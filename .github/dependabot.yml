@@ -10,6 +10,15 @@ updates:
       production-dependencies:
         dependency-type: production
     open-pull-requests-limit: 10
+    ignore:
+      # Typings track the runtime we support (Node 24 LTS, see .nvmrc and `engines`). Newer
+      # majors would type-check APIs that do not exist at runtime. Bump alongside .nvmrc.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # typescript-eslint supports TypeScript < 6.1. Lift this once it supports TS 7:
+      # https://github.com/typescript-eslint/typescript-eslint/issues/10940
+      - dependency-name: "typescript"
+        versions: [">=6.1.0"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
