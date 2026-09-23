@@ -91,3 +91,13 @@ console.log(formatInjectionReport(report)); // one row per file
 There are 50 attack files, generated deterministically in memory, so no binaries live in the repo. The files are real PDFs, DOCX and XLSX (they pass `qpdf --check` and open in LibreOffice), plus CSV, Markdown, HTML, text and hostile file names. Techniques include white or tiny text, off-page, invisible and covered PDF text, `w:vanish`, comments, headers, document properties, hidden and very hidden sheets, defined names, HYPERLINK and DDE formulas, CSV formula prefixes, HTML comments, base64, fake tool calls, bidi overrides, zero-width characters, path traversal and newlines in names. Content cases have neutral file names. Every payload carries its case id (`OHX-001`…) as a marker, so wherever it resurfaces can be traced to one file.
 
 Each file gets one outcome, worst first: `acted`, `loosened`, `error`, `leaked` (the marker reached the card), `flagged` (`risk:injection`), or `clean`. CI runs the naive `baselinePipeline` on every push and writes the table to the job summary. It fails if anything acts, loosens access or crashes. To red-team a real agent, write the files to disk with `pnpm --filter @openhoard/testkit injection:write ./corpus`, upload them, and look for `OHX-` markers in the agent's answers.
+
+## Benchmarks (T-019)
+
+```bash
+pnpm --filter @openhoard/testkit bench -- --out bench.json --baseline previous.json
+```
+
+The standard cases run on a seeded 10,000-item tenant: search latency p50, p95 and p99 over the reference engine (as random users), ingest throughput (streaming content, BLAKE3 hashing, card building), tenant generation, audit-chain appends and RRF fusion. Each case runs five rounds and keeps the median, and peak RSS is sampled throughout. `compareResults` flags any metric more than 20% worse than the baseline, and also beyond its absolute noise floor, so tiny timings don't flap.
+
+The `bench` workflow runs nightly. It compares against the last successful night, writes the table to the job summary, uploads `bench.json` for 90 days, and fails (which alerts) on a regression. Run it by hand with **accept-baseline** to record an intended slowdown as the new baseline.

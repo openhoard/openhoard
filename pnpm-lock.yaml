@@ -333,6 +333,12 @@ importers:
       '@hono/node-server':
         specifier: ^2.1.1
         version: 2.1.1(hono@4.13.8)
+      '@openhoard/core-audit':
+        specifier: workspace:^
+        version: link:../../core/audit
+      '@openhoard/core-catalog':
+        specifier: workspace:^
+        version: link:../../core/catalog
       '@openhoard/core-summarize':
         specifier: workspace:^
         version: link:../../core/summarize

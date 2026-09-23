@@ -20,10 +20,13 @@
     "test:coverage": "vitest run --coverage",
     "clean": "rimraf dist coverage",
     "injection:report": "tsx scripts/injection-report.ts",
-    "injection:write": "tsx scripts/write-corpus.ts"
+    "injection:write": "tsx scripts/write-corpus.ts",
+    "bench": "tsx scripts/bench.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
+    "@openhoard/core-audit": "workspace:^",
+    "@openhoard/core-catalog": "workspace:^",
     "@openhoard/core-summarize": "workspace:^",
     "@openhoard/sdk": "workspace:^",
     "hono": "^4.8.0",

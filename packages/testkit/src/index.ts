@@ -1,3 +1,4 @@
+export * from "./bench/index.js";
 export * from "./graph/index.js";
 export * from "./injection/index.js";
 export * from "./leak/index.js";

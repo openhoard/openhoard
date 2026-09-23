@@ -1,0 +1,67 @@
+name: bench
+# T-019: nightly benchmarks. Results are published in the job summary and as an artifact; the
+# job fails (and GitHub notifies) when a metric is more than 20% worse than the last good night.
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      accept-baseline:
+        description: Record this run as the new baseline without comparing (after an intended slowdown)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench
+  cancel-in-progress: false
+
+env:
+  TURBO_TELEMETRY_DISABLED: "1"
+  DO_NOT_TRACK: "1"
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read # to download the previous night's results
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Fetch the last successful night's results
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          run_id=$(gh run list --repo "$REPO" --workflow bench.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$run_id" ]; then
+            gh run download "$run_id" --repo "$REPO" --name bench-results --dir baseline || echo "no artifact on run $run_id"
+          else
+            echo "No previous successful run: this run sets the baseline."
+          fi
+      - name: Run benchmarks
+        env:
+          ACCEPT: ${{ inputs.accept-baseline }}
+        run: |
+          baseline="$GITHUB_WORKSPACE/baseline/bench.json"
+          if [ "$ACCEPT" = "true" ]; then baseline=""; fi
+          pnpm --filter @openhoard/testkit run bench --out "$GITHUB_WORKSPACE/bench.json" ${baseline:+--baseline "$baseline"}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: bench-results
+          path: bench.json
+          retention-days: 90
+          if-no-files-found: ignore

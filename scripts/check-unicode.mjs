@@ -7,7 +7,8 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-const FORBIDDEN = /[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/u;
+const FORBIDDEN =
+  /[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/u;
 const TEXT = /\.(?:[cm]?[jt]sx?|json|md|ya?ml|py|toml|txt|css|html?|svg|sh|ps1)$|(?:^|\/)[^.]+$/;
 
 const files = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" })
