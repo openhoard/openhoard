@@ -24,6 +24,7 @@ const good = JSON.stringify({
   name: "connector-s3",
   version: "0.0.1",
   type: "connector",
+  runtime: "process",
   capabilities: ["read:content"],
 });
 

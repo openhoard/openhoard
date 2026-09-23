@@ -5,6 +5,7 @@ BASE = {
     "name": "enricher-invoice",
     "version": "1.2.0",
     "type": "enricher",
+    "runtime": "wasm",
     "accepts": ["application/pdf"],
     "capabilities": ["read:content", "write:fields", "propose:tags"],
     "network": [],

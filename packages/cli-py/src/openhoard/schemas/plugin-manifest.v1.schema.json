@@ -7,7 +7,9 @@
   "additionalProperties": false,
   "required": ["manifest_version", "name", "version", "type", "capabilities"],
   "properties": {
-    "manifest_version": { "const": 1 },
+    "manifest_version": {
+      "const": 1
+    },
     "name": {
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
@@ -20,14 +22,26 @@
     "type": {
       "enum": ["connector", "enricher", "pack", "skill", "client"]
     },
-    "description": { "type": "string", "maxLength": 280 },
-    "publisher": { "type": "string" },
-    "homepage": { "type": "string", "format": "uri" },
-    "license": { "type": "string" },
+    "description": {
+      "type": "string",
+      "maxLength": 280
+    },
+    "publisher": {
+      "type": "string"
+    },
+    "homepage": {
+      "type": "string",
+      "format": "uri"
+    },
+    "license": {
+      "type": "string"
+    },
     "accepts": {
       "type": "array",
       "description": "Enrichers: MIME types this plugin handles.",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "capabilities": {
       "type": "array",
@@ -52,8 +66,13 @@
     },
     "network": {
       "type": "array",
-      "description": "Hostnames the plugin may reach. Empty means no network.",
-      "items": { "type": "string" },
+      "description": "Hostnames the plugin may reach. Empty means no network. Exact hostnames or one leading wildcard label (\"*.example.com\"); a bare \"*\" (any host) is rejected. (Security review #8.)",
+      "items": {
+        "type": "string",
+        "maxLength": 253,
+        "pattern": "^(\\*\\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+      },
+      "uniqueItems": true,
       "default": []
     },
     "max_exposure": {
@@ -69,9 +88,18 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "cpu_ms": { "type": "integer", "minimum": 1 },
-        "memory_mb": { "type": "integer", "minimum": 1 },
-        "timeout_s": { "type": "integer", "minimum": 1 }
+        "cpu_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memory_mb": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeout_s": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "signed_by": {
@@ -81,15 +109,75 @@
   },
   "allOf": [
     {
-      "if": { "properties": { "type": { "const": "enricher" } } },
-      "then": { "required": ["accepts"] }
+      "if": {
+        "properties": {
+          "type": {
+            "const": "enricher"
+          }
+        }
+      },
+      "then": {
+        "required": ["accepts"]
+      }
     },
     {
-      "if": { "properties": { "type": { "const": "pack" } } },
+      "$comment": "Code plugins must say how they are isolated (ADR-0012: no containers).",
+      "if": {
+        "properties": {
+          "type": {
+            "enum": ["connector", "enricher"]
+          }
+        }
+      },
+      "then": {
+        "required": ["runtime"],
+        "properties": {
+          "runtime": {
+            "enum": ["wasm", "process"]
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Packs are data only: no runtime code, capabilities or network.",
+      "if": {
+        "properties": {
+          "type": {
+            "const": "pack"
+          }
+        }
+      },
       "then": {
         "properties": {
-          "capabilities": { "maxItems": 0 },
-          "network": { "maxItems": 0 }
+          "runtime": {
+            "const": "declarative"
+          },
+          "capabilities": {
+            "maxItems": 0
+          },
+          "network": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "$comment": "Skills run inside the user's own agent, bound by the user's permissions.",
+      "if": {
+        "properties": {
+          "type": {
+            "const": "skill"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "runtime": {
+            "const": "agent"
+          },
+          "network": {
+            "maxItems": 0
+          }
         }
       }
     }

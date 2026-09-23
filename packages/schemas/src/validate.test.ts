@@ -6,6 +6,7 @@ const enricher = {
   name: "enricher-invoice",
   version: "1.2.0",
   type: "enricher",
+  runtime: "wasm",
   accepts: ["application/pdf"],
   capabilities: ["read:content", "write:fields", "propose:tags"],
   network: [],
@@ -40,6 +41,41 @@ describe("validatePluginManifest", () => {
     expect(validatePluginManifest(pack).ok).toBe(true);
     expect(validatePluginManifest({ ...pack, capabilities: ["read:content"] }).ok).toBe(false);
     expect(validatePluginManifest({ ...pack, network: ["example.com"] }).ok).toBe(false);
+    expect(validatePluginManifest({ ...pack, runtime: "process" }).ok).toBe(false);
+  });
+
+  it("requires an isolated runtime for code plugins (ADR-0012)", () => {
+    const { runtime: _runtime, ...noRuntime } = enricher;
+    expect(validatePluginManifest(noRuntime).ok).toBe(false);
+    expect(validatePluginManifest({ ...enricher, runtime: "process" }).ok).toBe(true);
+    expect(validatePluginManifest({ ...enricher, runtime: "container" }).ok).toBe(false);
+    expect(validatePluginManifest({ ...enricher, runtime: "agent" }).ok).toBe(false);
+  });
+
+  it("keeps skills inside the agent with no network", () => {
+    const skill = {
+      manifest_version: 1,
+      name: "skill-catch-up",
+      version: "0.1.0",
+      type: "skill",
+      capabilities: [],
+    };
+    expect(validatePluginManifest({ ...skill, runtime: "agent" }).ok).toBe(true);
+    expect(validatePluginManifest({ ...skill, runtime: "process" }).ok).toBe(false);
+    expect(validatePluginManifest({ ...skill, network: ["example.com"] }).ok).toBe(false);
+  });
+
+  it.each([
+    ["exact host", ["graph.microsoft.com"], true],
+    ["one wildcard label", ["*.amazonaws.com"], true],
+    ["any host", ["*"], false],
+    ["wildcard TLD", ["*.com"], false],
+    ["scheme", ["https://example.com"], false],
+    ["path", ["example.com/x"], false],
+    ["uppercase", ["Example.com"], false],
+    ["duplicates", ["example.com", "example.com"], false],
+  ])("network allowlist: %s", (_label, network, ok) => {
+    expect(validatePluginManifest({ ...enricher, network }).ok).toBe(ok);
   });
 
   it("rejects unknown fields and bad names", () => {

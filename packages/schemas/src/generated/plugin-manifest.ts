@@ -24,7 +24,7 @@ accepts?: string[]
  */
 capabilities: ("read:metadata" | "read:content" | "write:content" | "write:fields" | "propose:tags" | "read:acl" | "import:acl" | "source:crawl" | "source:delta" | "source:write" | "source:redirect" | "notify:send")[]
 /**
- * Hostnames the plugin may reach. Empty means no network.
+ * Hostnames the plugin may reach. Empty means no network. Exact hostnames or one leading wildcard label ("*.example.com"); a bare "*" (any host) is rejected. (Security review #8.)
  */
 network?: string[]
 /**
