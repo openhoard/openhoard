@@ -7,8 +7,9 @@ export interface LeakHarnessOptions {
   tenant: FakeTenant;
   target: SearchUnderTest;
   /**
-   * Users to probe as. Default: a deterministic sample of `sampleUsers` active users that
-   * always includes a guest, so external accounts are covered.
+   * Active users to probe as. Default: a deterministic sample of `sampleUsers` active users that
+   * always includes a guest, so external accounts are covered. People who have left cannot sign
+   * in, so probing as them is refused.
    */
   users?: readonly string[];
   /** Size of the default user sample. Default 12. */
@@ -20,88 +21,94 @@ export interface LeakHarnessOptions {
 /** Queries every user runs besides the canary tokens: broad words that match many files. */
 export const DEFAULT_QUERIES = ["canary", "invoice", "contract", "sensitivity:restricted"];
 
+type Canary = FakeItem & { canary: string };
+
 /**
  * Permission-leak harness (T-018). For every probe user it:
  *
- * 1. searches every canary token and checks that a user who may not read the canary's file
- *    gets no hit, a zero total, zero facet counts, and no trace of the token anywhere;
+ * 1. searches every canary token. A caller who may not read the canary's file must get no hit
+ *    for it and no trace of the token, and the total and facet counts must be no higher than
+ *    for a CONTROL token of the same shape that was never planted. (The control makes the
+ *    check fair to engines that match loosely, such as OR or vector search: whatever they
+ *    return for a random token is the floor, and a forbidden file may not add to it.)
  * 2. runs broad queries and checks every hit is readable and no forbidden token appears;
  * 3. asks for autocomplete on canary prefixes and checks no suggestion carries a forbidden
  *    token.
  *
- * Canary tokens are unique to one restricted file, so ANY appearance of a forbidden token in
- * a response, or any non-zero count for it, is a leak by construction. No knowledge of the
- * engine's ranking or matching rules is needed.
+ * It also counts canaries the caller CAN read but the engine did not return. If an engine
+ * finds none at all, the integration is probably broken (for example, principals in the wrong
+ * format filter out everything), and a "no leaks" result would mean nothing;
+ * {@link assertNoLeaks} fails in that case.
  */
 export async function runLeakHarness(options: LeakHarnessOptions): Promise<LeakReport> {
   const { tenant, target } = options;
   const access = new AccessModel(tenant);
-  const canaries = tenant.items.filter((i): i is FakeItem & { canary: string } => !!i.canary);
+  const canaries = tenant.items.filter((i): i is Canary => !!i.canary);
   const users = options.users ?? sampleUsers(tenant, options.sampleUsers ?? 12);
+  for (const id of users) {
+    const user = tenant.users.find((u) => u.id === id);
+    if (!user) throw new RangeError(`unknown user ${id}`);
+    if (!user.active)
+      throw new RangeError(`user ${id} has left and cannot sign in; probe active users only`);
+  }
   const queries = [...DEFAULT_QUERIES, ...(options.queries ?? [])];
   const byId = new Map(tenant.items.map((i) => [i.id, i]));
+  const controls = controlTokens(tenant, canaries);
   const leaks: Leak[] = [];
   let probes = 0;
+  let readableCanaryProbes = 0;
+  let found = 0;
 
   for (const userId of users) {
     const caller: Caller = { userId, principals: access.principalsOf(userId) };
     const forbidden = new Map(
       canaries.filter((c) => !access.canRead(userId, c)).map((c) => [c.canary, c]),
     );
+    const leak = (probe: string, surface: Leak["surface"], itemId: string, detail: string) =>
+      leaks.push({ userId, probe, surface, itemId, detail });
 
-    const inspect = (probe: string, response: SearchResponse, target?: FakeItem) => {
+    const inspect = (probe: string, response: SearchResponse) => {
       for (const hit of response.hits) {
         const item = byId.get(hit.id);
-        if (!item || !access.canRead(userId, item)) {
-          leaks.push({
-            userId,
-            probe,
-            surface: "results",
-            itemId: hit.id,
-            detail: "hit the caller may not read",
-          });
-        }
-      }
-      if (target && !access.canRead(userId, target)) {
-        if (response.total > 0) {
-          leaks.push({
-            userId,
-            probe,
-            surface: "total",
-            itemId: target.id,
-            detail: `total ${response.total}, expected 0`,
-          });
-        }
-        const facetSum = Object.values(response.facets ?? {})
-          .flatMap((f) => Object.values(f))
-          .reduce((a, b) => a + b, 0);
-        if (facetSum > 0) {
-          leaks.push({
-            userId,
-            probe,
-            surface: "facets",
-            itemId: target.id,
-            detail: `facet counts sum to ${facetSum}, expected 0`,
-          });
-        }
+        if (!item || !access.canRead(userId, item))
+          leak(probe, "results", hit.id, "hit the caller may not read");
       }
       scanText(
         JSON.stringify({ hits: response.hits, facets: response.facets ?? {} }),
         forbidden,
-        (item, token) =>
-          leaks.push({
-            userId,
-            probe,
-            surface: "text",
-            itemId: item.id,
-            detail: `response contains ${token}`,
-          }),
+        (item, token) => leak(probe, "text", item.id, `response contains ${token}`),
       );
     };
 
     for (const canary of canaries) {
       probes++;
-      inspect(canary.canary, await target.search({ ...caller, query: canary.canary }), canary);
+      const response = await target.search({ ...caller, query: canary.canary });
+      inspect(canary.canary, response);
+      if (access.canRead(userId, canary)) {
+        readableCanaryProbes++;
+        if (response.hits.some((h) => h.id === canary.id)) found++;
+        continue;
+      }
+      probes++;
+      const control = await target.search({ ...caller, query: controls.get(canary.id) as string });
+      if (response.total > control.total) {
+        leak(
+          canary.canary,
+          "total",
+          canary.id,
+          `total ${response.total}, but ${control.total} for a never-planted token`,
+        );
+      }
+      const sum = facetSum(response);
+      const controlSum = facetSum(control);
+      if (sum > controlSum) {
+        leak(
+          canary.canary,
+          "facets",
+          canary.id,
+          `facet counts sum to ${sum}, but ${controlSum} for a never-planted token`,
+        );
+      }
     }
     for (const query of queries) {
       probes++;
@@ -116,23 +123,25 @@ export async function runLeakHarness(options: LeakHarnessOptions): Promise<LeakR
         probes++;
         const suggestions = await target.autocomplete({ ...caller, prefix, limit: 50 });
         scanText(suggestions.join("\n"), forbidden, (item, token) =>
-          leaks.push({
-            userId,
-            probe: prefix,
-            surface: "autocomplete",
-            itemId: item.id,
-            detail: `suggestion contains ${token}`,
-          }),
+          leak(prefix, "autocomplete", item.id, `suggestion contains ${token}`),
         );
       }
     }
   }
-  return { probes, users: users.length, canaries: canaries.length, leaks };
+  return {
+    probes,
+    users: users.length,
+    canaries: canaries.length,
+    readableCanaryProbes,
+    found,
+    leaks,
+  };
 }
 
 /**
- * Checks one pair: everything `ownerId` can read that `otherId` cannot must stay invisible to
- * `otherId`. Use it to pin a regression found for a specific pair of accounts.
+ * Leaks of `ownerId`'s canary files to `otherId`: every restricted canary the owner can read
+ * but the other user cannot must stay invisible to the other user. Use it to pin a regression
+ * found for a specific pair of accounts.
  */
 export async function checkPair(
   tenant: FakeTenant,
@@ -146,8 +155,18 @@ export async function checkPair(
   return report.leaks.filter((l) => owned.has(l.itemId));
 }
 
-/** Throws a readable error listing the first leaks, for use in tests. */
+/**
+ * Throws a readable error listing the first leaks, for use in tests. Also throws when the
+ * engine returned none of the canaries the callers could read: an engine that returns nothing
+ * can't leak, but it isn't working either.
+ */
 export function assertNoLeaks(report: LeakReport): void {
+  if (report.readableCanaryProbes > 0 && report.found === 0) {
+    throw new Error(
+      `the engine returned none of the ${report.readableCanaryProbes} canaries the callers may read; ` +
+        "check the principal format and the index before trusting a leak-free result",
+    );
+  }
   if (report.leaks.length === 0) return;
   const lines = report.leaks
     .slice(0, 10)
@@ -169,6 +188,26 @@ function sampleUsers(tenant: FakeTenant, count: number): string[] {
     Math.max(0, count - (guest ? 1 : 0)),
   );
   return [...(guest ? [guest] : []), ...others].map((u) => u.id);
+}
+
+/** A never-planted `canary-xxxxxxxx` token per canary, deterministic for the tenant. */
+function controlTokens(tenant: FakeTenant, canaries: readonly Canary[]): Map<string, string> {
+  const planted = new Set(canaries.map((c) => c.canary));
+  const rng = new Random(`${tenant.seed}:leak-controls`);
+  const out = new Map<string, string>();
+  for (const c of canaries) {
+    let token: string;
+    do token = `canary-${Array.from({ length: 8 }, () => rng.int(0, 15).toString(16)).join("")}`;
+    while (planted.has(token));
+    out.set(c.id, token);
+  }
+  return out;
+}
+
+function facetSum(response: SearchResponse): number {
+  return Object.values(response.facets ?? {})
+    .flatMap((f) => Object.values(f))
+    .reduce((a, b) => a + b, 0);
 }
 
 function scanText(

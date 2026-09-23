@@ -53,9 +53,13 @@ export interface Leak {
 }
 
 export interface LeakReport {
-  /** Probes sent (searches plus autocompletes). */
+  /** Probes sent (searches, control searches and autocompletes). */
   probes: number;
   users: number;
   canaries: number;
+  /** Canary searches by a caller who may read that canary's file. */
+  readableCanaryProbes: number;
+  /** How many of those returned the file. Zero suggests a broken integration. */
+  found: number;
   leaks: Leak[];
 }

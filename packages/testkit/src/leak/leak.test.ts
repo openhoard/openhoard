@@ -81,6 +81,41 @@ describe("runLeakHarness", () => {
     expect(() => assertNoLeaks(report)).toThrow(/permission leak/);
   });
 
+  it("does not blame an engine that also returns loosely related, readable results", async () => {
+    // Like vector or OR search: every query also returns the caller's best "invoice" matches.
+    const loose: SearchUnderTest = {
+      search: async (r) => {
+        const exact = await reference.search(r);
+        const fallback = await reference.search({ ...r, query: "invoice" });
+        return {
+          hits: [...exact.hits, ...fallback.hits],
+          total: exact.total + fallback.total,
+          facets: fallback.facets ?? {},
+        };
+      },
+    };
+    assertNoLeaks(await runLeakHarness({ tenant, target: loose }));
+  });
+
+  it("refuses to call an engine that finds nothing leak-free", async () => {
+    const empty: SearchUnderTest = { search: () => Promise.resolve({ hits: [], total: 0 }) };
+    const report = await runLeakHarness({ tenant, target: empty });
+    expect(report.leaks).toEqual([]);
+    expect(report.found).toBe(0);
+    expect(() => assertNoLeaks(report)).toThrow(/returned none of the/);
+  });
+
+  it("refuses to probe as someone who has left, or an unknown user", async () => {
+    const departed = tenant.users.find((u) => !u.active);
+    if (!departed) throw new Error("fixture");
+    await expect(
+      runLeakHarness({ tenant, target: reference, users: [departed.id] }),
+    ).rejects.toThrow(/has left/);
+    await expect(runLeakHarness({ tenant, target: reference, users: ["u-nope"] })).rejects.toThrow(
+      /unknown user/,
+    );
+  });
+
   it("probes a guest account by default", async () => {
     const seen: string[] = [];
     const spy: SearchUnderTest = {
