@@ -54,6 +54,12 @@ so we turn it off in CI and recommend you do too, once per machine:
 
 Useful filters: `pnpm --filter @openhoard/core-policy test`, `pnpm --filter openhoard build`.
 
+Security invariants (fail-closed levels, card sanitising, audit-chain tamper detection, capability
+narrowing) are checked with property-based tests using [fast-check](https://fast-check.dev/) in
+`*.property.test.ts` files. When you touch one of those functions, keep its properties passing and
+add one for any new guarantee. A failing property prints a minimal counterexample. Add it as a
+plain unit test too, so the regression stays pinned.
+
 Decisions live in [`docs/adr/`](docs/adr/), contract changes go through [`docs/rfc/`](docs/rfc/),
 and spike reports go in [`docs/spikes/`](docs/spikes/).
 
