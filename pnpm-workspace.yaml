@@ -1,0 +1,9 @@
+packages:
+  - "apps/*"
+  - "core/*"
+  - "connectors/*"
+  - "enrichers/*"
+  - "packages/*"
+  - "!packages/cli-py"
+allowBuilds:
+  esbuild: true

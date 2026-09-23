@@ -1,0 +1,42 @@
+{
+  "name": "@openhoard/schemas",
+  "version": "0.0.1",
+  "description": "Canonical JSON Schemas and TypeScript types for OpenHoard contracts (plugin manifests and more).",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./plugin-manifest.v1.schema.json": "./dist/plugin-manifest.v1.schema.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "generate": "tsx scripts/generate.ts",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-json.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rimraf dist coverage"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  },
+  "devDependencies": {
+    "@openhoard/config": "workspace:*",
+    "json-schema-to-typescript": "^15.0.0"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openhoard/openhoard.git",
+    "directory": "packages/schemas"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

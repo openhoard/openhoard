@@ -6,14 +6,14 @@ while the trusted core stays small and carefully reviewed.
 
 ## Where to start
 
-| You want to… | Go to | Review bar |
-| --- | --- | --- |
-| Connect a new source (Box, Dropbox, NAS, …) | `connectors/` | Standard + conformance kit |
-| Understand a file type (invoices, CAD, Parquet, …) | `enrichers/` | Standard + conformance kit + red-team suite |
-| Ship an industry vocabulary or policy set | `packs/` | Standard + policy test cases |
-| Write an agent workflow | `skills/` | Standard |
-| Integrate an app (Office, Teams, Slack, …) | `clients/` | Standard |
-| Change identity, policy, search, summaries, audit or sandbox | `core/` | **Core review** (two maintainers + RFC for contract changes) |
+| You want to…                                                 | Go to         | Review bar                                                   |
+| ------------------------------------------------------------ | ------------- | ------------------------------------------------------------ |
+| Connect a new source (Box, Dropbox, NAS, …)                  | `connectors/` | Standard + conformance kit                                   |
+| Understand a file type (invoices, CAD, Parquet, …)           | `enrichers/`  | Standard + conformance kit + red-team suite                  |
+| Ship an industry vocabulary or policy set                    | `packs/`      | Standard + policy test cases                                 |
+| Write an agent workflow                                      | `skills/`     | Standard                                                     |
+| Integrate an app (Office, Teams, Slack, …)                   | `clients/`    | Standard                                                     |
+| Change identity, policy, search, summaries, audit or sandbox | `core/`       | **Core review** (two maintainers + RFC for contract changes) |
 
 Every plugin needs an `openhoard.plugin.json` manifest. Validate it with:
 

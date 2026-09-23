@@ -1,6 +1,6 @@
 # openhoard (CLI)
 
-Command-line tool for [OpenHoard](https://openhoard.com), an open-source, AI-managed, governed file layer.
+Command-line tool for [OpenHoard](https://openhoard.com), the open-source AI filesystem.
 
 Pre-alpha. Today it validates OpenHoard plugin manifests:
 

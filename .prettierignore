@@ -1,0 +1,10 @@
+dist
+coverage
+.turbo
+node_modules
+pnpm-lock.yaml
+packages/cli-py
+*.svg
+CHANGELOG.md
+.changeset/*.md
+**/generated/**

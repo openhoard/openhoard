@@ -9,4 +9,7 @@ __pycache__/
 .env
 .env.*
 .DS_Store
-packages/cli-js/schemas/
+.turbo/
+coverage/
+.openhoard/
+apps/cli/schemas/

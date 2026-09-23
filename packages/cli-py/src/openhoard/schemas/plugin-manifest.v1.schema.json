@@ -62,8 +62,8 @@
       "default": "metadata-only"
     },
     "runtime": {
-      "enum": ["wasm", "container", "declarative", "agent"],
-      "description": "wasm/container for code, declarative for packs, agent for skills."
+      "enum": ["wasm", "process", "declarative", "agent"],
+      "description": "wasm (sandboxed) or process (isolated OS process) for code, declarative for packs, agent for skills. No containers."
     },
     "limits": {
       "type": "object",

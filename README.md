@@ -25,7 +25,7 @@
 
 OpenHoard replaces the folder tree with an AI-managed, **governed** file layer. Every file is
 indexed, tagged, summarized and access-controlled, so people and their AI agents find
-things by *meaning*, not by path. Every action is checked by policy and written to a
+things by _meaning_, not by path. Every action is checked by policy and written to a
 tamper-evident audit log.
 
 > **Status: pre-alpha, designed in the open.** The vision below is where we're headed; see
@@ -33,17 +33,17 @@ tamper-evident audit log.
 
 ## The headlines
 
-| | |
-| --- | --- |
-| 🐉 **Your files, finally findable** | Ask in plain English. Permission-aware search across SharePoint, cloud buckets and Git, with zero AI tokens spent per search. |
-| 🔒 **Every file has a guardian** | Access follows tags, not folders. Former employees lose access automatically. External links expire by default. |
-| 🧠 **The filesystem that remembers** | "What was I working on yesterday?" "What changed in the Acme contract?" OpenHoard keeps the history, so you don't have to. |
-| 🏷️ **No more `Final_v2_FINAL.docx`** | AI names, tags, deduplicates and spots the real final version, and warns you before you send an old one. |
-| 🤖 **Bring any AI. Keep control.** | Works with Claude, ChatGPT, Copilot or local models over MCP. You decide, per tag, what AI is allowed to read. |
-| 🛡️ **Built for auditors, not just users** | Hash-chained audit log, 30-day undo on everything, HIPAA / SOC 2 / legal-hold packs on the roadmap. |
-| 📦 **No migration required** | Index SharePoint and OneDrive in place today. Move shared work into S3 or Azure Blob when you're ready. |
-| 🚚 **SFTP is over** | Send customers a link. They drag in 1 GB+ files from any browser, with no account and no client, and the files land tagged in the right project. |
-| 🧩 **Open core, open edges** | Apache-2.0. Connectors, enrichers, policy packs and skills are plugins anyone can build. |
+|                                           |                                                                                                                                                  |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 🐉 **Your files, finally findable**       | Ask in plain English. Permission-aware search across SharePoint, cloud buckets and Git, with zero AI tokens spent per search.                    |
+| 🔒 **Every file has a guardian**          | Access follows tags, not folders. Former employees lose access automatically. External links expire by default.                                  |
+| 🧠 **The filesystem that remembers**      | "What was I working on yesterday?" "What changed in the Acme contract?" OpenHoard keeps the history, so you don't have to.                       |
+| 🏷️ **No more `Final_v2_FINAL.docx`**      | AI names, tags, deduplicates and spots the real final version, and warns you before you send an old one.                                         |
+| 🤖 **Bring any AI. Keep control.**        | Works with Claude, ChatGPT, Copilot or local models over MCP. You decide, per tag, what AI is allowed to read.                                   |
+| 🛡️ **Built for auditors, not just users** | Hash-chained audit log, 30-day undo on everything, HIPAA / SOC 2 / legal-hold packs on the roadmap.                                              |
+| 📦 **No migration required**              | Index SharePoint and OneDrive in place today. Move shared work into S3 or Azure Blob when you're ready.                                          |
+| 🚚 **SFTP is over**                       | Send customers a link. They drag in 1 GB+ files from any browser, with no account and no client, and the files land tagged in the right project. |
+| 🧩 **Open core, open edges**              | Apache-2.0. Connectors, enrichers, policy packs and skills are plugins anyone can build.                                                         |
 
 ## Why your company needs this (the slide for your boss)
 
@@ -54,7 +54,7 @@ The folder tree was designed for filing cabinets. It's failing modern teams:
 - **38%** had former employees or guests keep access they should have lost, and **26%** had sensitive content reach the wrong people (same survey).
 - AI assistants now read everything a user can access, so **oversharing that used to be hidden is now one prompt away.**
 
-**OpenHoard's pitch in one line:** *keep your storage, lose the chaos*. Findable files,
+**OpenHoard's pitch in one line:** _keep your storage, lose the chaos_. Findable files,
 provable access control, and AI you can actually trust with company data.
 
 <details>
@@ -85,17 +85,17 @@ The core makes every trust decision. Plugins extend what OpenHoard can **reach**
 
 ## Repository layout
 
-| Path | What lives there |
-| --- | --- |
-| `core/` | The trusted core: `identity`, `policy`, `catalog` (index + search), `summarize`, `audit`, `sandbox` |
-| `connectors/` | Storage and source connectors (S3, Azure Blob, SharePoint, Git hosts, …) |
-| `enrichers/` | Extractors and taggers for specific file types |
-| `packs/` | Policy and tag-vocabulary packs (legal, healthcare, manufacturing, …) |
-| `skills/` | Agent skills built on the core MCP tools |
-| `clients/` | Web app, desktop client, Office/Teams integrations |
-| `schemas/` | Versioned JSON Schemas for plugin manifests and other contracts |
-| `packages/cli-js`, `packages/cli-py` | The `openhoard` CLI (npm and PyPI) |
-| `assets/` | Logo and brand assets |
+| Path                                 | What lives there                                                                                    |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| `core/`                              | The trusted core: `identity`, `policy`, `catalog` (index + search), `summarize`, `audit`, `sandbox` |
+| `connectors/`                        | Storage and source connectors (S3, Azure Blob, SharePoint, Git hosts, …)                            |
+| `enrichers/`                         | Extractors and taggers for specific file types                                                      |
+| `packs/`                             | Policy and tag-vocabulary packs (legal, healthcare, manufacturing, …)                               |
+| `skills/`                            | Agent skills built on the core MCP tools                                                            |
+| `clients/`                           | Web app, desktop client, Office/Teams integrations                                                  |
+| `schemas/`                           | Versioned JSON Schemas for plugin manifests and other contracts                                     |
+| `packages/cli-js`, `packages/cli-py` | The `openhoard` CLI (npm and PyPI)                                                                  |
+| `assets/`                            | Logo and brand assets                                                                               |
 
 ## Try the CLI
 

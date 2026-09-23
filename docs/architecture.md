@@ -21,14 +21,14 @@ flowchart TD
 
 ## Core pillars
 
-| Pillar | Owns | Never delegated to plugins |
-| --- | --- | --- |
-| Identity | Users, groups, sessions, AI-client allowlist | Issuing tokens, trust labels |
-| Permissions + policy | Grants, visibility, exposure, evaluation | Allow/deny decisions |
-| Catalog (index + search) | Objects, versions, tags, access-filtered hybrid search | Access filtering, result trimming |
-| Summarize | File-card schema, summary pipeline, model routing by exposure | Which model sees which content |
-| Audit | Hash-chained event log, export, undo | Writing or altering events |
-| Sandbox | Manifests, capabilities, isolation, signing | Granting extra capabilities |
+| Pillar                   | Owns                                                          | Never delegated to plugins        |
+| ------------------------ | ------------------------------------------------------------- | --------------------------------- |
+| Identity                 | Users, groups, sessions, AI-client allowlist                  | Issuing tokens, trust labels      |
+| Permissions + policy     | Grants, visibility, exposure, evaluation                      | Allow/deny decisions              |
+| Catalog (index + search) | Objects, versions, tags, access-filtered hybrid search        | Access filtering, result trimming |
+| Summarize                | File-card schema, summary pipeline, model routing by exposure | Which model sees which content    |
+| Audit                    | Hash-chained event log, export, undo                          | Writing or altering events        |
+| Sandbox                  | Manifests, capabilities, isolation, signing                   | Granting extra capabilities       |
 
 ## Key concepts
 
@@ -52,13 +52,13 @@ v1 engine: Postgres + ParadeDB `pg_search` + pgvector. Scale-out option: Meilise
 
 ## Extension points
 
-| Type | Interface (v1) | Runs in |
-| --- | --- | --- |
-| Connector | `crawl`, `delta`, `read`, `write`, `acl_import`, `redirect` | Sandbox with a network allowlist |
-| Enricher | `accepts` → `extract` → `propose_tags`, `fields`, `summary_hints` | WASM or container; no network by default |
-| Pack | Declarative facets, values, defaults, Cedar policies + tests | Data only |
-| Skill | SKILL.md using core MCP tools | The user's agent, with the user's permissions |
-| Client | Gateway REST/MCP + webhooks | Outside the core, allowlisted OAuth client |
+| Type      | Interface (v1)                                                    | Runs in                                       |
+| --------- | ----------------------------------------------------------------- | --------------------------------------------- |
+| Connector | `crawl`, `delta`, `read`, `write`, `acl_import`, `redirect`       | Sandbox with a network allowlist              |
+| Enricher  | `accepts` → `extract` → `propose_tags`, `fields`, `summary_hints` | WASM or container; no network by default      |
+| Pack      | Declarative facets, values, defaults, Cedar policies + tests      | Data only                                     |
+| Skill     | SKILL.md using core MCP tools                                     | The user's agent, with the user's permissions |
+| Client    | Gateway REST/MCP + webhooks                                       | Outside the core, allowlisted OAuth client    |
 
 Manifest schema: [`schemas/plugin-manifest.v1.schema.json`](../schemas/plugin-manifest.v1.schema.json).
 

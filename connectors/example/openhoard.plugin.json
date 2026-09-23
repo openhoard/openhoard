@@ -6,9 +6,15 @@
   "description": "Reference connector for S3-compatible buckets (AWS S3, MinIO, R2).",
   "publisher": "openhoard",
   "license": "Apache-2.0",
-  "capabilities": ["read:metadata", "read:content", "write:content", "source:crawl", "source:delta"],
+  "capabilities": [
+    "read:metadata",
+    "read:content",
+    "write:content",
+    "source:crawl",
+    "source:delta"
+  ],
   "network": ["*.amazonaws.com"],
   "max_exposure": "full",
-  "runtime": "container",
+  "runtime": "process",
   "limits": { "memory_mb": 256, "timeout_s": 300 }
 }
