@@ -202,6 +202,8 @@ describe("extractText on hostile input", () => {
       ["b.pdf", enc("obj<<>>stream\n".repeat(20_000))],
       ["c.pdf", enc(`${"stream\n".repeat(20_000)}endstream`)],
       ["d.xlsx", zip({ "xl/workbook.xml": `${"<sheet ".repeat(50_000)}>` })],
+      ["e.docx", zip({ "word/document.xml": "<".repeat(200_000) })],
+      ["f.pdf", enc(`(${"\\(".repeat(100_000)}`)],
     ];
     for (const [name, bytes] of inputs) {
       const start = performance.now();
@@ -244,6 +246,17 @@ describe("formats", () => {
       .map((p) => p.text)
       .join(" ");
     for (const s of ["S<1>", "v", "2", '"q"']) expect(xt).toContain(s);
+  });
+
+  it("reads nested and escaped PDF strings", () => {
+    const text = extractText(
+      "n.pdf",
+      "application/pdf",
+      new TextEncoder().encode("(a (nested) b \\) c) Tj (next)"),
+    )
+      .map((p) => p.text)
+      .join(" ");
+    expect(text).toBe("a (nested) b ) c next");
   });
 
   it("decodes entities and reads plain text as-is", () => {

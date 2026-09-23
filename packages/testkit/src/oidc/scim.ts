@@ -1,4 +1,5 @@
 import type { FakeTenant, FakeUser } from "../tenant/types.js";
+import { personalName } from "./names.js";
 
 /*
  * SCIM 2.0 seed data (RFC 7643 resources, RFC 7644 list responses) for the fake tenant, so
@@ -82,7 +83,7 @@ export function scimList<T>(
 }
 
 function scimUser(u: FakeUser, baseUrl: string): ScimUser {
-  const [givenName = u.displayName, ...rest] = u.displayName.replace(/ \(.*\)$/, "").split(" ");
+  const [givenName = u.displayName, ...rest] = personalName(u.displayName).split(" ");
   return {
     schemas: u.guest ? [SCIM_USER] : [SCIM_USER, SCIM_ENTERPRISE_USER],
     id: u.id,

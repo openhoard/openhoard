@@ -36,9 +36,25 @@ function fromOoxml(bytes: Uint8Array): ExtractedPart[] {
 
 /** Text content of an XML document: tags become spaces, entities are decoded. */
 function xmlText(doc: string): string {
-  return decodeEntities(doc.replace(/<\?[^>]*\?>/g, " ").replace(/<[^>]+>/g, " "))
-    .replace(/\s+/g, " ")
-    .trim();
+  return decodeEntities(stripTags(doc)).replace(/\s+/g, " ").trim();
+}
+
+/** Replaces every `<…>` with a space. An indexOf scan: linear even for "<<<<…" input. */
+function stripTags(doc: string): string {
+  const out: string[] = [];
+  let at = 0;
+  for (;;) {
+    const lt = doc.indexOf("<", at);
+    if (lt < 0) {
+      out.push(doc.slice(at));
+      break;
+    }
+    out.push(doc.slice(at, lt), " ");
+    const gt = doc.indexOf(">", lt);
+    if (gt < 0) break; // an unterminated tag: drop the rest
+    at = gt + 1;
+  }
+  return out.join("");
 }
 
 function decodeEntities(s: string): string {
@@ -135,26 +151,41 @@ function pdfStreams(raw: string): { dict: string; body: string; start: number; e
   return out;
 }
 
-/** All literal strings `( … )` in PDF syntax, unescaped and joined. */
+/**
+ * All literal strings `( … )` in PDF syntax, unescaped and joined. PDF strings may contain
+ * balanced nested parentheses and backslash escapes. This is a single forward scan: the regex it
+ * replaces was quadratic on runs of escaped parentheses.
+ */
 function pdfStrings(s: string): string {
   const out: string[] = [];
-  const re = /\(((?:\\[^]|[^\\()])*)\)/g;
-  for (let m = re.exec(s); m; m = re.exec(s)) {
-    out.push(
-      (m[1] ?? "").replace(/\\([nrtbf()\\]|[0-7]{1,3})/g, (_, e: string) => {
-        const map: Record<string, string> = {
-          n: "\n",
-          r: "\r",
-          t: "\t",
-          b: "\b",
-          f: "\f",
-          "(": "(",
-          ")": ")",
-          "\\": "\\",
-        };
-        return map[e] ?? String.fromCharCode(parseInt(e, 8));
-      }),
-    );
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (depth > 0 && c === "\\") {
+      i++; // skip the escaped character
+    } else if (c === "(") {
+      if (depth++ === 0) start = i + 1;
+    } else if (c === ")" && depth > 0 && --depth === 0) {
+      out.push(unescapePdf(s.slice(start, i)));
+    }
   }
   return out.join(" ").replace(/\s+/g, " ").trim();
+}
+
+function unescapePdf(raw: string): string {
+  const map: Record<string, string> = {
+    n: "\n",
+    r: "\r",
+    t: "\t",
+    b: "\b",
+    f: "\f",
+    "(": "(",
+    ")": ")",
+    "\\": "\\",
+  };
+  return raw.replace(
+    /\\([nrtbf()\\]|[0-7]{1,3})/g,
+    (_, e: string) => map[e] ?? String.fromCharCode(parseInt(e, 8)),
+  );
 }

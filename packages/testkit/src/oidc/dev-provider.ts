@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import { exportJWK, generateKeyPair } from "jose";
 import Provider, { type Configuration, type KoaContextWithOIDC } from "oidc-provider";
 import type { FakeTenant, FakeUser } from "../tenant/types.js";
+import { personalName } from "./names.js";
 
 export interface DevClient {
   clientId: string;
@@ -109,9 +110,7 @@ export async function startDevOidc(options: DevOidcOptions): Promise<DevOidc> {
         accountId: user.id,
         claims: () => {
           // Guests are shown as "Name (Company)"; the company is not part of their name.
-          const [given = user.displayName, ...family] = user.displayName
-            .replace(/ \(.*\)$/, "")
-            .split(" ");
+          const [given = user.displayName, ...family] = personalName(user.displayName).split(" ");
           return {
             sub: user.id,
             email: user.upn,
