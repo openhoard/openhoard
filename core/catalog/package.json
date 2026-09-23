@@ -21,7 +21,7 @@
     "clean": "rimraf dist coverage"
   },
   "dependencies": {
-    "@noble/hashes": "^1.8.0",
+    "@noble/hashes": "^2.4.0",
     "@openhoard/core-policy": "workspace:^"
   },
   "devDependencies": {
