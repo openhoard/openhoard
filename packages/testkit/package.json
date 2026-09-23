@@ -23,10 +23,13 @@
   "dependencies": {
     "@hono/node-server": "^2.1.1",
     "@openhoard/sdk": "workspace:^",
-    "hono": "^4.8.0"
+    "hono": "^4.8.0",
+    "jose": "^6.2.12",
+    "oidc-provider": "^9.12.2"
   },
   "devDependencies": {
-    "@openhoard/config": "workspace:*"
+    "@openhoard/config": "workspace:*",
+    "@types/oidc-provider": "^9.12.1"
   },
   "license": "Apache-2.0"
 }

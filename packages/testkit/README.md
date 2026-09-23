@@ -59,3 +59,17 @@ It covers what a SharePoint/OneDrive connector uses:
 - Rate limiting (429 + Retry-After) and injected faults.
 
 Response shapes follow the Graph v1.0 documentation for the fields connectors read. The source tenant is never modified: `graph.store` holds a mutable copy.
+
+## Dev OIDC provider and SCIM seed (T-016)
+
+```ts
+import { DEV_CLIENT, scimSeed, startDevOidc } from "@openhoard/testkit";
+
+const idp = await startDevOidc({ tenant }); // http://127.0.0.1:<port>, discovery included
+// Sign in as any active seeded user. The ID token carries email, name, groups (ids) and guest.
+await idp.close();
+
+const { users, groups } = scimSeed(tenant); // RFC 7643 resources; scimList() pages them
+```
+
+Built on [`oidc-provider`](https://github.com/panva/node-oidc-provider), a certified OpenID Connect implementation. It supports authorization code with required PKCE, refresh tokens, and public (`openhoard-dev`) or confidential clients. The login page lists active seeded users and asks for no password. People who have left can't sign in. Registered clients get no consent screen. It binds to 127.0.0.1 only and makes fresh keys on every start. **Development only.**
