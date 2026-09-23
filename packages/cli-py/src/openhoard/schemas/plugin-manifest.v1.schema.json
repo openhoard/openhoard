@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openhoard.com/schemas/plugin-manifest.v1.schema.json",
+  "title": "OpenHoard plugin manifest (v1)",
+  "description": "Declares what a plugin is and the capabilities it requests. The core grants nothing beyond what is declared and approved by an admin.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifest_version", "name", "version", "type", "capabilities"],
+  "properties": {
+    "manifest_version": { "const": 1 },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$",
+      "description": "Lowercase, hyphenated, unique within the registry."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(-[0-9A-Za-z.-]+)?$"
+    },
+    "type": {
+      "enum": ["connector", "enricher", "pack", "skill", "client"]
+    },
+    "description": { "type": "string", "maxLength": 280 },
+    "publisher": { "type": "string" },
+    "homepage": { "type": "string", "format": "uri" },
+    "license": { "type": "string" },
+    "accepts": {
+      "type": "array",
+      "description": "Enrichers: MIME types this plugin handles.",
+      "items": { "type": "string" }
+    },
+    "capabilities": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "read:metadata",
+          "read:content",
+          "write:content",
+          "write:fields",
+          "propose:tags",
+          "read:acl",
+          "import:acl",
+          "source:crawl",
+          "source:delta",
+          "source:write",
+          "source:redirect",
+          "notify:send"
+        ]
+      },
+      "description": "Plugins can never hold grant, share, policy:write or audit:write. Those belong to the core."
+    },
+    "network": {
+      "type": "array",
+      "description": "Hostnames the plugin may reach. Empty means no network.",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "max_exposure": {
+      "enum": ["full", "commercial-only", "local-only", "metadata-only"],
+      "description": "The most sensitive exposure level this plugin may receive. It never sees content above this level.",
+      "default": "metadata-only"
+    },
+    "runtime": {
+      "enum": ["wasm", "container", "declarative", "agent"],
+      "description": "wasm/container for code, declarative for packs, agent for skills."
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpu_ms": { "type": "integer", "minimum": 1 },
+        "memory_mb": { "type": "integer", "minimum": 1 },
+        "timeout_s": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "signed_by": {
+      "type": "string",
+      "description": "Publisher key ID. Required for registry listing."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "enricher" } } },
+      "then": { "required": ["accepts"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "pack" } } },
+      "then": {
+        "properties": {
+          "capabilities": { "maxItems": 0 },
+          "network": { "maxItems": 0 }
+        }
+      }
+    }
+  ]
+}

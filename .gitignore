@@ -1,0 +1,12 @@
+node_modules/
+*.tgz
+dist/
+build/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.venv/
+.env
+.env.*
+.DS_Store
+packages/cli-js/schemas/

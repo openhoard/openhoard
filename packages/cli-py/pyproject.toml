@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "openhoard"
+version = "0.0.1"
+description = "OpenHoard CLI: AI-managed, governed file layer. Currently validates OpenHoard plugin manifests."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+dependencies = ["jsonschema>=4.18"]
+keywords = ["openhoard", "mcp", "files", "document-management", "ai", "tags", "governance"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
+  "Programming Language :: Python :: 3",
+  "Topic :: System :: Filesystems",
+]
+
+[project.urls]
+Homepage = "https://openhoard.com"
+Source = "https://github.com/openhoard/openhoard"
+
+[project.scripts]
+openhoard = "openhoard.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openhoard"]
