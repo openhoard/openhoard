@@ -84,4 +84,18 @@ describe("readUpTo", () => {
     expect(r.bytes.byteLength).toBe(250);
     expect(pulled).toBeLessThan(10);
   });
+
+  it("still returns the prefix when the source fails to cancel", async () => {
+    const stubborn = new ReadableStream<Uint8Array>({
+      pull(c) {
+        c.enqueue(enc("abcdef"));
+      },
+      cancel() {
+        throw new Error("cannot cancel");
+      },
+    });
+    const r = await readUpTo(stubborn, 3);
+    expect(new TextDecoder().decode(r.bytes)).toBe("abc");
+    expect(r.truncated).toBe(true);
+  });
 });

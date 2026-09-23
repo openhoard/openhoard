@@ -27,7 +27,7 @@
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*",
-    "json-schema-to-typescript": "^15.0.0"
+    "json-schema-to-typescript": "^16.0.0"
   },
   "license": "Apache-2.0",
   "repository": {
