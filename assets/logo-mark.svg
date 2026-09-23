@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="-128 -128 256 256" role="img" aria-label="OpenHoard mark">
+  <defs>
+    <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F7C85C"/>
+      <stop offset="1" stop-color="#D98A1F"/>
+    </linearGradient>
+    <radialGradient id="iris" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFE39A"/>
+      <stop offset="0.7" stop-color="#F2A93B"/>
+      <stop offset="1" stop-color="#B8651A"/>
+    </radialGradient>
+  </defs>
+  <polygon points="0,-118 102,-59 102,59 0,118 -102,59 -102,-59" fill="#15110D" stroke="url(#gold)" stroke-width="10" stroke-linejoin="round"/>
+  <path d="M0,-96 L0,-58 M83,-48 L50,-29 M83,48 L50,29 M0,96 L0,58 M-83,48 L-50,29 M-83,-48 L-50,-29" stroke="#F2A93B" stroke-opacity="0.35" stroke-width="2"/>
+  <path d="M-66,0 C-40,-44 40,-44 66,0 C40,44 -40,44 -66,0 Z" fill="url(#iris)" stroke="#FFD27A" stroke-width="3"/>
+  <ellipse cx="0" cy="0" rx="8" ry="34" fill="#120C07"/>
+  <circle cx="-16" cy="-14" r="6" fill="#FFF6DA" opacity="0.85"/>
+</svg>
