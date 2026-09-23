@@ -1,0 +1,8 @@
+# Normalise all text to LF so Prettier, generated-type checks and hashes agree on every OS.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
+*.bundle binary
