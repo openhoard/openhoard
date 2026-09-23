@@ -4,6 +4,7 @@ packages:
   - "connectors/*"
   - "enrichers/*"
   - "packages/*"
+  - "spikes/*"
   - "!packages/cli-py"
 allowBuilds:
   esbuild: true

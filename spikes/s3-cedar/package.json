@@ -1,0 +1,15 @@
+{
+  "name": "@openhoard/spike-s3-cedar",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Spike S3 (T-022): Cedar in Node 24, ESM import and a 1,000-policy benchmark.",
+  "type": "module",
+  "scripts": {
+    "spike": "tsx run.ts"
+  },
+  "dependencies": {
+    "@cedar-policy/cedar-wasm": "4.13.0",
+    "@openhoard/testkit": "workspace:*"
+  },
+  "license": "Apache-2.0"
+}

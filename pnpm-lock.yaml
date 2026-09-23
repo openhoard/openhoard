@@ -362,6 +362,15 @@ importers:
         specifier: ^9.12.1
         version: 9.12.1
 
+  spikes/s3-cedar:
+    dependencies:
+      '@cedar-policy/cedar-wasm':
+        specifier: 4.13.0
+        version: 4.13.0
+      '@openhoard/testkit':
+        specifier: workspace:*
+        version: link:../../packages/testkit
+
 packages:
 
   '@apidevtools/json-schema-ref-parser@11.9.3':
@@ -398,6 +407,9 @@ packages:
 
   '@cacheable/utils@2.5.0':
     resolution: {integrity: sha512-buipgOVDkkPXNR5+xBpDw7Zk2n1EvU7qBJCNUcL7rhQ//kfpOXPAvQ511Os0vpLYJ1pZnvudNytkQt2hst3wqA==}
+
+  '@cedar-policy/cedar-wasm@4.13.0':
+    resolution: {integrity: sha512-1omEd/J0c7RjcfSUWiXZc6zk6XUs1IuY7Yk9TVysoKV/LpFWIk45RpjvRFVioPUR3RQmgA/DaqKhK3pucbBx1A==}
 
   '@changesets/apply-release-plan@8.1.1':
     resolution: {integrity: sha512-nk2Hbq3M9NeHMdaIRBDvawKrQJzXB9sGyBUE5yWnIKtvdcNCPj75zBekJYr0gTT2ecJH3eFeTrc8eisPImcv0Q==}
@@ -2152,6 +2164,8 @@ snapshots:
     dependencies:
       hashery: 1.5.1
       keyv: 5.6.0
+
+  '@cedar-policy/cedar-wasm@4.13.0': {}
 
   '@changesets/apply-release-plan@8.1.1':
     dependencies:
