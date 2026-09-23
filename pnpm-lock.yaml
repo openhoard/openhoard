@@ -228,6 +228,69 @@ importers:
         specifier: workspace:*
         version: link:../../packages/config
 
+  apps/server:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.14.0
+        version: 1.19.17(hono@4.13.8)
+      hono:
+        specifier: ^4.8.0
+        version: 4.13.8
+      zod:
+        specifier: ^3.25.0
+        version: 3.25.76
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+
+  core/audit:
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+
+  core/catalog:
+    dependencies:
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
+      '@openhoard/core-policy':
+        specifier: workspace:^
+        version: link:../policy
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+
+  core/identity:
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+
+  core/policy:
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+
+  core/sandbox:
+    dependencies:
+      '@openhoard/schemas':
+        specifier: workspace:^
+        version: link:../../packages/schemas
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+
+  core/summarize:
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+
   packages/config: {}
 
   packages/schemas:
@@ -245,6 +308,19 @@ importers:
       json-schema-to-typescript:
         specifier: ^15.0.0
         version: 15.0.4
+
+  packages/sdk:
+    dependencies:
+      '@openhoard/core-policy':
+        specifier: workspace:^
+        version: link:../../core/policy
+      '@openhoard/schemas':
+        specifier: workspace:^
+        version: link:../schemas
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../config
 
 packages:
 
@@ -603,6 +679,12 @@ packages:
     resolution: {integrity: sha512-43/qtrDUokr7LJqoF2c3+RInu/t4zfrpYdoSDfYyhg52rwLV6TnOvdG4fXm7IkSB3wErkcmJS9iEhjVtOSEjjA==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
 
+  '@hono/node-server@1.19.17':
+    resolution: {integrity: sha512-dSneS5qhiauZWGDCeK4o695Xd9nUNjviSZCMQrj10eetr8Uln1ucn6bbphOM6UynAMMtNIzZNSpL9vnASJwrPQ==}
+    engines: {node: '>=18.14.1'}
+    peerDependencies:
+      hono: ^4
+
   '@humanfs/core@0.19.2':
     resolution: {integrity: sha512-UhXNm+CFMWcbChXywFwkmhqjs3PRCmcSa/hfBgLIb7oQ5HNb1wS0icWsGtSAUNgefHeI+eBrA8I1fxmbHsGdvA==}
     engines: {node: '>=18.18.0'}
@@ -668,6 +750,10 @@ packages:
     cpu: [x64]
     os: [linux]
     libc: [glibc]
+
+  '@noble/hashes@1.8.0':
+    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
+    engines: {node: ^14.21.3 || >=16}
 
   '@nodelib/fs.scandir@2.1.5':
     resolution: {integrity: sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g==}
@@ -1403,6 +1489,10 @@ packages:
     resolution: {integrity: sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==}
     engines: {node: '>=8'}
 
+  hono@4.13.8:
+    resolution: {integrity: sha512-/Gng7NfoykZl2pjukW5Z6+8Yxm3BPRf86GTbQnt0SbySkvax4fyL4H3HhY1cCpBGmiW9XDRFzRV+CXK2W8QudQ==}
+    engines: {node: '>=16.9.0'}
+
   html-escaper@2.0.2:
     resolution: {integrity: sha512-H2iMtd0I4Mt5eYiapRdIDjp+XzelXQ0tFE4JS7YFwFevXXMmOp9myNrUvCg0D6ws8iqkRPBfKHgbwig1SmlLfg==}
 
@@ -2110,6 +2200,9 @@ packages:
     resolution: {integrity: sha512-4LCcse/U2MHZ63HAJVE+v71o7yOdIe4cZ70Wpf8D/IyjDKYQLV5GD46B+hSTjJsvV5PztjvHoU580EftxjDZFQ==}
     engines: {node: '>=12.20'}
 
+  zod@3.25.76:
+    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+
 snapshots:
 
   '@ampproject/remapping@2.3.0':
@@ -2523,6 +2616,10 @@ snapshots:
       '@eslint/core': 0.17.0
       levn: 0.4.1
 
+  '@hono/node-server@1.19.17(hono@4.13.8)':
+    dependencies:
+      hono: 4.13.8
+
   '@humanfs/core@0.19.2':
     dependencies:
       '@humanfs/types': 0.15.0
@@ -2591,6 +2688,8 @@ snapshots:
 
   '@napi-rs/lzma-linux-x64-gnu@1.5.1':
     optional: true
+
+  '@noble/hashes@1.8.0': {}
 
   '@nodelib/fs.scandir@2.1.5':
     dependencies:
@@ -3323,6 +3422,8 @@ snapshots:
 
   has-flag@4.0.0: {}
 
+  hono@4.13.8: {}
+
   html-escaper@2.0.2: {}
 
   human-id@4.2.1: {}
@@ -3964,3 +4065,5 @@ snapshots:
   yocto-queue@0.1.0: {}
 
   yocto-queue@1.2.2: {}
+
+  zod@3.25.76: {}

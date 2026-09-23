@@ -1,0 +1,27 @@
+{
+  "name": "@openhoard/core-identity",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Identity: users, groups, principal sets.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rimraf dist coverage"
+  },
+  "devDependencies": {
+    "@openhoard/config": "workspace:*"
+  },
+  "license": "Apache-2.0"
+}

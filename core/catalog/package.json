@@ -1,0 +1,31 @@
+{
+  "name": "@openhoard/core-catalog",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Catalog: objects, versions, content hashing and search ranking.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rimraf dist coverage"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.8.0",
+    "@openhoard/core-policy": "workspace:^"
+  },
+  "devDependencies": {
+    "@openhoard/config": "workspace:*"
+  },
+  "license": "Apache-2.0"
+}

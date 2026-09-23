@@ -1,0 +1,31 @@
+{
+  "name": "@openhoard/server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "OpenHoard gateway: HTTP API and (soon) the MCP server.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch src/main.ts --data-dir ../../.openhoard",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rimraf dist coverage"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "hono": "^4.8.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@openhoard/config": "workspace:*"
+  },
+  "license": "Apache-2.0"
+}
