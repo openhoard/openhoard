@@ -328,6 +328,16 @@ importers:
         specifier: workspace:*
         version: link:../config
 
+  packages/testkit:
+    dependencies:
+      '@openhoard/sdk':
+        specifier: workspace:^
+        version: link:../sdk
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../config
+
 packages:
 
   '@apidevtools/json-schema-ref-parser@11.9.3':

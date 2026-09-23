@@ -1,0 +1,30 @@
+{
+  "name": "@openhoard/testkit",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Offline test kit: deterministic fake tenants, a fake Microsoft Graph, a dev OIDC provider, attack corpora and leak/benchmark harnesses.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rimraf dist coverage"
+  },
+  "dependencies": {
+    "@openhoard/sdk": "workspace:^"
+  },
+  "devDependencies": {
+    "@openhoard/config": "workspace:*"
+  },
+  "license": "Apache-2.0"
+}
