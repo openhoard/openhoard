@@ -7,9 +7,21 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
+// Invisible or direction-changing: soft hyphen, combining grapheme joiner, Arabic letter mark,
+// Hangul fillers, Khmer inherent vowels, Mongolian vowel separator, zero-width and bidi controls,
+// line/paragraph separators (line terminators in JS), word joiners, BOM, halfwidth Hangul filler,
+// Unicode tag characters and supplementary variation selectors (used to smuggle bytes).
 const FORBIDDEN =
-  /[\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u{e0000}-\u{e007f}]/u;
-const TEXT = /\.(?:[cm]?[jt]sx?|json|md|ya?ml|py|toml|txt|css|html?|svg|sh|ps1)$|(?:^|\/)[^.]+$/;
+  // eslint-disable-next-line no-misleading-character-class -- each invisible code point is matched on its own, on purpose
+  /[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2064\u2066-\u2069\u3164\ufeff\uffa0\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/u;
+// Basic variation selectors pick emoji or text style (the U+FE0F in a Markdown emoji), so one after
+// a character is fine in prose. In code, or in runs (a smuggling channel), they are refused.
+const SELECTOR = /[\ufe00-\ufe0f]/u;
+const SELECTOR_RUN = /[\ufe00-\ufe0f]{2,}/u;
+const PROSE = /\.(?:md|txt)$/;
+// Text files by extension, extensionless files (LICENSE) and dotfiles (.gitignore, .npmrc).
+const TEXT =
+  /\.(?:[cm]?[jt]sx?|json|md|ya?ml|py|toml|txt|css|html?|svg|sh|ps1)$|(?:^|\/)[^./]+$|(?:^|\/)\.[^/]+$/;
 
 const files = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" })
   .split("\0")
@@ -25,7 +37,10 @@ for (const file of files) {
   }
   if (text.includes("\0")) continue; // binary
   text.split("\n").forEach((line, i) => {
-    const m = FORBIDDEN.exec(line);
+    const m =
+      FORBIDDEN.exec(line) ??
+      SELECTOR_RUN.exec(line) ??
+      (PROSE.test(file) ? null : SELECTOR.exec(line));
     if (!m) return;
     const cp = m[0].codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
     console.error(
