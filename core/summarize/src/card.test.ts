@@ -89,6 +89,16 @@ describe("stripUnsafeText and malformed or invisible Unicode", () => {
     expect(stripUnsafeText("a\ud83db 😀")).toBe("a b 😀");
   });
 
+  it("removes invisible fillers and supplementary variation selectors", () => {
+    expect(stripUnsafeText("a\u3164b\u115fc\u034fd\u{e0101}\u{e0102}e")).toBe("a b c d e");
+  });
+
+  it("keeps one emoji-style selector but cuts selector runs used to smuggle data", () => {
+    expect(stripUnsafeText("tag \u{1f3f7}\ufe0f ok")).toBe("tag \u{1f3f7}\ufe0f ok");
+    expect(stripUnsafeText("x\ufe0f\ufe01\ufe02\ufe0e")).toBe("x\ufe0f");
+    expect(stripUnsafeText("\ufe0fstart and \ufe0f after space")).toBe("start and after space");
+  });
+
   it("removes invisible tag characters used for ASCII smuggling", () => {
     expect(stripUnsafeText("ok\u{e0049}\u{e0047}\u{e004e}")).toBe("ok");
   });

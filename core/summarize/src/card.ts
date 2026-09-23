@@ -24,12 +24,24 @@ export function clampWords(text: string, max = MAX_SUMMARY_WORDS): string {
  * - `\p{Cf}` format characters: zero-width spaces/joiners used to hide injected instructions,
  *   bidi overrides such as U+202E used to disguise names (`invoice\u202efdp.exe`), and the Unicode
  *   "tag" block (U+E0000–E007F) used to smuggle invisible ASCII;
- * - `\p{Cs}` lone surrogates: malformed UTF-16 that some databases and JSON consumers reject.
- * All are replaced with a space, then whitespace is collapsed. The result is well-formed UTF-16.
+ * - `\p{Cs}` lone surrogates: malformed UTF-16 that some databases and JSON consumers reject;
+ * - invisible characters outside those categories: Hangul fillers (U+115F, U+1160, U+3164,
+ *   U+FFA0), the combining grapheme joiner (U+034F), Khmer inherent vowels (U+17B4, U+17B5) and
+ *   supplementary variation selectors (U+E0100–E01EF), which can smuggle bytes invisibly.
+ * All are replaced with a space, then whitespace is collapsed. Basic variation selectors
+ * (U+FE00–FE0F) choose emoji or text style, so one is kept after a character, but runs of them
+ * (another smuggling channel) are cut to one. The result is well-formed UTF-16.
  */
 export function stripUnsafeText(s: string): string {
   return s
-    .replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, " ")
+    .replace(
+      // eslint-disable-next-line no-misleading-character-class -- each invisible code point is matched on its own, on purpose
+      /[\p{Cc}\p{Cf}\p{Cs}\u034f\u115f\u1160\u17b4\u17b5\u3164\uffa0\u{e0100}-\u{e01ef}]/gu,
+      " ",
+    )
+    .replace(/[\ufe00-\ufe0f]+/gu, (run, at: number, all: string) =>
+      at === 0 || /\s/.test(all[at - 1] ?? "") ? "" : run.slice(0, 1),
+    )
     .replace(/\s+/g, " ")
     .trim();
 }

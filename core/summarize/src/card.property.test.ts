@@ -7,11 +7,14 @@ import { buildCard, clampWords, safeLink, stripUnsafeText, type FileCard } from 
  * its guarantees must hold for ANY input, not only the examples in card.test.ts.
  */
 
-const UNSAFE = /[\p{Cc}\p{Cf}\p{Cs}]/u;
+const UNSAFE =
+  // eslint-disable-next-line no-misleading-character-class -- each invisible code point is matched on its own, on purpose
+  /[\p{Cc}\p{Cf}\p{Cs}\u034f\u115f\u1160\u3164\uffa0\u{e0100}-\u{e01ef}]|[\ufe00-\ufe0f]{2,}/u;
 /** Any string, biased towards the characters attackers use: controls, bidi, zero-width, surrogates. */
 const hostileString = fc.string({
   unit: fc.oneof(
     fc.constantFrom("\u202e", "\u200b", "\u200d", "\u2066", "\ufeff", "\u0000", "\u001b", "\n"),
+    fc.constantFrom("\u3164", "\u034f", "\ufe0f", "\ufe01", "\u{e0101}"),
     fc.constantFrom("\ud83d", "\ude00", "😀", "\u{e0041}"),
     fc.string({ unit: "grapheme", maxLength: 1 }),
     fc.string({ unit: "binary", maxLength: 1 }),
