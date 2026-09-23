@@ -83,7 +83,7 @@ export async function measureThroughput(
 ): Promise<number> {
   let units = 0;
   const start = performance.now();
-  let elapsed = 0;
+  let elapsed: number;
   do {
     units += await fn();
     elapsed = performance.now() - start;
