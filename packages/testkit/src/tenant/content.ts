@@ -8,7 +8,8 @@ const CHUNK_BYTES = 64 * 1024;
 export const MAX_BUFFERED_BYTES = 64 * 1024 * 1024;
 
 /**
- * Deterministic file content. Bytes are produced lazily, so a 4 GiB "huge file" costs no
+ * Deterministic file content, optionally one inclusive byte range (for HTTP Range requests:
+ * position N always holds the same byte, so resumed downloads line up). Bytes are produced lazily, so a 4 GiB "huge file" costs no
  * memory. Content depends only on the item's content key and size: seeded duplicates share
  * both, so they are byte-for-byte identical.
  *
@@ -16,13 +17,28 @@ export const MAX_BUFFERED_BYTES = 64 * 1024 * 1024;
  * files) its canary token, so full-text search over extracted text can find them. Names are
  * left out on purpose: renaming a file must not change its bytes.
  */
-export function contentStream(tenant: FakeTenant, item: FakeItem): ReadableStream<Uint8Array> {
+export function contentStream(
+  tenant: FakeTenant,
+  item: FakeItem,
+  range?: { start: number; end: number },
+): ReadableStream<Uint8Array> {
   if (item.kind !== "file") throw new TypeError(`${item.id} is a folder`);
+  const start = range?.start ?? 0;
+  const end = range?.end ?? item.size - 1;
+  if (
+    !Number.isInteger(start) ||
+    !Number.isInteger(end) ||
+    start < 0 ||
+    end >= item.size ||
+    (end < start && item.size > 0)
+  ) {
+    throw new RangeError(`bad byte range ${start}-${end} for ${item.size} bytes`);
+  }
   const origin = itemIndex(tenant).get(item.contentKey) ?? item;
   const header = new TextEncoder().encode(headerOf(origin));
   const block = bodyBlock(item.contentKey);
-  const size = item.size;
-  let sent = 0;
+  const size = item.size === 0 ? 0 : end + 1;
+  let sent = start;
   return new ReadableStream<Uint8Array>(
     {
       pull(controller) {

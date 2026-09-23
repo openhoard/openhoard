@@ -21,7 +21,9 @@
     "clean": "rimraf dist coverage"
   },
   "dependencies": {
-    "@openhoard/sdk": "workspace:^"
+    "@hono/node-server": "^2.1.1",
+    "@openhoard/sdk": "workspace:^",
+    "hono": "^4.8.0"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*"

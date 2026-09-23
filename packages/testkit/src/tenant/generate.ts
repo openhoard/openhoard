@@ -242,7 +242,7 @@ class ItemBuilder {
   private buildSite(site: FakeSite, budget: number): void {
     if (budget === 0) return;
     const rng = this.rng.fork(site.id);
-    const siteAcl = siteEntries(site);
+    const rootAcl = siteAcl(site);
     const folders: FakeItem[] = [];
     let remaining = budget;
 
@@ -254,13 +254,13 @@ class ItemBuilder {
           rng,
           site,
           parent,
-          siteAcl,
+          rootAcl,
           `Project archive level ${depth + 1} - migrated from legacy file share`,
         );
         folders.push(parent);
         remaining--;
       }
-      this.addFile(rng, site, parent, siteAcl, {
+      this.addFile(rng, site, parent, rootAcl, {
         forceName: "Legacy migration checklist - keep until audit sign-off.docx",
       });
       remaining--;
@@ -273,12 +273,12 @@ class ItemBuilder {
         folders.length && rng.chance(0.7)
           ? rng.pick(candidates.length ? candidates : folders)
           : undefined;
-      folders.push(this.addFolder(rng, site, parent, siteAcl, rng.pick(FOLDER_NAMES)));
+      folders.push(this.addFolder(rng, site, parent, rootAcl, rng.pick(FOLDER_NAMES)));
       remaining--;
     }
     for (let i = 0; i < remaining; i++) {
       const parent = folders.length && rng.chance(0.8) ? rng.pick(folders) : undefined;
-      this.addFile(rng, site, parent, siteAcl, {});
+      this.addFile(rng, site, parent, rootAcl, {});
     }
   }
 
@@ -286,13 +286,13 @@ class ItemBuilder {
     rng: Random,
     site: FakeSite,
     parent: FakeItem | undefined,
-    siteAcl: SourceAcl[],
+    rootAcl: SourceAcl[],
     base: string,
   ): FakeItem {
     const item = this.newItem(rng, site, parent, "folder", base);
     item.acl = rng.chance(0.03)
       ? this.uniqueAcl(rng, site, item)
-      : inherit(parent?.acl ?? siteAcl, item.id);
+      : inheritAcl(parent?.acl ?? rootAcl, item.id);
     return item;
   }
 
@@ -300,7 +300,7 @@ class ItemBuilder {
     rng: Random,
     site: FakeSite,
     parent: FakeItem | undefined,
-    siteAcl: SourceAcl[],
+    rootAcl: SourceAcl[],
     opts: { forceName?: string },
   ): FakeItem {
     const type = rng.pick(DOC_TYPES);
@@ -322,7 +322,7 @@ class ItemBuilder {
 
     item.acl = rng.chance(0.02)
       ? this.uniqueAcl(rng, site, item)
-      : inherit(parent?.acl ?? siteAcl, item.id);
+      : inheritAcl(parent?.acl ?? rootAcl, item.id);
     if (rng.chance(0.015)) {
       item.acl.push({
         externalId: item.id,
@@ -460,7 +460,8 @@ class ItemBuilder {
   }
 }
 
-function siteEntries(site: FakeSite): SourceAcl[] {
+/** The entries every item in a site inherits unless it breaks inheritance. */
+export function siteAcl(site: FakeSite): SourceAcl[] {
   const writers = new Set(site.writerGroups);
   return [
     ...site.writerGroups.map((g): SourceAcl => ({
@@ -481,7 +482,7 @@ function siteEntries(site: FakeSite): SourceAcl[] {
 }
 
 /** Copies a parent's entries onto a child. Explicit shares (links, guests) do not propagate. */
-function inherit(parentAcl: readonly SourceAcl[], itemId: string): SourceAcl[] {
+export function inheritAcl(parentAcl: readonly SourceAcl[], itemId: string): SourceAcl[] {
   return parentAcl
     .filter((a) => a.principal !== "anyone-with-link" && !a.principal.startsWith("guest:"))
     .map((a) => ({ externalId: itemId, principal: a.principal, role: a.role, inherited: true }));

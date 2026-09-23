@@ -32,3 +32,30 @@ assertNoLeaks(report); // throws, listing each leak's surface, user, probe and i
 The harness probes as a deterministic sample of active users (always including a guest). It searches every canary token, runs broad queries and asks for autocomplete. Because each canary is unique to one restricted file, any sign of a forbidden token is a leak by construction: a hit, a non-zero total, a facet count, a suggestion, or the token in any card text. No knowledge of the engine's ranking is needed. `checkPair(tenant, target, ownerId, otherId)` pins a regression for one pair of accounts.
 
 `InMemorySearch` is a small, correct reference engine that filters before matching, counting, faceting and suggesting. The tests prove the harness catches an engine that leaks through each surface.
+
+## Fake Microsoft Graph (T-015)
+
+```ts
+import { FakeGraph, generateTenant } from "@openhoard/testkit";
+
+const graph = new FakeGraph(generateTenant(), {
+  pageSize: 50,
+  throttle: { limit: 100, windowMs: 1000 },
+});
+await graph.fetch("/v1.0/sites", { headers: { authorization: "Bearer fake-graph-token" } }); // in-process
+const { url, close } = await graph.listen(); // or real HTTP on 127.0.0.1
+graph.store.update(itemId, { name: "Renamed.docx" }); // changes show up in the next delta
+graph.failNext(503, 2, 3); // two 503s with Retry-After: 3
+```
+
+It covers what a SharePoint/OneDrive connector uses:
+
+- Bearer auth.
+- `sites`, `drives`, `root`, `items`, `children` with `$top` and absolute `@odata.nextLink`.
+- `content`: a 302 to a signed, pre-authenticated download URL, with `Range`/206/416.
+- `permissions`, including inherited, link, group and guest entries.
+- `root/delta`: opaque tokens, `token=latest`, tombstones, id-ordered pages that never skip items deleted mid-round, and 410 `resyncRequired` after `requireResync()`.
+- `subscriptions`, with the validation handshake, the 42,300-minute expiry cap, renewal and notifications on change.
+- Rate limiting (429 + Retry-After) and injected faults.
+
+Response shapes follow the Graph v1.0 documentation for the fields connectors read. The source tenant is never modified: `graph.store` holds a mutable copy.
