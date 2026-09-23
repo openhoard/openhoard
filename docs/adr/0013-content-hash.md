@@ -21,3 +21,5 @@ BLAKE3 for blob identity (prefixed b3:), SHA-256 kept for interop and the audit 
 ## Consequences
 
 Ids are prefixed so the algorithm can change later.
+
+Storage keys use a tenant-scoped id (`b3t:`, a keyed BLAKE3 of the content hash with a per-tenant secret) so de-duplication never reveals across tenants that two tenants hold the same file. Raw `b3:` hashes stay inside one tenant. The pure-JS implementation is benchmarked in spike S1 and replaced by a native binding if it can't keep up with large uploads.

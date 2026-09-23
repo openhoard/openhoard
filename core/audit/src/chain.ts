@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 
-/** What callers record. The chain fields are added by {@link appendEvent}. */
+/**
+ * What callers record. The chain fields are added by {@link appendEvent}.
+ *
+ * Each tenant has its own chain (security review #6): `tenantId` is part of every hash, so an
+ * event can't be moved between tenants and one tenant's export never includes another's rows.
+ */
 export interface AuditInput {
+  tenantId: string;
   at: string;
   actor: string;
   action: string;
@@ -48,11 +54,19 @@ export function appendEvent(prev: AuditEvent | undefined, input: AuditInput): Au
 
 export type VerifyResult = { ok: true } | { ok: false; seq: number; problem: string };
 
-/** Detects edited, deleted, inserted or reordered events. */
+/**
+ * Detects edited, deleted, inserted, reordered or cross-tenant events in one tenant's chain.
+ *
+ * LIMIT: a hash chain is only tamper-EVIDENT against someone who cannot rewrite the whole chain.
+ * A database admin could recompute every hash. The planned defence (T-701) is periodic anchors
+ * of the latest hash to WORM storage (S3 Object Lock / Azure immutable blobs), verified here.
+ */
 export function verifyChain(events: readonly AuditEvent[]): VerifyResult {
   let prevHash = GENESIS_HASH;
   let expectedSeq = 1;
+  const tenantId = events[0]?.tenantId;
   for (const e of events) {
+    if (e.tenantId !== tenantId) return { ok: false, seq: e.seq, problem: "mixed tenants" };
     if (e.seq !== expectedSeq)
       return { ok: false, seq: e.seq, problem: `expected seq ${expectedSeq}` };
     if (e.prevHash !== prevHash) return { ok: false, seq: e.seq, problem: "prevHash mismatch" };

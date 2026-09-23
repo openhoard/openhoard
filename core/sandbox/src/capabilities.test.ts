@@ -6,6 +6,7 @@ const manifest = {
   name: "enricher-invoice",
   version: "1.0.0",
   type: "enricher",
+  runtime: "wasm",
   accepts: ["application/pdf"],
   capabilities: ["read:content", "propose:tags"],
 };

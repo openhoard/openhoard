@@ -33,6 +33,8 @@ export function decideRead(req: ReadRequest): ReadDecision {
     if (req.visibility === "hidden") return { shape: "none", reason: "hidden to non-readers" };
     if (req.visibility === "discoverable")
       return { shape: "title-only", reason: "discoverable: title and request-access only" };
+    // `readable` visibility is for tenant-public material: non-readers get the card (which
+    // includes the summary) but never the file content.
     return { shape: "card", reason: "readable visibility: card without content" };
   }
   if (!req.wantsContent) return { shape: "card", reason: "reader asked for a card" };

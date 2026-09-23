@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { contentHash, contentHasher, reciprocalRankFusion } from "./index.js";
+import { contentHash, contentHasher, reciprocalRankFusion, scopedBlobId } from "./index.js";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 
@@ -15,6 +15,23 @@ describe("contentHash", () => {
     h.update(enc("ho"));
     h.update(enc("ard"));
     expect(h.digest()).toBe(contentHash(enc("hoard")));
+  });
+});
+
+describe("scopedBlobId", () => {
+  const keyA = new Uint8Array(32).fill(1);
+  const keyB = new Uint8Array(32).fill(2);
+  const h = contentHash(enc("same file"));
+
+  it("differs per tenant for the same content, and is stable per tenant", () => {
+    expect(scopedBlobId(keyA, h)).toMatch(/^b3t:[0-9a-f]{64}$/);
+    expect(scopedBlobId(keyA, h)).toBe(scopedBlobId(keyA, h));
+    expect(scopedBlobId(keyA, h)).not.toBe(scopedBlobId(keyB, h));
+  });
+
+  it("rejects bad keys and hashes", () => {
+    expect(() => scopedBlobId(new Uint8Array(16), h)).toThrow(RangeError);
+    expect(() => scopedBlobId(keyA, "sha256:abc")).toThrow(TypeError);
   });
 });
 

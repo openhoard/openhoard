@@ -6,6 +6,7 @@ function chain(n: number): AuditEvent[] {
   for (let i = 0; i < n; i++) {
     events.push(
       appendEvent(events.at(-1), {
+        tenantId: "t1",
         at: `2026-09-23T12:00:0${i}Z`,
         actor: "user:steve",
         action: i % 2 ? "open" : "find",
@@ -51,6 +52,17 @@ describe("audit chain", () => {
     const events = chain(5);
     events.splice(1, 1);
     expect(verifyChain(events)).toMatchObject({ ok: false, seq: 3 });
+  });
+
+  it("binds events to their tenant", () => {
+    const events = chain(3);
+    const other = appendEvent(at(events, 1), { ...at(events, 2), tenantId: "t2" });
+    events[2] = other;
+    expect(verifyChain(events)).toMatchObject({ ok: false, seq: 3, problem: "mixed tenants" });
+    const moved = chain(2);
+    moved[1] = { ...at(moved, 1), tenantId: "t2" };
+    moved[0] = { ...at(moved, 0), tenantId: "t2" };
+    expect(verifyChain(moved)).toMatchObject({ ok: false, problem: "content altered" });
   });
 
   it("detects a re-hashed forgery that breaks the link", () => {

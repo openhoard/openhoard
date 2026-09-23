@@ -16,20 +16,52 @@ export type Exposure = (typeof EXPOSURE)[number];
 export type ClientTrust = "local" | "commercial" | "consumer";
 
 /**
- * A file carries many tags; the most restrictive visibility among them wins.
- * With no tags, `fallback` applies (the tenant default).
+ * FAIL-CLOSED DEFAULTS (security review #1).
+ * A file that has not finished ingest/tagging is treated as `hidden` + `metadata-only`, so a
+ * sensitive file's title and content never leak in the window before its tags are known.
+ * Tenant defaults (e.g. `discoverable` for internal work) apply only once a file is processed.
  */
+export const UNPROCESSED: { visibility: Visibility; exposure: Exposure } = {
+  visibility: "hidden",
+  exposure: "metadata-only",
+};
+
+export interface TenantDefaults {
+  visibility: Visibility;
+  exposure: Exposure;
+}
+
+/**
+ * Effective visibility/exposure for one file.
+ * - Unprocessed files get {@link UNPROCESSED}, whatever their (possibly partial) tags say.
+ * - Processed files: the most restrictive level among their tags wins; with no level-bearing
+ *   tags, the tenant default applies.
+ */
+export function resolveLevels(input: {
+  processed: boolean;
+  visibilities: readonly string[];
+  exposures: readonly string[];
+  defaults: TenantDefaults;
+}): { visibility: Visibility; exposure: Exposure } {
+  if (!input.processed) return UNPROCESSED;
+  return {
+    visibility: mostRestrictiveVisibility(input.visibilities, input.defaults.visibility),
+    exposure: mostRestrictiveExposure(input.exposures, input.defaults.exposure),
+  };
+}
+
+/** Most restrictive visibility wins. Empty input returns `fallback` (fail-closed by default). */
 export function mostRestrictiveVisibility(
-  levels: readonly Visibility[],
-  fallback: Visibility = "discoverable",
+  levels: readonly string[],
+  fallback: Visibility = UNPROCESSED.visibility,
 ): Visibility {
   return pickMostRestrictive(VISIBILITY, levels, fallback);
 }
 
-/** The most restrictive exposure among a file's tags wins. */
+/** Most restrictive exposure wins. Empty input returns `fallback` (fail-closed by default). */
 export function mostRestrictiveExposure(
-  levels: readonly Exposure[],
-  fallback: Exposure = "commercial-only",
+  levels: readonly string[],
+  fallback: Exposure = UNPROCESSED.exposure,
 ): Exposure {
   return pickMostRestrictive(EXPOSURE, levels, fallback);
 }
@@ -43,16 +75,26 @@ export function exposureAllowsContent(exposure: Exposure, trust: ClientTrust): b
       return trust === "commercial" || trust === "local";
     case "local-only":
       return trust === "local";
-    case "metadata-only":
+    default:
+      // "metadata-only" and any unknown value from storage: never hand out content.
       return false;
   }
 }
 
+/**
+ * Picks the most restrictive level. Values that are not recognised (bad data, a newer schema,
+ * a typo in a pack) count as the MOST restrictive level, so corruption can only tighten access.
+ */
 function pickMostRestrictive<T extends string>(
   order: readonly T[],
-  levels: readonly T[],
+  levels: readonly string[],
   fallback: T,
 ): T {
   if (levels.length === 0) return fallback;
-  return levels.reduce((a, b) => (order.indexOf(b) < order.indexOf(a) ? b : a));
+  let best = order.length - 1;
+  for (const level of levels) {
+    const i = order.indexOf(level as T);
+    best = Math.min(best, i === -1 ? 0 : i);
+  }
+  return order[best] as T;
 }

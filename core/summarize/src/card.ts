@@ -6,6 +6,7 @@ export interface FileCard {
   summary: string;
   owner: string;
   lastTouched: string;
+  /** Always an http(s) URL or empty. */
   link: string;
 }
 
@@ -18,26 +19,51 @@ export function clampWords(text: string, max = MAX_SUMMARY_WORDS): string {
 }
 
 /**
+ * Removes characters that let untrusted text hide or disguise itself (security review #4):
+ * - `\p{Cc}` control characters (NUL, BEL, ESC…);
+ * - `\p{Cf}` format characters: zero-width spaces/joiners used to hide injected instructions,
+ *   and bidi overrides such as U+202E used to disguise names (`invoice‮fdp.exe`).
+ * Both are replaced with a space, then whitespace is collapsed.
+ */
+export function stripUnsafeText(s: string): string {
+  return s
+    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Only http(s) links survive (security review #5). A connector or enricher could otherwise
+ * smuggle `javascript:` or `data:` URLs that a UI would render as clickable.
+ */
+export function safeLink(link: string): string {
+  try {
+    const url = new URL(link);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+
+const TAG = /^[a-z][a-z0-9-]*:[^\s:]\S*$/;
+
+/**
  * Builds a card from model or rule output. Everything is treated as untrusted text:
- * control characters are removed, lengths are capped, and tags must look like `facet:value`.
+ * hidden/control characters are removed, lengths are capped, tags must look like
+ * `facet:value`, and links must be http(s).
  */
 export function buildCard(input: FileCard): FileCard {
-  const clean = (s: string, max: number) =>
-    s
-      .replace(/\p{Cc}/gu, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, max);
+  const clean = (s: string, max: number) => stripUnsafeText(s).slice(0, max);
   return {
     id: input.id,
     title: clean(input.title, 200),
-    tags: [...new Set(input.tags.filter((t) => /^[a-z][a-z0-9-]*:[^\s:][^\s]*$/.test(t)))].slice(
+    tags: [...new Set(input.tags.map((t) => stripUnsafeText(t)).filter((t) => TAG.test(t)))].slice(
       0,
       20,
     ),
     summary: clampWords(clean(input.summary, 2000)),
     owner: clean(input.owner, 200),
     lastTouched: input.lastTouched,
-    link: input.link,
+    link: safeLink(input.link),
   };
 }
