@@ -34,7 +34,9 @@ jobs:
             # Bots (Dependabot, GitHub Actions) can't sign the DCO; their changes are reviewed on merge.
             case "$name" in *"[bot]") continue ;; esac
             author=$(git log -1 --format='%ae' "$c")
-            if ! git log -1 --format='%B' "$c" | grep -qiE "^Signed-off-by: .+<${author}>$"; then
+            # Compare as a fixed string: emails such as 123+name@users.noreply.github.com contain
+            # regex metacharacters. Only real trailers count, not "Signed-off-by" in the body text.
+            if ! git log -1 --format='%(trailers:key=Signed-off-by,valueonly)' "$c" | grep -qF -- "<${author}>"; then
               echo "::error::Commit $c is missing 'Signed-off-by' matching its author ($author). Use git commit -s."
               missing=1
             fi
