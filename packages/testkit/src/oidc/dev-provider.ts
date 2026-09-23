@@ -62,7 +62,10 @@ export async function startDevOidc(options: DevOidcOptions): Promise<DevOidc> {
   };
 
   const server = createServer();
-  await new Promise<void>((resolve) => server.listen(options.port ?? 0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject); // e.g. EADDRINUSE
+    server.listen(options.port ?? 0, "127.0.0.1", resolve);
+  });
   const issuer = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
   const configuration: Configuration = {
@@ -93,13 +96,22 @@ export async function startDevOidc(options: DevOidcOptions): Promise<DevOidc> {
     // so a client can sign someone in without a separate userinfo call.
     conformIdTokenClaims: false,
     interactions: { url: (_ctx, interaction) => `/interaction/${interaction.uid}` },
+    // Plain-text errors (e.g. an unregistered redirect_uri): nothing from the request is echoed
+    // into HTML.
+    renderError: (ctx, out) => {
+      ctx.type = "text/plain; charset=utf-8";
+      ctx.body = `${out.error}: ${out.error_description ?? ""}`;
+    },
     findAccount: (_ctx, id) => {
       const user = users.get(id);
       if (!user?.active) return undefined;
       return {
         accountId: user.id,
         claims: () => {
-          const [given = user.displayName, ...family] = user.displayName.split(" ");
+          // Guests are shown as "Name (Company)"; the company is not part of their name.
+          const [given = user.displayName, ...family] = user.displayName
+            .replace(/ \(.*\)$/, "")
+            .split(" ");
           return {
             sub: user.id,
             email: user.upn,
@@ -128,9 +140,15 @@ export async function startDevOidc(options: DevOidcOptions): Promise<DevOidc> {
       await grant.save();
       return grant;
     },
+    // Dev clients may always refresh; offline_access alone is dropped without prompt=consent.
+    issueRefreshToken: (_ctx, client) => client.grantTypeAllowed("refresh_token"),
     ttl: { AccessToken: 3600, IdToken: 3600, Session: 8 * 3600, Grant: 8 * 3600, Interaction: 600 },
   };
 
+  // The login form's redirect chain ends at a client's redirect URI; CSP form-action must allow it.
+  const formTargets = [
+    ...new Set(clients.flatMap((c) => c.redirectUris.map((u) => new URL(u).origin))),
+  ];
   const provider = new Provider(issuer, configuration);
   const callback = provider.callback();
   server.on("request", (req, res) => {
@@ -140,11 +158,13 @@ export async function startDevOidc(options: DevOidcOptions): Promise<DevOidc> {
       void callback(req, res);
       return;
     }
-    handleInteraction(provider, req, res, Boolean(m[2]), tenant.users).catch((error: unknown) => {
-      res.statusCode = 400;
-      res.setHeader("content-type", "text/plain; charset=utf-8");
-      res.end(`sign-in failed: ${(error as Error).message}`);
-    });
+    handleInteraction(provider, req, res, Boolean(m[2]), tenant.users, formTargets).catch(
+      (error: unknown) => {
+        res.statusCode = 400;
+        res.setHeader("content-type", "text/plain; charset=utf-8");
+        res.end(`sign-in failed: ${(error as Error).message}`);
+      },
+    );
   });
 
   return {
@@ -158,21 +178,30 @@ export async function startDevOidc(options: DevOidcOptions): Promise<DevOidc> {
   };
 }
 
-/** The login step: a page listing active users, and the form post that signs one in. */
+/**
+ * Interactions: the login page and its form post, and consent, which is granted automatically
+ * because every registered dev client is first-party (it happens for prompt=consent, new scopes
+ * or claims, or an expired grant).
+ */
 async function handleInteraction(
   provider: Provider,
   req: IncomingMessage,
   res: ServerResponse,
   submit: boolean,
   people: readonly FakeUser[],
+  formTargets: readonly string[],
 ): Promise<void> {
   const details = await provider.interactionDetails(req, res);
+  if (details.prompt.name === "consent") {
+    await grantConsent(provider, req, res, details);
+    return;
+  }
   if (details.prompt.name !== "login") throw new Error(`unexpected prompt ${details.prompt.name}`);
   if (!submit) {
     res.setHeader("content-type", "text/html; charset=utf-8");
     res.setHeader(
       "content-security-policy",
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+      `default-src 'none'; style-src 'unsafe-inline'; form-action 'self' ${formTargets.join(" ")}`,
     );
     res.end(
       loginPage(
@@ -192,6 +221,39 @@ async function handleInteraction(
     res,
     { login: { accountId: user.id } },
     { mergeWithLastSubmission: false },
+  );
+}
+
+type InteractionDetails = Awaited<ReturnType<Provider["interactionDetails"]>>;
+
+async function grantConsent(
+  provider: Provider,
+  req: IncomingMessage,
+  res: ServerResponse,
+  details: InteractionDetails,
+): Promise<void> {
+  const accountId = details.session?.accountId;
+  const clientId = details.params.client_id;
+  if (!accountId || typeof clientId !== "string") throw new Error("consent without a session");
+  const missing = details.prompt.details as {
+    missingOIDCScope?: string[];
+    missingOIDCClaims?: string[];
+    missingResourceScopes?: Record<string, string[]>;
+  };
+  const grant =
+    (details.grantId ? await provider.Grant.find(details.grantId) : undefined) ??
+    new provider.Grant({ accountId, clientId });
+  if (missing.missingOIDCScope) grant.addOIDCScope(missing.missingOIDCScope.join(" "));
+  if (missing.missingOIDCClaims) grant.addOIDCClaims(missing.missingOIDCClaims);
+  for (const [indicator, scopes] of Object.entries(missing.missingResourceScopes ?? {})) {
+    grant.addResourceScope(indicator, scopes.join(" "));
+  }
+  const grantId = await grant.save();
+  await provider.interactionFinished(
+    req,
+    res,
+    { consent: { grantId } },
+    { mergeWithLastSubmission: true },
   );
 }
 
