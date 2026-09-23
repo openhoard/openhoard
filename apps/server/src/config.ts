@@ -35,7 +35,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     try {
       fromFile = JSON.parse(readFileSync(file, "utf8"));
     } catch (e) {
-      throw new Error(`invalid OpenHoard config:\n  ${file}: ${(e as Error).message}`);
+      throw new Error(`invalid OpenHoard config:\n  ${file}: ${(e as Error).message}`, {
+        cause: e,
+      });
     }
   }
   const fileObj = typeof fromFile === "object" && fromFile !== null ? fromFile : {};
