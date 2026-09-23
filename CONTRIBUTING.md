@@ -48,6 +48,10 @@ pnpm check          # lint + format check + typecheck + tests with coverage
 pnpm changeset      # describe changes to published packages
 ```
 
+**Privacy:** Turborepo sends anonymous usage telemetry by default. OpenHoard is privacy-first,
+so we turn it off in CI and recommend you do too, once per machine:
+`pnpm exec turbo telemetry disable` (or set `DO_NOT_TRACK=1` in your shell profile).
+
 Useful filters: `pnpm --filter @openhoard/core-policy test`, `pnpm --filter openhoard build`.
 
 Decisions live in [`docs/adr/`](docs/adr/), contract changes go through [`docs/rfc/`](docs/rfc/),

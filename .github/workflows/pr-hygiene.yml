@@ -8,6 +8,12 @@ permissions:
 jobs:
   commits:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # PR data is passed through env, never interpolated straight into shell (script-injection hardening).
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      BASE_REF: ${{ github.base_ref }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -19,11 +25,14 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Conventional Commits
-        run: pnpm exec commitlint --from "${{ github.event.pull_request.base.sha }}" --to "${{ github.event.pull_request.head.sha }}"
-      - name: DCO sign-off on every commit
+        run: pnpm exec commitlint --from "$BASE_SHA" --to "$HEAD_SHA"
+      - name: DCO sign-off on every human commit
         run: |
           missing=0
-          for c in $(git rev-list "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"); do
+          for c in $(git rev-list "$BASE_SHA..$HEAD_SHA"); do
+            name=$(git log -1 --format='%an' "$c")
+            # Bots (Dependabot, GitHub Actions) can't sign the DCO; their changes are reviewed on merge.
+            case "$name" in *"[bot]") continue ;; esac
             author=$(git log -1 --format='%ae' "$c")
             if ! git log -1 --format='%B' "$c" | grep -qiE "^Signed-off-by: .+<${author}>$"; then
               echo "::error::Commit $c is missing 'Signed-off-by' matching its author ($author). Use git commit -s."
@@ -33,4 +42,15 @@ jobs:
           exit $missing
       - name: Changeset present (informational)
         continue-on-error: true
-        run: pnpm exec changeset status --since=origin/${{ github.base_ref }}
+        run: pnpm exec changeset status --since="origin/$BASE_REF"
+
+  dependency-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          # Apache-2.0 project: block strong-copyleft dependencies from entering the core.
+          deny-licenses: AGPL-1.0-only, AGPL-1.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later, GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later, SSPL-1.0
