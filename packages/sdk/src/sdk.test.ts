@@ -72,6 +72,12 @@ describe("readUpTo", () => {
     expect((await readUpTo(streamOf("ab"), 2)).truncated).toBe(false);
   });
 
+  it("does not count empty chunks as more data", async () => {
+    // Found by the readUpTo property test: an empty chunk after the budget reported truncation.
+    expect((await readUpTo(streamOf("ab", "", ""), 2)).truncated).toBe(false);
+    expect((await readUpTo(streamOf("", "x"), 0)).truncated).toBe(true);
+  });
+
   it("cancels the source so the rest is never read", async () => {
     let pulled = 0;
     const endless = new ReadableStream<Uint8Array>({

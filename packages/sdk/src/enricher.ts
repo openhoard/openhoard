@@ -60,7 +60,12 @@ export async function readUpTo(
       total += take;
       if (take < value.byteLength) truncated = true;
     }
-    if (!truncated && total >= maxBytes) truncated = !(await reader.read()).done;
+    // At the budget exactly: probe for more data. Empty chunks are not data, so skip them.
+    while (!truncated && total >= maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      truncated = value.byteLength > 0;
+    }
   } finally {
     await reader.cancel().catch(() => undefined);
   }
