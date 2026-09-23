@@ -1,5 +1,5 @@
-import { blake3 } from "@noble/hashes/blake3";
-import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
+import { blake3 } from "@noble/hashes/blake3.js";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
 
 /*
  * PERFORMANCE NOTE (security review #10): @noble/hashes is audited, pure JavaScript. It is fine

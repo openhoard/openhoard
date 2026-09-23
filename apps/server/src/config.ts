@@ -21,7 +21,7 @@ export const ConfigSchema = z
         url: z.string().default("pglite"),
       })
       .strict()
-      .default({}),
+      .prefault({}),
   })
   .strict();
 
