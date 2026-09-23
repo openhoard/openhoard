@@ -296,11 +296,27 @@ describe("delta", () => {
     const latest = await client.get<Page<DriveItem>>(`${url}?token=latest`);
     expect(latest.value).toEqual([]);
     expect((await graph.fetch(`${url}?token=%%%`, { headers: AUTH })).status).toBe(400);
-    graph.store.addFile(DRIVE, undefined, "x.txt", 1);
+    // No change in between: a token issued "now" must still be invalidated.
     graph.requireResync();
     const res = await graph.fetch(latest["@odata.deltaLink"] ?? "", { headers: AUTH });
     expect(res.status).toBe(410);
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe("resyncRequired");
+    // A fresh full sync works again and yields a usable deltaLink.
+    const fresh = await client.all<DriveItem>(url);
+    expect((await graph.fetch(fresh.deltaLink ?? "", { headers: AUTH })).status).toBe(200);
+  });
+
+  it("keeps the first request's page size for the whole round", async () => {
+    const sizes: number[] = [];
+    let next: string | undefined = `${url}?$top=7`;
+    while (next) {
+      const page: Page<DriveItem> = await client.get<Page<DriveItem>>(next);
+      sizes.push(page.value.length);
+      next = page["@odata.nextLink"];
+    }
+    expect(sizes.length).toBeGreaterThan(2);
+    expect(sizes.slice(1, -1).every((n) => n === 7)).toBe(true);
+    expect(sizes[0]).toBe(8); // the root item, then 7
   });
 });
 
@@ -315,6 +331,18 @@ describe("throttling and faults", () => {
     expect(limited.headers.get("retry-after")).toBe("10");
     now += 10_000;
     expect((await g.fetch("/v1.0/sites", { headers: AUTH })).status).toBe(200);
+  });
+
+  it("applies faults to pre-authenticated downloads too", async () => {
+    const file = tenant.items.find((i) => i.driveId === DRIVE && i.kind === "file");
+    const res = await graph.fetch(`/v1.0/drives/${DRIVE}/items/${file?.id}/content`, {
+      headers: AUTH,
+    });
+    graph.failNext(503, 1, 2);
+    const failed = await graph.fetch(res.headers.get("location") ?? "");
+    expect(failed.status).toBe(503);
+    expect(failed.headers.get("retry-after")).toBe("2");
+    expect((await graph.fetch(res.headers.get("location") ?? "")).status).toBe(200);
   });
 
   it("injects faults that a well-behaved client retries through", async () => {
@@ -434,6 +462,16 @@ describe("listen", () => {
       await server.close();
     }
   });
+
+  it("rejects instead of hanging when the port is taken", async () => {
+    const server = await graph.listen();
+    try {
+      const port = Number(new URL(server.url).port);
+      await expect(new FakeGraph(tenant).listen(port)).rejects.toThrow(/EADDRINUSE/);
+    } finally {
+      await server.close();
+    }
+  });
 });
 
 describe("TenantStore", () => {
@@ -480,24 +518,68 @@ describe("TenantStore", () => {
     const added = graph.store.addFile(DRIVE, undefined, "inherit.txt", 5);
     expect(added.acl.every((a) => a.inherited)).toBe(true);
     expect(added.acl.map((a) => a.principal)).toEqual(expect.arrayContaining([`group:g-hr`]));
-    const changed = graph.store.setAcl(added.id, [
-      { principal: "user:u-0001", role: "owner", inherited: false },
-    ]);
+    const changed = graph.store.setAcl(added.id, [{ principal: "user:u-0001", role: "owner" }]);
     expect(changed.acl).toEqual([
       { externalId: added.id, principal: "user:u-0001", role: "owner", inherited: false },
     ]);
     expect(tenant.items.find((i) => i.id === added.id)).toBeUndefined(); // source tenant untouched
   });
+
+  it("setAcl on a folder re-derives what inheriting descendants get, and reports them changed", () => {
+    const folder = graph.store
+      .inDrive(DRIVE)
+      .find(
+        (f) =>
+          f.kind === "folder" &&
+          graph.store.children(DRIVE, f.id).some((c) => c.acl.some((a) => a.inherited)),
+      );
+    if (!folder) throw new Error("no folder with inheriting children");
+    const child = graph.store
+      .children(DRIVE, folder.id)
+      .find((c) => c.acl.some((a) => a.inherited));
+    if (!child) throw new Error("fixture");
+    const shares = child.acl.filter((a) => !a.inherited);
+    const before = graph.store.sequence;
+    graph.store.setAcl(folder.id, [{ principal: "user:u-0001", role: "owner" }]);
+    expect(child.acl).toEqual([
+      { externalId: child.id, principal: "user:u-0001", role: "owner", inherited: true },
+      ...shares,
+    ]);
+    const changed = graph.store.changesSince(DRIVE, before).items.map((i) => i.id);
+    expect(changed).toEqual(expect.arrayContaining([folder.id, child.id]));
+  });
+
+  it("changes cTag only when content changes, and eTag on every change", async () => {
+    const file = graph.store.inDrive(DRIVE).find((i) => i.kind === "file");
+    if (!file) throw new Error("fixture");
+    const get = async () =>
+      (await (
+        await graph.fetch(`/v1.0/drives/${DRIVE}/items/${file.id}`, { headers: AUTH })
+      ).json()) as { eTag: string; cTag: string };
+    const v1 = await get();
+    graph.store.update(file.id, { name: "Only renamed.txt" });
+    const v2 = await get();
+    expect(v2.cTag).toBe(v1.cTag);
+    expect(v2.eTag).not.toBe(v1.eTag);
+    graph.store.update(file.id, { size: file.size + 1 });
+    expect((await get()).cTag).not.toBe(v1.cTag);
+  });
 });
 
 describe("parseRange", () => {
-  it("handles open, suffix and clamped ranges and rejects bad ones", () => {
+  it("handles open, suffix and clamped ranges", () => {
     expect(parseRange("bytes=0-", 10)).toEqual({ start: 0, end: 9 });
     expect(parseRange("bytes=-3", 10)).toEqual({ start: 7, end: 9 });
+    expect(parseRange("bytes=-30", 10)).toEqual({ start: 0, end: 9 });
     expect(parseRange("bytes=5-100", 10)).toEqual({ start: 5, end: 9 });
-    expect(parseRange(undefined, 10)).toBeUndefined();
-    for (const bad of ["bytes=-", "bytes=5-2", "bytes=-0", "items=0-1", "bytes=0-1,3-4"]) {
-      expect(parseRange(bad, 10)).toBe("invalid");
+  });
+
+  it("ignores ranges it cannot serve (RFC 9110) and reports unsatisfiable ones", () => {
+    for (const ignored of [undefined, "bytes=-", "bytes=5-2", "items=0-1", "bytes=0-1,3-4"]) {
+      expect(parseRange(ignored, 10)).toBeUndefined();
     }
+    expect(parseRange("bytes=10-", 10)).toBe("unsatisfiable");
+    expect(parseRange("bytes=-0", 10)).toBe("unsatisfiable");
+    expect(parseRange("bytes=-5", 0)).toBe("unsatisfiable");
   });
 });

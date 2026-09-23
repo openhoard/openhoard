@@ -57,7 +57,7 @@ export function driveItem(
     name: item.name,
     size: item.kind === "file" ? item.size : 0,
     eTag: item.etag,
-    cTag: `"c:{${item.id}},${item.version}"`,
+    cTag: `"c:{${item.id}},${item.contentVersion}"`,
     createdDateTime: item.createdAt,
     lastModifiedDateTime: item.modifiedAt,
     webUrl: `${site.webUrl}/Shared%20Documents${encodePath(item.path)}`,

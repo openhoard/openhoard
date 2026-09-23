@@ -5,7 +5,10 @@ import type { FakeItem, FakeTenant } from "../tenant/types.js";
 /** An item as the store keeps it: the tenant's item plus the change sequence that last touched it. */
 export interface StoredItem extends FakeItem {
   changeSeq: number;
+  /** Bumped on every change (eTag). */
   version: number;
+  /** Bumped only when the bytes change (cTag), so a rename never forces a re-download. */
+  contentVersion: number;
 }
 
 export interface Tombstone {
@@ -43,6 +46,7 @@ export class TenantStore {
         acl: item.acl.map((a) => ({ ...a })),
         changeSeq: 0,
         version: 1,
+        contentVersion: 1,
       });
     }
     this.nextId = tenant.items.length + 1;
@@ -99,18 +103,23 @@ export class TenantStore {
     if (patch.size !== undefined) {
       if (item.kind !== "file") throw new TypeError("folders have no content");
       item.size = patch.size;
-      item.contentKey = `${item.id}@${item.version + 1}`;
+      item.contentVersion++;
+      item.contentKey = `${item.id}@c${item.contentVersion}`;
     }
     if (patch.modifiedBy !== undefined) item.modifiedBy = patch.modifiedBy;
     this.touch(item, "updated");
     return item;
   }
 
-  /** Replaces an item's own permissions (breaking inheritance). */
-  setAcl(id: string, acl: Omit<SourceAcl, "externalId">[]): StoredItem {
+  /**
+   * Replaces an item's permissions with its own entries (breaking inheritance). Descendants
+   * that inherit are updated too, and each shows up as changed in the next delta.
+   */
+  setAcl(id: string, acl: Omit<SourceAcl, "externalId" | "inherited">[]): StoredItem {
     const item = this.require(id);
-    item.acl = acl.map((a) => ({ ...a, externalId: id }));
+    item.acl = acl.map((a) => ({ ...a, externalId: id, inherited: false }));
     this.touch(item, "updated");
+    this.propagateAcl(item);
     return item;
   }
 
@@ -152,6 +161,7 @@ export class TenantStore {
       acl: inheritAcl(parent?.acl ?? siteAcl(site), id),
       changeSeq: 0,
       version: 0,
+      contentVersion: 1,
     };
     this.items.set(id, item);
     this.touch(item, "created");
@@ -181,6 +191,17 @@ export class TenantStore {
     item.etag = `"{${item.id}},${item.version}"`;
     item.modifiedAt = new Date(Date.parse(this.tenant.now) + this.seq * 1000).toISOString();
     this.emit({ driveId: item.driveId, itemId: item.id, kind });
+  }
+
+  /** Re-derives inherited entries below `parent`; explicit entries (shares) are kept. */
+  private propagateAcl(parent: StoredItem): void {
+    for (const child of this.children(parent.driveId, parent.id)) {
+      if (!child.acl.some((a) => a.inherited)) continue; // broke inheritance: unaffected
+      const own = child.acl.filter((a) => !a.inherited);
+      child.acl = [...inheritAcl(parent.acl, child.id), ...own];
+      this.touch(child, "updated");
+      this.propagateAcl(child);
+    }
   }
 
   private repath(item: StoredItem): void {

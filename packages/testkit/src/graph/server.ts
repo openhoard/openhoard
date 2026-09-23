@@ -73,7 +73,8 @@ export class FakeGraph {
   private readonly pending = new Set<Promise<unknown>>();
   private windowStart = 0;
   private windowCount = 0;
-  private minDeltaSeq = 0;
+  /** Bumped by requireResync(); cursors from an older epoch get 410 resyncRequired. */
+  private deltaEpoch = 0;
   private subscriptionCounter = 0;
 
   constructor(
@@ -108,9 +109,9 @@ export class FakeGraph {
     }
   }
 
-  /** Invalidates every outstanding delta token: clients get 410 resyncRequired. */
+  /** Invalidates every delta token issued so far: clients get 410 resyncRequired. */
   requireResync(): void {
-    this.minDeltaSeq = this.store.sequence;
+    this.deltaEpoch++;
   }
 
   /** Resolves once every queued subscription notification has been delivered (or failed). */
@@ -120,7 +121,7 @@ export class FakeGraph {
 
   /** Serves the fake on 127.0.0.1. `port` 0 picks a free port. */
   listen(port = 0): Promise<{ url: string; close: () => Promise<void> }> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const server = serve(
         { fetch: this.app.fetch, hostname: "127.0.0.1", port },
         (info: AddressInfo) => {
@@ -131,6 +132,7 @@ export class FakeGraph {
           });
         },
       );
+      server.once("error", reject); // e.g. EADDRINUSE: fail instead of hanging
     });
   }
 
@@ -147,10 +149,9 @@ export class FakeGraph {
       });
     });
 
-    // Pre-authenticated download URLs need no bearer token, like the real ones.
-    app.get("/_download/:drive/:item", (c) => this.download(c));
-
-    app.use("/v1.0/*", async (c, next) => {
+    // Faults and rate limits apply to every request, downloads included, so retry and resume
+    // logic can be tested end to end.
+    app.use(async (c, next) => {
       const fault = this.faults.shift();
       if (fault) {
         if (fault.retryAfter !== undefined) c.header("Retry-After", String(fault.retryAfter));
@@ -166,6 +167,13 @@ export class FakeGraph {
         c.header("Retry-After", String(limited));
         return graphError(c, 429, "TooManyRequests", "Too many requests");
       }
+      return next();
+    });
+
+    // Pre-authenticated download URLs need no bearer token, like the real ones.
+    app.get("/_download/:drive/:item", (c) => this.download(c));
+
+    app.use("/v1.0/*", async (c, next) => {
       const auth = c.req.header("authorization") ?? "";
       if (!safeEqual(auth, `Bearer ${this.token}`)) {
         return graphError(
@@ -300,19 +308,21 @@ export class FakeGraph {
     const site = this.sites.get(drive);
     if (!site) return notFound(c);
     const origin = new URL(c.req.url).origin;
-    const link = (cursor: DeltaCursor) =>
-      `${origin}/v1.0/drives/${drive}/root/delta?token=${encodeCursor(cursor)}`;
+    const epoch = this.deltaEpoch;
+    const link = (cursor: Omit<DeltaCursor, "epoch">) =>
+      `${origin}/v1.0/drives/${drive}/root/delta?token=${encodeCursor({ ...cursor, epoch })}`;
     const raw = c.req.query("token");
-    if (raw === "latest")
+    if (raw === "latest") {
       return c.json({ value: [], "@odata.deltaLink": link({ since: this.store.sequence }) });
+    }
 
     let cursor: DeltaCursor;
     try {
-      cursor = raw === undefined ? { since: -1 } : decodeCursor(raw);
+      cursor = raw === undefined ? { since: -1, epoch } : decodeCursor(raw);
     } catch {
       return graphError(c, 400, "invalidRequest", "Invalid delta token");
     }
-    if (cursor.since >= 0 && cursor.since < this.minDeltaSeq) {
+    if (cursor.epoch !== epoch) {
       return graphError(
         c,
         410,
@@ -321,7 +331,8 @@ export class FakeGraph {
       );
     }
     const snapshot = cursor.snapshot ?? this.store.sequence;
-    const top = this.top(c);
+    // The page size chosen on the first request sticks for the whole round, as in Graph.
+    const top = cursor.top ?? this.top(c);
     const { items, deleted } = this.store.changesSince(drive, cursor.since);
     const visible = items
       .filter((i) => i.changeSeq <= snapshot)
@@ -330,15 +341,17 @@ export class FakeGraph {
     const pageItems = visible.slice(0, top);
     const value: unknown[] = pageItems.map((i) => this.toDriveItem(i));
     if (cursor.after === undefined) {
-      if (cursor.since < 0)
+      if (cursor.since < 0) {
         value.unshift(rootItem(site, this.store.children(drive, undefined).length));
-      else value.push(...deleted.filter((t) => t.changeSeq <= snapshot).map(deletedItem));
+      } else {
+        value.push(...deleted.filter((t) => t.changeSeq <= snapshot).map(deletedItem));
+      }
     }
     const last = pageItems.at(-1);
     if (visible.length > top && last) {
       return c.json({
         value,
-        "@odata.nextLink": link({ since: cursor.since, snapshot, after: last.id }),
+        "@odata.nextLink": link({ since: cursor.since, snapshot, after: last.id, top }),
       });
     }
     return c.json({ value, "@odata.deltaLink": link({ since: snapshot }) });
@@ -355,7 +368,7 @@ export class FakeGraph {
     }
     const headers = { "content-type": item.mime, "accept-ranges": "bytes", etag: item.etag };
     const range = parseRange(c.req.header("range"), item.size);
-    if (range === "invalid") {
+    if (range === "unsatisfiable") {
       return new Response(null, {
         status: 416,
         headers: { "content-range": `bytes */${item.size}` },
@@ -448,7 +461,10 @@ export class FakeGraph {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
-      }).catch(() => undefined);
+      })
+        // Drain the body so the connection is released rather than held until GC.
+        .then((r) => r.body?.cancel())
+        .catch(() => undefined);
       this.pending.add(delivery);
       void delivery.finally(() => this.pending.delete(delivery));
     }
@@ -511,10 +527,14 @@ export class FakeGraph {
 interface DeltaCursor {
   /** Changes after this sequence number; -1 means "everything". */
   since: number;
+  /** requireResync() epoch the cursor was issued in. */
+  epoch: number;
   /** Sequence number frozen at the first page of a round. */
   snapshot?: number;
   /** Last item id already returned in this round. */
   after?: string;
+  /** Page size for the round. */
+  top?: number;
 }
 
 function encodeCursor(cursor: DeltaCursor): string {
@@ -528,29 +548,33 @@ function decodeCursor(raw: string): DeltaCursor {
     throw new Error("bad cursor");
   if (c.snapshot !== undefined && !Number.isInteger(c.snapshot)) throw new Error("bad cursor");
   if (c.after !== undefined && typeof c.after !== "string") throw new Error("bad cursor");
+  if (!Number.isInteger(c.epoch)) throw new Error("bad cursor");
+  if (c.top !== undefined && !(Number.isInteger(c.top) && c.top > 0)) throw new Error("bad cursor");
   return c;
 }
 
-/** Parses a single `bytes=a-b`, `bytes=a-` or `bytes=-n` range. Multi-range is not supported. */
+/**
+ * Interprets a Range header per RFC 9110 section 14: a satisfiable single range gives 206,
+ * an unsatisfiable one ("bytes=500-" on a 100-byte file) gives 416, and anything the server
+ * does not support or cannot parse (multiple ranges, reversed ranges, other units) is ignored,
+ * so the whole file is sent with 200.
+ */
 export function parseRange(
   header: string | undefined,
   size: number,
-): { start: number; end: number } | "invalid" | undefined {
+): { start: number; end: number } | "unsatisfiable" | undefined {
   if (!header) return undefined;
   const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
-  if (!m || (m[1] === "" && m[2] === "")) return "invalid";
-  let start: number;
-  let end: number;
+  if (!m || (m[1] === "" && m[2] === "")) return undefined;
   if (m[1] === "") {
     const suffix = Number(m[2]);
-    if (suffix === 0) return "invalid";
-    start = Math.max(0, size - suffix);
-    end = size - 1;
-  } else {
-    start = Number(m[1]);
-    end = m[2] === "" ? size - 1 : Math.min(Number(m[2]), size - 1);
+    if (suffix === 0 || size === 0) return "unsatisfiable";
+    return { start: Math.max(0, size - suffix), end: size - 1 };
   }
-  return start > end || start >= size ? "invalid" : { start, end };
+  const start = Number(m[1]);
+  if (m[2] !== "" && Number(m[2]) < start) return undefined; // reversed: invalid, so ignored
+  if (start >= size) return "unsatisfiable";
+  return { start, end: m[2] === "" ? size - 1 : Math.min(Number(m[2]), size - 1) };
 }
 
 function graphError(c: Context, status: number, code: string, message: string): Response {
