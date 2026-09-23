@@ -1,0 +1,6 @@
+# CI/dev toolchain for the Python CLI. Compile with:
+#   uv pip compile requirements-ci.in --python-version 3.12 --generate-hashes --universal -o requirements-ci.txt
+# CI installs the result with --require-hashes (OpenSSF Scorecard: Pinned-Dependencies).
+hatchling>=1.24
+jsonschema>=4.18
+pytest
