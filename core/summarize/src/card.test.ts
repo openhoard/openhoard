@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildCard, clampWords, MAX_SUMMARY_WORDS, safeLink, stripUnsafeText } from "./index.js";
+import {
+  buildCard,
+  clampWords,
+  MAX_SUMMARY_WORDS,
+  safeLink,
+  stripUnsafeText,
+  truncateCodePoints,
+} from "./index.js";
 
 describe("clampWords", () => {
   it("keeps short text and collapses whitespace", () => {
@@ -61,5 +68,28 @@ describe("buildCard", () => {
 
   it("drops unsafe links", () => {
     expect(buildCard({ ...base, link: "javascript:alert(document.cookie)" }).link).toBe("");
+  });
+
+  it("never splits an emoji when capping the title", () => {
+    const title = `${"a".repeat(199)}😀tail`;
+    expect(buildCard({ ...base, title }).title).toBe(`${"a".repeat(199)}😀`);
+  });
+});
+
+describe("truncateCodePoints", () => {
+  it("counts code points, not UTF-16 units", () => {
+    expect(truncateCodePoints("😀😀😀", 2)).toBe("😀😀");
+    expect(truncateCodePoints("abc", 5)).toBe("abc");
+    expect(truncateCodePoints("abc", 0)).toBe("");
+  });
+});
+
+describe("stripUnsafeText and malformed or invisible Unicode", () => {
+  it("removes lone surrogates but keeps valid pairs", () => {
+    expect(stripUnsafeText("a\ud83db 😀")).toBe("a b 😀");
+  });
+
+  it("removes invisible tag characters used for ASCII smuggling", () => {
+    expect(stripUnsafeText("ok\u{e0049}\u{e0047}\u{e004e}")).toBe("ok");
   });
 });

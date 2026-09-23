@@ -22,12 +22,14 @@ export function clampWords(text: string, max = MAX_SUMMARY_WORDS): string {
  * Removes characters that let untrusted text hide or disguise itself (security review #4):
  * - `\p{Cc}` control characters (NUL, BEL, ESC…);
  * - `\p{Cf}` format characters: zero-width spaces/joiners used to hide injected instructions,
- *   and bidi overrides such as U+202E used to disguise names (`invoice‮fdp.exe`).
- * Both are replaced with a space, then whitespace is collapsed.
+ *   bidi overrides such as U+202E used to disguise names (`invoice‮fdp.exe`), and the Unicode
+ *   "tag" block (U+E0000–E007F) used to smuggle invisible ASCII;
+ * - `\p{Cs}` lone surrogates: malformed UTF-16 that some databases and JSON consumers reject.
+ * All are replaced with a space, then whitespace is collapsed. The result is well-formed UTF-16.
  */
 export function stripUnsafeText(s: string): string {
   return s
-    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
+    .replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -45,6 +47,21 @@ export function safeLink(link: string): string {
   }
 }
 
+/**
+ * Keeps at most `max` code points. Unlike `String#slice`, never cuts a surrogate pair in half,
+ * which would turn an emoji at the boundary into a lone surrogate.
+ */
+export function truncateCodePoints(s: string, max: number): string {
+  if (s.length <= max) return s;
+  let out = "";
+  let n = 0;
+  for (const cp of s) {
+    if (n++ === max) break;
+    out += cp;
+  }
+  return out;
+}
+
 const TAG = /^[a-z][a-z0-9-]*:[^\s:]\S*$/;
 
 /**
@@ -53,7 +70,7 @@ const TAG = /^[a-z][a-z0-9-]*:[^\s:]\S*$/;
  * `facet:value`, and links must be http(s).
  */
 export function buildCard(input: FileCard): FileCard {
-  const clean = (s: string, max: number) => stripUnsafeText(s).slice(0, max);
+  const clean = (s: string, max: number) => truncateCodePoints(stripUnsafeText(s), max).trim();
   return {
     id: input.id,
     title: clean(input.title, 200),
