@@ -64,7 +64,7 @@ Manifest schema: [`schemas/plugin-manifest.v1.schema.json`](../schemas/plugin-ma
 
 ## MCP tools (planned)
 
-`find`, `recent`, `describe`, `open`, `ingest`, `tag`, `share`, `revoke`,
+`find`, `recent`, `describe`, `open` (link, content, or **native**: the local agent opens the file in its desktop app, e.g. "edit the Excel file from yesterday"), `ingest`, `tag`, `share`, `revoke`,
 `access_review`, `audit`, `subscribe`, `repo_context`. Reads return compact file cards;
 writes require a user confirmation issued by an OpenHoard client.
 

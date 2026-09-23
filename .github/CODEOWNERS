@@ -1,0 +1,9 @@
+# Default owner
+*                   @RevBooyah
+
+# Trusted core: identity, policy, catalog filtering, audit and sandbox need core review.
+# Add a second maintainer here as soon as one joins (target: end of M1).
+/core/              @RevBooyah
+/packages/schemas/  @RevBooyah
+/.github/           @RevBooyah
+/SECURITY.md        @RevBooyah

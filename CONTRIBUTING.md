@@ -38,18 +38,28 @@ changes need an RFC: open an issue using the **RFC** template, discuss, then sub
 
 ## Development
 
-```bash
-# JS CLI
-cd packages/cli-js && npm install && npm test
+Requirements: **Node 24 LTS** and **pnpm** (`corepack enable`). No Docker, ever: the database
+(PGlite), storage and identity provider all run in-process for development.
 
-# Python CLI
-cd packages/cli-py && python -m pip install -e . pytest && pytest
+```bash
+pnpm install        # install the workspace
+pnpm dev            # run the server on http://127.0.0.1:7420 (data in ./.openhoard)
+pnpm check          # lint + format check + typecheck + tests with coverage
+pnpm changeset      # describe changes to published packages
 ```
+
+Useful filters: `pnpm --filter @openhoard/core-policy test`, `pnpm --filter openhoard build`.
+
+Decisions live in [`docs/adr/`](docs/adr/), contract changes go through [`docs/rfc/`](docs/rfc/),
+and spike reports go in [`docs/spikes/`](docs/spikes/).
+
+Python CLI (PyPI name only): `cd packages/cli-py && python -m pip install -e . pytest && pytest`.
 
 ## Pull requests
 
 - One logical change per PR, with tests.
 - Describe the user-visible effect and any security considerations.
+- Use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`…).
 - Sign off your commits (`git commit -s`) under the
   [Developer Certificate of Origin](https://developercertificate.org/).
 - Be kind. See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).

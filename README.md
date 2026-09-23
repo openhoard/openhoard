@@ -85,21 +85,27 @@ The core makes every trust decision. Plugins extend what OpenHoard can **reach**
 
 ## Repository layout
 
-| Path                                 | What lives there                                                                                    |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| `core/`                              | The trusted core: `identity`, `policy`, `catalog` (index + search), `summarize`, `audit`, `sandbox` |
-| `connectors/`                        | Storage and source connectors (S3, Azure Blob, SharePoint, Git hosts, …)                            |
-| `enrichers/`                         | Extractors and taggers for specific file types                                                      |
-| `packs/`                             | Policy and tag-vocabulary packs (legal, healthcare, manufacturing, …)                               |
-| `skills/`                            | Agent skills built on the core MCP tools                                                            |
-| `clients/`                           | Web app, desktop client, Office/Teams integrations                                                  |
-| `schemas/`                           | Versioned JSON Schemas for plugin manifests and other contracts                                     |
-| `packages/cli-js`, `packages/cli-py` | The `openhoard` CLI (npm and PyPI)                                                                  |
-| `assets/`                            | Logo and brand assets                                                                               |
+| Path                      | What lives there                                                                                    |
+| ------------------------- | --------------------------------------------------------------------------------------------------- |
+| `core/`                   | The trusted core: `identity`, `policy`, `catalog` (index + search), `summarize`, `audit`, `sandbox` |
+| `connectors/`             | Storage and source connectors (S3, Azure Blob, SharePoint, Git hosts, …)                            |
+| `enrichers/`              | Extractors and taggers for specific file types                                                      |
+| `packs/`                  | Policy and tag-vocabulary packs (legal, healthcare, manufacturing, …)                               |
+| `skills/`                 | Agent skills built on the core MCP tools                                                            |
+| `clients/`                | Web app, desktop client, Office/Teams integrations                                                  |
+| `packages/schemas`        | Versioned JSON Schemas for plugin manifests and other contracts                                     |
+| `apps/server`, `apps/cli` | The gateway (HTTP, soon MCP) and the `openhoard` CLI (npm; PyPI twin in `packages/cli-py`)          |
+| `assets/`                 | Logo and brand assets                                                                               |
 
-## Try the CLI
+## Try it
 
-Today the CLI validates plugin manifests against the published schema, the first contract every plugin must meet.
+Run the server locally. Node 24 and pnpm are all you need; no Docker, no database to install:
+
+```bash
+pnpm install && pnpm dev   # http://127.0.0.1:7420/healthz
+```
+
+The CLI validates plugin manifests against the published schema, the first contract every plugin must meet.
 
 ```bash
 npx openhoard manifest validate connectors/example/openhoard.plugin.json
