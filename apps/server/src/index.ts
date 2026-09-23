@@ -1,2 +1,3 @@
 export { createApp } from "./app.js";
-export { loadConfig, ConfigSchema, type Config } from "./config.js";
+export { loadConfig, ensureDataDir, ConfigSchema, type Config } from "./config.js";
+export { createLogger } from "./logger.js";

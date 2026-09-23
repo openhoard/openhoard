@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Hono } from "hono";
+import { secureHeaders } from "hono/secure-headers";
+import type { Logger } from "pino";
 import type { Config } from "./config.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
@@ -7,21 +9,43 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 };
 
 /** Builds the HTTP app. Kept free of listeners so tests can call it directly. */
-export function createApp(config: Config): Hono {
+export function createApp(_config: Config, log?: Logger): Hono {
   const app = new Hono();
 
+  // Baseline security headers on every response (nosniff, frame-deny, strict referrer, etc.).
+  app.use(secureHeaders());
+
+  if (log) {
+    app.use(async (c, next) => {
+      const started = performance.now();
+      await next();
+      log.info(
+        {
+          method: c.req.method,
+          path: c.req.path,
+          status: c.res.status,
+          ms: Math.round(performance.now() - started),
+        },
+        "request",
+      );
+    });
+  }
+
   app.get("/healthz", (c) => c.json({ status: "ok" }));
-  app.get("/version", (c) =>
-    c.json({ name: "openhoard", version: pkg.version, node: process.version }),
-  );
+  // Deliberately minimal (security review #11): no Node/OS/database details for fingerprinting.
+  app.get("/version", (c) => c.json({ name: "openhoard", version: pkg.version }));
   app.get("/", (c) =>
     c.json({
       name: "OpenHoard",
       tagline: "The AI filesystem that remembers everything and guards it all.",
-      database: config.database.url === "pglite" ? "embedded (PGlite)" : "postgres",
     }),
   );
 
   app.notFound((c) => c.json({ error: "not found" }, 404));
+  app.onError((err, c) => {
+    // Never echo internal error details to clients; log them instead.
+    log?.error({ err }, "unhandled error");
+    return c.json({ error: "internal error" }, 500);
+  });
   return app;
 }
