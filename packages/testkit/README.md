@@ -19,3 +19,16 @@ contentStream(tenant, tenant.items[42]); // deterministic bytes, streamed lazily
 - **Known problems.** `tenant.problems` lists every instance, by definition, of: anyone links, external guests, orphaned owners, duplicates, stale files, broken inheritance, sensitive files in open sites, injection file names, huge files and over-long paths. A detector can be scored for precision and recall against it.
 - **Canaries.** Some restricted files carry a unique `canary-…` token in their name and content. The leak harness searches for these tokens as every user.
 - All names are invented and all domains use reserved TLDs (`.test`, `.example`).
+
+## Permission-leak harness (T-018)
+
+```ts
+import { assertNoLeaks, runLeakHarness } from "@openhoard/testkit";
+
+const report = await runLeakHarness({ tenant, target: mySearchEngine });
+assertNoLeaks(report); // throws, listing each leak's surface, user, probe and item
+```
+
+The harness probes as a deterministic sample of active users (always including a guest). It searches every canary token, runs broad queries and asks for autocomplete. Because each canary is unique to one restricted file, any sign of a forbidden token is a leak by construction: a hit, a non-zero total, a facet count, a suggestion, or the token in any card text. No knowledge of the engine's ranking is needed. `checkPair(tenant, target, ownerId, otherId)` pins a regression for one pair of accounts.
+
+`InMemorySearch` is a small, correct reference engine that filters before matching, counting, faceting and suggesting. The tests prove the harness catches an engine that leaks through each surface.
