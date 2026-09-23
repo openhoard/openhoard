@@ -18,10 +18,13 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "clean": "rimraf dist coverage"
+    "clean": "rimraf dist coverage",
+    "injection:report": "tsx scripts/injection-report.ts",
+    "injection:write": "tsx scripts/write-corpus.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
+    "@openhoard/core-summarize": "workspace:^",
     "@openhoard/sdk": "workspace:^",
     "hono": "^4.8.0",
     "jose": "^6.2.12",
