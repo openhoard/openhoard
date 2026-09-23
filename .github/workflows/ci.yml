@@ -43,8 +43,9 @@ jobs:
           git diff --exit-code -- packages/schemas/src/generated
       - name: CLI smoke test
         run: node apps/cli/dist/bin.js manifest validate connectors/example/openhoard.plugin.json
-      # T-017: per-file outcomes for the prompt-injection corpus, in the job summary. Fails only if
-      # a file makes the pipeline act or loosen access (or crash); leaks into cards are reported.
+      # T-017: per-file outcomes for the prompt-injection corpus, in the job summary. The v0
+      # baseline pipeline cannot act or tag, so today this is a smoke test of the corpus and the
+      # extractor (it fails if either crashes). It becomes a real gate when enrichers plug in.
       - name: Prompt-injection corpus report
         if: matrix.os == 'ubuntu-latest'
         run: pnpm --filter @openhoard/testkit run injection:report

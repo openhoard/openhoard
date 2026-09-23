@@ -217,6 +217,7 @@ class ItemBuilder {
   private readonly groups: Map<string, FakeGroup>;
   private injectionNamesLeft: string[];
   private readonly guests: FakeUser[];
+  private readonly canaries = new Set<string>();
 
   constructor(
     private readonly rng: Random,
@@ -348,7 +349,7 @@ class ItemBuilder {
     if (!planted) this.plantContentVariants(rng, item);
     const original = item.contentKey === item.id && item.size <= HUGE_FILE_BYTES;
     if (!planted && original && this.isRestricted(item) && rng.chance(0.03)) {
-      item.canary = `canary-${hex(rng, 8)}`;
+      item.canary = this.uniqueCanary(rng);
       const at = item.name.lastIndexOf(".");
       this.rename(item, `${item.name.slice(0, at)} ${item.canary}${item.name.slice(at)}`);
     }
@@ -453,6 +454,15 @@ class ItemBuilder {
         inherited: false,
       })),
     ];
+  }
+
+  /** Canary tokens must be unique: each one has to point at exactly one file. */
+  private uniqueCanary(rng: Random): string {
+    let token: string;
+    do token = `canary-${hex(rng, 8)}`;
+    while (this.canaries.has(token));
+    this.canaries.add(token);
+    return token;
   }
 
   private isRestricted(item: FakeItem): boolean {

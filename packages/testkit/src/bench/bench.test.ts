@@ -118,7 +118,10 @@ describe("formatBench", () => {
     const md = formatBench(current, baseline, compareResults(current, baseline));
     expect(md).toContain("| lat | 12.50 ms | lower | 10.00 ms | +25% | **regressed** |");
     expect(md).toContain("1 regression(s)");
-    expect(formatBench(current)).toContain("No baseline yet");
-    expect(formatBench(current, current)).toContain("No regressions");
+    expect(formatBench(current)).toContain("No baseline to compare against");
+    expect(formatBench(current, current)).toContain("No regressions over 20%");
+    expect(formatBench(current, current, [], { threshold: 0.3, note: "Different CPU." })).toMatch(
+      /No regressions over 30%[^]*Different CPU\./,
+    );
   });
 });

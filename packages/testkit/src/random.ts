@@ -76,7 +76,10 @@ export class Random {
     return copy.slice(0, n);
   }
 
-  /** A child generator whose sequence depends only on this seed and `label`. */
+  /**
+   * A child generator seeded from this generator's next value and `label`. It is deterministic
+   * for a given seed and call order, and drawing from the child never disturbs the parent.
+   */
   fork(label: string): Random {
     return new Random(`${this.int(0, 0x7fffffff)}:${label}`);
   }

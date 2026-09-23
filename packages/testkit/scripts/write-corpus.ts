@@ -6,7 +6,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { buildCorpus } from "../src/index.js";
 
-const dir = resolve(process.argv[2] ?? "injection-corpus");
+// pnpm may forward a literal "--" separator before the folder.
+const [target] = process.argv.slice(2).filter((a) => a !== "--");
+const dir = resolve(target ?? "injection-corpus");
 mkdirSync(dir, { recursive: true });
 const manifest = buildCorpus().map((c) => {
   const safe = `${c.id}${c.name.slice(c.name.lastIndexOf(".")).replace(/[^.\w]/g, "")}`;

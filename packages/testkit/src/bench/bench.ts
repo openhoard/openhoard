@@ -159,11 +159,20 @@ export function compareResults(
   return out;
 }
 
+export interface FormatOptions {
+  /** The threshold the regressions were computed with. Default 0.2. */
+  threshold?: number;
+  /** An extra line, e.g. why the comparison was skipped. */
+  note?: string;
+}
+
 export function formatBench(
   results: BenchResults,
   baseline?: BenchResults,
   regressions: readonly Regression[] = [],
+  options: FormatOptions = {},
 ): string {
+  const pct = `${Math.round((options.threshold ?? 0.2) * 100)}%`;
   const base = new Map((baseline?.metrics ?? []).map((m) => [m.name, m]));
   const flagged = new Set(regressions.map((r) => r.name));
   const rows = results.metrics.map((m) => {
@@ -172,17 +181,21 @@ export function formatBench(
       b && b.value > 0
         ? `${m.value >= b.value ? "+" : ""}${round(((m.value - b.value) / b.value) * 100, 1)}%`
         : "n/a";
-    return `| ${m.name} | ${fmt(m.value)} ${m.unit} | ${m.better} | ${b ? `${fmt(b.value)} ${b.unit}` : "n/a"} | ${delta} | ${flagged.has(m.name) ? "**regressed**" : "ok"} |`;
+    const status = flagged.has(m.name) ? "**regressed**" : "ok";
+    return `| ${m.name} | ${fmt(m.value)} ${m.unit} | ${m.better} | ${b ? `${fmt(b.value)} ${b.unit}` : "n/a"} | ${delta} | ${status} |`;
   });
+  const summary = regressions.length
+    ? `**${regressions.length} regression(s) over ${pct}.**`
+    : baseline
+      ? `No regressions over ${pct} against the baseline.`
+      : "No baseline to compare against.";
   return [
     "## Benchmarks",
     "",
     `${results.platform}, Node ${results.node}, ${results.cpu}. Median of ${results.rounds} rounds. Peak RSS ${results.peakRssMiB} MiB.`,
-    regressions.length
-      ? `\n**${regressions.length} regression(s) over 20%.**`
-      : baseline
-        ? "\nNo regressions over 20% against the previous nightly run."
-        : "\nNo baseline yet: this run becomes the baseline.",
+    "",
+    summary,
+    ...(options.note ? ["", options.note] : []),
     "",
     "| Metric | Value | Better | Baseline | Change | Status |",
     "| --- | --- | --- | --- | --- | --- |",
