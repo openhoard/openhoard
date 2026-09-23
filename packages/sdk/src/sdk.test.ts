@@ -78,6 +78,11 @@ describe("readUpTo", () => {
     expect((await readUpTo(streamOf("", "x"), 0)).truncated).toBe(true);
   });
 
+  it("gives up probing a source that only ever sends empty chunks", async () => {
+    const hollow = new ReadableStream<Uint8Array>({ pull: (c) => c.enqueue(new Uint8Array(0)) });
+    expect(await readUpTo(hollow, 0)).toEqual({ bytes: new Uint8Array(0), truncated: false });
+  });
+
   it("cancels the source so the rest is never read", async () => {
     let pulled = 0;
     const endless = new ReadableStream<Uint8Array>({

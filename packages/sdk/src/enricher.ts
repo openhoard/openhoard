@@ -39,6 +39,9 @@ export function defineEnricher(enricher: Enricher): Enricher {
   return enricher;
 }
 
+/** How many empty chunks readUpTo skips when probing for data past the budget. */
+const MAX_EMPTY_PROBES = 16;
+
 /**
  * Reads at most `maxBytes` from a stream and cancels the rest, so an enricher can never be made
  * to buffer an entire large file. `truncated` tells the caller whether more data existed.
@@ -60,8 +63,9 @@ export async function readUpTo(
       total += take;
       if (take < value.byteLength) truncated = true;
     }
-    // At the budget exactly: probe for more data. Empty chunks are not data, so skip them.
-    while (!truncated && total >= maxBytes) {
+    // At the budget exactly: probe for more data. Empty chunks are not data, so skip them, but
+    // only a few: a source that emits nothing but empty chunks must not hang the enricher.
+    for (let empty = 0; !truncated && total >= maxBytes && empty < MAX_EMPTY_PROBES; empty++) {
       const { done, value } = await reader.read();
       if (done) break;
       truncated = value.byteLength > 0;
