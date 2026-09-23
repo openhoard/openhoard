@@ -28,11 +28,7 @@ function fromOoxml(bytes: Uint8Array): ExtractedPart[] {
     if (!path.endsWith(".xml") || path.startsWith("[Content_Types]") || path.includes("_rels/"))
       continue;
     const doc = dec.decode(data);
-    // Sheet names live in attributes but are visible text in Excel, so keep them.
-    const sheetNames = [...doc.matchAll(/<sheet [^>]*name="([^"]*)"/g)].map((m) =>
-      decodeEntities(m[1] ?? ""),
-    );
-    const text = [...sheetNames, xmlText(doc)].join(" ").trim();
+    const text = [...sheetNames(doc), xmlText(doc)].join(" ").trim();
     if (text) parts.push({ source: path, text });
   }
   return parts;
@@ -54,18 +50,38 @@ function decodeEntities(s: string): string {
   });
 }
 
+/**
+ * Sheet names live in attributes but are visible text in Excel, so keep them. A linear scan
+ * with indexOf (no backtracking regex), because the input is untrusted.
+ */
+function sheetNames(doc: string): string[] {
+  const names: string[] = [];
+  let at = doc.indexOf("<sheet ");
+  while (at >= 0) {
+    const close = doc.indexOf(">", at);
+    if (close < 0) break;
+    const name = /\bname="([^"]*)"/.exec(doc.slice(at, close))?.[1];
+    if (name !== undefined) names.push(decodeEntities(name));
+    at = doc.indexOf("<sheet ", close);
+  }
+  return names;
+}
+
 function fromPdf(bytes: Uint8Array): ExtractedPart[] {
   const raw = Buffer.from(bytes).toString("latin1");
   const parts: ExtractedPart[] = [];
+  const outside: string[] = [];
+  let last = 0;
   // Content streams (inflated when compressed) hold the page text.
-  // The dictionary must belong to the same object as the stream: it may not cross "endobj".
-  const streams = /obj\s*<<((?:(?!endobj)[^])*?)>>\s*stream\r?\n([^]*?)\r?\nendstream/g;
-  for (let m = streams.exec(raw); m; m = streams.exec(raw)) {
-    const dict = m[1] ?? "";
-    let body = m[2] ?? "";
-    if (/\/FlateDecode/.test(dict)) {
+  for (const s of pdfStreams(raw)) {
+    outside.push(raw.slice(last, s.start));
+    last = s.end;
+    let body = s.body;
+    if (s.dict.includes("/FlateDecode")) {
       try {
-        body = inflateSync(Buffer.from(body, "latin1")).toString("latin1");
+        body = inflateSync(Buffer.from(body, "latin1"), {
+          maxOutputLength: 64 * 1024 * 1024,
+        }).toString("latin1");
       } catch {
         continue;
       }
@@ -73,10 +89,50 @@ function fromPdf(bytes: Uint8Array): ExtractedPart[] {
     const text = pdfStrings(body);
     if (text) parts.push({ source: "pdf:content", text });
   }
+  outside.push(raw.slice(last));
   // Everything outside streams: /Info, annotations (/Contents), outlines.
-  const outside = pdfStrings(raw.replace(streams, " "));
-  if (outside) parts.push({ source: "pdf:objects", text: outside });
+  const text = pdfStrings(outside.join(" "));
+  if (text) parts.push({ source: "pdf:objects", text });
   return parts;
+}
+
+/**
+ * Finds `stream … endstream` bodies and the dictionary before each, in one forward pass. Every
+ * search starts after the previous stream and looks back no further than it, so the scan is
+ * linear even on hostile input (a regex here backtracked for minutes on 50 KB of "obj<<").
+ */
+function pdfStreams(raw: string): { dict: string; body: string; start: number; end: number }[] {
+  const out: { dict: string; body: string; start: number; end: number }[] = [];
+  let from = 0;
+  for (let kw = raw.indexOf("stream", from); kw >= 0; kw = raw.indexOf("stream", from)) {
+    if (raw.startsWith("end", kw - 3)) {
+      from = kw + 6; // a stray "endstream"
+      continue;
+    }
+    let bodyStart = kw + 6;
+    if (raw[bodyStart] === "\r") bodyStart++;
+    if (raw[bodyStart] !== "\n") {
+      from = kw + 6; // "stream" inside some other token
+      continue;
+    }
+    bodyStart++;
+    const endAt = raw.indexOf("endstream", bodyStart);
+    if (endAt < 0) break;
+    let bodyEnd = endAt;
+    if (raw[bodyEnd - 1] === "\n") bodyEnd--;
+    if (raw[bodyEnd - 1] === "\r") bodyEnd--;
+    const window = raw.slice(from, kw);
+    const objAt = window.lastIndexOf("obj");
+    const start = objAt >= 0 ? from + objAt : kw;
+    out.push({
+      dict: raw.slice(start, kw),
+      body: raw.slice(bodyStart, Math.max(bodyStart, bodyEnd)),
+      start,
+      end: endAt + 9,
+    });
+    from = endAt + 9;
+  }
+  return out;
 }
 
 /** All literal strings `( … )` in PDF syntax, unescaped and joined. */

@@ -124,7 +124,90 @@ describe("zip", () => {
 
   it("rejects non-zip input and oversized entries", () => {
     expect(() => unzip(new Uint8Array(100))).toThrow(/not a zip/);
-    expect(() => unzip(zip({ "big.txt": "x".repeat(100) }), 10)).toThrow(/too large/);
+    expect(() => unzip(zip({ "big.txt": "x".repeat(100) }), { maxEntryBytes: 10 })).toThrow(
+      /too large/,
+    );
+    expect(() =>
+      unzip(zip({ a: "x".repeat(60), b: "y".repeat(60) }), { maxTotalBytes: 100 }),
+    ).toThrow(/expands past/);
+    expect(() => unzip(zip({ a: "1", b: "2", c: "3" }), { maxEntries: 2 })).toThrow(
+      /too many entries/,
+    );
+  });
+
+  it("rejects the overlapping-entries zip bomb before decompressing anything", () => {
+    // One real entry, then a second central record pointing at the same local header.
+    const one = zip({ "a.txt": "payload" });
+    const view = new DataView(one.buffer);
+    const eocd = one.length - 22;
+    const cdStart = view.getUint32(eocd + 16, true);
+    const record = one.slice(cdStart, eocd);
+    const bomb = new Uint8Array(one.length + record.length);
+    bomb.set(one.subarray(0, eocd));
+    bomb.set(record, eocd);
+    // Rename the copy so it is not rejected as a duplicate, then fix the end record.
+    bomb[eocd + 46] = "b".charCodeAt(0);
+    bomb.set(one.subarray(eocd), eocd + record.length);
+    const bv = new DataView(bomb.buffer);
+    bv.setUint16(eocd + record.length + 8, 2, true);
+    bv.setUint16(eocd + record.length + 10, 2, true);
+    bv.setUint32(eocd + record.length + 12, record.length * 2, true);
+    expect(() => unzip(bomb)).toThrow(/name mismatch/);
+  });
+
+  it("rejects an entry whose header sits inside another entry's data", () => {
+    // a.txt's stored data is itself a zip, so a valid local header for b.txt sits inside it.
+    const inner = zip({ "b.txt": "hi" });
+    const outer = zip({ "a.txt": inner });
+    const view = new DataView(outer.buffer);
+    const eocd = outer.length - 22;
+    const cdStart = view.getUint32(eocd + 16, true);
+    const innerAt = 30 + "a.txt".length; // where a.txt's data (the inner zip) starts
+    const innerCd = new DataView(inner.buffer).getUint32(inner.length - 22 + 16, true);
+    const record = inner.slice(innerCd, inner.length - 22);
+    new DataView(record.buffer).setUint32(42, innerAt, true); // point b.txt into a.txt's data
+    const crafted = new Uint8Array(outer.length + record.length);
+    crafted.set(outer.subarray(0, eocd));
+    crafted.set(record, eocd);
+    crafted.set(outer.subarray(eocd), eocd + record.length);
+    const cv = new DataView(crafted.buffer);
+    const end = eocd + record.length;
+    cv.setUint16(end + 8, 2, true);
+    cv.setUint16(end + 10, 2, true);
+    cv.setUint32(end + 12, eocd - cdStart + record.length, true);
+    expect(() => unzip(crafted)).toThrow(/overlap/);
+  });
+
+  it("rejects headers that lie about sizes or point outside the data area", () => {
+    const good = zip({ "a.txt": "hello" });
+    const cd = new DataView(good.buffer).getUint32(good.length - 22 + 16, true);
+    const lying = good.slice();
+    new DataView(lying.buffer).setUint32(cd + 24, 3, true); // stored: size != compressed
+    expect(() => unzip(lying)).toThrow(/inconsistent sizes/);
+    const outside = good.slice();
+    new DataView(outside.buffer).setUint32(cd + 42, cd, true); // local header offset into the CD
+    expect(() => unzip(outside)).toThrow(/bad local header/);
+    const encrypted = good.slice();
+    new DataView(encrypted.buffer).setUint16(cd + 8, 1, true);
+    expect(() => unzip(encrypted)).toThrow(/encrypted/);
+  });
+});
+
+describe("extractText on hostile input", () => {
+  // These inputs took seconds to minutes with the old backtracking regexes.
+  it("scans pathological PDFs and XML in linear time", () => {
+    const enc = (x: string) => new TextEncoder().encode(x);
+    const inputs: [string, Uint8Array][] = [
+      ["a.pdf", enc("1 0 obj<<".repeat(20_000))],
+      ["b.pdf", enc("obj<<>>stream\n".repeat(20_000))],
+      ["c.pdf", enc(`${"stream\n".repeat(20_000)}endstream`)],
+      ["d.xlsx", zip({ "xl/workbook.xml": `${"<sheet ".repeat(50_000)}>` })],
+    ];
+    for (const [name, bytes] of inputs) {
+      const start = performance.now();
+      extractText(name, "", bytes);
+      expect(performance.now() - start, name).toBeLessThan(1000);
+    }
   });
 });
 
