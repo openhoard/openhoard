@@ -146,7 +146,7 @@ describe("seeded problems", () => {
       .filter((p) => p.kind === "injection-filename")
       .map((p) => tenant.items.find((i) => i.id === p.itemId)?.name);
     expect(names).toHaveLength(4);
-    expect(names.some((n) => n?.includes("‮"))).toBe(true);
+    expect(names.some((n) => n?.includes("\u202e"))).toBe(true);
   });
 });
 

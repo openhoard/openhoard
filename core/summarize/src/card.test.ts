@@ -23,9 +23,9 @@ describe("clampWords", () => {
 
 describe("stripUnsafeText", () => {
   it("removes zero-width and bidi-override characters", () => {
-    expect(stripUnsafeText("invoice‮fdp.exe")).toBe("invoice fdp.exe");
-    expect(stripUnsafeText("ig​nore‍ previous")).toBe("ig nore previous");
-    expect(stripUnsafeText("﻿hello⁦world⁩")).toBe("hello world");
+    expect(stripUnsafeText("invoice\u202efdp.exe")).toBe("invoice fdp.exe");
+    expect(stripUnsafeText("ig\u200bnore\u200d previous")).toBe("ig nore previous");
+    expect(stripUnsafeText("\ufeffhello\u2066world\u2069")).toBe("hello world");
   });
 });
 
@@ -56,8 +56,8 @@ describe("buildCard", () => {
   it("sanitizes untrusted fields", () => {
     const card = buildCard({
       ...base,
-      title: "Q3\u0000 Forecast​\n\n",
-      tags: ["client:acme", "client:acme", "Bad Tag", "type:deck", "nocolon", "type:‮deck"],
+      title: "Q3\u0000 Forecast\u200b\n\n",
+      tags: ["client:acme", "client:acme", "Bad Tag", "type:deck", "nocolon", "type:\u202edeck"],
       summary: "Revenue   forecast\u0007 for Q3.",
     });
     expect(card.title).toBe("Q3 Forecast");

@@ -22,7 +22,7 @@ export function clampWords(text: string, max = MAX_SUMMARY_WORDS): string {
  * Removes characters that let untrusted text hide or disguise itself (security review #4):
  * - `\p{Cc}` control characters (NUL, BEL, ESC…);
  * - `\p{Cf}` format characters: zero-width spaces/joiners used to hide injected instructions,
- *   bidi overrides such as U+202E used to disguise names (`invoice‮fdp.exe`), and the Unicode
+ *   bidi overrides such as U+202E used to disguise names (`invoice\u202efdp.exe`), and the Unicode
  *   "tag" block (U+E0000–E007F) used to smuggle invisible ASCII;
  * - `\p{Cs}` lone surrogates: malformed UTF-16 that some databases and JSON consumers reject.
  * All are replaced with a space, then whitespace is collapsed. The result is well-formed UTF-16.

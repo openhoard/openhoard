@@ -11,7 +11,7 @@ const UNSAFE = /[\p{Cc}\p{Cf}\p{Cs}]/u;
 /** Any string, biased towards the characters attackers use: controls, bidi, zero-width, surrogates. */
 const hostileString = fc.string({
   unit: fc.oneof(
-    fc.constantFrom("‮", "​", "‍", "⁦", "﻿", "\u0000", "\u001b", "\n"),
+    fc.constantFrom("\u202e", "\u200b", "\u200d", "\u2066", "\ufeff", "\u0000", "\u001b", "\n"),
     fc.constantFrom("\ud83d", "\ude00", "😀", "\u{e0041}"),
     fc.string({ unit: "grapheme", maxLength: 1 }),
     fc.string({ unit: "binary", maxLength: 1 }),
