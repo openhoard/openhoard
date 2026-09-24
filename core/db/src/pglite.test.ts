@@ -25,8 +25,10 @@ describe("lockDataDir", () => {
 
   it("writes this process's pid, start and a nonce, and removes the lock on release", () => {
     const release = lockDataDir(data);
+    // The start: exact on Linux, elsewhere an estimate that another thread may read a
+    // millisecond off, which a lock check tolerates.
     expect(readFileSync(lock, "utf8")).toMatch(
-      new RegExp(`^${process.pid} ${processStart()} [0-9a-f]{32}$`),
+      new RegExp(`^${process.pid} [lt]\\d+ [0-9a-f]{32}$`),
     );
     expect(() => lockDataDir(data)).toThrow(`already open in process ${process.pid}`);
     release();

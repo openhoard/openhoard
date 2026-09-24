@@ -101,6 +101,13 @@ const openHere = new Map<string, string>();
  * container, a restarted node process usually gets the pid its crashed predecessor had.
  */
 export function processStart(): string {
+  started ??= readProcessStart();
+  return started;
+}
+
+let started: string | undefined;
+
+function readProcessStart(): string {
   try {
     // Field 22 of /proc/self/stat; the command name before it may hold spaces and parentheses.
     const stat = readFileSync("/proc/self/stat", "utf8");
