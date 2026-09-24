@@ -1,0 +1,19 @@
+{
+  "name": "@openhoard/spike-s1-search-scale",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Spike S1 (T-020): full-text + pgvector search with an access filter at 1M rows.",
+  "type": "module",
+  "scripts": {
+    "spike": "tsx run.ts"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@electric-sql/pglite-pgvector": "0.0.9",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.0"
+  },
+  "license": "Apache-2.0"
+}

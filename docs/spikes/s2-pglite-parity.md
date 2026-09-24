@@ -29,6 +29,8 @@ The same migration applies everywhere, and the integration checks return identic
 
 ## Results
 
+Full output: [`s2-output.md`](s2-output.md).
+
 **18 of the 22 behavioural checks gave identical results on all three engines**:
 
 - full-text ranking (`websearch_to_tsquery`, `ts_rank_cd`) and English stemming;
