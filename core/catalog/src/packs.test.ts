@@ -989,6 +989,12 @@ describe("policy tests and zones", () => {
         'when { resource.zone == "code" || "legal" != resource . zone || ["a", "b\\"c"].contains(resource.zone) }',
       ),
     ).toEqual(["code", "legal", "a", 'b"c']);
+    // Not in comments, but a "//" inside a string is no comment; Cedar's escapes are decoded.
+    expect(
+      zoneLiterals(
+        '// resource.zone == "legal"\nwhen { resource.zone == "man\\u{61}ged" && resource.zone != "a//b" }',
+      ),
+    ).toEqual(["managed", "a//b"]);
   });
 });
 
@@ -1022,13 +1028,22 @@ describe("validatePack", () => {
   it.each<[string, unknown, string]>([
     [
       "a bidi override in policy text",
-      small({ policies: { p: "// a‮ b\nforbid (principal, action, resource);" } }),
-      "policy p: control or format characters (only line breaks and tabs)",
+      small({ policies: { p: "// a\u202e b\nforbid (principal, action, resource);" } }),
+      "policy p: control, format or separator characters (only line breaks and tabs)",
+    ],
+    [
+      "a line separator in a policy comment, which viewers may break the line at",
+      small({
+        policies: {
+          p: "permit (principal, action, resource);\n// note\u2028forbid (principal, action, resource);",
+        },
+      }),
+      "policy p: control, format or separator characters (only line breaks and tabs)",
     ],
     [
       "a NUL in policy text",
       small({ policies: { p: "forbid (principal, action, resource);\u0000" } }),
-      "policy p: control or format characters (only line breaks and tabs)",
+      "policy p: control, format or separator characters (only line breaks and tabs)",
     ],
     [
       "a zone name where a zone kind belongs",
@@ -1062,6 +1077,13 @@ describe("validatePack", () => {
       { ...small(), version: "1.0" },
       "version must be semver, at most 64 characters",
     ],
+    ...["1.0.0-01", "1.0.0-.", "1.0.0-rc..1", "1.0.0-"].map(
+      (version): [string, unknown, string] => [
+        `a pre-release that isn't semver (${version})`,
+        { ...small(), version },
+        "version must be semver, at most 64 characters",
+      ],
+    ),
     [
       "bad defaults",
       { ...small(), defaults: { visibility: "open" } },

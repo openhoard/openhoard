@@ -89,26 +89,62 @@ export async function openPglite(options: {
 }
 
 /**
- * Data directories this process has open (lock path → the content of its lock file). A lock
- * naming this process's pid but absent here was left by an earlier process that had the same
- * pid: in a container, a restarted node process usually gets the pid its crashed predecessor had.
+ * Data directories this module instance has open (lock path → the content of its lock file).
+ * Another instance in this process (a worker thread, a second copy of this package) has its own.
  */
 const openHere = new Map<string, string>();
 
 /**
+ * When this process started, the same in every thread: on Linux the kernel's start time in clock
+ * ticks since boot (`l…`), elsewhere an estimate in milliseconds (`t…`). A lock naming this
+ * process's pid but another start was left by an earlier process that had the same pid: in a
+ * container, a restarted node process usually gets the pid its crashed predecessor had.
+ */
+export function processStart(): string {
+  try {
+    // Field 22 of /proc/self/stat; the command name before it may hold spaces and parentheses.
+    const stat = readFileSync("/proc/self/stat", "utf8");
+    const ticks = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+    if (ticks !== undefined && /^\d+$/.test(ticks)) return `l${ticks}`;
+  } catch {
+    // not Linux
+  }
+  return `t${Math.round(Date.now() - process.uptime() * 1000)}`;
+}
+
+/** Whether a lock's recorded start (see {@link processStart}) is this process's. */
+function sameStart(recorded: string, mine: string): boolean {
+  if (recorded.startsWith("l") || mine.startsWith("l")) return recorded === mine;
+  // Two estimates of one start differ by the clock's jitter, well under a second.
+  const a = Number(recorded.slice(1));
+  const b = Number(mine.slice(1));
+  return recorded.startsWith("t") && Number.isFinite(a) && Math.abs(a - b) < 2_000;
+}
+
+/**
  * PGlite does not lock its data directory, and two instances writing one directory lose data
- * silently. This takes `<dataDir>.lock`, holding the owner's pid and a random nonce, or throws
- * if a live holder, this process included, has it. A lock whose process is gone, or that names
- * this process without being one this process holds, is stale and taken over.
+ * silently. This takes `<dataDir>.lock`, holding the owner's pid, when that process started and
+ * a random nonce, or throws if a live holder, this process included, has it. A lock whose
+ * process is gone, or that names this pid with another start, is stale and taken over.
  */
 export function lockDataDir(dataDir: string): () => void {
   const path = resolve(`${dataDir}.lock`);
   mkdirSync(dirname(path), { recursive: true });
   for (let attempt = 0; attempt < 3; attempt++) {
-    let fd: number;
+    const content = `${process.pid} ${processStart()} ${randomBytes(16).toString("hex")}`;
+    // Written aside and linked into place, so the lock never exists without its content: two
+    // processes can't both judge one empty lock stale and both end up holding it.
+    const draft = `${path}.new-${randomBytes(8).toString("hex")}`;
+    const fd = openSync(draft, "wx");
     try {
-      fd = openSync(path, "wx");
+      writeSync(fd, content);
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      linkSync(draft, path); // unlike rename, fails if the lock exists
     } catch (e) {
+      rmSync(draft, { force: true });
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
       const holder = readLock(path);
       if (holder === undefined) continue; // released in the meantime: try again
@@ -129,12 +165,7 @@ export function lockDataDir(dataDir: string): () => void {
       }
       continue;
     }
-    const content = `${process.pid} ${randomBytes(16).toString("hex")}`;
-    try {
-      writeSync(fd, content);
-    } finally {
-      closeSync(fd);
-    }
+    rmSync(draft, { force: true });
     openHere.set(path, content);
     return () => {
       if (openHere.get(path) !== content) return; // released already
@@ -204,13 +235,19 @@ export function readLock(
   }
   try {
     const content = readFileSync(fd, "utf8");
-    const pid = Number.parseInt(content, 10);
+    const [first, start] = content.split(" ");
+    const pid = Number.parseInt(first ?? "", 10);
     if (Number.isSafeInteger(pid) && pid > 0) {
-      // This process's pid is live only in a lock this process holds.
-      const live = pid === process.pid ? openHere.get(resolve(path)) === content : isAlive(pid);
+      if (pid !== process.pid) return { pid, live: isAlive(pid), content };
+      // This pid: live if this process wrote it (any thread or copy of this module). A lock in
+      // the older format, without a start, is live only if this module instance holds it.
+      const live =
+        start !== undefined && /^[lt]\d+$/.test(start)
+          ? sameStart(start, processStart())
+          : openHere.get(resolve(path)) === content;
       return { pid, live, content };
     }
-    // No pid yet: another process created the file an instant ago and is still writing it.
+    // No pid: an older version created the file an instant ago and is still writing it.
     return { live: Date.now() - fstatSync(fd).mtimeMs < 5_000, content };
   } finally {
     closeSync(fd);

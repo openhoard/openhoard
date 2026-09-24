@@ -129,7 +129,11 @@ export class PackError extends Error {
 }
 
 const NAME = /^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/;
-const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$/;
+/** Semver 2.0: a pre-release is dot-separated, non-empty identifiers, numbers without leading 0s. */
+const PRE_ID = "(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)";
+const VERSION = new RegExp(
+  `^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(-${PRE_ID}(?:\\.${PRE_ID})*)?$`,
+);
 const FACET = /^[a-z][a-z0-9-]{0,63}$/;
 const VALUE = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const TAG = /^[a-z][a-z0-9-]{0,63}:[a-z0-9][a-z0-9._-]{0,127}$/;
@@ -140,9 +144,11 @@ const CLIENTS = ["first-party", "local", "commercial", "consumer"];
 const INVISIBLE = /\p{C}/u;
 /**
  * Not in policy text either, except line breaks and tabs: a NUL or a bidi override in a Cedar
- * comment or string makes the diff an admin reviews render differently from what runs.
+ * comment or string makes the diff an admin reviews render differently from what runs. Nor the
+ * line and paragraph separators (U+2028, U+2029): a viewer may break the line there, while a
+ * Cedar comment runs on to the next newline, hiding what looks like a policy after it.
  */
-const POLICY_INVISIBLE = /[^\P{C}\n\r\t]/u;
+const POLICY_INVISIBLE = /[^\P{C}\n\r\t]|[\p{Zl}\p{Zp}]/u;
 /** The zone kinds `resource.zone` can be (core/db `zones.kind`). */
 export const ZONE_KINDS: readonly string[] = zones.kind.enumValues;
 const LIMITS = {
@@ -262,7 +268,7 @@ export function validatePack(input: unknown): string[] {
           continue;
         }
         if (POLICY_INVISIBLE.test(body)) {
-          bad(`policy ${id}: control or format characters (only line breaks and tabs)`);
+          bad(`policy ${id}: control, format or separator characters (only line breaks and tabs)`);
         }
         for (const zone of zoneLiterals(body)) {
           if (!ZONE_KINDS.includes(zone)) {
@@ -349,19 +355,50 @@ const STRING_LITERAL = /"((?:[^"\\]|\\.)*)"/g;
 
 /**
  * The string literals a policy compares `resource.zone` with: `resource.zone == "x"`, `!=`,
- * either way round, and `["x", "y"].contains(resource.zone)`. A text check, not a parse, so it
- * also reads comments. It is there to catch mistakes such as `resource.zone == "legal"`, which
- * never matches (a zone's name isn't its kind), not to be a boundary: other spellings, such as
- * `resource["zone"]`, aren't checked.
+ * either way round, and `["x", "y"].contains(resource.zone)`, outside comments, with Cedar's
+ * escapes decoded. A text check, not a parse: it is there to catch mistakes such as
+ * `resource.zone == "legal"`, which never matches (a zone's name isn't its kind), not to be a
+ * boundary: other spellings, such as `resource["zone"]` or `like`, aren't checked.
  */
-export function zoneLiterals(text: string): string[] {
-  const unquote = (s = "") => s.replace(/\\(.)/g, "$1");
+export function zoneLiterals(policy: string): string[] {
+  const text = withoutComments(policy);
+  const unquote = (s = "") =>
+    s.replace(/\\u\{([0-9a-fA-F]{1,6})\}|\\(.)/g, (_, hex?: string, c?: string) => {
+      if (hex !== undefined) {
+        const code = Number.parseInt(hex, 16);
+        return code <= 0x10ffff ? String.fromCodePoint(code) : "";
+      }
+      return (
+        ({ n: "\n", r: "\r", t: "\t", "0": "\0" } as Record<string, string>)[c ?? ""] ?? c ?? ""
+      );
+    });
   return [
     ...[...text.matchAll(ZONE_EQUALS), ...text.matchAll(EQUALS_ZONE)].map((m) => unquote(m[1])),
     ...[...text.matchAll(ZONE_IN_SET)].flatMap((m) =>
       [...(m[1] ?? "").matchAll(STRING_LITERAL)].map((l) => unquote(l[1])),
     ),
   ];
+}
+
+/** Cedar text with its `//` comments blanked, leaving string literals (which may hold `//`). */
+function withoutComments(text: string): string {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inString) {
+      out += c;
+      if (c === "\\") out += text[++i] ?? "";
+      else if (c === '"') inString = false;
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+      out += "\n";
+    } else {
+      out += c;
+      if (c === '"') inString = true;
+    }
+  }
+  return out;
 }
 
 /**
@@ -1000,7 +1037,8 @@ export async function applyPack(
   const pack = parsePack(input);
   const planned = await plan(tx, tenantId, pack);
   checkPlan(planned, options.planHash);
-  if (pack.defaults) {
+  // Only a change: an unchanged row isn't rewritten, so it can't conflict with other work.
+  if (pack.defaults && planned.changes.some((c) => c.kind === "set-defaults")) {
     await tx
       .update(tenants)
       .set({ defaultVisibility: pack.defaults.visibility, defaultExposure: pack.defaults.exposure })

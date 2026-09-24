@@ -140,10 +140,10 @@ export async function explainAccess(
     .innerJoin(zones, and(eq(zones.tenantId, objects.tenantId), eq(zones.id, objects.zoneId)))
     .where(and(eq(objects.tenantId, tenantId), eq(objects.id, request.objectId)));
   if (!object) throw new ExplainError("unknown-object", `no object ${request.objectId}`);
-  // One clock for everything time-based (grant expiry), as the snapshot is one for the data.
-  const now = new Date();
+  // Grant expiry by the database's clock, as enforcement reads it: now() is the transaction's
+  // start, one moment for every check here, as the snapshot is one for the data.
   const user = await getUser(tx, tenantId, request.userId);
-  const principal = await resolvePrincipal(tx, tenantId, request.userId, now);
+  const principal = await resolvePrincipal(tx, tenantId, request.userId);
   if (!user || !principal) throw new ExplainError("unknown-user", `no user ${request.userId}`);
   const levels = await explainLevels(tx, tenantId, request.objectId);
   if (!levels) throw new ExplainError("unknown-object", `no levels for ${request.objectId}`);
@@ -168,12 +168,10 @@ export async function explainAccess(
   const groupNames = new Map(
     (await groupsOf(tx, tenantId, request.userId)).map((g) => [g.id, g.name]),
   );
-  const held = await liveGrants(
-    tx,
-    tenantId,
-    [userPrincipal(request.userId), ...principal.groupIds.map(groupPrincipal)],
-    now,
-  );
+  const held = await liveGrants(tx, tenantId, [
+    userPrincipal(request.userId),
+    ...principal.groupIds.map(groupPrincipal),
+  ]);
   const counts = (g: LiveGrant) => action !== "tag" || g.role === "write";
   const covers = (g: LiveGrant, onTags: Set<string>) =>
     (g.objectId !== null && g.objectId === request.objectId) ||

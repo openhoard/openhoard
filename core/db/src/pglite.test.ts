@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { lockDataDir, readLock, removeStaleLock } from "./pglite.js";
+import { lockDataDir, processStart, readLock, removeStaleLock } from "./pglite.js";
 
 describe("lockDataDir", () => {
   let dir: string;
@@ -23,9 +23,11 @@ describe("lockDataDir", () => {
   });
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-  it("writes this process's pid and a nonce, and removes the lock on release", () => {
+  it("writes this process's pid, start and a nonce, and removes the lock on release", () => {
     const release = lockDataDir(data);
-    expect(readFileSync(lock, "utf8")).toMatch(new RegExp(`^${process.pid} [0-9a-f]{32}$`));
+    expect(readFileSync(lock, "utf8")).toMatch(
+      new RegExp(`^${process.pid} ${processStart()} [0-9a-f]{32}$`),
+    );
     expect(() => lockDataDir(data)).toThrow(`already open in process ${process.pid}`);
     release();
     expect(existsSync(lock)).toBe(false);
@@ -41,9 +43,15 @@ describe("lockDataDir", () => {
     release();
   });
 
-  it("takes over a lock with this process's pid that this process doesn't hold", () => {
-    // A container restart: the crashed node had the pid this one has now.
-    for (const stale of [`${process.pid} 0123456789abcdef0123456789abcdef`, `${process.pid}`]) {
+  it("takes over a lock with this process's pid but another start", () => {
+    // A container restart: the crashed node had the pid this one has now. Also the older
+    // formats, with no start, that this module instance doesn't hold.
+    const other = processStart().startsWith("l") ? "l1" : "t1";
+    for (const stale of [
+      `${process.pid} ${other} 0123456789abcdef0123456789abcdef`,
+      `${process.pid} 0123456789abcdef0123456789abcdef`,
+      `${process.pid}`,
+    ]) {
       writeFileSync(lock, stale);
       expect(readLock(lock)).toMatchObject({ pid: process.pid, live: false });
       const release = lockDataDir(data);
@@ -53,6 +61,16 @@ describe("lockDataDir", () => {
     }
     // Nothing left aside.
     expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it("refuses a lock this process holds through another thread or copy of this module", () => {
+    // Same pid and start, but not in this module instance's own list: a worker thread has it.
+    const theirs = `${process.pid} ${processStart()} 0123456789abcdef0123456789abcdef`;
+    writeFileSync(lock, theirs);
+    expect(readLock(lock)).toMatchObject({ pid: process.pid, live: true });
+    expect(() => lockDataDir(data)).toThrow(`already open in process ${process.pid}`);
+    expect(readFileSync(lock, "utf8")).toBe(theirs);
+    expect(readdirSync(dir)).toEqual(["pgdata.lock"]); // no draft left behind
   });
 
   it("does not remove a lock another process took over after judging ours stale", () => {

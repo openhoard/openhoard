@@ -143,7 +143,9 @@ export function fromDriver(driver: Driver): Database {
       if (!isId("tenant", tenantId)) {
         return Promise.reject(new TypeError("withTenant: not a tenant id"));
       }
-      return driver.db.transaction(async (tx) => {
+      let session: unknown;
+      const settled = driver.db.transaction(async (tx) => {
+        session = (tx as unknown as { session?: unknown }).session;
         // Transaction-local (the `true`), and parameterized, unlike SET LOCAL.
         await tx.execute(sql`select set_config('app.tenant_id', ${tenantId}, true)`);
         const guarded = guardTransaction(tx as Tx);
@@ -154,9 +156,35 @@ export function fromDriver(driver: Driver): Database {
           guarded.end();
         }
       }, config);
+      // A query builder made inside the callback (tx.select()…, tx.query.…) keeps the raw
+      // session, not the guarded handle, so awaiting it later would run on the released pooled
+      // connection, perhaps in another tenant's transaction. Once COMMIT or ROLLBACK is done
+      // and the connection is back in the pool, cut the session off from it.
+      const cut = () => poisonSession(session);
+      return settled.then(
+        (value) => {
+          cut();
+          return value;
+        },
+        (e: unknown) => {
+          cut();
+          throw e;
+        },
+      );
     },
     close: () => driver.close(),
   };
+}
+
+/** Makes every later use of a drizzle session's connection throw {@link TransactionEndedError}. */
+function poisonSession(session: unknown): void {
+  if (typeof session !== "object" || session === null || !("client" in session)) return;
+  Object.defineProperty(session, "client", {
+    configurable: false,
+    get() {
+      throw new TransactionEndedError();
+    },
+  });
 }
 
 /** Thrown when a transaction handle is used after its withTenant() callback settled. */

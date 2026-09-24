@@ -148,8 +148,15 @@ person saying yes. `proposeTag()` applies a tag straight away only when that is 
 
 A tag with an open review item waits for that item, whoever proposes it again, with one exception:
 a rule, pack or person proposing an approved value that waits only because a model proposed it
-applies it, and closes the model's item as approved by the proposer. Likewise, a trusted source
-proposing a tag the object carries as an unreviewed model tag takes it over, so grants match it.
+applies it. A person's proposal also closes the model's item, as approved by them; a rule's or
+pack's leaves it open, since nothing automated records a sensitive tag as approved.
+
+A trusted source proposing a tag the object carries as an unreviewed model tag takes it over, so
+grants match it. A rule or pack keeps the model's guess on the tag (`model_applied_by`,
+`model_confidence`), so when the rule stops giving it the tag goes back to being the model's
+unreviewed tag, and still tightens visibility, rather than disappearing. A person proposing a
+tag the object carries from any other source makes it theirs, and approving a model's item for
+a tag a rule gives does the same: rule changes no longer take it off.
 
 Inputs are checked before anything is written. A refused proposal or decision throws `TagError`
 with a `code`: `invalid` (a value that isn't a slug, a label over 200 characters…),
@@ -193,8 +200,10 @@ Packs and admins give rules as data. Check them with `validateRules()`:
 - **Applying:** `applyRuleTags()` makes the object's rule tags exactly what the rules give now.
   Matches apply with source `rule`; values that aren't in the approved vocabulary go to review
   like anyone else's. Rule tags no rule gives any more are taken off and returned as `removed`: a
-  file moved from `Clients/Acme/` to `HR/` loses `client:acme` and the grants on it. Tags from
-  people, packs and models are left alone. Pass the complete rule set.
+  file moved from `Clients/Acme/` to `HR/` loses `client:acme` and the grants on it, even when a
+  person approved the new value the rule proposed. A model's guess a rule took over goes back to
+  the model instead (`reverted`), and the rules' open items for tags no rule gives are closed as
+  `withdrawn`. Tags from people, packs and models are left alone. Pass the complete rule set.
 
 ## Locks
 

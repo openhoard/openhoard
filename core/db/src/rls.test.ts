@@ -311,22 +311,36 @@ describe("withTenant", () => {
         const ta = await seedTenant(pg, 1);
         const tb = await seedTenant(pg, 2);
         let leaked: Tx | undefined;
+        // A builder made inside the callback, and the relational query API, keep drizzle's raw
+        // session rather than the guarded handle.
+        let builder: PromiseLike<unknown> | undefined;
+        let relational: Tx["query"] | undefined;
         await pg.withTenant(ta.tenantId, async (tx) => {
           leaked = tx;
+          builder = tx.select({ id: objects.id }).from(objects);
+          relational = tx.query;
           await tx.select().from(objects);
         });
+        const attempt = async (run: () => PromiseLike<unknown> | undefined) => {
+          try {
+            return await run();
+          } catch (e) {
+            return e;
+          }
+        };
         const seen = await pg.withTenant(tb.tenantId, async (tx) => {
           const mine = await tx.select({ id: objects.id }).from(objects);
-          let stolen: unknown;
-          try {
-            stolen = await leaked?.select({ id: objects.id }).from(objects);
-          } catch (e) {
-            stolen = e;
-          }
-          return { mine, stolen };
+          return {
+            mine,
+            stolen: await attempt(() => leaked?.select({ id: objects.id }).from(objects)),
+            built: await attempt(() => builder),
+            related: await attempt(() => relational?.objects.findMany()),
+          };
         });
         expect(seen.mine).toEqual([{ id: tb.objectId }]);
         expect(seen.stolen).toBeInstanceOf(TransactionEndedError);
+        expect(seen.built).toBeInstanceOf(TransactionEndedError);
+        expect(seen.related).toBeInstanceOf(TransactionEndedError);
       } finally {
         await single.close();
         await own.close();

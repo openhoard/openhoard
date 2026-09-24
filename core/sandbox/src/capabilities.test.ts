@@ -35,6 +35,19 @@ describe("admitPlugin", () => {
     expect(() => (p.manifest.capabilities as string[]).push("write:content")).toThrow(TypeError);
   });
 
+  it("keeps approvals fixed after admission, and denies look-alikes", () => {
+    const p = admitPlugin(manifest, ["propose:tags"]);
+    const approved = p.approved as Set<string>;
+    expect(() => approved.add("read:content")).toThrow(TypeError);
+    expect(() => approved.clear()).toThrow(TypeError);
+    // Around the read-only view: the gate reads its own copy.
+    Set.prototype.add.call(approved, "read:content");
+    expect(hasCapability(p, "read:content")).toBe(false);
+    expect(hasCapability(p, "propose:tags")).toBe(true);
+    const forged = { manifest: p.manifest, approved: new Set(["write:content" as const]) };
+    expect(hasCapability(forged, "write:content")).toBe(false);
+  });
+
   it("validates what it returns: a getter can't answer differently later", () => {
     let reads = 0;
     const tricky = {

@@ -23,7 +23,9 @@ never reference another tenant's.
 The `tx` handle works only while the callback runs. Once it settles, every use of the handle
 throws `TransactionEndedError`, so a handle that escaped (kept in a variable, or used by a
 promise nobody awaited) can't run on a pooled connection that is by then inside another
-tenant's transaction. Await every query inside the callback.
+tenant's transaction. A query builder or `tx.query` saved inside the callback and awaited after
+it fails the same way, once the transaction has committed or rolled back. Await every query
+inside the callback.
 
 Errors keep the server's SQLSTATE: `sqlState(e)` reads it however the driver wrapped it, and
 `isRetryable(e)` says whether the transaction may succeed if run again (serialization failure

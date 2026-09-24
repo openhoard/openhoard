@@ -95,9 +95,14 @@ const engines = new Map<string, PolicyEngine>();
  * stays resident for the life of the process (roughly 25–400 KB each). Build an engine when the
  * rules change, which is rare, and share it; never build one per request.
  */
-export function createCedarEngine(policies: Readonly<Record<string, string>> = {}): PolicyEngine {
+export function createCedarEngine(input: Readonly<Record<string, string>> = {}): PolicyEngine {
+  // Read once: every check below, the cache key and Cedar see this copy, so a getter or a proxy
+  // can't show the checks one text and Cedar another.
+  const policies: Record<string, string> = Object.fromEntries(Object.entries(input));
   const clash = Object.keys(policies).filter((id) => id.startsWith("core/"));
   if (clash.length) throw new PolicyError("policy ids reserved for the core rules", clash);
+  const notText = Object.keys(policies).filter((id) => typeof policies[id] !== "string");
+  if (notText.length) throw new PolicyError("policy text must be a string", notText);
   const staticPolicies = { ...CORE_POLICIES, ...policies };
   const canonical = Object.keys(staticPolicies)
     .sort()

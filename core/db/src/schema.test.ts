@@ -305,11 +305,21 @@ describe("migrations", () => {
       );
       await migratePglite(driver.db as never, { migrationsFolder: older });
       const db = fromDriver(driver);
-      const s = await seedTenant(db, 1);
+      // Only the tables this migration touches, in their 0014 form: seedTenant() writes today's
+      // columns, which later migrations add.
+      const s = { tenantId: newId("tenant"), userId: newId("user"), groupId: newId("group") };
       const scimUser = newId("user");
       await db.withTenant(s.tenantId, async (tx) => {
-        await tx.update(users).set({ externalId: "local-1" }).where(eq(users.id, s.userId));
-        await tx.update(groups).set({ externalId: "local-g" }).where(eq(groups.id, s.groupId));
+        await tx.execute(sql`insert into tenants (id, name) values (${s.tenantId}, 'Tenant 1')`);
+        await tx.execute(
+          sql`insert into users (tenant_id, id, email, email_key, display_name, source, external_id)
+              values (${s.tenantId}, ${s.userId}, 'ana@example.com', 'ana@example.com', 'Ana',
+                      'local', 'local-1')`,
+        );
+        await tx.execute(
+          sql`insert into groups (tenant_id, id, name, source, external_id)
+              values (${s.tenantId}, ${s.groupId}, 'Readers', 'local', 'local-g')`,
+        );
         await tx.insert(users).values({
           tenantId: s.tenantId,
           id: scimUser,
@@ -497,6 +507,33 @@ describe("openDatabase", () => {
         expect(await custom.query(settings)).toEqual([{ statement: "1234ms", idle: "5s" }]);
         // A statement over the limit is cancelled.
         await expect(custom.query("select pg_sleep(2)")).rejects.toMatchObject({ code: "57014" });
+      } finally {
+        await custom.close();
+        await own.close();
+      }
+    },
+  );
+
+  it.runIf(process.env[TEST_POSTGRES_ENV])(
+    "survives an idle-in-transaction timeout on a checked-out connection (PostgreSQL)",
+    async () => {
+      const { createPostgresDatabase } = await import("./testing-postgres.js");
+      const own = await createPostgresDatabase(process.env[TEST_POSTGRES_ENV] ?? "");
+      const custom = await openDriver({
+        url: own.url,
+        postgres: { max: 1, idleInTransactionTimeoutMillis: 200 },
+      });
+      try {
+        // Without a listener on the client, the server ending the session would emit an
+        // unhandled 'error' and end the process (and this test run).
+        const idle = custom.db.transaction(async (tx) => {
+          await tx.execute(sql`select 1`);
+          await new Promise((r) => setTimeout(r, 700));
+          await tx.execute(sql`select 1`);
+        });
+        await expect(idle).rejects.toThrow();
+        // The broken connection was dropped; the pool's one slot works again.
+        expect(await custom.query("select 1 as one")).toEqual([{ one: 1 }]);
       } finally {
         await custom.close();
         await own.close();

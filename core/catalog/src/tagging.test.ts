@@ -319,7 +319,7 @@ describe("the review inbox", () => {
     expect(await tagsOn()).toEqual(["client:acme-1", "client:new-co (reviewed)"]);
   });
 
-  it("lets a trusted source settle a model's item on an approved value by applying it", async () => {
+  it("lets a trusted source apply a tag a model's item waits on; only a person closes the item", async () => {
     const outcome = await propose({ confidence: 0.2 });
     if (outcome.applied) throw new Error("expected a review");
     // Another model's word changes nothing.
@@ -328,14 +328,24 @@ describe("the review inbox", () => {
       applied: true,
       tag: "client:globex",
     });
+    expect(await inTenant((tx) => tagsForDecisions(tx, t.tenantId, t.objectId))).toMatchObject({
+      grantable: ["client:acme-1", "client:globex"],
+    });
+    // The rule may stop giving the tag; the model's guess waits for a person meanwhile.
+    expect((await reviews()).map((r) => r.id)).toEqual([outcome.reviewId]);
+    expect(await propose({ source: "user", appliedBy: "user:ana", confidence: 1 })).toEqual({
+      applied: true,
+      tag: "client:globex",
+    });
     expect(await reviews()).toEqual([]);
     const [item] = await inTenant((tx) =>
       tx.select().from(tagReviews).where(eq(tagReviews.id, outcome.reviewId)),
     );
-    expect(item).toMatchObject({ decision: "approved", resolvedBy: "rule:x" });
-    expect(await inTenant((tx) => tagsForDecisions(tx, t.tenantId, t.objectId))).toMatchObject({
-      grantable: ["client:acme-1", "client:globex"],
-    });
+    expect(item).toMatchObject({ decision: "approved", resolvedBy: "user:ana" });
+    const [row] = await inTenant((tx) =>
+      tx.select().from(objectTags).where(eq(objectTags.value, "globex")),
+    );
+    expect(row).toMatchObject({ source: "user", appliedBy: "user:ana", modelConfidence: null });
     // A model's sensitive item too, for a person.
     const sensitive = await propose({ tag: "sensitivity:restricted", confidence: 0.99 });
     expect(sensitive).toMatchObject({ applied: false, reason: "sensitive" });
@@ -358,7 +368,14 @@ describe("the review inbox", () => {
     const [row] = await inTenant((tx) =>
       tx.select().from(objectTags).where(eq(objectTags.value, "globex")),
     );
-    expect(row).toMatchObject({ source: "pack", appliedBy: "pack:general", confidence: 1 });
+    expect(row).toMatchObject({
+      source: "pack",
+      appliedBy: "pack:general",
+      confidence: 1,
+      // The model's guess, kept for when the pack no longer gives the tag.
+      modelAppliedBy: "model:small-tagger",
+      modelConfidence: expect.closeTo(0.9, 5),
+    });
     // A model proposing a trusted tag again takes nothing back.
     await propose({ confidence: 0.8 });
     expect(await grantable()).toEqual(["client:acme-1", "client:globex"]);

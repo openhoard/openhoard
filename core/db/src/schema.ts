@@ -346,6 +346,13 @@ export const objectTags = pgTable(
     /** 1 for rules, people and packs; the model's score otherwise. */
     confidence: real("confidence").notNull(),
     reviewed: boolean("reviewed").notNull().default(false),
+    /**
+     * A model proposed this tag first, and a rule or pack took it over (so grants match it): the
+     * model's applier and confidence. When the rule stops giving the tag, it goes back to being
+     * the model's unreviewed tag, which still tightens visibility, rather than disappearing.
+     */
+    modelAppliedBy: text("model_applied_by"),
+    modelConfidence: real("model_confidence"),
     createdAt: createdAt(),
   },
   (t) => [
@@ -372,6 +379,13 @@ export const objectTags = pgTable(
     check(
       "object_tags_applied_by_matches_source",
       sql`applied_by is null or starts_with(applied_by, source || ':')`,
+    ),
+    // Provenance only on a rule's or pack's tag, a model's applier, and a confidence with it.
+    check(
+      "object_tags_model_provenance",
+      sql`(model_confidence is null and model_applied_by is null)
+       or (source in ('rule', 'pack') and model_confidence >= 0 and model_confidence <= 1
+           and (model_applied_by is null or model_applied_by ~ '^model:.+$'))`,
     ),
   ],
 );
@@ -618,7 +632,8 @@ export const grants = pgTable(
  * existing value. Resolved items stay, as the record of who decided.
  */
 export const REVIEW_REASONS = ["new-value", "low-confidence", "sensitive"] as const;
-export const REVIEW_DECISIONS = ["approved", "rejected", "merged"] as const;
+/** `withdrawn`: a rule's item, closed when the rule stopped giving the tag before anyone decided. */
+export const REVIEW_DECISIONS = ["approved", "rejected", "merged", "withdrawn"] as const;
 
 export const tagReviews = pgTable(
   "tag_reviews",

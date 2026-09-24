@@ -5,11 +5,11 @@ import {
   newId,
   objects,
   sourceRefs,
+  users,
   versions,
   zones,
   type Tx,
 } from "@openhoard/core-db";
-import { getUser } from "@openhoard/core-identity";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { contentHasher, scopedBlobId } from "./hash.js";
 import { lockObject, lockSourceItem } from "./locks.js";
@@ -157,9 +157,18 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
   if (!ref) {
     // A new object needs an owner who can own it. An existing one keeps its owner, even one
     // retired since: offboarding hands files over through the API, not through a crawl.
-    const owner = await getUser(tx, tenantId, input.ownerId.slice(USER_PREFIX.length));
+    const userId = input.ownerId.slice(USER_PREFIX.length);
+    if (!input.ownerId.startsWith(USER_PREFIX) || !isId("user", userId)) {
+      throw new IngestError("invalid", "ownerId must be user: and a user id");
+    }
+    // FOR KEY SHARE, as addMember does: a retirement running now finishes first, and is seen.
+    const [owner] = await tx
+      .select({ retiredAt: users.retiredAt })
+      .from(users)
+      .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)))
+      .for("key share");
     if (!owner) throw new IngestError("invalid", `ownerId ${input.ownerId} is not a user`);
-    if (owner.retired) {
+    if (owner.retiredAt !== null) {
       throw new IngestError("invalid", `ownerId ${input.ownerId} is a retired user`);
     }
     const blobCreated = await ensureBlob(tx, tenantId, content);
@@ -303,12 +312,10 @@ function validate(input: IngestInput) {
   text("externalId", "externalId", input.externalId);
   if (!ZONE_ID.test(input.zoneId)) bad("zoneId", "is not a zone id");
   text("title", "title", input.title);
-  if (
-    !input.ownerId.startsWith(USER_PREFIX) ||
-    !isId("user", input.ownerId.slice(USER_PREFIX.length))
-  ) {
-    bad("ownerId", "must be user: and a user id");
-  }
+  // The owner of a new object must be a user (checked when creating it); an existing object
+  // keeps its owner, perhaps one recorded in an older form, so here only its shape.
+  if (!PRINCIPAL.test(input.ownerId)) bad("ownerId", "must be a principal such as user:…");
+  text("principal", "ownerId", input.ownerId);
   if (input.authorId !== undefined && !PRINCIPAL.test(input.authorId)) {
     bad("authorId", "must be a principal such as user:…");
   }
@@ -348,6 +355,8 @@ export async function removeFromSource(
       ),
     );
   if (!ref) return null;
+  // The object's lock before its row, as locks.ts orders them (markProcessed takes both).
+  await lockObject(tx, tenantId, ref.objectId);
   const marked = await tx
     .update(objects)
     .set({ deletedAt: sql`now()`, updatedAt: sql`now()` })

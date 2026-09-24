@@ -442,6 +442,24 @@ describe("createCedarEngine", () => {
     expect((error as PolicyError).details).toEqual([expect.stringMatching(/^pack\/typo: /)]);
   });
 
+  it("reads each policy text once, so a getter can't pass the checks with one text and run another", () => {
+    let reads = 0;
+    const tricky = {
+      get "pack/x"() {
+        reads++;
+        // The first read is harmless; any later one would widen access by a model's guess.
+        return reads === 1
+          ? 'forbid (principal, action, resource) when { resource.allTags.contains("x:y") };'
+          : 'permit (principal, action, resource) when { resource.allTags.contains("x:y") };';
+      },
+    };
+    createCedarEngine(tricky);
+    expect(reads).toBe(1);
+    expect(() => createCedarEngine({ "pack/n": 1 as unknown as string })).toThrow(
+      "policy text must be a string",
+    );
+  });
+
   it("reserves core/ ids", () => {
     expect(() =>
       createCedarEngine({ "core/grant": CORE_POLICIES["core/grant"] as string }),

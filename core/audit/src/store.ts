@@ -46,11 +46,15 @@ const APPEND_LOCK = 7421;
 class AppendConflict extends Error {
   /** serialization_failure, so core/db's isRetryable() says to retry. */
   readonly code = "40001";
-  constructor(cause: unknown) {
-    super("a concurrent transaction extended the audit chain first; retry the transaction", {
-      cause,
-    });
+  /**
+   * The unique violation behind it. Not `cause`: sqlState() reads a cause's code first, and
+   * would report this as 23505, which isn't retryable.
+   */
+  readonly conflict: unknown;
+  constructor(conflict: unknown) {
+    super("a concurrent transaction extended the audit chain first; retry the transaction");
     this.name = "AppendConflict";
+    this.conflict = conflict;
   }
 }
 

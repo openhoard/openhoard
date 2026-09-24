@@ -37,7 +37,25 @@ export function admitPlugin(manifest: unknown, approved: readonly string[]): Ins
   const declared = new Set<string>(m.capabilities);
   const extra = approved.filter((c) => !declared.has(c));
   if (extra.length) throw new PluginRejected(extra.map((c) => `approval of undeclared ${c}`));
-  return Object.freeze({ manifest: m, approved: new Set(approved as Capability[]) });
+  const plugin = Object.freeze({ manifest: m, approved: readOnlySet(approved as Capability[]) });
+  // What hasCapability() reads: a copy nothing outside this module can reach, so neither
+  // Set.prototype.add.call(plugin.approved, …) nor an object built to look admitted widens it.
+  admitted.set(plugin, new Set(approved as Capability[]));
+  return plugin;
+}
+
+const admitted = new WeakMap<InstalledPlugin, ReadonlySet<Capability>>();
+
+/** A Set whose mutators throw, for callers to read what was approved. */
+function readOnlySet<T>(items: readonly T[]): ReadonlySet<T> {
+  const set = new Set(items);
+  const refuse = () => {
+    throw new TypeError("an admitted plugin's approvals can't change");
+  };
+  for (const name of ["add", "delete", "clear"]) {
+    Object.defineProperty(set, name, { value: refuse });
+  }
+  return Object.freeze(set);
 }
 
 function deepFreeze<T>(value: T): T {
@@ -48,7 +66,10 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
-/** Runtime gate the core calls before handing anything to a plugin. Default deny. */
+/**
+ * Runtime gate the core calls before handing anything to a plugin. Default deny, including for
+ * anything admitPlugin() didn't return.
+ */
 export function hasCapability(plugin: InstalledPlugin, cap: Capability): boolean {
-  return plugin.approved.has(cap);
+  return admitted.get(plugin)?.has(cap) ?? false;
 }

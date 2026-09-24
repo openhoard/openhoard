@@ -44,9 +44,12 @@ export function openPostgres(url: string, options: PostgresOptions = {}): Driver
       `-c idle_in_transaction_session_timeout=${o.idleInTransactionTimeoutMillis}`,
     ].join(" "),
   });
-  // An idle client's error (server restart, network, an idle-in-transaction timeout) would
-  // otherwise crash the process; the pool drops that client and the next query gets a fresh one.
+  // A client's error event with no listener would crash the process. The pool's listener covers
+  // idle clients (a server restart, the network); a checked-out client (an idle-in-transaction
+  // timeout, 25P03) needs its own. Either way the query in flight fails, the pool drops that
+  // client, and the next query gets a fresh one.
   pool.on("error", () => {});
+  pool.on("connect", (client) => client.on("error", () => {}));
   const db = drizzle(pool, { schema });
   return {
     kind: "postgres",

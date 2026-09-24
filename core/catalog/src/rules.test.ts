@@ -4,6 +4,7 @@ import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applyRuleTags, evaluateRules, globMatch, validateRules, type TagRule } from "./rules.js";
+import { approveReview, proposeTag, rejectReview, tagsForDecisions } from "./tagging.js";
 
 /* The rule tagger (T-403). */
 
@@ -292,5 +293,155 @@ describe("applyRuleTags", () => {
     // Nothing matches: every rule tag goes, and only those.
     expect((await apply({ path: "Misc/Plan.docx" }, [])).removed).toEqual(["department:hr"]);
     expect(await tagsOn()).toEqual(["client:globex (user)"]);
+  });
+
+  describe("a restriction a model proposed first", () => {
+    // HR/** gives sensitivity:restricted (hidden, local-only); a model guessed it too.
+    const HR: TagRule[] = [{ id: "hr", tag: "sensitivity:restricted", when: { path: "HR/**" } }];
+    beforeEach(() =>
+      db.withTenant(t.tenantId, async (tx) => {
+        await tx.insert(facets).values({ tenantId: t.tenantId, key: "sensitivity", label: "S" });
+        await tx.insert(facetValues).values({
+          tenantId: t.tenantId,
+          facet: "sensitivity",
+          value: "restricted",
+          label: "Restricted",
+          approved: true,
+          visibility: "hidden",
+          exposure: "local-only",
+        });
+      }),
+    );
+    const byModel = (tx: Parameters<typeof proposeTag>[0]) =>
+      proposeTag(tx, t.tenantId, {
+        objectId: t.objectId,
+        tag: "sensitivity:restricted",
+        source: "model",
+        appliedBy: "model:small",
+        confidence: 0.9,
+      });
+    const open = () =>
+      db.withTenant(t.tenantId, async (tx) =>
+        (await tx.select().from(tagReviews)).filter((r) => r.resolvedAt === null),
+      );
+    const decisions = () =>
+      db.withTenant(t.tenantId, (tx) => tagsForDecisions(tx, t.tenantId, t.objectId));
+
+    it("goes back to the model's unreviewed tag when the rule stops giving it", async () => {
+      // The value got its levels after the model tagged the file, so the tag applied.
+      await db.withTenant(t.tenantId, async (tx) => {
+        await tx.insert(objectTags).values({
+          tenantId: t.tenantId,
+          objectId: t.objectId,
+          facet: "sensitivity",
+          value: "restricted",
+          source: "model",
+          appliedBy: "model:small",
+          confidence: 0.8,
+        });
+      });
+      await apply({ path: "HR/Pay.xlsx" }, HR);
+      expect(await tagsOn()).toContain("sensitivity:restricted (rule)");
+      expect((await decisions()).grantable).toContain("sensitivity:restricted");
+      // Out of HR/: the rule's reason is gone, the model's guess isn't.
+      const moved = await apply({ path: "Misc/Pay.xlsx" }, HR);
+      expect(moved).toMatchObject({ removed: [], reverted: ["sensitivity:restricted"] });
+      const [row] = await db.withTenant(t.tenantId, (tx) =>
+        tx.select().from(objectTags).where(eq(objectTags.value, "restricted")),
+      );
+      expect(row).toMatchObject({
+        source: "model",
+        appliedBy: "model:small",
+        confidence: expect.closeTo(0.8, 5),
+        reviewed: false,
+        modelAppliedBy: null,
+        modelConfidence: null,
+      });
+      // It tightens levels again, and grants no longer match it.
+      expect(await decisions()).toMatchObject({
+        levels: expect.arrayContaining(["sensitivity:restricted"]),
+      });
+      expect((await decisions()).grantable).not.toContain("sensitivity:restricted");
+    });
+
+    it("follows the rule once a person rejected the model's guess", async () => {
+      const outcome = await db.withTenant(t.tenantId, byModel);
+      if (outcome.applied) throw new Error("expected a review");
+      await apply({ path: "HR/Pay.xlsx" }, HR);
+      await db.withTenant(t.tenantId, (tx) =>
+        rejectReview(tx, t.tenantId, outcome.reviewId, "user:ana"),
+      );
+      // The rule's tag stays while it applies, and goes with it.
+      expect(await tagsOn()).toContain("sensitivity:restricted (rule)");
+      expect(await apply({ path: "Misc/Pay.xlsx" }, HR)).toMatchObject({
+        removed: ["sensitivity:restricted"],
+        reverted: [],
+      });
+      expect(await open()).toEqual([]);
+    });
+
+    it("leaves a model's pending item open, not approved by the rule", async () => {
+      const outcome = await db.withTenant(t.tenantId, byModel);
+      expect(outcome).toMatchObject({ applied: false, reason: "sensitive" });
+      if (outcome.applied) return;
+      await apply({ path: "HR/Pay.xlsx" }, HR);
+      expect(await tagsOn()).toContain("sensitivity:restricted (rule)");
+      expect((await open()).map((r) => r.id)).toEqual([outcome.reviewId]);
+      // Moved out: the rule tag goes, the model's item still waits for a person (and tightens).
+      expect(await apply({ path: "Misc/Pay.xlsx" }, HR)).toMatchObject({
+        removed: ["sensitivity:restricted"],
+        withdrawn: [],
+      });
+      expect((await open()).map((r) => r.id)).toEqual([outcome.reviewId]);
+    });
+
+    it("stays when a person approves the model's item while the rule gives it", async () => {
+      const outcome = await db.withTenant(t.tenantId, byModel);
+      if (outcome.applied) throw new Error("expected a review");
+      await apply({ path: "HR/Pay.xlsx" }, HR);
+      await db.withTenant(t.tenantId, (tx) =>
+        approveReview(tx, t.tenantId, outcome.reviewId, "user:ana"),
+      );
+      expect(await tagsOn()).toContain("sensitivity:restricted (model)");
+      expect(await apply({ path: "Misc/Pay.xlsx" }, HR)).toMatchObject({
+        removed: [],
+        reverted: [],
+      });
+      expect(await tagsOn()).toContain("sensitivity:restricted (model)");
+    });
+  });
+
+  it("keeps a rule tag a person confirmed, as theirs", async () => {
+    await apply({ path: "Clients/Acme/Plan.docx" });
+    expect(await tagsOn()).toContain("client:acme (rule)");
+    await db.withTenant(t.tenantId, (tx) =>
+      proposeTag(tx, t.tenantId, {
+        objectId: t.objectId,
+        tag: "client:acme",
+        source: "user",
+        appliedBy: "user:ana",
+        confidence: 1,
+      }),
+    );
+    expect(await tagsOn()).toContain("client:acme (user)");
+    expect((await apply({ path: "Misc/Plan.docx" })).removed).not.toContain("client:acme");
+    expect(await tagsOn()).toContain("client:acme (user)");
+  });
+
+  it("withdraws a rule's open item once no rule gives its tag", async () => {
+    const first = await apply({ path: "Finance.xlsx" });
+    const waiting = first.outcomes.find((o) => !o.applied);
+    if (waiting === undefined || waiting.applied) throw new Error("expected a review");
+    // Still given: the item stays.
+    expect((await apply({ path: "Other.xlsx" })).withdrawn).toEqual([]);
+    const moved = await apply({ path: "Other.docx" });
+    expect(moved.withdrawn).toEqual([waiting.reviewId]);
+    const [item] = await db.withTenant(t.tenantId, (tx) =>
+      tx.select().from(tagReviews).where(eq(tagReviews.id, waiting.reviewId)),
+    );
+    expect(item).toMatchObject({ decision: "withdrawn", resolvedBy: "rule:spreadsheets" });
+    // Given again later: a fresh item.
+    const again = await apply({ path: "Again.xlsx" });
+    expect(again.outcomes.find((o) => !o.applied)).toMatchObject({ reason: "new-value" });
   });
 });

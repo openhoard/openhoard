@@ -28,9 +28,15 @@ import { lockObject, lockTagValue } from "./locks.js";
  *
  * A tag with an open review item waits for that item, whoever proposes it again, with one
  * exception: a trusted source (rule, pack, person) proposing an approved value that waits only
- * because a model proposed it applies it, and closes the model's item as approved by the
- * proposer. Likewise a trusted source proposing a tag the object carries as an unreviewed model
- * tag takes it over, so grants match it from then on.
+ * because a model proposed it applies it. A person's proposal also closes the model's item, as
+ * approved by that person; a rule's or pack's leaves it open, since the rule may stop giving the
+ * tag (the file moves) while the model's guess still stands and still tightens visibility.
+ *
+ * Likewise a trusted source proposing a tag the object carries as an unreviewed model tag takes
+ * it over, so grants match it from then on. A rule or pack keeps the model's provenance on the
+ * tag, and when the rule stops giving it (rules.ts applyRuleTags) it goes back to being the
+ * model's unreviewed tag instead of disappearing. A person proposing a tag the object carries
+ * from any other source makes it theirs: it stays when rules change.
  *
  * Levels and grants can be added to a value after a model tagged objects with it, so the check
  * above can't be the only guard: decisions read tags through tagsForDecisions(), where an
@@ -106,7 +112,6 @@ export async function proposeTag(
   const { facet, value } = splitTag(proposal.tag);
   checkProposal(proposal, facet, value);
   const minConfidence = options.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
-  const now = options.now ?? new Date();
   const trusted = proposal.source !== "model";
   const appliedBy = proposal.appliedBy ?? null;
   await lockObject(tx, tenantId, proposal.objectId);
@@ -130,16 +135,42 @@ export async function proposeTag(
     eq(objectTags.value, value),
   );
   const [already] = await tx
-    .select({ source: objectTags.source, reviewed: objectTags.reviewed })
+    .select({
+      source: objectTags.source,
+      reviewed: objectTags.reviewed,
+      appliedBy: objectTags.appliedBy,
+      confidence: objectTags.confidence,
+    })
     .from(objectTags)
     .where(tagKey);
   if (already) {
-    // A trusted source vouches for a model's unreviewed guess: from now on the tag is the
-    // trusted source's, and grants match it.
-    if (trusted && already.source === "model" && !already.reviewed) {
+    const person = proposal.source === "user";
+    if (person && already.source !== "user") {
+      // A person decides this object carries the tag: it is theirs from now on, whatever gave
+      // it first, and no rule change takes it off. A model's item for it is settled too.
       await tx
         .update(objectTags)
-        .set({ source: proposal.source, appliedBy, confidence: proposal.confidence })
+        .set({
+          source: "user",
+          appliedBy,
+          confidence: 1,
+          modelAppliedBy: null,
+          modelConfidence: null,
+        })
+        .where(tagKey);
+      await settleModelItem(tx, tenantId, proposal, facet, value);
+    } else if (trusted && already.source === "model" && !already.reviewed) {
+      // A rule or pack vouches for a model's unreviewed guess: grants match the tag from now
+      // on, and the model's guess is kept, for when the rule stops giving it.
+      await tx
+        .update(objectTags)
+        .set({
+          source: proposal.source,
+          appliedBy,
+          confidence: proposal.confidence,
+          modelAppliedBy: already.appliedBy,
+          modelConfidence: already.confidence,
+        })
         .where(tagKey);
     }
     // Already on the object: nothing to decide, and never a review item for a settled tag.
@@ -161,8 +192,9 @@ export async function proposeTag(
   if (!known?.approved) reason = "new-value";
   else if (proposal.source === "model") {
     const levels = known.visibility !== null || known.exposure !== null;
-    if (levels || (await hasLiveGrant(tx, tenantId, facet, value, now))) reason = "sensitive";
-    else if (proposal.confidence < minConfidence) reason = "low-confidence";
+    if (levels || (await hasLiveGrant(tx, tenantId, facet, value, options.now))) {
+      reason = "sensitive";
+    } else if (proposal.confidence < minConfidence) reason = "low-confidence";
   }
 
   if (reason === undefined) {
@@ -175,10 +207,12 @@ export async function proposeTag(
       appliedBy,
       confidence: proposal.confidence,
     });
-    if (open) {
+    // Only a person settles the model's item; a rule's or pack's tag leaves it for a person
+    // (see above). Nothing automated records a sensitive tag as approved.
+    if (open && proposal.source === "user") {
       await resolve(tx, tenantId, [open.id], {
         decision: "approved",
-        resolvedBy: appliedBy ?? `${proposal.source}:unknown`,
+        resolvedBy: appliedBy ?? "user:unknown",
       });
     }
     return { applied: true, tag: proposal.tag };
@@ -205,6 +239,22 @@ export async function proposeTag(
     confidence: proposal.confidence,
   });
   return { applied: false, reviewId, reason };
+}
+
+/** Closes a model's open item for this tag (not a new value) as approved by a person. */
+async function settleModelItem(
+  tx: Tx,
+  tenantId: string,
+  proposal: TagProposal,
+  facet: string,
+  value: string,
+) {
+  const [open] = await openItemFor(tx, tenantId, proposal.objectId, facet, value);
+  if (open?.source !== "model" || open.reason === "new-value") return;
+  await resolve(tx, tenantId, [open.id], {
+    decision: "approved",
+    resolvedBy: proposal.appliedBy ?? "user:unknown",
+  });
 }
 
 /** The checks core/db's constraints make, as TagErrors raised before any write. */
@@ -429,6 +479,15 @@ function openItemFor(tx: Tx, tenantId: string, objectId: string, facet: string, 
 }
 
 async function applyReviewed(tx: Tx, tenantId: string, item: ReviewRow, value: string) {
+  // A person decided a model's or person's item: its provenance replaces a rule's or pack's on
+  // the tag, so it no longer follows the rule. A reviewed rule or pack item stays theirs (and a
+  // rule's tag does follow the rule), and a person's own tag is never handed to a rule.
+  const takesOver = item.source === "model" || item.source === "user";
+  const ruled = sql`${objectTags.source} in ('rule', 'pack')`;
+  const pick = <T>(
+    mine: T,
+    column: typeof objectTags.source | typeof objectTags.appliedBy | typeof objectTags.confidence,
+  ) => (takesOver ? sql`case when ${ruled} then ${mine} else ${column} end` : column);
   await tx
     .insert(objectTags)
     .values({
@@ -443,7 +502,13 @@ async function applyReviewed(tx: Tx, tenantId: string, item: ReviewRow, value: s
     })
     .onConflictDoUpdate({
       target: [objectTags.tenantId, objectTags.objectId, objectTags.facet, objectTags.value],
-      set: { reviewed: true },
+      set: {
+        source: pick(item.source, objectTags.source),
+        appliedBy: pick(item.appliedBy, objectTags.appliedBy),
+        confidence: pick(item.confidence, objectTags.confidence),
+        reviewed: true,
+        ...(takesOver ? { modelAppliedBy: null, modelConfidence: null } : {}),
+      },
     });
 }
 
@@ -483,8 +548,18 @@ async function findValue(tx: Tx, tenantId: string, facet: string, value: string)
   return row;
 }
 
-/** Whether any grant names this tag that is live at `at` or will be (not revoked or expired by then). */
-async function hasLiveGrant(tx: Tx, tenantId: string, facet: string, value: string, at: Date) {
+/**
+ * Whether any grant names this tag that is live at `at` (the database's now() by default, the
+ * clock grants are enforced by) or will be: not revoked or expired by then.
+ */
+async function hasLiveGrant(
+  tx: Tx,
+  tenantId: string,
+  facet: string,
+  value: string,
+  at: Date | undefined,
+) {
+  const moment = at ?? sql`now()`;
   const [row] = await tx
     .select({ id: grants.id })
     .from(grants)
@@ -493,8 +568,8 @@ async function hasLiveGrant(tx: Tx, tenantId: string, facet: string, value: stri
         eq(grants.tenantId, tenantId),
         eq(grants.facet, facet),
         eq(grants.value, value),
-        or(isNull(grants.revokedAt), gt(grants.revokedAt, at)),
-        or(isNull(grants.expiresAt), gt(grants.expiresAt, at)),
+        or(isNull(grants.revokedAt), gt(grants.revokedAt, moment)),
+        or(isNull(grants.expiresAt), gt(grants.expiresAt, moment)),
       ),
     )
     .limit(1);

@@ -182,6 +182,10 @@ describe("ingest", () => {
     const r = await item("a", "x");
     await item("a", "y", { ownerId: `user:${newId("user")}` });
     expect((await objectRow(r.objectId))?.ownerId).toBe(owner);
+    // A connector may still pass an owner recorded in an older form; an existing object's owner
+    // isn't read, so it isn't refused either.
+    await item("a", "z", { ownerId: "user:owner-1" });
+    expect((await objectRow(r.objectId))?.ownerId).toBe(owner);
     const other = newId("zone");
     await inTenant((tx) =>
       tx.insert(zones).values({ tenantId: t.tenantId, id: other, kind: "indexed", name: "Other" }),

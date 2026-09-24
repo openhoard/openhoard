@@ -50,7 +50,7 @@ export function clampWords(text: string, max = MAX_SUMMARY_WORDS): string {
  * Removes characters that let untrusted text hide or disguise itself (security review #4):
  * - `\p{Cc}` control characters (NUL, BEL, ESC…);
  * - `\p{Cf}` format characters: zero-width spaces/joiners used to hide injected instructions,
- *   bidi overrides such as U+202E used to disguise names (`invoice‮fdp.exe`), and the Unicode
+ *   bidi overrides such as U+202E used to disguise names (`invoice\u202efdp.exe`), and the Unicode
  *   "tag" block (U+E0000–E007F) used to smuggle invisible ASCII;
  * - `\p{Cs}` lone surrogates: malformed UTF-16 that some databases and JSON consumers reject;
  * - `\p{Co}` private-use characters, which render as whatever a font decides, or not at all;
@@ -68,10 +68,10 @@ export function stripUnsafeText(s: string): string {
   return s
     .replace(
       // eslint-disable-next-line no-misleading-character-class -- each invisible code point is matched on its own, on purpose
-      /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}͏ᅟᅠ឴឵⠀ㅤﾠ\u{e0100}-\u{e01ef}]/gu,
+      /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\u034f\u115f\u1160\u17b4\u17b5\u2800\u3164\uffa0\u{e0100}-\u{e01ef}]/gu,
       " ",
     )
-    .replace(/[︀-️]+/gu, (run, at: number, all: string) =>
+    .replace(/[\ufe00-\ufe0f]+/gu, (run, at: number, all: string) =>
       at === 0 || /\s/.test(all[at - 1] ?? "") ? "" : run.slice(0, 1),
     )
     .replace(/\s+/g, " ")

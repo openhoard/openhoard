@@ -19,7 +19,7 @@ import {
 import { Authorizer, createCedarEngine, type AuthzPrincipal } from "@openhoard/core-policy";
 import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { ingest } from "./ingest.js";
+import { ingest, removeFromSource } from "./ingest.js";
 import { proposeTag } from "./tagging.js";
 import {
   explainLevels,
@@ -668,5 +668,31 @@ describe.runIf(process.env[TEST_POSTGRES_ENV])("under concurrency (PostgreSQL)",
     await rename.renamed;
     rename.release();
     await rename.committed;
+  });
+
+  it("takes the object's lock before its row when a source removes it, so marking can't deadlock", async () => {
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let signal = () => {};
+    const removed = new Promise<void>((r) => (signal = r));
+    const remover = inTenant(async (tx) => {
+      const id = await removeFromSource(tx, t.tenantId, "sharepoint", t.externalId);
+      signal();
+      await held;
+      const tagged = await proposeTag(tx, t.tenantId, {
+        objectId: t.objectId,
+        tag: "kind:report",
+        source: "user",
+        appliedBy: "user:owner-1",
+        confidence: 1,
+      });
+      return { id, tagged };
+    });
+    await removed;
+    const marking = processed(SEEDED_TITLE);
+    await someoneWaits();
+    release();
+    expect(await remover).toMatchObject({ id: t.objectId, tagged: { applied: true } });
+    await marking;
   });
 });

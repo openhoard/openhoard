@@ -19,6 +19,9 @@ Every access decision and every AI read leaves an event in its tenant's **hash c
       with SQLSTATE 40001, like any serialization failure: run the transaction again
       (`isRetryable()` from core/db). The chain never forks. REPEATABLE READ is refused: the
       same race would surface as a unique violation.
+    - A long SERIALIZABLE transaction on a busy tenant can lose that race on every retry: any
+      append committed after it started is a conflict. Keep such transactions short, or record
+      their event in a READ COMMITTED transaction of its own once they commit.
     - The record is checked at run time: the actor is a principal (`user:…`), the action a
       lower-case name, the decision `allow` or `deny`, client, object and version non-empty
       text, and the detail an object of strings, finite numbers and booleans. Text the

@@ -1,5 +1,5 @@
-import { objectTags, tagOf, type Tx } from "@openhoard/core-db";
-import { and, eq, or } from "drizzle-orm";
+import { objectTags, tagOf, tagReviews, type Tx } from "@openhoard/core-db";
+import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { lockObject } from "./locks.js";
 import { proposeTag, type TagOutcome } from "./tagging.js";
 
@@ -82,6 +82,13 @@ export interface RuleTagSync {
   outcomes: (TagOutcome & { rule: string })[];
   /** Rule tags the object had that no rule gives any more, taken off; sorted. */
   removed: string[];
+  /**
+   * Rule tags no rule gives any more that a model had proposed first: not taken off, but the
+   * model's unreviewed tags again, so they still tighten visibility and no longer grant; sorted.
+   */
+  reverted: string[];
+  /** The rules' open review items for tags no rule gives any more, closed as withdrawn. */
+  withdrawn: string[];
 }
 
 /**
@@ -89,8 +96,10 @@ export interface RuleTagSync {
  * applied through proposeTag(), as source `rule`; values that aren't approved vocabulary go to
  * the review inbox like anyone else's. Rule tags the object carries that no rule gives any more
  * (the file moved from Clients/Acme/ to HR/, say) are taken off, and with them the grants they
- * carried. Tags from other sources (people, packs, models) are left alone, even when a rule
- * once gave the same tag too.
+ * carried, even when a person approved the value the rule proposed. Tags from other sources
+ * (people, packs, models) are left alone, and so is a model's guess a rule took over: it goes
+ * back to being the model's unreviewed tag, since taking it off could loosen visibility that no
+ * person decided to loosen. A rule's open review item for a tag no rule gives is withdrawn.
  *
  * Pass the object's complete rule set and current input: an empty rule list takes every rule
  * tag off.
@@ -117,7 +126,11 @@ export async function applyRuleTags(
   }
   const wanted = new Set(matched.map((m) => m.tag));
   const current = await tx
-    .select({ facet: objectTags.facet, value: objectTags.value })
+    .select({
+      facet: objectTags.facet,
+      value: objectTags.value,
+      model: isNotNull(objectTags.modelConfidence).mapWith(Boolean),
+    })
     .from(objectTags)
     .where(
       and(
@@ -127,21 +140,59 @@ export async function applyRuleTags(
       ),
     );
   const stale = current.filter((r) => !wanted.has(tagOf(r.facet, r.value)));
-  if (stale.length > 0) {
+  const staleTags = (rows: typeof stale) =>
+    and(
+      eq(objectTags.tenantId, tenantId),
+      eq(objectTags.objectId, objectId),
+      eq(objectTags.source, "rule"),
+      or(...rows.map((r) => and(eq(objectTags.facet, r.facet), eq(objectTags.value, r.value)))),
+    );
+  const removed = stale.filter((r) => !r.model);
+  const reverted = stale.filter((r) => r.model);
+  if (removed.length > 0) await tx.delete(objectTags).where(staleTags(removed));
+  if (reverted.length > 0) {
     await tx
-      .delete(objectTags)
-      .where(
-        and(
-          eq(objectTags.tenantId, tenantId),
-          eq(objectTags.objectId, objectId),
-          eq(objectTags.source, "rule"),
-          or(
-            ...stale.map((r) => and(eq(objectTags.facet, r.facet), eq(objectTags.value, r.value))),
-          ),
-        ),
-      );
+      .update(objectTags)
+      .set({
+        source: "model",
+        appliedBy: sql`${objectTags.modelAppliedBy}`,
+        confidence: sql`${objectTags.modelConfidence}`,
+        reviewed: false,
+        modelAppliedBy: null,
+        modelConfidence: null,
+      })
+      .where(staleTags(reverted));
   }
-  return { outcomes, removed: stale.map((r) => tagOf(r.facet, r.value)).sort() };
+  // Under the object's lock, so no decision on these items runs meanwhile (each takes it).
+  const withdrawn = await tx
+    .update(tagReviews)
+    .set({
+      decision: "withdrawn",
+      resolvedBy: sql`coalesce(${tagReviews.appliedBy}, 'rule:unknown')`,
+      resolvedAt: sql`greatest(now(), ${tagReviews.createdAt})`,
+    })
+    .where(
+      and(
+        eq(tagReviews.tenantId, tenantId),
+        eq(tagReviews.objectId, objectId),
+        eq(tagReviews.source, "rule"),
+        isNull(tagReviews.resolvedAt),
+        wanted.size === 0
+          ? undefined
+          : sql`(${tagReviews.facet} || ':' || ${tagReviews.value}) not in (${sql.join(
+              [...wanted].map((t) => sql`${t}`),
+              sql`, `,
+            )})`,
+      ),
+    )
+    .returning({ id: tagReviews.id });
+  const tags = (rows: typeof stale) => rows.map((r) => tagOf(r.facet, r.value)).sort();
+  return {
+    outcomes,
+    removed: tags(removed),
+    reverted: tags(reverted),
+    withdrawn: withdrawn.map((w) => w.id).sort(),
+  };
 }
 
 /** Checks rules loaded from a pack or an admin; returns what is wrong, empty when fine. */
