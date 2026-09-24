@@ -96,6 +96,11 @@ describe("decideRead", () => {
     expect(decideRead({ ...base, canRead: false }).shape).toBe("card");
   });
 
+  it("shows non-readers nothing for a visibility it doesn't know (bad data)", () => {
+    const bad = "public" as unknown as "readable";
+    expect(decideRead({ ...base, canRead: false, visibility: bad }).shape).toBe("none");
+  });
+
   it("readers get cards unless they ask for content", () => {
     expect(decideRead({ ...base, canRead: true, wantsContent: false }).shape).toBe("card");
     expect(decideRead({ ...base, canRead: true }).shape).toBe("content");

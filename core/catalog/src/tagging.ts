@@ -149,8 +149,9 @@ export async function proposeTag(
 /**
  * An object's tags for access decisions (authorize(), search filters).
  *
- * - `levels`: every tag. Visibility and exposure resolve most-restrictive-wins, so a tag can only
- *   tighten them, and an unreviewed guess that tightens is the safe way to be wrong.
+ * - `levels`: every tag. For visibility and exposure use visibility.ts levelsFor(), which lets
+ *   an unreviewed model tag tighten them but never loosen them past what trusted tags and the
+ *   tenant default say.
  * - `grantable`: the tags grants may match. An unreviewed model tag is left out: a grant widens
  *   access, and only a person or a trusted source may decide an object carries it.
  */

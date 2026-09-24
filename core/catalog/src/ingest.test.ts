@@ -122,10 +122,26 @@ describe("ingest", () => {
       seq: 1,
       created: { object: false, version: false, blob: false },
       restored: false,
+      renamed: true,
     });
     expect((await objectRow(first.objectId))?.title).toBe("Plan (final).docx");
     expect((await refRow("a"))?.etag).toBe("e2");
     expect(await versionsOf(first.objectId)).toHaveLength(1);
+  });
+
+  it("sends a renamed object back through enrichment, and only a renamed one", async () => {
+    const r = await item("a", "v1");
+    const processedAt = async () => (await versionsOf(r.objectId))[0]?.processedAt ?? null;
+    await inTenant((tx) =>
+      tx.update(versions).set({ processedAt: new Date() }).where(eq(versions.id, r.versionId)),
+    );
+    expect(await item("a", "v1", { etag: "e9" })).toMatchObject({ renamed: false });
+    expect(await processedAt()).toBeInstanceOf(Date);
+    expect(await item("a", "v1", { title: "Termination - J Smith.docx" })).toMatchObject({
+      renamed: true,
+      created: { version: false },
+    });
+    expect(await processedAt()).toBeNull();
   });
 
   it("adds a version when the content changes, and numbers versions in order", async () => {

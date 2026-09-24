@@ -33,3 +33,18 @@ export {
   type IngestResult,
   type SourceItemState,
 } from "./ingest.js";
+export {
+  GENERIC_TITLE,
+  levelsFor,
+  markProcessed,
+  nonReaderTitle,
+  proposeDisplayTitle,
+  setDisplayTitle,
+  VIEW_TRANSACTION,
+  viewObjects,
+  type CardView,
+  type ObjectLevels,
+  type ObjectView,
+  type TitleOnlyView,
+  type ViewRequest,
+} from "./visibility.js";

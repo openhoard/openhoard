@@ -8,6 +8,8 @@ Part of the OpenHoard trusted core. See [../README.md](../README.md) and
 - [`ingest.ts`](src/ingest.ts): recording source items, their versions and blobs (T-204).
 - [`rank.ts`](src/rank.ts): reciprocal rank fusion for hybrid search.
 - [`tagging.ts`](src/tagging.ts): applying tags and the review inbox (T-406).
+- [`visibility.ts`](src/visibility.ts): visibility levels, display titles and what non-readers
+  see (T-603).
 - [`rules.ts`](src/rules.ts): the rule tagger (T-403), deterministic tags from path, site,
   file type and a client dictionary, applied before any model sees a file.
 
@@ -44,6 +46,44 @@ connector can report it and go on. Connectors should:
 
 Ingests of one source item are serialized with an advisory lock, so an item that arrives twice
 at once still becomes one object.
+
+## Visibility
+
+What someone who can't read a file learns about it:
+
+| Visibility   | A non-reader gets                                                     |
+| ------------ | --------------------------------------------------------------------- |
+| hidden       | nothing: the file doesn't appear to exist                             |
+| discoverable | a title-only card: display title, type, owner, public tags, "request" |
+| readable     | the card, never the content                                           |
+
+`levelsFor()` resolves an object's levels:
+
+- **Trusted tags decide.** Tags from rules, packs, people and reviewed model tags, on approved
+  values, resolve most-restrictive-wins. With none, the tenant default applies, which is
+  `hidden` and `metadata-only` until an admin or a pack changes it.
+- **Everything else can only tighten.** Unreviewed model tags, model tags waiting in review and
+  unapproved values count only when they are stricter. A model saying a file is sensitive hides
+  it at once. A model saying it is public changes nothing until a person agrees.
+- **Unprocessed objects are hidden.** Until enrichment finishes the current version
+  (`markProcessed()`), an object is `hidden` and `metadata-only`. A new version or a rename
+  starts it over.
+
+`viewObjects()` returns what a caller may see of a list of objects, in order, leaving out
+hidden, deleted and unknown ones alike. Only active tenant members discover files. Guests and
+deprovisioned users see what they can read and nothing else. Run it in one snapshot:
+`db.withTenant(tenant, work, VIEW_TRANSACTION)`.
+
+**Display titles.** A title can be sensitive on its own ("Termination – J. Smith.docx"). A model
+proposes a neutral display title with `proposeDisplayTitle()`, and the owner confirms, edits or
+clears it with `setDisplayTitle()`. Non-readers see:
+
+- the owner's display title, or the real title if the owner cleared it;
+- `Document` while a model's proposal waits, because model output never reaches non-readers
+  unconfirmed;
+- the real title when nobody has flagged it.
+
+A rename lets models propose again, even over the owner's earlier decision.
 
 ## Tagging
 

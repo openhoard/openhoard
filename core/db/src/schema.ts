@@ -39,6 +39,7 @@ import { idPattern, type IdKind } from "./ids.js";
  */
 
 const createdAt = () => timestamp("created_at", { withTimezone: true }).notNull().defaultNow();
+const quoted = (values: readonly string[]) => values.map((v) => `'${v}'`).join(", ");
 const idCheck = (name: string, column: string, kind: IdKind) =>
   check(name, sql.raw(`${column} ~ '${idPattern(kind)}'`));
 
@@ -48,11 +49,24 @@ export const tenants = pgTable(
   {
     id: text("id").primaryKey(),
     name: text("name").notNull(),
+    /**
+     * Levels for a processed object none of whose tags sets one (core/policy resolveLevels).
+     * Fail-closed until an admin or a pack says otherwise.
+     */
+    defaultVisibility: text("default_visibility", { enum: VISIBILITY }).notNull().default("hidden"),
+    defaultExposure: text("default_exposure", { enum: EXPOSURE })
+      .notNull()
+      .default("metadata-only"),
     createdAt: createdAt(),
   },
   () => [
     idCheck("tenants_id_format", "id", "tenant"),
     check("tenants_name_length", sql`char_length(name) between 1 and 200`),
+    check(
+      "tenants_default_visibility_valid",
+      sql.raw(`default_visibility in (${quoted(VISIBILITY)})`),
+    ),
+    check("tenants_default_exposure_valid", sql.raw(`default_exposure in (${quoted(EXPOSURE)})`)),
   ],
 );
 
@@ -117,6 +131,19 @@ export const objects = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     /** Set when the source deletes the file; rows are kept for audit and undo. */
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    /**
+     * What people who can't read the object see instead of its title, when the title itself is
+     * sensitive ("Termination – J. Smith.docx" → "HR document"). A model proposes it, the owner
+     * confirms, edits or clears it (T-603).
+     */
+    displayTitle: text("display_title"),
+    /**
+     * Who decided on the display title: `model:…` for a proposal, `user:…` once a person
+     * confirmed, edited or cleared it (a null display title then means the real one is fine).
+     */
+    displayTitleBy: text("display_title_by"),
+    /** The title that decision was made for. After a rename it is stale and models may propose again. */
+    displayTitleFor: text("display_title_for"),
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.id] }),
@@ -129,6 +156,22 @@ export const objects = pgTable(
     idCheck("objects_id_format", "id", "object"),
     check("objects_title_length", sql`char_length(title) between 1 and 1024`),
     check("objects_owner_principal", sql`owner_id ~ '^[a-z]+:.+$'`),
+    check(
+      "objects_display_title_length",
+      sql`display_title is null or char_length(display_title) between 1 and 1024`,
+    ),
+    check(
+      "objects_display_title_by",
+      sql`display_title_by is null or display_title_by ~ '^(user|model):.+$'`,
+    ),
+    check(
+      "objects_display_title_has_author",
+      sql`display_title is null or display_title_by is not null`,
+    ),
+    check(
+      "objects_display_title_decision",
+      sql`(display_title_by is null) = (display_title_for is null)`,
+    ),
   ],
 );
 
@@ -148,6 +191,11 @@ export const versions = pgTable(
     authorId: text("author_id"),
     /** The source's own version marker (e.g. a SharePoint cTag), to skip unchanged files. */
     sourceVersion: text("source_version"),
+    /**
+     * When enrichment finished tagging this content. Until then the object is treated as
+     * unprocessed (core/policy UNPROCESSED: hidden, metadata-only), whatever its tags say.
+     */
+    processedAt: timestamp("processed_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [
@@ -171,6 +219,10 @@ export const versions = pgTable(
       sql`mime ~ '^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$'`,
     ),
     check("versions_author_principal", sql`author_id is null or author_id ~ '^[a-z]+:.+$'`),
+    check(
+      "versions_processed_after_creation",
+      sql`processed_at is null or processed_at >= created_at`,
+    ),
   ],
 );
 
@@ -211,7 +263,6 @@ export const sourceRefs = pgTable(
  * inside a principal (`tag:client:acme`) and compare the same on every engine (spike S2).
  */
 
-const quoted = (values: readonly string[]) => values.map((v) => `'${v}'`).join(", ");
 const SLUG = "^[a-z0-9][a-z0-9._-]{0,127}$";
 
 /** A dimension of the vocabulary: client, project, sensitivity, department… */
@@ -223,6 +274,11 @@ export const facets = pgTable(
       .references(() => tenants.id),
     key: text("key").notNull(),
     label: text("label").notNull(),
+    /**
+     * Whether this facet's tags may be shown to people who can't read an object, on its
+     * title-only card (e.g. `department`, `kind`; never `client`).
+     */
+    public: boolean("public").notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [

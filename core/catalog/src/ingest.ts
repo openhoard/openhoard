@@ -21,6 +21,8 @@ import { lockObject, lockSourceItem } from "./locks.js";
  * - An item seen again with the same content and media type adds no version; only its source
  *   reference (eTag, URL, sync time), the version's source marker and the object's title are
  *   refreshed. An item seen without a media type keeps the one it had.
+ * - A new version, or a rename, leaves the object unprocessed until enrichment finishes again
+ *   (core/catalog visibility.ts: hidden from non-readers meanwhile).
  * - Re-ingesting an item that removeFromSource() marked deleted restores it.
  * - An item keeps its zone and owner: a crawl can't move an object to another zone or give it
  *   to someone else. Ownership changes go through the API (M2 offboarding).
@@ -80,6 +82,11 @@ export interface IngestResult {
   created: { object: boolean; version: boolean; blob: boolean };
   /** True when the item had been removed from its source and has come back. */
   restored: boolean;
+  /**
+   * True when the title changed. Like a new version, a rename needs enrichment again: the
+   * current version is unprocessed until it finishes (T-603).
+   */
+  renamed: boolean;
 }
 
 export type IngestErrorCode =
@@ -150,6 +157,7 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
       ...version,
       created: { object: true, version: true, blob: blobCreated },
       restored: false,
+      renamed: false,
     };
   }
 
@@ -186,12 +194,20 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
   const blobCreated = await ensureBlob(tx, tenantId, content);
   const unchanged = latest?.blobId === content.blobId && latest.mime === mime;
   let version;
+  const renamed = object.title !== input.title;
   if (unchanged) {
     version = { versionId: latest.id, seq: latest.seq };
-    if (input.sourceVersion !== undefined && input.sourceVersion !== latest.sourceVersion) {
+    const marker =
+      input.sourceVersion !== undefined && input.sourceVersion !== latest.sourceVersion;
+    // Title rules and the display title depend on the title: a rename starts enrichment over,
+    // and until it finishes the object is unprocessed (hidden from non-readers).
+    if (marker || renamed) {
       await tx
         .update(versions)
-        .set({ sourceVersion: input.sourceVersion })
+        .set({
+          ...(marker ? { sourceVersion: input.sourceVersion } : {}),
+          ...(renamed ? { processedAt: null } : {}),
+        })
         .where(and(eq(versions.tenantId, tenantId), eq(versions.id, latest.id)));
     }
   } else {
@@ -199,7 +215,7 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
   }
 
   const restored = object.deletedAt !== null;
-  if (!unchanged || restored || object.title !== input.title) {
+  if (!unchanged || restored || renamed) {
     await tx
       .update(objects)
       .set({ title: input.title, deletedAt: null, updatedAt: sql`now()` })
@@ -220,6 +236,7 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
     ...version,
     created: { object: false, version: !unchanged, blob: blobCreated },
     restored,
+    renamed,
   };
 }
 

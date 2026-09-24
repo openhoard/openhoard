@@ -35,7 +35,10 @@ export function decideRead(req: ReadRequest): ReadDecision {
       return { shape: "title-only", reason: "discoverable: title and request-access only" };
     // `readable` visibility is for tenant-public material: non-readers get the card (which
     // includes the summary) but never the file content.
-    return { shape: "card", reason: "readable visibility: card without content" };
+    if (req.visibility === "readable")
+      return { shape: "card", reason: "readable visibility: card without content" };
+    // Anything else (bad data from storage) shows nothing.
+    return { shape: "none", reason: "unknown visibility" };
   }
   if (!req.wantsContent) return { shape: "card", reason: "reader asked for a card" };
   if (req.clientTrust === undefined)
