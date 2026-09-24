@@ -1,6 +1,13 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { buildCard, clampWords, safeLink, stripUnsafeText, type FileCard } from "./card.js";
+import {
+  buildCard,
+  clampWords,
+  MAX_TAGS,
+  safeLink,
+  stripUnsafeText,
+  type FileCard,
+} from "./card.js";
 
 /*
  * Property-based tests: card building runs on untrusted model, connector and enricher output, so
@@ -9,13 +16,14 @@ import { buildCard, clampWords, safeLink, stripUnsafeText, type FileCard } from 
 
 const UNSAFE =
   // eslint-disable-next-line no-misleading-character-class -- each invisible code point is matched on its own, on purpose
-  /[\p{Cc}\p{Cf}\p{Cs}\u034f\u115f\u1160\u3164\uffa0\u{e0100}-\u{e01ef}]|[\ufe00-\ufe0f]{2,}/u;
+  /[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\u034f\u115f\u1160\u2800\u3164\uffa0\u{e0100}-\u{e01ef}]|[\ufe00-\ufe0f]{2,}/u;
 /** Any string, biased towards the characters attackers use: controls, bidi, zero-width, surrogates. */
 const hostileString = fc.string({
   unit: fc.oneof(
     fc.constantFrom("\u202e", "\u200b", "\u200d", "\u2066", "\ufeff", "\u0000", "\u001b", "\n"),
     fc.constantFrom("\u3164", "\u034f", "\ufe0f", "\ufe01", "\u{e0101}"),
     fc.constantFrom("\ud83d", "\ude00", "😀", "\u{e0041}"),
+    fc.constantFrom("\ue000", "\u{f0000}", "\u0378", "\u2800", "\uffff"),
     fc.string({ unit: "grapheme", maxLength: 1 }),
     fc.string({ unit: "binary", maxLength: 1 }),
   ),
@@ -23,14 +31,22 @@ const hostileString = fc.string({
 });
 
 const cardInput = fc.record<FileCard>({
-  id: fc.string(),
+  id: fc.stringMatching(/^[0-9a-hjkmnp-tv-z]{26}$/).map((s) => `obj_${s}`),
   title: hostileString,
-  tags: fc.array(fc.oneof(hostileString, fc.constantFrom("client:acme", "type:invoice")), {
-    maxLength: 40,
-  }),
+  tags: fc.array(
+    fc.oneof(hostileString, fc.constantFrom("client:acme", "type:invoice", " kind:a ")),
+    {
+      maxLength: 40,
+    },
+  ),
   summary: hostileString,
   owner: hostileString,
-  lastTouched: fc.string(),
+  lastTouched: fc.oneof(
+    fc.constant(""),
+    fc
+      .date({ min: new Date("1970-01-01"), max: new Date("9999-12-31"), noInvalidDate: true })
+      .map((d) => d.toISOString()),
+  ),
   link: fc.oneof(fc.webUrl(), hostileString, fc.constantFrom("javascript:alert(1)", "data:,x")),
 });
 
@@ -71,12 +87,20 @@ describe("clampWords (properties)", () => {
 });
 
 describe("safeLink (properties)", () => {
-  it("returns an http(s) URL or nothing", () => {
+  it("returns an https URL without credentials, or nothing", () => {
     fc.assert(
-      fc.property(fc.oneof(fc.webUrl(), hostileString), (s) => {
-        const out = safeLink(s);
-        return out === "" || /^https?:\/\//.test(out);
-      }),
+      fc.property(
+        fc.oneof(fc.webUrl({ authoritySettings: { withUserInfo: true } }), hostileString),
+        (s) => {
+          const out = safeLink(s);
+          return (
+            out === "" ||
+            (out.startsWith("https://") &&
+              new URL(out).username === "" &&
+              new URL(out).password === "")
+          );
+        },
+      ),
     );
   });
 });
@@ -93,10 +117,11 @@ describe("buildCard (properties)", () => {
         expect([...c.title].length).toBeLessThanOrEqual(200);
         expect([...c.owner].length).toBeLessThanOrEqual(200);
         expect(c.summary === "" || c.summary.split(" ").length <= 100).toBe(true);
-        expect(c.tags.length).toBeLessThanOrEqual(20);
+        expect(c.tags.length).toBeLessThanOrEqual(MAX_TAGS);
         expect(new Set(c.tags).size).toBe(c.tags.length);
-        for (const t of c.tags) expect(t).toMatch(/^[a-z][a-z0-9-]*:[^\s:]\S*$/);
-        expect(c.link === "" || /^https?:\/\//.test(c.link)).toBe(true);
+        for (const t of c.tags)
+          expect(t).toMatch(/^[a-z][a-z0-9-]{0,63}:[a-z0-9][a-z0-9._-]{0,127}$/);
+        expect(c.link === "" || /^https:\/\/[^@/]*\//.test(c.link)).toBe(true);
         expect(c.id).toBe(input.id);
       }),
     );

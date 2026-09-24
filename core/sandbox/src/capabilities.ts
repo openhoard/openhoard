@@ -18,15 +18,34 @@ export class PluginRejected extends Error {
 /**
  * Admits a plugin: the manifest must validate, and the admin's approval can only narrow
  * what the manifest declares, never widen it.
+ *
+ * The manifest is copied first (a JSON round trip, which drops getters, prototypes and anything
+ * JSON can't carry), and that copy is what is validated and returned, deeply frozen, so neither
+ * the caller mutating its object later nor a getter answering differently the second time can
+ * change what was admitted.
  */
 export function admitPlugin(manifest: unknown, approved: readonly string[]): InstalledPlugin {
-  const { ok, errors } = validatePluginManifest(manifest);
+  let copy: unknown;
+  try {
+    copy = JSON.parse(JSON.stringify(manifest)) as unknown;
+  } catch {
+    throw new PluginRejected(["a manifest must be plain JSON"]);
+  }
+  const { ok, errors } = validatePluginManifest(copy);
   if (!ok) throw new PluginRejected(errors);
-  const m = manifest as PluginManifest;
+  const m = deepFreeze(copy as PluginManifest);
   const declared = new Set<string>(m.capabilities);
   const extra = approved.filter((c) => !declared.has(c));
   if (extra.length) throw new PluginRejected(extra.map((c) => `approval of undeclared ${c}`));
-  return { manifest: m, approved: new Set(approved as Capability[]) };
+  return Object.freeze({ manifest: m, approved: new Set(approved as Capability[]) });
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null) {
+    for (const v of Object.values(value)) deepFreeze(v);
+    Object.freeze(value);
+  }
+  return value;
 }
 
 /** Runtime gate the core calls before handing anything to a plugin. Default deny. */

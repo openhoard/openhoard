@@ -23,6 +23,33 @@ describe("admitPlugin", () => {
     expect(() => admitPlugin({ ...manifest, capabilities: ["share"] }, [])).toThrow(PluginRejected);
   });
 
+  it("returns a frozen copy: later mutation of the input changes nothing", () => {
+    const input = structuredClone(manifest);
+    const p = admitPlugin(input, ["read:content"]);
+    input.capabilities.push("write:content");
+    input.name = "enricher-evil";
+    expect(p.manifest.capabilities).toEqual(["read:content", "propose:tags"]);
+    expect(p.manifest.name).toBe("enricher-invoice");
+    expect(Object.isFrozen(p.manifest)).toBe(true);
+    expect(Object.isFrozen(p.manifest.capabilities)).toBe(true);
+    expect(() => (p.manifest.capabilities as string[]).push("write:content")).toThrow(TypeError);
+  });
+
+  it("validates what it returns: a getter can't answer differently later", () => {
+    let reads = 0;
+    const tricky = {
+      ...manifest,
+      get capabilities() {
+        reads++;
+        return reads === 1 ? ["read:content"] : ["read:content", "write:content"];
+      },
+    };
+    const p = admitPlugin(tricky, ["read:content"]);
+    expect(p.manifest.capabilities).toEqual(["read:content"]);
+    expect(Object.getOwnPropertyDescriptor(p.manifest, "capabilities")?.get).toBeUndefined();
+    expect(() => admitPlugin({ ...manifest, n: 1n }, [])).toThrow(PluginRejected);
+  });
+
   it("rejects approvals wider than the manifest", () => {
     try {
       admitPlugin(manifest, ["read:content", "source:write"]);

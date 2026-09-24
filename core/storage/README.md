@@ -32,7 +32,15 @@ const stream = await blobs.open(tenantId, blobId, { offset: 0, length: 1024 });
   - Otherwise it is a copy, checked before the upload is deleted.
   - Otherwise it is a streamed copy, which removes what it wrote if it fails.
 - A failed upload removes its incoming file. `sweepIncoming()` clears what a crashed
-  process left behind.
+  process left behind, as far as the service lists it:
+  - On S3, a large upload is a multipart upload, and one a crash interrupts is not an object:
+    listing doesn't show it, so `sweepIncoming()` can't remove it, and its parts are billed
+    until aborted. Give the bucket a lifecycle rule with `AbortIncompleteMultipartUpload`
+    (for example after 1 day).
+  - On Azure Blob, uncommitted blocks aren't listed either; Azure discards them after 7 days.
+- On local disk, writes aren't fsynced before the rename. After a power loss a blob can be
+  torn (its final path holding short or zeroed bytes); `verify()` detects that, since the
+  bytes no longer match the id.
 - An existing blob of the wrong size is replaced rather than trusted.
 
 ## Reading

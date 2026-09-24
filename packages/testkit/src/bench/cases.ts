@@ -92,7 +92,8 @@ export function standardCases(options: { items?: number } = {}): BenchCase[] {
             bytes += r.value.byteLength;
           }
           buildCard({
-            id: f.id,
+            // Generated items' ids aren't object ids, which buildCard() requires.
+            id: "obj_00000000000000000000000000",
             title: f.name,
             tags: f.labels,
             summary: f.labels.join(" "),

@@ -23,7 +23,9 @@ invoice folders set the kind, and file extensions tag spreadsheets and presentat
 - `guests-no-hr-or-legal`: guests never reach HR or legal files, even with a grant, and even when
   only a model has guessed the department.
 - `consumer-ai-no-confidential`: consumer AI clients can't read or open confidential or restricted
-  files (no card, which carries the summary, and no content). They can still find them.
+  files (no card, which carries the summary, and no content). Both levels are hidden, and
+  listings check `read`, so through a consumer client these files don't appear at all: people
+  who can't read them see nothing anyway, and readers get no card either.
 
 `pack.json` carries policy and level tests. OpenHoard runs them before applying the pack, and an
 admin reviews the diff first.

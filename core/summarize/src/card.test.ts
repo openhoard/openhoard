@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCard,
+  CardError,
   clampWords,
+  isIsoDate,
+  MAX_TAGS,
   MAX_SUMMARY_WORDS,
   safeLink,
   stripUnsafeText,
@@ -32,7 +35,11 @@ describe("stripUnsafeText", () => {
 describe("safeLink", () => {
   it.each([
     ["https://example.test/o1", "https://example.test/o1"],
-    ["http://intranet.local/x", "http://intranet.local/x"],
+    ["http://intranet.local/x", ""],
+    ["https://user:pass@example.test/x", ""],
+    ["https://bank.example@evil.example/", ""],
+    ["https://:secret@example.test/", ""],
+    ["ftp://example.test/x", ""],
     ["javascript:alert(1)", ""],
     ["data:text/html,<script>", ""],
     ["file:///etc/passwd", ""],
@@ -44,7 +51,7 @@ describe("safeLink", () => {
 
 describe("buildCard", () => {
   const base = {
-    id: "o1",
+    id: "obj_01k5xr3c8v0q6m2d4n7p9s1t3w",
     title: "Q3 Forecast",
     tags: ["client:acme"],
     summary: "Revenue forecast for Q3.",
@@ -57,17 +64,57 @@ describe("buildCard", () => {
     const card = buildCard({
       ...base,
       title: "Q3\u0000 Forecast\u200b\n\n",
-      tags: ["client:acme", "client:acme", "Bad Tag", "type:deck", "nocolon", "type:\u202edeck"],
+      tags: [
+        "client:acme",
+        "client:acme",
+        "Bad Tag",
+        "type:deck",
+        "nocolon",
+        "type:\u202edeck",
+        "Type:Deck",
+        "type:has space",
+        "type:a:b",
+        `type:${"x".repeat(129)}`,
+        ` kind:report `,
+      ],
       summary: "Revenue   forecast\u0007 for Q3.",
     });
     expect(card.title).toBe("Q3 Forecast");
-    expect(card.tags).toEqual(["client:acme", "type:deck"]);
+    expect(card.tags).toEqual(["client:acme", "type:deck", "kind:report"]);
     expect(card.summary).toBe("Revenue forecast for Q3.");
     expect(card.link).toBe("https://example.test/o1");
   });
 
   it("drops unsafe links", () => {
     expect(buildCard({ ...base, link: "javascript:alert(document.cookie)" }).link).toBe("");
+  });
+
+  it("caps the number of tags", () => {
+    const tags = Array.from({ length: 50 }, (_, i) => `client:c${i}`);
+    expect(buildCard({ ...base, tags }).tags).toEqual(tags.slice(0, MAX_TAGS));
+  });
+
+  it.each([
+    "o1",
+    "obj_01K5XR3C8V0Q6M2D4N7P9S1T3W",
+    "ver_01k5xr3c8v0q6m2d4n7p9s1t3w",
+    "obj_01k5xr3c8v0q6m2d4n7p9s1t3i",
+  ])("refuses the id %s", (id) => {
+    expect(() => buildCard({ ...base, id })).toThrow(CardError);
+  });
+
+  it.each(["yesterday", "2026-02-30", "2026-09-23T12:00:00", "2026-09-23 12:00:00Z", "2026-13-01"])(
+    "refuses the date %s",
+    (lastTouched) => {
+      expect(() => buildCard({ ...base, lastTouched })).toThrow(CardError);
+    },
+  );
+
+  it("accepts ISO dates, date-times and an unknown date", () => {
+    for (const d of ["2026-09-24", "2026-09-24T12:00Z", "2024-02-29T23:59:59.123+05:30", ""]) {
+      expect(buildCard({ ...base, lastTouched: d }).lastTouched).toBe(d);
+    }
+    expect(isIsoDate("2025-02-29")).toBe(false);
   });
 
   it("never splits an emoji when capping the title", () => {
@@ -97,6 +144,10 @@ describe("stripUnsafeText and malformed or invisible Unicode", () => {
     expect(stripUnsafeText("tag \u{1f3f7}\ufe0f ok")).toBe("tag \u{1f3f7}\ufe0f ok");
     expect(stripUnsafeText("x\ufe0f\ufe01\ufe02\ufe0e")).toBe("x\ufe0f");
     expect(stripUnsafeText("\ufe0fstart and \ufe0f after space")).toBe("start and after space");
+  });
+
+  it("removes private-use, unassigned and blank Braille characters", () => {
+    expect(stripUnsafeText("a\ue000b\u{f0000}c\u0378d\u2800e\uffff")).toBe("a b c d e");
   });
 
   it("removes invisible tag characters used for ASCII smuggling", () => {

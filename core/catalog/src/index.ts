@@ -72,6 +72,8 @@ export {
   PackError,
   parsePack,
   planPack,
+  planPackRemoval,
+  removePack,
   runPackTests,
   tenantPolicies,
   tenantRules,

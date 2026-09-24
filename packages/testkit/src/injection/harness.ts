@@ -127,7 +127,8 @@ export const baselinePipeline: InjectionPipeline = {
       .map((p) => p.text)
       .join(" ");
     const card = buildCard({
-      id: "baseline",
+      // Any object id: buildCard() refuses anything else.
+      id: "obj_00000000000000000000000000",
       title: file.name,
       tags: [],
       summary: text,

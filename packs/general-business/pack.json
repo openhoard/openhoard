@@ -224,7 +224,7 @@
   ],
   "policies": {
     "guests-no-hr-or-legal": "// Guests never reach HR or legal files, whatever they were granted, and even\n// when only a model has guessed the department.\nforbid (principal, action, resource)\n  when {\n    principal.guest &&\n    (resource.allTags.contains(\"department:hr\") || resource.allTags.contains(\"department:legal\"))\n  };",
-    "consumer-ai-no-confidential": "// Consumer AI clients can't read or open confidential or restricted files: no card\n// (it carries the summary), no content. They can still find them.\nforbid (\n  principal,\n  action in [OpenHoard::Action::\"read\", OpenHoard::Action::\"open\"],\n  resource\n)\n  when {\n    context.client.trust == \"consumer\" &&\n    (resource.allTags.contains(\"sensitivity:confidential\") ||\n      resource.allTags.contains(\"sensitivity:restricted\"))\n  };"
+    "consumer-ai-no-confidential": "// Consumer AI clients can't read or open confidential or restricted files: no card\n// (it carries the summary) and no content. Both levels are hidden and listings check\n// read, so through a consumer client these files don't appear at all, even to readers.\nforbid (\n  principal,\n  action in [OpenHoard::Action::\"read\", OpenHoard::Action::\"open\"],\n  resource\n)\n  when {\n    context.client.trust == \"consumer\" &&\n    (resource.allTags.contains(\"sensitivity:confidential\") ||\n      resource.allTags.contains(\"sensitivity:restricted\"))\n  };"
   },
   "tests": {
     "policies": [
@@ -313,7 +313,7 @@
         "expect": "forbid"
       },
       {
-        "name": "a consumer AI client can still find it",
+        "name": "a consumer AI client's search query isn't forbidden (the results still list nothing: listings check read)",
         "action": "search",
         "principal": {
           "readGrants": ["client:acme"]
