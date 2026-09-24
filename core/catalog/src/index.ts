@@ -12,3 +12,13 @@ export {
   type TagProposal,
   type TagSource,
 } from "./tagging.js";
+export {
+  applyRuleTags,
+  evaluateRules,
+  globMatch,
+  validateRules,
+  type DictionaryRule,
+  type MatchRule,
+  type RuleInput,
+  type TagRule,
+} from "./rules.js";

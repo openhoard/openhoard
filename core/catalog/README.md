@@ -7,6 +7,8 @@ Part of the OpenHoard trusted core. See [../README.md](../README.md) and
   (`b3t:`, ADR-0013).
 - [`rank.ts`](src/rank.ts): reciprocal rank fusion for hybrid search.
 - [`tagging.ts`](src/tagging.ts): applying tags and the review inbox (T-406).
+- [`rules.ts`](src/rules.ts): the rule tagger (T-403), deterministic tags from path, site,
+  file type and a client dictionary, applied before any model sees a file.
 
 ## Tagging
 
@@ -35,3 +37,24 @@ Access decisions read tags through `tagsForDecisions()`:
   can only tighten them.
 - **Grants match only trusted or reviewed tags.** This holds even when a value gains levels or a
   grant after a model has used it.
+
+## Rules
+
+Packs and admins give rules as data. Check them with `validateRules()`:
+
+```json
+[
+  { "id": "finance-folder", "tag": "department:finance", "when": { "path": "Finance/**" } },
+  { "id": "spreadsheets", "tag": "kind:spreadsheet", "when": { "extension": ["xlsx", "csv"] } },
+  { "id": "clients", "facet": "client", "dictionary": { "acme": ["Acme", "Acme Corp"] } }
+]
+```
+
+- **Conditions:** a rule can test the path (a glob), the site, the file extension and the media
+  type. All of a rule's conditions must hold.
+- **Dictionaries:** a term matches as whole words in the title or in any one path segment, ignoring
+  case, over Unicode letters and digits.
+- **Speed:** matching never builds a regular expression from rule text, so a rule can't make
+  tagging slow.
+- **Applying:** `applyRuleTags()` applies the matches with source `rule`. Values that aren't in
+  the approved vocabulary go to review like anyone else's.
