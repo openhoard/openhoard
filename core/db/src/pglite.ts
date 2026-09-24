@@ -1,4 +1,12 @@
-import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import { PGlite, types } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
@@ -85,18 +93,18 @@ export async function openPglite(options: {
 export function lockDataDir(dataDir: string): () => void {
   const path = `${dataDir}.lock`;
   mkdirSync(dirname(path), { recursive: true });
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     let fd: number;
     try {
       fd = openSync(path, "wx");
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const pid = Number.parseInt(readFileSync(path, "utf8"), 10);
-      // No pid yet: another process created the file an instant ago and is still writing it.
-      const writing = !Number.isSafeInteger(pid) && Date.now() - statSync(path).mtimeMs < 5_000;
-      if (writing || isAlive(pid)) {
+      const holder = readLock(path);
+      if (holder === undefined) continue; // released in the meantime: try again
+      if (holder.live) {
+        const who = holder.pid === undefined ? "" : ` in process ${holder.pid}`;
         throw new Error(
-          `the embedded database in ${dataDir} is already open${writing ? "" : ` in process ${pid}`}; ` +
+          `the embedded database in ${dataDir} is already open${who}; ` +
             `only one process may open it at a time`,
           { cause: e },
         );
@@ -114,8 +122,29 @@ export function lockDataDir(dataDir: string): () => void {
   throw new Error(`could not lock the embedded database in ${dataDir}`);
 }
 
+/**
+ * Reads an existing lock through one file descriptor, so the pid and the age belong to the same
+ * file. Undefined when the lock is gone by the time we look.
+ */
+export function readLock(path: string): { pid?: number; live: boolean } | undefined {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw e;
+  }
+  try {
+    const pid = Number.parseInt(readFileSync(fd, "utf8"), 10);
+    if (Number.isSafeInteger(pid) && pid > 0) return { pid, live: isAlive(pid) };
+    // No pid yet: another process created the file an instant ago and is still writing it.
+    return { live: Date.now() - fstatSync(fd).mtimeMs < 5_000 };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function isAlive(pid: number): boolean {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;

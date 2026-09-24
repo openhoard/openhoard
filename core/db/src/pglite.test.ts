@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { lockDataDir } from "./pglite.js";
+import { lockDataDir, readLock } from "./pglite.js";
 
 describe("lockDataDir", () => {
   let dir: string;
@@ -28,6 +28,10 @@ describe("lockDataDir", () => {
     const release = lockDataDir(data);
     expect(readFileSync(`${data}.lock`, "utf8")).toBe(String(process.pid));
     release();
+  });
+
+  it("reports a lock that is already gone as free", () => {
+    expect(readLock(`${data}.lock`)).toBeUndefined();
   });
 
   it("waits out a lock that is still being written, then treats an old empty one as stale", () => {
