@@ -18,7 +18,7 @@ import type { ClientTrust } from "./levels.js";
 export const ACTIONS = ["search", "read", "open", "tag"] as const;
 export type Action = (typeof ACTIONS)[number];
 
-/** Who is asking, after SSO and SCIM resolved them (see core/identity `Subject`). */
+/** Who is asking, after sign-in resolved them: core/identity `resolvePrincipal()` builds it. */
 export interface AuthzPrincipal {
   userId: string;
   groupIds: readonly string[];
