@@ -239,6 +239,9 @@ importers:
       '@hono/node-server':
         specifier: ^2.1.1
         version: 2.1.1(hono@4.13.8)
+      '@openhoard/core-db':
+        specifier: workspace:^
+        version: link:../../core/db
       hono:
         specifier: ^4.8.0
         version: 4.13.8

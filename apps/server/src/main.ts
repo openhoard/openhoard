@@ -1,5 +1,6 @@
 import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
+import { openDatabase } from "@openhoard/core-db";
 import { createApp } from "./app.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
@@ -10,6 +11,17 @@ const dataDir = typeof values["data-dir"] === "string" ? values["data-dir"] : un
 const config = loadConfig(dataDir ? { ...process.env, OPENHOARD_DATA_DIR: dataDir } : process.env);
 const log = createLogger(config);
 ensureDataDir(config.dataDir);
+
+// Checks the server against the requirements (spike S2) and applies pending migrations. The
+// embedded default keeps its files in <dataDir>/pgdata; only one process may open them at a time.
+let db: Awaited<ReturnType<typeof openDatabase>>;
+try {
+  db = await openDatabase({ url: config.database.url, dataDir: config.dataDir });
+} catch (err) {
+  log.fatal({ err }, "cannot open the database");
+  process.exit(1);
+}
+log.info({ database: db.kind }, "database ready");
 
 const server = serve(
   { fetch: createApp(config, log).fetch, hostname: config.host, port: config.port },
@@ -32,7 +44,15 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
       log.warn("shutdown timed out; forcing exit");
       process.exit(1);
     }, SHUTDOWN_TIMEOUT_MS).unref();
-    server.close(() => process.exit(0));
+    server.close(() => {
+      db.close().then(
+        () => process.exit(0),
+        (err: unknown) => {
+          log.error({ err }, "closing the database failed");
+          process.exit(1);
+        },
+      );
+    });
     if ("closeIdleConnections" in server) server.closeIdleConnections();
   });
 }
