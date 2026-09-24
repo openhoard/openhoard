@@ -32,6 +32,15 @@ What this protects against, and what it doesn't:
   parameters, never `sql.raw()` with input. A separate runtime role with only DML rights is a
   planned hardening step.
 
+## Grants
+
+Access is granted as data (spike S3): a row in `grants` gives a user or a group read or write
+access to every object carrying a tag, or to one object. Grants expire after 90 days unless the
+caller sets another date, or asks for a permanent one explicitly. `loadGrants()` returns only
+live grants for a caller's principals (at a given moment), in the shape core/policy's
+`authorize()` takes, so an expired or revoked grant stops working at once, with no job to run.
+Revoking keeps the row for history.
+
 ## Server requirements
 
 `openDatabase()` refuses to start unless:

@@ -311,6 +311,73 @@ export const objectTags = pgTable(
   ],
 );
 
+/*
+ * Grants (T-602): who may read or write what, as data (spike S3). A grant gives a principal, a
+ * user or a group, access to every object carrying a tag, or to one object. Grants expire by
+ * default; the expiry is checked when grants are read, so an expired grant stops working the
+ * moment it expires, with no job to run. Revoking keeps the row, for "why could X see this?".
+ *
+ * History has two limits: a grant on an object goes when the object is hard-deleted (objects are
+ * normally soft-deleted), and a vocabulary value that was ever granted cannot be deleted, only
+ * merged into another (T-406), which carries its grants along.
+ */
+export const GRANT_ROLES = ["read", "write"] as const;
+
+export const grants = pgTable(
+  "grants",
+  {
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    id: text("id").notNull(),
+    /** `user:<id>` or `group:<id>`. */
+    principal: text("principal").notNull(),
+    role: text("role", { enum: GRANT_ROLES }).notNull(),
+    /** A tag grant names a facet and value; an object grant names an object. Exactly one. */
+    facet: text("facet"),
+    value: text("value"),
+    objectId: text("object_id"),
+    grantedBy: text("granted_by").notNull(),
+    createdAt: createdAt(),
+    /** Null only for a grant made permanent on purpose. */
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: text("revoked_by"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    foreignKey({
+      name: "grants_tag_fk",
+      columns: [t.tenantId, t.facet, t.value],
+      foreignColumns: [facetValues.tenantId, facetValues.facet, facetValues.value],
+    }),
+    foreignKey({
+      name: "grants_object_fk",
+      columns: [t.tenantId, t.objectId],
+      foreignColumns: [objects.tenantId, objects.id],
+    }).onDelete("cascade"),
+    // Loading a caller's grants: by principal, live ones first.
+    index("grants_principal_idx").on(t.tenantId, t.principal),
+    index("grants_object_idx").on(t.tenantId, t.objectId),
+    idCheck("grants_id_format", "id", "grant"),
+    check("grants_principal_format", sql`principal ~ '^(user|group):.+$'`),
+    check("grants_role_valid", sql.raw(`role in (${quoted(GRANT_ROLES)})`)),
+    check(
+      "grants_one_target",
+      sql`(facet is not null and value is not null and object_id is null)
+       or (facet is null and value is null and object_id is not null)`,
+    ),
+    check("grants_granted_by_principal", sql`granted_by ~ '^[a-z]+:.+$'`),
+    check("grants_expiry_after_creation", sql`expires_at is null or expires_at > created_at`),
+    check("grants_revoked_after_creation", sql`revoked_at is null or revoked_at >= created_at`),
+    check(
+      "grants_revocation_complete",
+      sql`(revoked_at is null and revoked_by is null)
+       or (revoked_at is not null and revoked_by is not null and revoked_by ~ '^[a-z]+:.+$')`,
+    ),
+  ],
+);
+
 /** The tag string policy and search use for a facet and value. */
 export const tagOf = (facet: string, value: string): string => `${facet}:${value}`;
 
@@ -366,4 +433,5 @@ export const tables = {
   facets,
   facetValues,
   objectTags,
+  grants,
 } as const;

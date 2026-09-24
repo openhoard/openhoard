@@ -19,6 +19,7 @@ export const ID_PREFIXES = {
   zone: "zon",
   object: "obj",
   version: "ver",
+  grant: "grt",
 } as const;
 export type IdKind = keyof typeof ID_PREFIXES;
 

@@ -8,6 +8,7 @@ import {
   blobs,
   facets,
   facetValues,
+  grants,
   objects,
   objectTags,
   sourceRefs,
@@ -62,6 +63,7 @@ const counts = (tenantId: string) =>
     facets: (await tx.select().from(facets)).length,
     facetValues: (await tx.select().from(facetValues)).length,
     objectTags: (await tx.select().from(objectTags)).length,
+    grants: (await tx.select().from(grants)).length,
   }));
 
 describe("catalog", () => {
@@ -163,6 +165,7 @@ describe("withTenant", () => {
       facets: 1,
       facetValues: 1,
       objectTags: 1,
+      grants: 1,
     };
     expect(await counts(a.tenantId)).toEqual(one);
     expect(await counts(b.tenantId)).toEqual(one);

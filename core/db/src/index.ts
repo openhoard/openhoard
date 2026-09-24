@@ -15,3 +15,12 @@ export {
 } from "./database.js";
 export { ID_PREFIXES, idPattern, isId, newId, type IdKind } from "./ids.js";
 export * from "./schema.js";
+export {
+  addGrant,
+  DEFAULT_GRANT_DAYS,
+  loadGrants,
+  revokeGrant,
+  type GrantInput,
+  type GrantRole,
+  type GrantSet,
+} from "./grants.js";

@@ -21,6 +21,7 @@ import {
   blobs,
   facets,
   facetValues,
+  grants,
   objects,
   sourceRefs,
   tenants,
@@ -225,6 +226,7 @@ describe("schema", () => {
     // Deliberate removal, children first, works.
     await inTenant(async (tx) => {
       await tx.delete(objects); // takes versions, source refs and tags with it
+      await tx.delete(grants);
       await tx.delete(facetValues);
       await tx.delete(facets);
       await tx.delete(blobs);
@@ -239,7 +241,7 @@ describe("schema", () => {
                    (select count(*) from blobs) + (select count(*) from objects) +
                    (select count(*) from versions) + (select count(*) from source_refs) +
                    (select count(*) from facets) + (select count(*) from facet_values) +
-                   (select count(*) from object_tags) as n`,
+                   (select count(*) from object_tags) + (select count(*) from grants) as n`,
       ),
     );
     expect(left).toEqual([{ n: "0" }]); // raw int8 is a string (see above)

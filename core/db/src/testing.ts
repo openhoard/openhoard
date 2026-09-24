@@ -5,6 +5,7 @@ import {
   blobs,
   facets,
   facetValues,
+  grants,
   objects,
   objectTags,
   sourceRefs,
@@ -75,7 +76,8 @@ export interface SeededTenant {
 
 /**
  * Creates a tenant with one row in every table: a zone, a blob, an object with one version, the
- * object's source reference, and one tag on it from a one-value vocabulary. `n` makes names and hashes distinct between seeded tenants.
+ * object's source reference, one tag on it from a one-value vocabulary, and a permanent read
+ * grant on that tag to `group:readers-<n>`. `n` makes names and hashes distinct between seeded tenants.
  */
 export async function seedTenant(db: Database, n = 0): Promise<SeededTenant> {
   const s: SeededTenant = {
@@ -131,6 +133,16 @@ export async function seedTenant(db: Database, n = 0): Promise<SeededTenant> {
       source: "rule",
       appliedBy: "rule:client-dictionary",
       confidence: 1,
+    });
+    await tx.insert(grants).values({
+      tenantId: s.tenantId,
+      id: newId("grant"),
+      principal: `group:readers-${n}`,
+      role: "read",
+      facet: "client",
+      value: `acme-${n}`,
+      grantedBy: `user:owner-${n}`,
+      expiresAt: null,
     });
   });
   return s;
