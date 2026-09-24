@@ -17,7 +17,16 @@ import { PGlite } from "@electric-sql/pglite";
 import { checkServer, DatabaseCheckError } from "./checks.js";
 import { newId } from "./ids.js";
 import { migrationsFolder } from "./migrations.js";
-import { blobs, objects, sourceRefs, tenants, versions, zones } from "./schema.js";
+import {
+  blobs,
+  facets,
+  facetValues,
+  objects,
+  sourceRefs,
+  tenants,
+  versions,
+  zones,
+} from "./schema.js";
 import {
   openTestDatabase,
   openTestDriver,
@@ -215,7 +224,9 @@ describe("schema", () => {
     expect(await sqlState(inTenant((tx) => tx.delete(tenants)))).toBe(FOREIGN_KEY_VIOLATION);
     // Deliberate removal, children first, works.
     await inTenant(async (tx) => {
-      await tx.delete(objects); // takes versions and source refs with it
+      await tx.delete(objects); // takes versions, source refs and tags with it
+      await tx.delete(facetValues);
+      await tx.delete(facets);
       await tx.delete(blobs);
       await tx.delete(zones);
       await tx.delete(tenants);
@@ -226,7 +237,9 @@ describe("schema", () => {
         tx,
         sql`select (select count(*) from tenants) + (select count(*) from zones) +
                    (select count(*) from blobs) + (select count(*) from objects) +
-                   (select count(*) from versions) + (select count(*) from source_refs) as n`,
+                   (select count(*) from versions) + (select count(*) from source_refs) +
+                   (select count(*) from facets) + (select count(*) from facet_values) +
+                   (select count(*) from object_tags) as n`,
       ),
     );
     expect(left).toEqual([{ n: "0" }]); // raw int8 is a string (see above)

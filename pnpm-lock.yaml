@@ -283,6 +283,9 @@ importers:
       '@electric-sql/pglite-pgvector':
         specifier: 0.0.9
         version: 0.0.9(@electric-sql/pglite@0.5.8)
+      '@openhoard/core-policy':
+        specifier: workspace:^
+        version: link:../policy
       drizzle-orm:
         specifier: ^0.45.3
         version: 0.45.3(@electric-sql/pglite@0.5.8)(@types/pg@8.23.1)(pg@8.23.0)

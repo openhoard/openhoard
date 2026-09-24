@@ -3,7 +3,18 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fromDriver, queryRows, type Database, type Driver, type Tx } from "./database.js";
 import { newId } from "./ids.js";
-import { blobs, objects, sourceRefs, tables, tenants, versions, zones } from "./schema.js";
+import {
+  blobs,
+  facets,
+  facetValues,
+  objects,
+  objectTags,
+  sourceRefs,
+  tables,
+  tenants,
+  versions,
+  zones,
+} from "./schema.js";
 import { openTestDriver, seedTenant, type SeededTenant } from "./testing.js";
 
 /*
@@ -47,6 +58,9 @@ const counts = (tenantId: string) =>
     objects: (await tx.select().from(objects)).length,
     versions: (await tx.select().from(versions)).length,
     sourceRefs: (await tx.select().from(sourceRefs)).length,
+    facets: (await tx.select().from(facets)).length,
+    facetValues: (await tx.select().from(facetValues)).length,
+    objectTags: (await tx.select().from(objectTags)).length,
   }));
 
 describe("catalog", () => {
@@ -114,7 +128,17 @@ describe("catalog", () => {
 
 describe("withTenant", () => {
   it("sees only its own tenant's rows, in every table", async () => {
-    const one = { tenants: 1, zones: 1, blobs: 1, objects: 1, versions: 1, sourceRefs: 1 };
+    const one = {
+      tenants: 1,
+      zones: 1,
+      blobs: 1,
+      objects: 1,
+      versions: 1,
+      sourceRefs: 1,
+      facets: 1,
+      facetValues: 1,
+      objectTags: 1,
+    };
     expect(await counts(a.tenantId)).toEqual(one);
     expect(await counts(b.tenantId)).toEqual(one);
     const [obj] = await db.withTenant(a.tenantId, (tx) => tx.select().from(objects));

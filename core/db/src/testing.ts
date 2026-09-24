@@ -1,7 +1,17 @@
 import { fromDriver, prepareDriver, type Database, type Driver } from "./database.js";
 import { newId } from "./ids.js";
 import { openPglite } from "./pglite.js";
-import { blobs, objects, sourceRefs, tenants, versions, zones } from "./schema.js";
+import {
+  blobs,
+  facets,
+  facetValues,
+  objects,
+  objectTags,
+  sourceRefs,
+  tenants,
+  versions,
+  zones,
+} from "./schema.js";
 
 /*
  * Test databases for this package and the packages built on it:
@@ -59,11 +69,13 @@ export interface SeededTenant {
   objectId: string;
   versionId: string;
   externalId: string;
+  /** The object's one tag, `client:acme-<n>`, an approved value. */
+  tag: string;
 }
 
 /**
- * Creates a tenant with one row in every table: a zone, a blob, an object with one version, and
- * the object's source reference. `n` makes names and hashes distinct between seeded tenants.
+ * Creates a tenant with one row in every table: a zone, a blob, an object with one version, the
+ * object's source reference, and one tag on it from a one-value vocabulary. `n` makes names and hashes distinct between seeded tenants.
  */
 export async function seedTenant(db: Database, n = 0): Promise<SeededTenant> {
   const s: SeededTenant = {
@@ -73,6 +85,7 @@ export async function seedTenant(db: Database, n = 0): Promise<SeededTenant> {
     objectId: newId("object"),
     versionId: newId("version"),
     externalId: `item-${n}`,
+    tag: `client:acme-${n}`,
   };
   await db.withTenant(s.tenantId, async (tx) => {
     await tx.insert(tenants).values({ id: s.tenantId, name: `Tenant ${n}` });
@@ -101,6 +114,23 @@ export async function seedTenant(db: Database, n = 0): Promise<SeededTenant> {
       source: "sharepoint",
       externalId: s.externalId,
       objectId: s.objectId,
+    });
+    await tx.insert(facets).values({ tenantId: s.tenantId, key: "client", label: "Client" });
+    await tx.insert(facetValues).values({
+      tenantId: s.tenantId,
+      facet: "client",
+      value: `acme-${n}`,
+      label: `Acme ${n}`,
+      approved: true,
+    });
+    await tx.insert(objectTags).values({
+      tenantId: s.tenantId,
+      objectId: s.objectId,
+      facet: "client",
+      value: `acme-${n}`,
+      source: "rule",
+      appliedBy: "rule:client-dictionary",
+      confidence: 1,
     });
   });
   return s;

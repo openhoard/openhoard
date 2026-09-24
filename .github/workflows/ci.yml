@@ -81,6 +81,8 @@ jobs:
           sudo -u postgres psql -p 5499 -v ON_ERROR_STOP=1 \
             -c "create role openhoard_ci login createdb password 'ci'"
       - run: pnpm install --frozen-lockfile
+      # The packages core-db imports (core-policy) are used from their build output.
+      - run: pnpm --filter "@openhoard/core-db^..." run build
       - run: pnpm --filter @openhoard/core-db run test:coverage
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres

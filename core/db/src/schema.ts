@@ -1,11 +1,14 @@
 import { sql } from "drizzle-orm";
+import { EXPOSURE, VISIBILITY } from "@openhoard/core-policy";
 import {
   bigint,
+  boolean,
   check,
   foreignKey,
   index,
   integer,
   pgTable,
+  real,
   primaryKey,
   text,
   timestamp,
@@ -199,5 +202,126 @@ export const sourceRefs = pgTable(
   ],
 );
 
+/*
+ * Tags (T-202). A tag is `facet:value`, e.g. `client:acme` or `sensitivity:restricted`. The
+ * vocabulary (facets and their values) belongs to the tenant; values carry the visibility and
+ * exposure levels core/policy resolves per object. Both parts are ASCII slugs, so a tag can sit
+ * inside a principal (`tag:client:acme`) and compare the same on every engine (spike S2).
+ */
+
+const quoted = (values: readonly string[]) => values.map((v) => `'${v}'`).join(", ");
+const SLUG = "^[a-z0-9][a-z0-9._-]{0,127}$";
+
+/** A dimension of the vocabulary: client, project, sensitivity, department… */
+export const facets = pgTable(
+  "facets",
+  {
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    key: text("key").notNull(),
+    label: text("label").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.key] }),
+    check("facets_key_format", sql`key ~ '^[a-z][a-z0-9-]{0,63}$'`),
+    check("facets_label_length", sql`char_length(label) between 1 and 200`),
+  ],
+);
+
+/**
+ * One value of a facet. Proposed values (by a model, an agent or a user) start unapproved and
+ * wait in the review inbox (T-406); nothing creates approved vocabulary implicitly.
+ */
+export const facetValues = pgTable(
+  "facet_values",
+  {
+    tenantId: text("tenant_id").notNull(),
+    facet: text("facet").notNull(),
+    value: text("value").notNull(),
+    label: text("label").notNull(),
+    approved: boolean("approved").notNull().default(false),
+    /** Null: this value sets no visibility; the object's other tags or the tenant default do. */
+    visibility: text("visibility", { enum: VISIBILITY }),
+    /** Null: this value sets no exposure level. */
+    exposure: text("exposure", { enum: EXPOSURE }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.facet, t.value] }),
+    foreignKey({
+      name: "facet_values_facet_fk",
+      columns: [t.tenantId, t.facet],
+      foreignColumns: [facets.tenantId, facets.key],
+    }),
+    check("facet_values_value_format", sql.raw(`value ~ '${SLUG}'`)),
+    check("facet_values_label_length", sql`char_length(label) between 1 and 200`),
+    check(
+      "facet_values_visibility_valid",
+      sql.raw(`visibility is null or visibility in (${quoted(VISIBILITY)})`),
+    ),
+    check(
+      "facet_values_exposure_valid",
+      sql.raw(`exposure is null or exposure in (${quoted(EXPOSURE)})`),
+    ),
+  ],
+);
+
+export const TAG_SOURCES = ["rule", "model", "user", "pack"] as const;
+
+/** A tag on an object, with where it came from and whether a person has confirmed it. */
+export const objectTags = pgTable(
+  "object_tags",
+  {
+    tenantId: text("tenant_id").notNull(),
+    objectId: text("object_id").notNull(),
+    facet: text("facet").notNull(),
+    value: text("value").notNull(),
+    /** What applied it: a rule, a model, a person, or a pack. */
+    source: text("source", { enum: TAG_SOURCES }).notNull(),
+    /** Who or what exactly, when known: `user:…`, `model:…`, `rule:…`, `pack:…`. */
+    appliedBy: text("applied_by"),
+    /** 1 for rules, people and packs; the model's score otherwise. */
+    confidence: real("confidence").notNull(),
+    reviewed: boolean("reviewed").notNull().default(false),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.objectId, t.facet, t.value] }),
+    foreignKey({
+      name: "object_tags_object_fk",
+      columns: [t.tenantId, t.objectId],
+      foreignColumns: [objects.tenantId, objects.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "object_tags_value_fk",
+      columns: [t.tenantId, t.facet, t.value],
+      foreignColumns: [facetValues.tenantId, facetValues.facet, facetValues.value],
+    }),
+    // Finding objects by tag: the search filter and "who can see this" (T-504, T-606).
+    index("object_tags_tag_idx").on(t.tenantId, t.facet, t.value),
+    check("object_tags_source_valid", sql.raw(`source in (${quoted(TAG_SOURCES)})`)),
+    check("object_tags_confidence_range", sql`confidence >= 0 and confidence <= 1`),
+    check(
+      "object_tags_applied_by_principal",
+      sql`applied_by is null or applied_by ~ '^[a-z]+:.+$'`,
+    ),
+  ],
+);
+
+/** The tag string policy and search use for a facet and value. */
+export const tagOf = (facet: string, value: string): string => `${facet}:${value}`;
+
 /** Every table, for tests and tooling that must cover all of them. */
-export const tables = { tenants, zones, blobs, objects, versions, sourceRefs } as const;
+export const tables = {
+  tenants,
+  zones,
+  blobs,
+  objects,
+  versions,
+  sourceRefs,
+  facets,
+  facetValues,
+  objectTags,
+} as const;
