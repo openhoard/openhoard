@@ -23,10 +23,12 @@ const shape = decideRead({ canRead: allow, visibility, exposure, clientTrust, wa
 
 Following spike S3, **grants are data and rules are Cedar**:
 
-- A grant ("group G may read tag T") is a row, not a policy. `authorize()` checks whether any
-  of the object's tags is among the caller's read grants (`tagGrants`) or write grants
-  (`tagWriteGrants`, which imply read), using the same principal set as the search filter, and
-  whether the caller owns the object. Cedar gets the answers as `context.readGranted`,
+- A grant ("group G may read tag T", or "user U may write object O") is a row, not a policy
+  (core/db `grants`; `loadGrants()` collects a caller's live ones, and expired grants simply
+  stop being returned). `authorize()` checks whether any of the object's tags is among the
+  caller's read grants (`tagGrants`) or write grants (`tagWriteGrants`, which imply read),
+  whether the object itself is granted (`objectGrants`, `objectWriteGrants`), and whether the
+  caller owns the object. Cedar gets the answers as `context.readGranted`,
   `context.writeGranted` and `context.owner`.
 - Cedar applies the rules. The core rules permit search, read and open with a read grant,
   tagging with a write grant, anything to the owner, and forbid deprovisioned users. Packs

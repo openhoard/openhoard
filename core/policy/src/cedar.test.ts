@@ -9,6 +9,8 @@ const request = (patch: Partial<AuthzRequest> = {}): AuthzRequest => ({
     groupIds: ["g-sales"],
     tagGrants: [],
     tagWriteGrants: [],
+    objectGrants: [],
+    objectWriteGrants: [],
     guest: false,
     active: true,
   },
@@ -318,8 +320,10 @@ describe("Cedar engine against a reference evaluator (property)", () => {
     if (r.action === "open" && tags.has("sensitivity:restricted") && r.client.trust === "consumer")
       return false;
     if (r.action === "tag" && p.guest) return false;
-    const write = p.tagWriteGrants.some((t) => tags.has(t));
-    const read = write || p.tagGrants.some((t) => tags.has(t));
+    const write =
+      p.tagWriteGrants.some((t) => tags.has(t)) || p.objectWriteGrants.includes(r.resource.id);
+    const read =
+      write || p.tagGrants.some((t) => tags.has(t)) || p.objectGrants.includes(r.resource.id);
     if (r.action === "tag" ? write : read) return true;
     if (r.resource.ownerId === `user:${p.userId}`) return true;
     return (
@@ -345,6 +349,8 @@ describe("Cedar engine against a reference evaluator (property)", () => {
       groupIds: fc.uniqueArray(fc.constantFrom("g-hr", "g-sales", "g-all"), { maxLength: 3 }),
       tagGrants: fc.uniqueArray(tag, { maxLength: 3 }),
       tagWriteGrants: fc.uniqueArray(tag, { maxLength: 2 }),
+      objectGrants: fc.uniqueArray(fc.constantFrom("obj_1", "obj_2", "g-hr"), { maxLength: 2 }),
+      objectWriteGrants: fc.uniqueArray(fc.constantFrom("obj_1", "g-hr"), { maxLength: 1 }),
       guest: fc.boolean(),
       active: fc.boolean(),
     }),

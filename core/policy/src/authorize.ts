@@ -4,9 +4,9 @@ import type { ClientTrust } from "./levels.js";
  * Authorization (T-601, ADR-0007). Every access decision in OpenHoard goes through
  * Authorizer.authorize(). It follows spike S3's split:
  *
- * - Grants are data. Whether the caller holds a grant on one of the object's tags is a set
- *   intersection, computed here from the same principal set the search filter uses; so is
- *   whether the caller owns the object.
+ * - Grants are data. Whether the caller holds a grant on one of the object's tags, or on the
+ *   object itself, is a set lookup, computed here from grants loaded for the caller (core/db
+ *   loadGrants, T-602); so is whether the caller owns the object.
  * - Rules are Cedar. The engine gets the request plus those facts and applies the core rules
  *   and any pack rules: permits for grants and owners, forbids, conditional permits.
  *
@@ -29,6 +29,10 @@ export interface AuthzPrincipal {
   tagGrants: readonly string[];
   /** Tags the user may also write (tag objects carrying them). A write grant implies read. */
   tagWriteGrants: readonly string[];
+  /** Objects granted to the user directly (by id), for reading. */
+  objectGrants: readonly string[];
+  /** Objects granted to the user directly for writing too. Implies read. */
+  objectWriteGrants: readonly string[];
   guest: boolean;
   /** False once deprovisioned. */
   active: boolean;
@@ -68,9 +72,9 @@ export interface AuthzDecision {
 
 /** What an engine evaluates: the request, plus the facts authorize() derived from data. */
 export interface EngineRequest extends AuthzRequest {
-  /** The caller holds a read or write grant on one of the object's tags. */
+  /** The caller holds a read or write grant on one of the object's tags, or on the object. */
   readGranted: boolean;
-  /** The caller holds a write grant on one of the object's tags. */
+  /** The caller holds a write grant on one of the object's tags, or on the object. */
   writeGranted: boolean;
   /** The object's owner is the caller. */
   owner: boolean;
@@ -99,9 +103,11 @@ export class Authorizer {
     const { principal, resource } = request;
     const write = new Set(principal.tagWriteGrants);
     const read = new Set([...principal.tagGrants, ...write]);
+    const objectWrite = principal.objectWriteGrants.includes(resource.id);
+    const objectRead = objectWrite || principal.objectGrants.includes(resource.id);
     const facts = {
-      readGranted: resource.tags.some((t) => read.has(t)),
-      writeGranted: resource.tags.some((t) => write.has(t)),
+      readGranted: objectRead || resource.tags.some((t) => read.has(t)),
+      writeGranted: objectWrite || resource.tags.some((t) => write.has(t)),
       owner: resource.ownerId === `user:${principal.userId}`,
     };
     try {
@@ -141,6 +147,8 @@ function malformed(r: AuthzRequest): string | undefined {
   if (!isStrings(p.groupIds) || !p.groupIds.every(isId)) return "principal.groupIds";
   if (!isStrings(p.tagGrants)) return "principal.tagGrants";
   if (!isStrings(p.tagWriteGrants)) return "principal.tagWriteGrants";
+  if (!isStrings(p.objectGrants)) return "principal.objectGrants";
+  if (!isStrings(p.objectWriteGrants)) return "principal.objectWriteGrants";
   if (typeof p.guest !== "boolean") return "principal.guest";
   if (typeof p.active !== "boolean") return "principal.active";
   if (!(ACTIONS as readonly unknown[]).includes(r.action)) return "action";

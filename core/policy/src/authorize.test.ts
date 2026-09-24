@@ -13,6 +13,8 @@ const request = (): AuthzRequest => ({
     groupIds: ["g-sales"],
     tagGrants: ["client:acme"],
     tagWriteGrants: [],
+    objectGrants: [],
+    objectWriteGrants: [],
     guest: false,
     active: true,
   },
@@ -56,6 +58,26 @@ describe("Authorizer", () => {
       [true, false],
       [true, true],
       [true, false],
+      [false, false],
+    ]);
+  });
+
+  it("counts grants on the object itself, a write grant implying read", () => {
+    const { engine, seen } = recording();
+    const authz = new Authorizer(engine);
+    const r = request();
+    const direct = (objectGrants: string[], objectWriteGrants: string[] = []) => ({
+      ...r,
+      principal: { ...r.principal, tagGrants: [], objectGrants, objectWriteGrants },
+    });
+    authz.authorize(direct(["obj_1"]));
+    authz.authorize(direct([], ["obj_1"]));
+    authz.authorize(direct(["obj_2"], ["obj_3"]));
+    authz.authorize(direct(["obj_"]));
+    expect(seen.map((s) => [s.readGranted, s.writeGranted])).toEqual([
+      [true, false],
+      [true, true],
+      [false, false],
       [false, false],
     ]);
   });
@@ -131,6 +153,11 @@ describe("Authorizer", () => {
     // eslint-disable-next-line no-sparse-arrays -- a hole, which every() would skip
     ["principal.tagGrants", { ...r, principal: { ...r.principal, tagGrants: [, "x"] } }],
     ["principal.tagWriteGrants", { ...r, principal: { ...r.principal, tagWriteGrants: null } }],
+    ["principal.objectGrants", { ...r, principal: { ...r.principal, objectGrants: [7] } }],
+    [
+      "principal.objectWriteGrants",
+      { ...r, principal: { ...r.principal, objectWriteGrants: "obj_1" } },
+    ],
     // eslint-disable-next-line no-sparse-arrays -- a hole, which every() would skip
     ["principal.groupIds", { ...r, principal: { ...r.principal, groupIds: ["g", , "h"] } }],
     ["principal.guest", { ...r, principal: { ...r.principal, guest: "no" } }],
