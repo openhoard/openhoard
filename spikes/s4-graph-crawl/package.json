@@ -1,0 +1,14 @@
+{
+  "name": "@openhoard/spike-s4-graph-crawl",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Spike S4 (T-023): Graph crawl, delta and permission import. Runs against the fake Graph offline, or a Microsoft 365 dev tenant.",
+  "type": "module",
+  "scripts": {
+    "spike": "tsx run.ts"
+  },
+  "dependencies": {
+    "@openhoard/testkit": "workspace:*"
+  },
+  "license": "Apache-2.0"
+}
