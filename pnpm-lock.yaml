@@ -336,6 +336,19 @@ importers:
         specifier: workspace:*
         version: link:../../packages/config
 
+  core/storage:
+    dependencies:
+      '@openhoard/core-catalog':
+        specifier: workspace:^
+        version: link:../catalog
+      opendal:
+        specifier: ^0.49.11
+        version: 0.49.11
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+
   core/summarize:
     devDependencies:
       '@openhoard/config':
@@ -1088,6 +1101,58 @@ packages:
   '@noble/hashes@2.4.0':
     resolution: {integrity: sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==}
     engines: {node: '>= 20.19.0'}
+
+  '@opendal/lib-darwin-arm64@0.49.11':
+    resolution: {integrity: sha512-aYb+igMDH50xm02/jQNNV9PkwMjT7u7u3Wf5PnpSIKvI00RmkM1Eh7ZiGQh1dOAz8gjU3xoJgZaaK3ASlkeNtw==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@opendal/lib-darwin-x64@0.49.11':
+    resolution: {integrity: sha512-dhoF7CmeWI0KETs6grwxuUBsX7B/iD42Ovdze6qUia+RA+Bc7UwDH0A++NYGuNxg77DzzdZWMC4QqntZW/1Zqg==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [darwin]
+
+  '@opendal/lib-linux-arm64-gnu@0.49.11':
+    resolution: {integrity: sha512-+RYHxFD7F9pUaCI/oOq8B1Q6f/NjXJZ9buwZMyiQh85tOsuVxw1iXVRB9x7jwdpb6lrBesmg26VGHA7vBkE9tw==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@opendal/lib-linux-arm64-musl@0.49.11':
+    resolution: {integrity: sha512-nfDT9Kkl1PQFV4e937BYOx0wjRgrjLIlbFiGgwkX6xxt9XoL5s2GBEmGO98ROI6M3rWZ5D53Y3TdBc+oK+K4rQ==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  '@opendal/lib-linux-x64-gnu@0.49.11':
+    resolution: {integrity: sha512-GdJtrif/ZxtYQqI5tSNUdq0/34XFf9bk8iRKIO22KTF4xOTzKZHlMYbW/BvsvVXXTqs5fi5edd9QndJNNlm/qw==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@opendal/lib-linux-x64-musl@0.49.11':
+    resolution: {integrity: sha512-IRY5PNUD6zVW3ju0Qe30mdcPf1dGUo9wT/SQp8m6y8p7O/DUXiaQDXNIknThA4VWzFzh4IREz5SAWCLr810zNA==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  '@opendal/lib-win32-arm64-msvc@0.49.11':
+    resolution: {integrity: sha512-3beLC5BSk/zFiayhsiG5aFhEFjIB0jeIB4j9EBw1ijeDPJDT+BXq7fpu+PoNTbmm5IHmzieMv9KGBIPD8iYTIA==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [win32]
+
+  '@opendal/lib-win32-x64-msvc@0.49.11':
+    resolution: {integrity: sha512-Rv83MezVqjnNu6sxZGqW9iE9CCbRmdwCHSHVIQnF8vgoj5DZ+Zt6zaVHlpUyEu0qF1li2FKna4cwb+xWtvOuDw==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [win32]
 
   '@pinojs/redact@0.4.0':
     resolution: {integrity: sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==}
@@ -2106,6 +2171,10 @@ packages:
     resolution: {integrity: sha512-oVlzkg3ENAhCk2zdv7IJwd/QUD4z2RxRwpkcGY8psCVcCYZNq4wYnVWALHM+brtuJjePWiYF/ClmuDr8Ch5+kg==}
     engines: {node: '>= 0.8'}
 
+  opendal@0.49.11:
+    resolution: {integrity: sha512-hGUoSAp5FU7SeLYRxDBkY9nm0IuEl1QUUbqCLZEKYApXh/V5By+tTal1l7OMeROmXdo9LU9+V9oISCdK6KEZww==}
+    engines: {node: '>= 10'}
+
   optionator@0.9.4:
     resolution: {integrity: sha512-6IpQ7mKUxRcZNLIObR0hz7lxsapSSIYNZJwXPGeF0mTVqGKFIXj1DQcMoT22S3ROcLyY/rz0PWaWZ9ayWmad9g==}
     engines: {node: '>= 0.8.0'}
@@ -3104,6 +3173,30 @@ snapshots:
 
   '@noble/hashes@2.4.0': {}
 
+  '@opendal/lib-darwin-arm64@0.49.11':
+    optional: true
+
+  '@opendal/lib-darwin-x64@0.49.11':
+    optional: true
+
+  '@opendal/lib-linux-arm64-gnu@0.49.11':
+    optional: true
+
+  '@opendal/lib-linux-arm64-musl@0.49.11':
+    optional: true
+
+  '@opendal/lib-linux-x64-gnu@0.49.11':
+    optional: true
+
+  '@opendal/lib-linux-x64-musl@0.49.11':
+    optional: true
+
+  '@opendal/lib-win32-arm64-msvc@0.49.11':
+    optional: true
+
+  '@opendal/lib-win32-x64-msvc@0.49.11':
+    optional: true
+
   '@pinojs/redact@0.4.0': {}
 
   '@pnpm/deps.graph-sequencer@1100.0.1': {}
@@ -4017,6 +4110,17 @@ snapshots:
   on-finished@2.4.1:
     dependencies:
       ee-first: 1.1.1
+
+  opendal@0.49.11:
+    optionalDependencies:
+      '@opendal/lib-darwin-arm64': 0.49.11
+      '@opendal/lib-darwin-x64': 0.49.11
+      '@opendal/lib-linux-arm64-gnu': 0.49.11
+      '@opendal/lib-linux-arm64-musl': 0.49.11
+      '@opendal/lib-linux-x64-gnu': 0.49.11
+      '@opendal/lib-linux-x64-musl': 0.49.11
+      '@opendal/lib-win32-arm64-msvc': 0.49.11
+      '@opendal/lib-win32-x64-msvc': 0.49.11
 
   optionator@0.9.4:
     dependencies:

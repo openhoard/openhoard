@@ -11,4 +11,5 @@ Changes here need **core review** (two maintainers) and an RFC if a contract cha
 | [`summarize/`](summarize/) | Enrichment orchestration, file-card schema, model routing by exposure level                    |
 | [`audit/`](audit/)         | Append-only hash-chained log, WORM anchors, export, undo                                       |
 | [`db/`](db/)               | Drizzle schema, migrations, forced tenant row-level security, PGlite and Postgres drivers      |
+| [`storage/`](storage/)     | Content-addressed, tenant-scoped blobs on disk, S3 or Azure Blob (OpenDAL)                     |
 | [`sandbox/`](sandbox/)     | Plugin manifests, capability enforcement, WASM/container isolation, signing                    |

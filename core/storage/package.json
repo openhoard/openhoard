@@ -1,0 +1,31 @@
+{
+  "name": "@openhoard/core-storage",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Blob storage: content-addressed, tenant-scoped blobs on local disk, S3 or Azure Blob through Apache OpenDAL.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rimraf dist coverage"
+  },
+  "dependencies": {
+    "@openhoard/core-catalog": "workspace:^",
+    "opendal": "^0.49.11"
+  },
+  "devDependencies": {
+    "@openhoard/config": "workspace:*"
+  },
+  "license": "Apache-2.0"
+}
