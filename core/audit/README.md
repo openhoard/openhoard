@@ -22,6 +22,14 @@ Every access decision and every AI read leaves an event in its tenant's **hash c
     every hash and link, and that the query columns agree with the hashed event. A chain of
     1,000,000 events verifies in about 16 s on 2 vCPUs.
 
+- [`export.ts`](src/export.ts): `exportAudit(db, tenantId, filter, "ndjson" | "csv", sink)`
+  streams one tenant's events, filtered by actor, action, decision, client, object and time,
+  from one snapshot (T-703).
+  - NDJSON lines are the events exactly as hashed, plus their hash, so each line checks out
+    on its own.
+  - CSV follows RFC 4180. Text a spreadsheet would run as a formula gets a leading
+    apostrophe (CSV injection), so use NDJSON when the bytes must match the log.
+
 The table is append-only: tenants can read and insert, and nothing can change or remove a
 row (row-level security plus triggers). A trigger also checks that every insert extends the
 chain: the next sequence number, linked to the head's hash.
