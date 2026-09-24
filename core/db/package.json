@@ -1,0 +1,41 @@
+{
+  "name": "@openhoard/core-db",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Database: Drizzle schema, migrations, tenant row-level security, PGlite and Postgres drivers.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    }
+  },
+  "files": [
+    "dist",
+    "migrations"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "db:generate": "drizzle-kit generate",
+    "clean": "rimraf dist coverage"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@electric-sql/pglite-pgvector": "0.0.9",
+    "drizzle-orm": "^0.45.3",
+    "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "@openhoard/config": "workspace:*",
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^0.31.11"
+  },
+  "license": "Apache-2.0"
+}

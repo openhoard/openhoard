@@ -10,4 +10,5 @@ Changes here need **core review** (two maintainers) and an RFC if a contract cha
 | [`catalog/`](catalog/)     | Objects, versions, blobs, tags, zones; permission-aware hybrid search; file cards              |
 | [`summarize/`](summarize/) | Enrichment orchestration, file-card schema, model routing by exposure level                    |
 | [`audit/`](audit/)         | Append-only hash-chained log, WORM anchors, export, undo                                       |
+| [`db/`](db/)               | Drizzle schema, migrations, forced tenant row-level security, PGlite and Postgres drivers      |
 | [`sandbox/`](sandbox/)     | Plugin manifests, capability enforcement, WASM/container isolation, signing                    |

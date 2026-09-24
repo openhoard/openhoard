@@ -8,3 +8,8 @@ packages:
   - "!packages/cli-py"
 allowBuilds:
   esbuild: true
+overrides:
+  # drizzle-kit (dev only) pulls esbuild 0.18 through the deprecated @esbuild-kit loader.
+  # GHSA-67mh-4wv8-2f99 affects esbuild's dev server, which nothing here runs, but the
+  # dependency review gate is right to insist: 0.25 is API-compatible for its transform calls.
+  "@esbuild-kit/core-utils>esbuild": "^0.25.12"

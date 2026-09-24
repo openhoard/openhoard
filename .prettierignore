@@ -8,3 +8,5 @@ packages/cli-py
 CHANGELOG.md
 .changeset/*.md
 **/generated/**
+# drizzle-kit output, kept byte-for-byte as generated
+core/db/migrations/meta
