@@ -74,6 +74,38 @@ describe("evaluateRules", () => {
     const rules: TagRule[] = [{ id: "d", facet: "client", dictionary: { muller: ["Müller AG"] } }];
     expect(evaluateRules(rules, { title: "Angebot MÜLLER ag 2026" })).toHaveLength(1);
   });
+
+  it("matches decomposed (NFD) names, as macOS writes them, against composed rules and back", () => {
+    const nfc = (s: string) => s.normalize("NFC");
+    const nfd = (s: string) => s.normalize("NFD");
+    const rules = (form: (s: string) => string): TagRule[] => [
+      { id: "d", facet: "client", dictionary: { sg: [form("Société Générale")] } },
+      { id: "compta", tag: "department:finance", when: { path: form("Comptabilité/**") } },
+      { id: "site", tag: "department:hr", when: { site: form("Ressources Humaines") } },
+      { id: "ext", tag: "kind:note", when: { extension: [form("tâche")] } },
+    ];
+    for (const [ruleForm, inputForm] of [
+      [nfc, nfd],
+      [nfd, nfc],
+      [nfd, nfd],
+    ] as const) {
+      const got = evaluateRules(rules(ruleForm), {
+        title: inputForm("Contrat SOCIÉTÉ GÉNÉRALE"),
+        path: inputForm("Comptabilité/2026/liste.tâche"),
+        site: inputForm("ressources humaines"),
+      });
+      expect(got.map((r) => r.tag)).toEqual([
+        "client:sg",
+        "department:finance",
+        "department:hr",
+        "kind:note",
+      ]);
+    }
+    // A combining mark with no precomposed form stays inside its word.
+    const marked: TagRule[] = [{ id: "m", facet: "client", dictionary: { x: ["q̇a"] } }];
+    expect(evaluateRules(marked, { title: "Q̇A report" })).toHaveLength(1);
+    expect(evaluateRules(marked, { title: "q a" })).toHaveLength(0);
+  });
 });
 
 describe("globMatch", () => {
@@ -195,14 +227,23 @@ describe("applyRuleTags", () => {
   });
   afterEach(() => db?.close());
 
-  it("applies approved tags as the rule, and files new values for review", async () => {
-    const outcomes = await db.withTenant(t.tenantId, (tx) =>
-      applyRuleTags(tx, t.tenantId, t.objectId, RULES, { path: "Clients/Acme/Finance.xlsx" }),
+  const apply = (input: Parameters<typeof applyRuleTags>[4], rules = RULES) =>
+    db.withTenant(t.tenantId, (tx) => applyRuleTags(tx, t.tenantId, t.objectId, rules, input));
+  const tagsOn = () =>
+    db.withTenant(t.tenantId, async (tx) =>
+      (await tx.select().from(objectTags).where(eq(objectTags.objectId, t.objectId)))
+        .map((r) => `${r.facet}:${r.value} (${r.source})`)
+        .sort(),
     );
+
+  it("applies approved tags as the rule, and files new values for review", async () => {
+    const { outcomes, removed } = await apply({ path: "Clients/Acme/Finance.xlsx" });
     expect(outcomes).toEqual([
       { applied: true, tag: "client:acme", rule: "clients" },
       { applied: false, reviewId: expect.any(String), reason: "new-value", rule: "spreadsheets" },
     ]);
+    // The seeded rule tag comes from a rule these rules don't have.
+    expect(removed).toEqual(["client:acme-1"]);
     const tags = await db.withTenant(t.tenantId, (tx) =>
       tx.select().from(objectTags).where(eq(objectTags.value, "acme")),
     );
@@ -213,5 +254,43 @@ describe("applyRuleTags", () => {
       value: "spreadsheet",
       appliedBy: "rule:spreadsheets",
     });
+  });
+
+  it("takes off rule tags no rule gives any more, and leaves other sources' tags alone", async () => {
+    await db.withTenant(t.tenantId, async (tx) => {
+      await tx.insert(facets).values({ tenantId: t.tenantId, key: "department", label: "Dept" });
+      await tx.insert(facetValues).values([
+        { tenantId: t.tenantId, facet: "department", value: "hr", label: "HR", approved: true },
+        { tenantId: t.tenantId, facet: "client", value: "globex", label: "G", approved: true },
+      ]);
+      await tx.insert(objectTags).values({
+        tenantId: t.tenantId,
+        objectId: t.objectId,
+        facet: "client",
+        value: "globex",
+        source: "user",
+        appliedBy: "user:ana",
+        confidence: 1,
+      });
+    });
+    const rules: TagRule[] = [
+      ...RULES,
+      { id: "hr", tag: "department:hr", when: { path: "HR/**" } },
+      { id: "seeded", tag: "client:acme-1", when: { path: "**/Acme/**" } },
+    ];
+    expect((await apply({ path: "Clients/Acme/Plan.docx" }, rules)).removed).toEqual([]);
+    expect(await tagsOn()).toEqual([
+      "client:acme (rule)",
+      "client:acme-1 (rule)",
+      "client:globex (user)",
+    ]);
+    // Moved out of the client's folder: its client tags, and the grants on them, go.
+    const moved = await apply({ path: "HR/Plan.docx" }, rules);
+    expect(moved.outcomes).toEqual([{ applied: true, tag: "department:hr", rule: "hr" }]);
+    expect(moved.removed).toEqual(["client:acme", "client:acme-1"]);
+    expect(await tagsOn()).toEqual(["client:globex (user)", "department:hr (rule)"]);
+    // Nothing matches: every rule tag goes, and only those.
+    expect((await apply({ path: "Misc/Plan.docx" }, [])).removed).toEqual(["department:hr"]);
+    expect(await tagsOn()).toEqual(["client:globex (user)"]);
   });
 });

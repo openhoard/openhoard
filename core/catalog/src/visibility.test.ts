@@ -4,20 +4,29 @@ import {
   newId,
   objects,
   objectTags,
+  queryRows,
   tenants,
   versions,
   type Database,
   type Tx,
 } from "@openhoard/core-db";
-import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
+import {
+  openTestDatabase,
+  seedTenant,
+  TEST_POSTGRES_ENV,
+  type SeededTenant,
+} from "@openhoard/core-db/testing";
 import { Authorizer, createCedarEngine, type AuthzPrincipal } from "@openhoard/core-policy";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { ingest } from "./ingest.js";
 import { proposeTag } from "./tagging.js";
 import {
+  explainLevels,
   GENERIC_TITLE,
   levelsFor,
   markProcessed,
+  MAX_OBJECT_IDS,
   nonReaderTitle,
   proposeDisplayTitle,
   setDisplayTitle,
@@ -69,8 +78,10 @@ beforeEach(async () => {
 afterEach(() => db?.close());
 
 const inTenant = <T>(work: (tx: Tx) => Promise<T>) => db.withTenant(t.tenantId, work);
+const inSnapshot = <T>(work: (tx: Tx) => Promise<T>, tenantId = t.tenantId) =>
+  db.withTenant(tenantId, work, VIEW_TRANSACTION);
 const levels = async (id = t.objectId) =>
-  (await inTenant((tx) => levelsFor(tx, t.tenantId, [id]))).get(id);
+  (await inSnapshot((tx) => levelsFor(tx, t.tenantId, [id]))).get(id);
 const SEEDED_TITLE = "Report 1.docx";
 const processed = (title = SEEDED_TITLE) =>
   inTenant((tx) => markProcessed(tx, t.tenantId, { versionId: t.versionId, title }));
@@ -152,8 +163,9 @@ describe("levelsFor", () => {
     await db.withTenant(other.tenantId, (tx) =>
       markProcessed(tx, other.tenantId, { versionId: other.versionId, title: "Report 2.docx" }),
     );
-    const fresh = await db.withTenant(other.tenantId, (tx) =>
-      levelsFor(tx, other.tenantId, [other.objectId]),
+    const fresh = await inSnapshot(
+      (tx) => levelsFor(tx, other.tenantId, [other.objectId]),
+      other.tenantId,
     );
     expect(fresh.get(other.objectId)).toMatchObject({
       visibility: "hidden",
@@ -244,9 +256,38 @@ describe("levelsFor", () => {
   });
 
   it("leaves out unknown ids", async () => {
-    const got = await inTenant((tx) => levelsFor(tx, t.tenantId, [newId("object"), t.objectId]));
+    const got = await inSnapshot((tx) => levelsFor(tx, t.tenantId, [newId("object"), t.objectId]));
     expect([...got.keys()]).toEqual([t.objectId]);
-    expect((await inTenant((tx) => levelsFor(tx, t.tenantId, []))).size).toBe(0);
+    expect((await inSnapshot((tx) => levelsFor(tx, t.tenantId, []))).size).toBe(0);
+  });
+
+  it("refuses to read outside one snapshot, where a review could slip between its reads", async () => {
+    await expect(inTenant((tx) => levelsFor(tx, t.tenantId, [t.objectId]))).rejects.toThrow(
+      "levelsFor needs a repeatable read transaction",
+    );
+    await expect(inTenant((tx) => explainLevels(tx, t.tenantId, t.objectId))).rejects.toThrow(
+      "explainLevels needs a repeatable read transaction",
+    );
+    const serializable = await db.withTenant(
+      t.tenantId,
+      (tx) => explainLevels(tx, t.tenantId, t.objectId),
+      { isolationLevel: "serializable" },
+    );
+    expect(serializable).toMatchObject({ processed: false });
+  });
+
+  it("takes at most MAX_OBJECT_IDS distinct ids: page your ids", async () => {
+    const many = Array.from({ length: MAX_OBJECT_IDS - 1 }, () => newId("object"));
+    // Repeats don't count: this is exactly MAX_OBJECT_IDS.
+    const got = await inSnapshot((tx) => levelsFor(tx, t.tenantId, [...many, ...many, t.objectId]));
+    expect([...got.keys()]).toEqual([t.objectId]);
+    expect(await view(reader(), [...many, t.objectId])).toMatchObject([{ id: t.objectId }]);
+    await expect(
+      inSnapshot((tx) => levelsFor(tx, t.tenantId, [...many, newId("object"), newId("object")])),
+    ).rejects.toThrow(RangeError);
+    await expect(view(person(), [...many, newId("object"), newId("object")])).rejects.toThrow(
+      "page your ids",
+    );
   });
 });
 
@@ -344,6 +385,26 @@ describe("viewObjects", () => {
     );
     // The reader's grant no longer reads it, and the guess hides it from non-readers.
     expect(got).toEqual([]);
+  });
+
+  it("shows non-readers only trusted public tags, never a model's unreviewed guess", async () => {
+    await tag("sensitivity:internal");
+    await inTenant((tx) =>
+      tx.insert(facetValues).values({
+        tenantId: t.tenantId,
+        facet: "kind",
+        value: "memo",
+        label: "Memo",
+        approved: true,
+      }),
+    );
+    await tag("kind:memo", t.objectId, "model");
+    expect(await view(person())).toMatchObject([{ shape: "title-only", tags: ["kind:report"] }]);
+    expect((await view(reader()))[0]?.tags).toContain("kind:memo");
+    await inTenant((tx) =>
+      tx.update(objectTags).set({ reviewed: true }).where(eq(objectTags.value, "memo")),
+    );
+    expect(await view(person())).toMatchObject([{ tags: ["kind:memo", "kind:report"] }]);
   });
 
   it("keeps the order asked, drops duplicates, deleted objects and unknown ids", async () => {
@@ -520,5 +581,92 @@ describe("display titles", () => {
         }),
       ),
     ).toBe(false);
+  });
+});
+
+describe.runIf(process.env[TEST_POSTGRES_ENV])("under concurrency (PostgreSQL)", () => {
+  const RENAMED = "Termination - J Smith.docx";
+  /** Waits until another session of this database waits on a lock. */
+  const someoneWaits = async () => {
+    for (let i = 0; i < 500; i++) {
+      const [row] = await inTenant((tx) =>
+        queryRows<{ n: number }>(
+          tx,
+          sql`select count(*)::int as n from pg_locks l join pg_stat_activity a on a.pid = l.pid
+            where not l.granted and a.datname = current_database()`,
+        ),
+      );
+      if ((row?.n ?? 0) > 0) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error("no session started waiting");
+  };
+  /** An ingest renaming the seeded object, its transaction held open until released. */
+  const renameAndHold = () => {
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let signal = () => {};
+    const renamed = new Promise<void>((r) => (signal = r));
+    const committed = inTenant(async (tx) => {
+      const r = await ingest(tx, t.tenantId, {
+        source: "sharepoint",
+        externalId: t.externalId,
+        zoneId: t.zoneId,
+        title: RENAMED,
+        ownerId: `user:${t.userId}`,
+        content: { blobId: t.blobId, size: 1234 },
+        mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
+      expect(r).toMatchObject({ renamed: true, created: { version: false } });
+      signal();
+      await held;
+    });
+    return { renamed, release, committed };
+  };
+
+  it("doesn't mark processed under the old title when a rename commits while it waits", async () => {
+    const rename = renameAndHold();
+    await rename.renamed;
+    const marking = processed(SEEDED_TITLE);
+    await someoneWaits();
+    rename.release();
+    await rename.committed;
+    expect(await marking).toBe(false);
+    expect(await levels()).toMatchObject({ processed: false, visibility: "hidden" });
+    expect(await processed(RENAMED)).toBe(true);
+  });
+
+  it("takes the object's lock before its row for display titles, so ingest can't deadlock", async () => {
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let signal = () => {};
+    const decided = new Promise<void>((r) => (signal = r));
+    const owner = inTenant(async (tx) => {
+      const set = await setDisplayTitle(tx, t.tenantId, {
+        objectId: t.objectId,
+        title: "HR document",
+        by: "user:owner-1",
+        forTitle: SEEDED_TITLE,
+      });
+      signal();
+      await held;
+      // Tagging in the same transaction takes the object's lock again: it is already ours.
+      const tagged = await proposeTag(tx, t.tenantId, {
+        objectId: t.objectId,
+        tag: "kind:report",
+        source: "user",
+        appliedBy: "user:owner-1",
+        confidence: 1,
+      });
+      return { set, tagged };
+    });
+    await decided;
+    const rename = renameAndHold();
+    await someoneWaits();
+    release();
+    expect(await owner).toMatchObject({ set: true, tagged: { applied: true } });
+    await rename.renamed;
+    rename.release();
+    await rename.committed;
   });
 });

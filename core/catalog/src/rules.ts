@@ -1,4 +1,6 @@
-import type { Tx } from "@openhoard/core-db";
+import { objectTags, tagOf, type Tx } from "@openhoard/core-db";
+import { and, eq, or } from "drizzle-orm";
+import { lockObject } from "./locks.js";
 import { proposeTag, type TagOutcome } from "./tagging.js";
 
 /*
@@ -10,7 +12,9 @@ import { proposeTag, type TagOutcome } from "./tagging.js";
  *   { id: "clients", facet: "client", dictionary: { acme: ["Acme", "Acme Corp"] } }
  *
  * Matching is linear in the input (no regular expressions built from rule text), so a rule can't
- * make tagging slow, and case-insensitive over Unicode letters and digits.
+ * make tagging slow, and case-insensitive over Unicode letters and digits. Rules and inputs are
+ * compared in Unicode NFC, so a decomposed name (macOS writes "é" as "e" and a combining accent)
+ * matches a rule written with the composed one, and the other way round.
  */
 
 /** What rules can look at. Everything is optional; a condition on a missing field fails. */
@@ -72,9 +76,24 @@ export function evaluateRules(
     .sort((a, b) => (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0));
 }
 
+/** What applyRuleTags() did. */
+export interface RuleTagSync {
+  /** One per tag the rules give now, sorted by tag: applied, or waiting in review. */
+  outcomes: (TagOutcome & { rule: string })[];
+  /** Rule tags the object had that no rule gives any more, taken off; sorted. */
+  removed: string[];
+}
+
 /**
- * Applies the rules' tags to an object through proposeTag(), as source `rule`. Tags whose value
- * isn't approved vocabulary go to the review inbox like anyone else's.
+ * Makes an object's rule tags exactly what the rules give it now. Tags the rules give are
+ * applied through proposeTag(), as source `rule`; values that aren't approved vocabulary go to
+ * the review inbox like anyone else's. Rule tags the object carries that no rule gives any more
+ * (the file moved from Clients/Acme/ to HR/, say) are taken off, and with them the grants they
+ * carried. Tags from other sources (people, packs, models) are left alone, even when a rule
+ * once gave the same tag too.
+ *
+ * Pass the object's complete rule set and current input: an empty rule list takes every rule
+ * tag off.
  */
 export async function applyRuleTags(
   tx: Tx,
@@ -82,9 +101,11 @@ export async function applyRuleTags(
   objectId: string,
   rules: readonly TagRule[],
   input: RuleInput,
-): Promise<(TagOutcome & { rule: string })[]> {
+): Promise<RuleTagSync> {
+  await lockObject(tx, tenantId, objectId);
+  const matched = evaluateRules(rules, input);
   const outcomes: (TagOutcome & { rule: string })[] = [];
-  for (const { tag, rule } of evaluateRules(rules, input)) {
+  for (const { tag, rule } of matched) {
     const outcome = await proposeTag(tx, tenantId, {
       objectId,
       tag,
@@ -94,7 +115,33 @@ export async function applyRuleTags(
     });
     outcomes.push({ ...outcome, rule });
   }
-  return outcomes;
+  const wanted = new Set(matched.map((m) => m.tag));
+  const current = await tx
+    .select({ facet: objectTags.facet, value: objectTags.value })
+    .from(objectTags)
+    .where(
+      and(
+        eq(objectTags.tenantId, tenantId),
+        eq(objectTags.objectId, objectId),
+        eq(objectTags.source, "rule"),
+      ),
+    );
+  const stale = current.filter((r) => !wanted.has(tagOf(r.facet, r.value)));
+  if (stale.length > 0) {
+    await tx
+      .delete(objectTags)
+      .where(
+        and(
+          eq(objectTags.tenantId, tenantId),
+          eq(objectTags.objectId, objectId),
+          eq(objectTags.source, "rule"),
+          or(
+            ...stale.map((r) => and(eq(objectTags.facet, r.facet), eq(objectTags.value, r.value))),
+          ),
+        ),
+      );
+  }
+  return { outcomes, removed: stale.map((r) => tagOf(r.facet, r.value)).sort() };
 }
 
 /** Checks rules loaded from a pack or an admin; returns what is wrong, empty when fine. */
@@ -195,16 +242,22 @@ function matches(rule: MatchRule, input: RuleInput): boolean {
   return true;
 }
 
-const lower = (s: string | undefined) => s?.toLowerCase();
+/** Case-folded and in NFC, so composed and decomposed spellings compare equal. */
+function fold(s: string): string;
+function fold(s: string | undefined): string | undefined;
+function fold(s: string | undefined) {
+  return s?.toLowerCase().normalize("NFC");
+}
+const lower = fold;
 
 /**
- * Glob matching over `/`-separated paths, case-insensitive. Segments are matched one by one;
- * `**` spans any number of segments. Iterative with backtracking to the last `**` and the last
- * `*` only, so the cost is linear-ish in the input for any pattern.
+ * Glob matching over `/`-separated paths, case-insensitive and in NFC. Segments are matched one
+ * by one; `**` spans any number of segments. Iterative with backtracking to the last `**` and
+ * the last `*` only, so the cost is linear-ish in the input for any pattern.
  */
 export function globMatch(pattern: string, path: string): boolean {
-  const pat = pattern.toLowerCase().split("/").filter(Boolean);
-  const segs = path.toLowerCase().split("/").filter(Boolean);
+  const pat = fold(pattern).split("/").filter(Boolean);
+  const segs = fold(path).split("/").filter(Boolean);
   let p = 0;
   let s = 0;
   let starP = -1;
@@ -253,9 +306,12 @@ function segmentMatch(pattern: string, text: string): boolean {
   return p === pc.length;
 }
 
-/** Lower-case runs of Unicode letters and digits. */
+/**
+ * Lower-case NFC runs of Unicode letters and digits, with their combining marks (a mark with no
+ * precomposed form stays part of its word).
+ */
 function tokenize(text: string): string[] {
-  return text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  return fold(text).match(/[\p{L}\p{M}\p{N}]+/gu) ?? [];
 }
 
 function wordsOf(texts: string[]): string[][] {

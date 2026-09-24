@@ -3,6 +3,7 @@ import {
   newId,
   objects,
   sourceRefs,
+  users,
   versions,
   zones,
   type Database,
@@ -31,9 +32,12 @@ const content = async (text: string) => blobIdOf(KEY, enc(text));
 
 let db: Database;
 let t: SeededTenant;
+/** The seeded user, Ana, who owns what the tests ingest. */
+let owner: string;
 beforeEach(async () => {
   db = await openTestDatabase();
   t = await seedTenant(db, 1);
+  owner = `user:${t.userId}`;
 });
 afterEach(() => db?.close());
 
@@ -50,7 +54,7 @@ const item = async (
     externalId,
     zoneId: t.zoneId,
     title: "Plan.docx",
-    ownerId: "user:ana",
+    ownerId: owner,
     content: await content(text),
     ...rest,
   };
@@ -85,7 +89,7 @@ describe("ingest", () => {
     expect(await objectRow(r.objectId)).toMatchObject({
       zoneId: t.zoneId,
       title: "Plan.docx",
-      ownerId: "user:ana",
+      ownerId: owner,
       deletedAt: null,
     });
     expect(await versionsOf(r.objectId)).toMatchObject([
@@ -176,8 +180,8 @@ describe("ingest", () => {
 
   it("keeps owner and zone: a crawl can't hand an object over or move it", async () => {
     const r = await item("a", "x");
-    await item("a", "y", { ownerId: "user:mallory" });
-    expect((await objectRow(r.objectId))?.ownerId).toBe("user:ana");
+    await item("a", "y", { ownerId: `user:${newId("user")}` });
+    expect((await objectRow(r.objectId))?.ownerId).toBe(owner);
     const other = newId("zone");
     await inTenant((tx) =>
       tx.insert(zones).values({ tenantId: t.tenantId, id: other, kind: "indexed", name: "Other" }),
@@ -218,7 +222,7 @@ describe("ingest", () => {
         externalId: "m",
         zoneId: managed,
         title: "Kept.txt",
-        ownerId: "user:ana",
+        ownerId: owner,
         content: { ...(await content("kept")), location: loc },
       }),
     );
@@ -243,18 +247,37 @@ describe("ingest", () => {
     ["an empty title", (i) => ({ ...i, title: "" })],
     ["a title over 1024 characters", (i) => ({ ...i, title: "é".repeat(1025) })],
     ["an owner that isn't a principal", (i) => ({ ...i, ownerId: "ana" })],
+    ["an owner that isn't a user id", (i) => ({ ...i, ownerId: "user:ana" })],
+    ["a group as the owner", (i) => ({ ...i, ownerId: `group:${t.groupId}` })],
+    ["an owner nobody knows", (i) => ({ ...i, ownerId: `user:${newId("user")}` })],
     ["an author that isn't a principal", (i) => ({ ...i, authorId: "ana@example.com" })],
     ["a raw content hash", (i) => ({ ...i, content: { ...i.content, blobId: "b3:00" } })],
     ["a negative size", (i) => ({ ...i, content: { ...i.content, size: -1 } })],
     ["a fractional size", (i) => ({ ...i, content: { ...i.content, size: 1.5 } })],
     ["an empty location", (i) => ({ ...i, content: { ...i.content, location: "" } })],
+    [
+      "a location for a zone that isn't managed",
+      (i) => ({ ...i, content: { ...i.content, location: "somewhere" } }),
+    ],
+    ["NUL in the title", (i) => ({ ...i, title: "Plan\0.docx" })],
+    ["NUL in the external id", (i) => ({ ...i, externalId: "a\0b" })],
+    ["NUL in the author", (i) => ({ ...i, authorId: "user:\0" })],
+    ["NUL in the URL", (i) => ({ ...i, url: "https://x/\0" })],
+    ["NUL in the eTag", (i) => ({ ...i, etag: "\0" })],
+    ["NUL in the source marker", (i) => ({ ...i, sourceVersion: "c\0" })],
+    ["NUL in the media type", (i) => ({ ...i, mime: "text/plain\0" })],
+    ["an external id over 2048 characters", (i) => ({ ...i, externalId: "x".repeat(2049) })],
+    ["a URL over 4096 characters", (i) => ({ ...i, url: `https://x/${"a".repeat(4096)}` })],
+    ["an eTag over 1024 characters", (i) => ({ ...i, etag: "e".repeat(1025) })],
+    ["a source marker over 1024 characters", (i) => ({ ...i, sourceVersion: "c".repeat(1025) })],
+    ["a media type over 1024 characters", (i) => ({ ...i, mime: `text/${"x".repeat(1020)}` })],
   ])("refuses %s before writing anything, and the transaction goes on", async (_, change) => {
     const base: IngestInput = {
       source: "sharepoint",
       externalId: "a",
       zoneId: t.zoneId,
       title: "Plan.docx",
-      ownerId: "user:ana",
+      ownerId: owner,
       content: await content("x"),
     };
     const after = await inTenant(async (tx) => {
@@ -266,6 +289,52 @@ describe("ingest", () => {
       return ingest(tx, t.tenantId, { ...base, externalId: "next" });
     });
     expect(after.created.object).toBe(true);
+  });
+
+  it("gives a new object only to a current user, and lets a retired owner's files sync on", async () => {
+    const r = await item("a", "x");
+    await inTenant((tx) =>
+      tx
+        .update(users)
+        .set({ retiredAt: new Date(), retiredBy: "system:test" })
+        .where(eq(users.id, t.userId)),
+    );
+    await expect(item("b", "y")).rejects.toMatchObject({
+      code: "invalid",
+      message: expect.stringContaining("retired"),
+    });
+    // The existing object keeps its owner, retired or not: offboarding hands files over.
+    expect(await item("a", "x2")).toMatchObject({ objectId: r.objectId, seq: 2 });
+    expect((await objectRow(r.objectId))?.ownerId).toBe(owner);
+  });
+
+  it("refuses a location that differs from the blob's recorded one", async () => {
+    const managed = newId("zone");
+    await inTenant((tx) =>
+      tx
+        .insert(zones)
+        .values({ tenantId: t.tenantId, id: managed, kind: "managed", name: "Hoard" }),
+    );
+    const bytes = await content("stored");
+    const at = (externalId: string, location: string) =>
+      inTenant((tx) =>
+        ingest(tx, t.tenantId, {
+          source: "upload",
+          externalId,
+          zoneId: managed,
+          title: "Stored.txt",
+          ownerId: owner,
+          content: { ...bytes, location },
+        }),
+      );
+    await at("m1", "here");
+    expect((await at("m2", "here")).created.blob).toBe(false);
+    await expect(at("m3", "elsewhere")).rejects.toMatchObject({
+      code: "blob-mismatch",
+      message: expect.stringContaining("another location"),
+    });
+    const [row] = await inTenant((tx) => tx.select().from(blobs).where(eq(blobs.id, bytes.blobId)));
+    expect(row?.location).toBe("here");
   });
 
   it("writes nothing for an item refused after the checks, such as a zone mismatch", async () => {
@@ -282,7 +351,7 @@ describe("ingest", () => {
           externalId: "a",
           zoneId: other,
           title: "Plan.docx",
-          ownerId: "user:ana",
+          ownerId: owner,
           content: await content("new bytes"),
         }),
       ).rejects.toMatchObject({ code: "zone-mismatch" });

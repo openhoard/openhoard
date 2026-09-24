@@ -23,6 +23,7 @@ import {
   type Visibility,
 } from "@openhoard/core-policy";
 import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { lockObject } from "./locks.js";
 
 /*
  * Visibility (T-603): what someone who can't read a file learns about it.
@@ -49,8 +50,14 @@ import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm"
  * one, a generic title while a model's proposal waits for the owner, and the real title only
  * when nobody has flagged it (see nonReaderTitle()).
  *
- * viewObjects() reads in several statements, so it needs one snapshot: run it in a
- * REPEATABLE READ transaction ({@link VIEW_TRANSACTION}); it refuses weaker isolation.
+ * viewObjects(), levelsFor() and explainLevels() read in several statements, so they need one
+ * snapshot: run them in a REPEATABLE READ transaction ({@link VIEW_TRANSACTION}); they refuse
+ * weaker isolation. (Under READ COMMITTED, a review approved between two of the statements made
+ * a pending restrictive tag vanish from both.) They take at most {@link MAX_OBJECT_IDS} ids.
+ *
+ * markProcessed(), proposeDisplayTitle() and setDisplayTitle() take the object's lock first,
+ * like ingest (locks.ts), so a rename can't slip between their check of the title and their
+ * write.
  */
 
 export interface ObjectLevels {
@@ -86,13 +93,37 @@ export interface LevelsExplanation extends ObjectLevels {
   contributions: LevelContribution[];
 }
 
-/** Effective levels for each object that exists; missing ids are left out. */
+/**
+ * The most distinct object ids one call of viewObjects(), levelsFor() or explainLevels() takes.
+ * Page your ids: a statement binds at most 65,535 parameters, and a page this size is already
+ * more than any listing shows.
+ */
+export const MAX_OBJECT_IDS = 10_000;
+
+function distinctIds(objectIds: readonly string[], what: string): string[] {
+  const ids = [...new Set(objectIds)];
+  if (ids.length > MAX_OBJECT_IDS) {
+    throw new RangeError(
+      `${what} takes at most ${MAX_OBJECT_IDS} distinct object ids, not ${ids.length}: page your ids`,
+    );
+  }
+  return ids;
+}
+
+/**
+ * Effective levels for each object that exists; missing ids are left out. It reads in several
+ * statements, so it needs one snapshot, like viewObjects(): run it in a REPEATABLE READ (or
+ * serializable) transaction, {@link VIEW_TRANSACTION}; it refuses weaker isolation. At most
+ * {@link MAX_OBJECT_IDS} distinct ids.
+ */
 export async function levelsFor(
   tx: Tx,
   tenantId: string,
   objectIds: readonly string[],
 ): Promise<Map<string, ObjectLevels>> {
-  const explained = await collectLevels(tx, tenantId, objectIds);
+  const ids = distinctIds(objectIds, "levelsFor");
+  await requireSnapshot(tx, "levelsFor");
+  const explained = await collectLevels(tx, tenantId, ids);
   return new Map(
     [...explained].map(([id, e]) => [
       id,
@@ -101,22 +132,31 @@ export async function levelsFor(
   );
 }
 
-/** Levels with the tags behind them, for one object; null if it doesn't exist. */
+/**
+ * Levels with the tags behind them, for one object; null if it doesn't exist. Needs one
+ * snapshot, like levelsFor().
+ */
 export async function explainLevels(
   tx: Tx,
   tenantId: string,
   objectId: string,
 ): Promise<LevelsExplanation | null> {
+  await requireSnapshot(tx, "explainLevels");
   return (await collectLevels(tx, tenantId, [objectId])).get(objectId) ?? null;
 }
 
+/**
+ * Levels of `ids` (distinct, at most MAX_OBJECT_IDS), read in one snapshot the caller checked.
+ * `known` passes what the caller has read already: which of the ids exist, and whether each
+ * one's current version is processed.
+ */
 async function collectLevels(
   tx: Tx,
   tenantId: string,
-  objectIds: readonly string[],
+  ids: readonly string[],
+  known?: { present: readonly string[]; processed: ReadonlyMap<string, boolean> },
 ): Promise<Map<string, LevelsExplanation>> {
   const out = new Map<string, LevelsExplanation>();
-  const ids = [...new Set(objectIds)];
   if (ids.length === 0) return out;
   const [tenant] = await tx
     .select({ visibility: tenants.defaultVisibility, exposure: tenants.defaultExposure })
@@ -124,15 +164,11 @@ async function collectLevels(
     .where(eq(tenants.id, tenantId));
   if (!tenant) return out;
 
-  const current = await tx
-    .selectDistinctOn([versions.objectId], {
-      objectId: versions.objectId,
-      processedAt: versions.processedAt,
-    })
-    .from(versions)
-    .where(and(eq(versions.tenantId, tenantId), inArray(versions.objectId, ids)))
-    .orderBy(versions.objectId, desc(versions.seq));
-  const processed = new Map(current.map((v) => [v.objectId, v.processedAt !== null]));
+  let processed = known?.processed;
+  if (!processed) {
+    const current = await currentVersions(tx, tenantId, ids);
+    processed = new Map([...current].map(([id, v]) => [id, v.processed]));
+  }
 
   const levelled = or(isNotNull(facetValues.visibility), isNotNull(facetValues.exposure));
   const applied = tx
@@ -219,11 +255,15 @@ async function collectLevels(
     byObject.set(row.objectId, entry);
   }
 
-  const present = await tx
-    .select({ id: objects.id })
-    .from(objects)
-    .where(and(eq(objects.tenantId, tenantId), inArray(objects.id, ids)));
-  for (const { id } of present) {
+  const present =
+    known?.present ??
+    (
+      await tx
+        .select({ id: objects.id })
+        .from(objects)
+        .where(and(eq(objects.tenantId, tenantId), inArray(objects.id, [...ids])))
+    ).map((r) => r.id);
+  for (const id of present) {
     const isProcessed = processed.get(id) ?? false;
     const entry = byObject.get(id);
     const base = resolveLevels({
@@ -247,6 +287,26 @@ async function collectLevels(
     });
   }
   return out;
+}
+
+/** Each object's current version: its media type, and whether enrichment has finished it. */
+async function currentVersions(
+  tx: Tx,
+  tenantId: string,
+  ids: readonly string[],
+): Promise<Map<string, { mime: string; processed: boolean }>> {
+  const rows = await tx
+    .selectDistinctOn([versions.objectId], {
+      objectId: versions.objectId,
+      mime: versions.mime,
+      processedAt: versions.processedAt,
+    })
+    .from(versions)
+    .where(and(eq(versions.tenantId, tenantId), inArray(versions.objectId, [...ids])))
+    .orderBy(versions.objectId, desc(versions.seq));
+  return new Map(
+    rows.map((v) => [v.objectId, { mime: v.mime, processed: v.processedAt !== null }]),
+  );
 }
 
 /** What non-readers see when a model's display title waits for the owner. */
@@ -285,7 +345,7 @@ export interface TitleOnlyView extends ViewBase {
   shape: "title-only";
   /** nonReaderTitle(): the owner's display title, the generic title, or the real one. */
   title: string;
-  /** Tags of facets marked public, only. */
+  /** Trusted tags (not a model's unreviewed guess) of facets marked public, only. */
   tags: string[];
   requestAccess: true;
 }
@@ -294,7 +354,7 @@ export interface TitleOnlyView extends ViewBase {
 export interface CardView extends ViewBase {
   shape: "card";
   title: string;
-  /** Every tag for a reader; public-facet tags only for a non-reader. */
+  /** Every tag for a reader; trusted public-facet tags only for a non-reader. */
   tags: string[];
   /** Whether the caller can read the file (and so open it). */
   readable: boolean;
@@ -311,7 +371,7 @@ export interface ViewRequest {
 /**
  * The views a caller may have of some objects, in the order asked, as search results and
  * listings show them. Objects the caller may not know about, deleted ones and unknown ids are
- * left out, indistinguishably.
+ * left out, indistinguishably. At most {@link MAX_OBJECT_IDS} distinct ids: page your ids.
  */
 export async function viewObjects(
   tx: Tx,
@@ -320,7 +380,7 @@ export async function viewObjects(
   request: ViewRequest,
   objectIds: readonly string[],
 ): Promise<ObjectView[]> {
-  const ids = [...new Set(objectIds)];
+  const ids = distinctIds(objectIds, "viewObjects");
   if (ids.length === 0) return [];
   await requireSnapshot(tx);
   const rows = await tx
@@ -360,19 +420,20 @@ export async function viewObjects(
   for (const r of tagRows) {
     const entry = tagsOf.get(r.objectId) ?? { all: [], grantable: [], public: [] };
     const tag = tagOf(r.facet, r.value);
+    const trusted = r.source !== "model" || r.reviewed;
     entry.all.push(tag);
-    if (r.source !== "model" || r.reviewed) entry.grantable.push(tag);
-    if (r.public) entry.public.push(tag);
+    if (trusted) entry.grantable.push(tag);
+    // Model output never reaches non-readers unconfirmed: public tags shown to them are trusted.
+    if (r.public && trusted) entry.public.push(tag);
     tagsOf.set(r.objectId, entry);
   }
 
-  const mimes = await tx
-    .selectDistinctOn([versions.objectId], { objectId: versions.objectId, mime: versions.mime })
-    .from(versions)
-    .where(and(eq(versions.tenantId, tenantId), inArray(versions.objectId, found)))
-    .orderBy(versions.objectId, desc(versions.seq));
-  const mimeOf = new Map(mimes.map((m) => [m.objectId, m.mime]));
-  const levels = await levelsFor(tx, tenantId, found);
+  // One read of the current versions serves both the media types and the levels.
+  const current = await currentVersions(tx, tenantId, found);
+  const levels = await collectLevels(tx, tenantId, found, {
+    present: found,
+    processed: new Map([...current].map(([id, v]) => [id, v.processed])),
+  });
   const { principal } = request;
   const member = principal.active && !principal.guest;
 
@@ -403,7 +464,7 @@ export async function viewObjects(
     });
     const base = {
       id: row.id,
-      mime: mimeOf.get(row.id) ?? "application/octet-stream",
+      mime: current.get(row.id)?.mime ?? "application/octet-stream",
       ownerId: row.ownerId,
     };
     const sorted = (list: string[]) => [...list].sort();
@@ -478,6 +539,8 @@ export async function proposeDisplayTitle(
   if (!input.by.startsWith("model:")) {
     throw new TypeError("a proposal comes from a model: principal");
   }
+  // The object's lock before its row, as ingest takes them (locks.ts).
+  await lockObject(tx, tenantId, input.objectId);
   const updated = await tx
     .update(objects)
     .set({ displayTitle: input.title, displayTitleBy: input.by, displayTitleFor: input.forTitle })
@@ -512,6 +575,7 @@ export async function setDisplayTitle(
   if (!input.by.startsWith("user:")) {
     throw new TypeError("a decision comes from a user: principal");
   }
+  await lockObject(tx, tenantId, input.objectId);
   const updated = await tx
     .update(objects)
     .set({ displayTitle: input.title, displayTitleBy: input.by, displayTitleFor: input.forTitle })
@@ -537,6 +601,25 @@ export async function markProcessed(
   tenantId: string,
   input: { versionId: string; title: string },
 ): Promise<boolean> {
+  // A version never changes objects, so an unlocked read names the object to lock.
+  const [version] = await tx
+    .select({ objectId: versions.objectId })
+    .from(versions)
+    .where(and(eq(versions.tenantId, tenantId), eq(versions.id, input.versionId)));
+  if (!version) return false;
+  // Ingest renames under this lock, so once we hold it no rename is half done. The title is
+  // compared in a statement of its own, after the lock: a single UPDATE … WHERE EXISTS would
+  // compare against the title as of its snapshot, taken before it waited, and mark the renamed
+  // object processed under a title nobody enriched. FOR SHARE reads the latest committed row;
+  // in a snapshot transaction, a rename since the snapshot fails it with a serialization error
+  // (retry) instead.
+  await lockObject(tx, tenantId, version.objectId);
+  const [object] = await tx
+    .select({ title: objects.title })
+    .from(objects)
+    .where(and(eq(objects.tenantId, tenantId), eq(objects.id, version.objectId)))
+    .for("share");
+  if (object?.title !== input.title) return false;
   const updated = await tx
     .update(versions)
     .set({ processedAt: sql`greatest(now(), ${versions.createdAt})` })
@@ -545,8 +628,6 @@ export async function markProcessed(
         eq(versions.tenantId, tenantId),
         eq(versions.id, input.versionId),
         isNull(versions.processedAt),
-        sql`exists (select 1 from ${objects} where ${objects.tenantId} = ${versions.tenantId}
-          and ${objects.id} = ${versions.objectId} and ${objects.title} = ${input.title})`,
       ),
     )
     .returning({ id: versions.id });

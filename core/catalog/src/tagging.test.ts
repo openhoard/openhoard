@@ -19,6 +19,7 @@ import {
   proposeTag,
   rejectReview,
   tagsForDecisions,
+  TagError,
   type TagProposal,
 } from "./tagging.js";
 
@@ -210,7 +211,41 @@ describe("proposeTag", () => {
     await expect(propose({ confidence: 1.5 })).rejects.toThrow("confidence must be in [0, 1]");
     await expect(propose({ confidence: Number.NaN })).rejects.toThrow("confidence");
     // The vocabulary's own rules still hold for proposed values.
-    await expect(propose({ tag: "client:Not A Slug" })).rejects.toThrow();
+    await expect(propose({ tag: "client:Not A Slug" })).rejects.toThrow("is not a value");
+  });
+
+  it.each<[string, Partial<TagProposal>, string]>([
+    ["a value that isn't a slug", { tag: "client:Not A Slug" }, "invalid"],
+    ["a value over 128 characters", { tag: `client:${"a".repeat(129)}` }, "invalid"],
+    ["a value with NUL", { tag: "client:a\0b" }, "invalid"],
+    ["a facet that isn't a key", { tag: "Client:acme" }, "invalid"],
+    ["a label over 200 characters", { tag: "client:new-co", label: "x".repeat(201) }, "invalid"],
+    ["a blank label", { tag: "client:new-co", label: "  " }, "invalid"],
+    ["a label with NUL", { tag: "client:new-co", label: "New\0Co" }, "invalid"],
+    ["an applier with NUL", { appliedBy: "model:\0" }, "invalid"],
+    ["an unknown facet", { tag: "project:apollo" }, "unknown-facet"],
+    ["an unknown object", { objectId: newId("object") }, "unknown-object"],
+  ])("refuses %s with a TagError, and the transaction goes on", async (_, change, code) => {
+    await inTenant(async (tx) => {
+      const refused = await proposeTag(tx, t.tenantId, {
+        objectId: t.objectId,
+        tag: "client:globex",
+        source: "model",
+        confidence: 0.9,
+        ...change,
+      }).catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(TagError);
+      expect(refused).toMatchObject({ code });
+      expect(
+        await proposeTag(tx, t.tenantId, {
+          objectId: t.objectId,
+          tag: "client:globex",
+          source: "model",
+          confidence: 0.9,
+        }),
+      ).toMatchObject({ applied: true });
+    });
+    expect(await value("client", "new-co")).toBeUndefined();
   });
 });
 
@@ -273,13 +308,60 @@ describe("the review inbox", () => {
   });
 
   it("holds a tag with an open item until the item is decided, whoever proposes it again", async () => {
-    const outcome = await propose({ confidence: 0.2 });
+    const outcome = await propose({ tag: "client:new-co" });
     if (outcome.applied) throw new Error("expected a review");
-    expect(await propose({ confidence: 0.99 })).toEqual(outcome);
-    expect(await propose({ source: "rule", appliedBy: "rule:x", confidence: 1 })).toEqual(outcome);
+    expect(await propose({ tag: "client:new-co", confidence: 0.99 })).toEqual(outcome);
+    expect(
+      await propose({ tag: "client:new-co", source: "rule", appliedBy: "rule:x", confidence: 1 }),
+    ).toEqual(outcome);
     expect(await tagsOn()).toEqual(["client:acme-1"]);
     await inTenant((tx) => approveReview(tx, t.tenantId, outcome.reviewId, "user:reviewer"));
-    expect(await tagsOn()).toEqual(["client:acme-1", "client:globex (reviewed)"]);
+    expect(await tagsOn()).toEqual(["client:acme-1", "client:new-co (reviewed)"]);
+  });
+
+  it("lets a trusted source settle a model's item on an approved value by applying it", async () => {
+    const outcome = await propose({ confidence: 0.2 });
+    if (outcome.applied) throw new Error("expected a review");
+    // Another model's word changes nothing.
+    expect(await propose({ confidence: 0.99 })).toEqual(outcome);
+    expect(await propose({ source: "rule", appliedBy: "rule:x", confidence: 1 })).toEqual({
+      applied: true,
+      tag: "client:globex",
+    });
+    expect(await reviews()).toEqual([]);
+    const [item] = await inTenant((tx) =>
+      tx.select().from(tagReviews).where(eq(tagReviews.id, outcome.reviewId)),
+    );
+    expect(item).toMatchObject({ decision: "approved", resolvedBy: "rule:x" });
+    expect(await inTenant((tx) => tagsForDecisions(tx, t.tenantId, t.objectId))).toMatchObject({
+      grantable: ["client:acme-1", "client:globex"],
+    });
+    // A model's sensitive item too, for a person.
+    const sensitive = await propose({ tag: "sensitivity:restricted", confidence: 0.99 });
+    expect(sensitive).toMatchObject({ applied: false, reason: "sensitive" });
+    expect(
+      await propose({ tag: "sensitivity:restricted", source: "user", confidence: 1 }),
+    ).toMatchObject({ applied: true });
+    expect(await reviews()).toEqual([]);
+  });
+
+  it("hands a model's unreviewed tag to a trusted source that proposes it, so grants match it", async () => {
+    expect(await propose({ confidence: 0.9 })).toMatchObject({ applied: true });
+    const grantable = async () =>
+      (await inTenant((tx) => tagsForDecisions(tx, t.tenantId, t.objectId))).grantable;
+    expect(await grantable()).toEqual(["client:acme-1"]);
+    expect(await propose({ source: "pack", appliedBy: "pack:general", confidence: 1 })).toEqual({
+      applied: true,
+      tag: "client:globex",
+    });
+    expect(await grantable()).toEqual(["client:acme-1", "client:globex"]);
+    const [row] = await inTenant((tx) =>
+      tx.select().from(objectTags).where(eq(objectTags.value, "globex")),
+    );
+    expect(row).toMatchObject({ source: "pack", appliedBy: "pack:general", confidence: 1 });
+    // A model proposing a trusted tag again takes nothing back.
+    await propose({ confidence: 0.8 });
+    expect(await grantable()).toEqual(["client:acme-1", "client:globex"]);
   });
 
   it("rejecting takes off an unreviewed model tag that got on anyway", async () => {
@@ -337,6 +419,41 @@ describe("the review inbox", () => {
       ]);
       expect(await reviews()).toEqual([]);
       expect(await tagsOn()).toContain(`${tag} (reviewed)`);
+    }
+  });
+
+  it("never deadlocks two reviewers rejecting one new value on different objects", async () => {
+    const others = [await newObject(), await newObject()];
+    for (let round = 0; round < 10; round++) {
+      const tag = `client:bogus-${round}`;
+      const [a, b] = await Promise.all(others.map((objectId) => propose({ tag, objectId })));
+      if (!a || !b || a.applied || b.applied) throw new Error("expected reviews");
+      const settled = await Promise.allSettled([
+        inTenant((tx) => rejectReview(tx, t.tenantId, a.reviewId, "user:one")),
+        inTenant((tx) => rejectReview(tx, t.tenantId, b.reviewId, "user:two")),
+      ]);
+      // One closes both; the other finds its item decided, and says so in a way a caller can tell.
+      expect(settled.filter((s) => s.status === "fulfilled")).toHaveLength(1);
+      const [refused] = settled.flatMap((s) => (s.status === "rejected" ? [s.reason] : []));
+      expect(refused).toBeInstanceOf(TagError);
+      expect(refused).toMatchObject({ code: "already-resolved" });
+      expect(await reviews()).toEqual([]);
+    }
+  });
+
+  it("decides a review twice at once only once", async () => {
+    for (let round = 0; round < 5; round++) {
+      const outcome = await propose({ tag: `client:twice-${round}` });
+      if (outcome.applied) throw new Error("expected a review");
+      const settled = await Promise.allSettled([
+        inTenant((tx) => approveReview(tx, t.tenantId, outcome.reviewId, "user:one")),
+        inTenant((tx) => mergeReview(tx, t.tenantId, outcome.reviewId, "globex", "user:two")),
+        inTenant((tx) => rejectReview(tx, t.tenantId, outcome.reviewId, "user:three")),
+      ]);
+      expect(settled.filter((s) => s.status === "fulfilled")).toHaveLength(1);
+      for (const s of settled) {
+        if (s.status === "rejected") expect(s.reason).toMatchObject({ code: "already-resolved" });
+      }
     }
   });
 

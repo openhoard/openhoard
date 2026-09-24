@@ -35,11 +35,18 @@ one source item (source, external id) → one object → versions 1, 2, 3… →
 - **Skip unchanged items.** `sourceItemState()` returns the eTag and the current version's
   source marker, so a connector can skip an item before downloading it.
 
-In M1 every zone is index-only: the caller hashes the bytes with `blobIdOf()` and OpenHoard keeps
-no copy. Managed zones store the bytes first with core/storage and pass their location.
+- **Owners are people.** A new object's `ownerId` is `user:` and the id of an existing user who
+  isn't retired. An existing object keeps its owner, even one retired since: files change hands
+  through the API (offboarding), not through a crawl.
 
-Every input is checked before anything is written. A refused item throws `IngestError` with a
-`code` (`invalid`, `unknown-zone`, `zone-mismatch`, `needs-location`, `blob-mismatch`), so a
+In M1 every zone is index-only: the caller hashes the bytes with `blobIdOf()` and OpenHoard keeps
+no copy. Managed zones store the bytes first with core/storage and pass their location. A location
+for any other zone is refused, and so is one that differs from the location already recorded for
+the blob (`blob-mismatch`): storage paths derive from the blob id.
+
+Every input is checked before anything is written: formats, lengths (`INGEST_LIMITS`) and NUL
+characters, which PostgreSQL text can't hold. A refused item throws `IngestError` with a `code`
+(`invalid`, `unknown-zone`, `zone-mismatch`, `needs-location`, `blob-mismatch`), so a
 connector can report it and go on. Connectors should:
 
 - ingest one item per transaction, and retry on deadlock (`40P01`) or serialization failure
@@ -74,8 +81,13 @@ What someone who can't read a file learns about it:
 
 `viewObjects()` returns what a caller may see of a list of objects, in order, leaving out
 hidden, deleted and unknown ones alike. Only active tenant members discover files. Guests and
-deprovisioned users see what they can read and nothing else. Run it in one snapshot:
-`db.withTenant(tenant, work, VIEW_TRANSACTION)`.
+deprovisioned users see what they can read and nothing else. Non-readers see public-facet tags only,
+and only trusted ones: never a model's unreviewed guess.
+
+`viewObjects()`, `levelsFor()` and `explainLevels()` read in several statements, so they run in
+one snapshot, `db.withTenant(tenant, work, VIEW_TRANSACTION)`, and refuse weaker isolation. Each
+takes at most `MAX_OBJECT_IDS` (10,000) distinct ids and throws a `RangeError` beyond: page your
+ids.
 
 **Display titles.** A title can be sensitive on its own ("Termination – J. Smith.docx"). A model
 proposes a neutral display title with `proposeDisplayTitle()`, and the owner confirms, edits or
@@ -86,7 +98,9 @@ clears it with `setDisplayTitle()`. Non-readers see:
   unconfirmed;
 - the real title when nobody has flagged it.
 
-A rename lets models propose again, even over the owner's earlier decision.
+A rename lets models propose again, even over the owner's earlier decision. `markProcessed()`,
+`proposeDisplayTitle()` and `setDisplayTitle()` take the object's lock before comparing the title,
+so a decision about a title never lands on a rename that committed meanwhile.
 
 ## Why can X see this?
 
@@ -132,7 +146,15 @@ person saying yes. `proposeTag()` applies a tag straight away only when that is 
 | approved, and below the confidence threshold (0.75)            | applied                     | review: low-confidence |
 | approved, otherwise                                            | applied                     | applied                |
 
-A tag with an open review item waits for that item, whoever proposes it again.
+A tag with an open review item waits for that item, whoever proposes it again, with one exception:
+a rule, pack or person proposing an approved value that waits only because a model proposed it
+applies it, and closes the model's item as approved by the proposer. Likewise, a trusted source
+proposing a tag the object carries as an unreviewed model tag takes it over, so grants match it.
+
+Inputs are checked before anything is written. A refused proposal or decision throws `TagError`
+with a `code`: `invalid` (a value that isn't a slug, a label over 200 characters…),
+`unknown-facet`, `unknown-object`, `unknown-review` or `already-resolved` (another reviewer
+decided the item first).
 
 The inbox is `tag_reviews` in core/db. `approveReview()`, `rejectReview()` and `mergeReview()`
 decide items, and items stay as the record of who decided:
@@ -166,5 +188,25 @@ Packs and admins give rules as data. Check them with `validateRules()`:
   case, over Unicode letters and digits.
 - **Speed:** matching never builds a regular expression from rule text, so a rule can't make
   tagging slow.
-- **Applying:** `applyRuleTags()` applies the matches with source `rule`. Values that aren't in
-  the approved vocabulary go to review like anyone else's.
+- **Unicode:** rules and inputs are compared in NFC, so a decomposed name (macOS writes "é" as
+  "e" and a combining accent) matches a rule written with the composed one.
+- **Applying:** `applyRuleTags()` makes the object's rule tags exactly what the rules give now.
+  Matches apply with source `rule`; values that aren't in the approved vocabulary go to review
+  like anyone else's. Rule tags no rule gives any more are taken off and returned as `removed`: a
+  file moved from `Clients/Acme/` to `HR/` loses `client:acme` and the grants on it. Tags from
+  people, packs and models are left alone. Pass the complete rule set.
+
+## Locks
+
+Catalog functions take advisory locks (`locks.ts`) in one order, so they can queue behind each
+other but never deadlock among themselves:
+
+```text
+source item (7423) → tag value (7425) → object (7422) → the object's rows → audit appends (7421)
+```
+
+Ingest takes the source item, then the object. Review decisions take the value, then the object,
+then the item; rejecting a new value locks the other items for it in id order. Everything that
+tags, titles or marks an object takes its lock before touching its rows. A transaction that makes
+several decisions can still deadlock with another doing the same in another order: decide one item
+per transaction, or retry on `40P01`.

@@ -1,6 +1,7 @@
 import {
   blobs,
   idPattern,
+  isId,
   newId,
   objects,
   sourceRefs,
@@ -8,6 +9,7 @@ import {
   zones,
   type Tx,
 } from "@openhoard/core-db";
+import { getUser } from "@openhoard/core-identity";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { contentHasher, scopedBlobId } from "./hash.js";
 import { lockObject, lockSourceItem } from "./locks.js";
@@ -29,8 +31,11 @@ import { lockObject, lockSourceItem } from "./locks.js";
  *
  * In M1 every zone is index-only: the caller hashes the bytes with blobIdOf() and passes no
  * location. Managed zones (M3) store the bytes first (core/storage BlobStore.put) and pass the
- * location; ingest refuses a managed-zone object without one. A blob keeps the first location
- * recorded for it (storage paths derive from the blob id, so they agree).
+ * location; ingest refuses a managed-zone object without one, and a location for any other zone.
+ * A blob keeps the first location recorded for it: storage paths derive from the blob id, so a
+ * different one is refused (blob-mismatch).
+ *
+ * A new object's owner is `user:` and the id of an existing user who isn't retired.
  *
  * Every input is checked before anything is written, and a refused item throws IngestError with
  * a code, so a connector can report it and go on. Callers should:
@@ -51,7 +56,10 @@ export interface IngestInput {
   externalId: string;
   zoneId: string;
   title: string;
-  /** Principal that owns a new object, e.g. `user:…`. Ignored for an existing one. */
+  /**
+   * Who owns a new object: `user:` and the id of an existing user who isn't retired. Checked for
+   * form always; ignored otherwise for an existing object, which keeps its owner.
+   */
   ownerId: string;
   content: {
     /** From blobIdOf(), or BlobStore.put() for a managed zone. */
@@ -97,7 +105,7 @@ export type IngestErrorCode =
   | "zone-mismatch"
   /** A managed zone needs the bytes stored first. */
   | "needs-location"
-  /** The tenant has this blob id with another size. */
+  /** The tenant has this blob id with another size, or stored at another location. */
   | "blob-mismatch";
 
 export class IngestError extends Error {
@@ -127,6 +135,12 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
       "managed zones hold the bytes: store them first and pass the location",
     );
   }
+  if (zone.kind !== "managed" && content.location !== undefined) {
+    throw new IngestError(
+      "invalid",
+      `content.location is for managed zones; zone ${input.zoneId} is ${zone.kind}`,
+    );
+  }
 
   const [ref] = await tx
     .select({ objectId: sourceRefs.objectId })
@@ -141,6 +155,13 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
   const refFields = { url: input.url ?? null, etag: input.etag ?? null, syncedAt: sql`now()` };
 
   if (!ref) {
+    // A new object needs an owner who can own it. An existing one keeps its owner, even one
+    // retired since: offboarding hands files over through the API, not through a crawl.
+    const owner = await getUser(tx, tenantId, input.ownerId.slice(USER_PREFIX.length));
+    if (!owner) throw new IngestError("invalid", `ownerId ${input.ownerId} is not a user`);
+    if (owner.retired) {
+      throw new IngestError("invalid", `ownerId ${input.ownerId} is a retired user`);
+    }
     const blobCreated = await ensureBlob(tx, tenantId, content);
     const objectId = newId("object");
     await tx.insert(objects).values({
@@ -244,6 +265,19 @@ const SOURCE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const PRINCIPAL = /^[a-z]+:.+$/s;
 const BLOB_ID = /^b3t:[0-9a-f]{64}$/;
 const ZONE_ID = new RegExp(idPattern("zone"));
+const USER_PREFIX = "user:";
+
+/** Longest accepted values, in characters, of the free-text fields. */
+export const INGEST_LIMITS = {
+  externalId: 2048,
+  title: 1024,
+  principal: 1024,
+  location: 1024,
+  url: 4096,
+  etag: 1024,
+  sourceVersion: 1024,
+  mime: 1024,
+} as const;
 
 /** The checks core/db's constraints make, as IngestErrors raised before any write. */
 function validate(input: IngestInput) {
@@ -251,26 +285,45 @@ function validate(input: IngestInput) {
     throw new IngestError("invalid", `${field} ${why}`);
   };
   const chars = (s: string) => [...s].length;
+  // PostgreSQL text can't hold NUL (it would fail with 22021, aborting the transaction).
+  const text = (
+    field: keyof typeof INGEST_LIMITS,
+    name: string,
+    value: string | undefined,
+    min = 1,
+  ) => {
+    if (value === undefined) return;
+    const max = INGEST_LIMITS[field];
+    if (chars(value) < min || chars(value) > max) {
+      bad(name, `must be ${min} to ${max} characters`);
+    }
+    if (value.includes("\0")) bad(name, "must not contain NUL");
+  };
   if (!SOURCE.test(input.source)) bad("source", "must be a lower-case slug");
-  if (chars(input.externalId) < 1 || chars(input.externalId) > 2048) {
-    bad("externalId", "must be 1 to 2048 characters");
-  }
+  text("externalId", "externalId", input.externalId);
   if (!ZONE_ID.test(input.zoneId)) bad("zoneId", "is not a zone id");
-  if (chars(input.title) < 1 || chars(input.title) > 1024) {
-    bad("title", "must be 1 to 1024 characters");
+  text("title", "title", input.title);
+  if (
+    !input.ownerId.startsWith(USER_PREFIX) ||
+    !isId("user", input.ownerId.slice(USER_PREFIX.length))
+  ) {
+    bad("ownerId", "must be user: and a user id");
   }
-  if (!PRINCIPAL.test(input.ownerId)) bad("ownerId", "must be a principal such as user:…");
   if (input.authorId !== undefined && !PRINCIPAL.test(input.authorId)) {
     bad("authorId", "must be a principal such as user:…");
   }
+  text("principal", "authorId", input.authorId);
   const { blobId, size, location } = input.content;
   if (!BLOB_ID.test(blobId)) bad("content.blobId", "must be a b3t: blob id");
   if (!Number.isSafeInteger(size) || size < 0) {
     bad("content.size", "must be a non-negative integer");
   }
-  if (location !== undefined && (location.length < 1 || location.length > 1024)) {
-    bad("content.location", "must be 1 to 1024 characters");
-  }
+  text("location", "content.location", location);
+  // Sources send empty markers and media types; those stay allowed.
+  text("url", "url", input.url, 0);
+  text("etag", "etag", input.etag, 0);
+  text("sourceVersion", "sourceVersion", input.sourceVersion, 0);
+  text("mime", "mime", input.mime, 0);
 }
 
 /**
@@ -402,6 +455,18 @@ async function ensureBlob(tx: Tx, tenantId: string, content: IngestInput["conten
     throw new IngestError(
       "blob-mismatch",
       `blob ${content.blobId} is ${existing.size} bytes, not ${content.size}`,
+    );
+  }
+  if (
+    existing.location !== null &&
+    content.location !== undefined &&
+    existing.location !== content.location
+  ) {
+    // Storage paths derive from the blob id, so two locations for one blob mean a bug or a
+    // forged location, not a second copy.
+    throw new IngestError(
+      "blob-mismatch",
+      `blob ${content.blobId} is stored at another location than ${content.location}`,
     );
   }
   if (existing.location === null && content.location !== undefined) {

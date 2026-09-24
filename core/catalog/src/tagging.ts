@@ -3,14 +3,15 @@ import {
   facetValues,
   grants,
   newId,
+  objects,
   objectTags,
   tagOf,
   tagReviews,
   type TAG_SOURCES,
   type Tx,
 } from "@openhoard/core-db";
-import { and, asc, eq, gt, isNull, ne, or, sql } from "drizzle-orm";
-import { lockObject } from "./locks.js";
+import { and, asc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { lockObject, lockTagValue } from "./locks.js";
 
 /*
  * Applying tags, and the review inbox (T-406). The one rule: nothing creates vocabulary, and
@@ -25,7 +26,11 @@ import { lockObject } from "./locks.js";
  * | approved, below the confidence threshold          | applied            | review: low-confidence |
  * | approved otherwise                                | applied            | applied                |
  *
- * A tag with an open review item waits for that item, whoever proposes it again.
+ * A tag with an open review item waits for that item, whoever proposes it again, with one
+ * exception: a trusted source (rule, pack, person) proposing an approved value that waits only
+ * because a model proposed it applies it, and closes the model's item as approved by the
+ * proposer. Likewise a trusted source proposing a tag the object carries as an unreviewed model
+ * tag takes it over, so grants match it from then on.
  *
  * Levels and grants can be added to a value after a model tagged objects with it, so the check
  * above can't be the only guard: decisions read tags through tagsForDecisions(), where an
@@ -34,6 +39,9 @@ import { lockObject } from "./locks.js";
  *
  * Who may propose or decide is the API's question (authorize(), action "tag"); these functions
  * trust their caller and record who acted. `appliedBy` must name the same kind as `source`.
+ *
+ * Every input is checked before anything is written; a refused one throws TagError with a code.
+ * Locks follow locks.ts: a decision takes the value's lock, then the object's, then the item.
  */
 
 export type TagSource = (typeof TAG_SOURCES)[number];
@@ -47,7 +55,7 @@ export interface TagProposal {
   appliedBy?: string;
   /** In [0, 1]; 1 for rules, packs and people. */
   confidence: number;
-  /** Display label for a value the vocabulary doesn't have yet. */
+  /** Display label for a value the vocabulary doesn't have yet: 1 to 200 characters. */
   label?: string;
 }
 
@@ -56,8 +64,38 @@ export type ReviewReason = "new-value" | "low-confidence" | "sensitive";
 export type TagOutcome =
   { applied: true; tag: string } | { applied: false; reviewId: string; reason: ReviewReason };
 
+export type TagErrorCode =
+  /** A malformed input: the tag, a label, a confidence, the applier. The message names it. */
+  | "invalid"
+  | "unknown-facet"
+  | "unknown-object"
+  | "unknown-review"
+  /** The review item was decided already, perhaps by another reviewer a moment ago. */
+  | "already-resolved";
+
+/**
+ * A refused proposal or decision. Inputs are checked before anything is written, so the
+ * transaction can go on: model output can't abort it with a constraint violation.
+ */
+export class TagError extends Error {
+  constructor(
+    readonly code: TagErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "TagError";
+  }
+}
+
 /** Model tags below this confidence go to review. */
 export const DEFAULT_MIN_CONFIDENCE = 0.75;
+
+// core/db's own checks on facets, values, labels and principals, made here first.
+const FACET_KEY = /^[a-z][a-z0-9-]{0,63}$/;
+const VALUE_SLUG = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const PRINCIPAL = /^[a-z]+:[^\0]+$/;
+const PRINCIPAL_MAX = 1024;
+const LABEL_MAX = 200;
 
 export async function proposeTag(
   tx: Tx,
@@ -66,42 +104,59 @@ export async function proposeTag(
   options: { minConfidence?: number; now?: Date } = {},
 ): Promise<TagOutcome> {
   const { facet, value } = splitTag(proposal.tag);
-  if (!(proposal.confidence >= 0 && proposal.confidence <= 1)) {
-    throw new RangeError("confidence must be in [0, 1]");
-  }
-  if (proposal.appliedBy !== undefined && !proposal.appliedBy.startsWith(`${proposal.source}:`)) {
-    throw new TypeError(`appliedBy must be a ${proposal.source}: principal`);
-  }
+  checkProposal(proposal, facet, value);
   const minConfidence = options.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
   const now = options.now ?? new Date();
+  const trusted = proposal.source !== "model";
+  const appliedBy = proposal.appliedBy ?? null;
   await lockObject(tx, tenantId, proposal.objectId);
 
+  const [objectRow] = await tx
+    .select({ id: objects.id })
+    .from(objects)
+    .where(and(eq(objects.tenantId, tenantId), eq(objects.id, proposal.objectId)));
+  if (!objectRow) throw new TagError("unknown-object", `no object ${proposal.objectId}`);
   const [facetRow] = await tx
     .select({ key: facets.key })
     .from(facets)
     .where(and(eq(facets.tenantId, tenantId), eq(facets.key, facet)));
   // Facets come from packs and admins; a tag can't invent one.
-  if (!facetRow) throw new Error(`unknown facet: ${facet}`);
+  if (!facetRow) throw new TagError("unknown-facet", `unknown facet: ${facet}`);
 
+  const tagKey = and(
+    eq(objectTags.tenantId, tenantId),
+    eq(objectTags.objectId, proposal.objectId),
+    eq(objectTags.facet, facet),
+    eq(objectTags.value, value),
+  );
   const [already] = await tx
-    .select({ reviewed: objectTags.reviewed })
+    .select({ source: objectTags.source, reviewed: objectTags.reviewed })
     .from(objectTags)
-    .where(
-      and(
-        eq(objectTags.tenantId, tenantId),
-        eq(objectTags.objectId, proposal.objectId),
-        eq(objectTags.facet, facet),
-        eq(objectTags.value, value),
-      ),
-    );
-  // Already on the object: nothing to decide, and never a review item for a settled tag.
-  if (already) return { applied: true, tag: proposal.tag };
-
-  // An open item for this tag decides it; proposing again changes nothing.
-  const [open] = await openItemFor(tx, tenantId, proposal.objectId, facet, value);
-  if (open) return { applied: false, reviewId: open.id, reason: open.reason };
+    .where(tagKey);
+  if (already) {
+    // A trusted source vouches for a model's unreviewed guess: from now on the tag is the
+    // trusted source's, and grants match it.
+    if (trusted && already.source === "model" && !already.reviewed) {
+      await tx
+        .update(objectTags)
+        .set({ source: proposal.source, appliedBy, confidence: proposal.confidence })
+        .where(tagKey);
+    }
+    // Already on the object: nothing to decide, and never a review item for a settled tag.
+    return { applied: true, tag: proposal.tag };
+  }
 
   const known = await findValue(tx, tenantId, facet, value);
+  // An open item for this tag decides it; proposing again changes nothing. Except: a model's
+  // item on an approved value waits only because a model can't be trusted with it, and a
+  // trusted source can. It applies the tag and closes the item as approved by the proposer.
+  const [open] = await openItemFor(tx, tenantId, proposal.objectId, facet, value);
+  if (open) {
+    const settles =
+      trusted && open.source === "model" && open.reason !== "new-value" && known?.approved;
+    if (!settles) return { applied: false, reviewId: open.id, reason: open.reason };
+  }
+
   let reason: ReviewReason | undefined;
   if (!known?.approved) reason = "new-value";
   else if (proposal.source === "model") {
@@ -117,9 +172,15 @@ export async function proposeTag(
       facet,
       value,
       source: proposal.source,
-      appliedBy: proposal.appliedBy ?? null,
+      appliedBy,
       confidence: proposal.confidence,
     });
+    if (open) {
+      await resolve(tx, tenantId, [open.id], {
+        decision: "approved",
+        resolvedBy: appliedBy ?? `${proposal.source}:unknown`,
+      });
+    }
     return { applied: true, tag: proposal.tag };
   }
 
@@ -140,10 +201,39 @@ export async function proposeTag(
     value,
     reason,
     source: proposal.source,
-    appliedBy: proposal.appliedBy ?? null,
+    appliedBy,
     confidence: proposal.confidence,
   });
   return { applied: false, reviewId, reason };
+}
+
+/** The checks core/db's constraints make, as TagErrors raised before any write. */
+function checkProposal(proposal: TagProposal, facet: string, value: string) {
+  const invalid = (message: string) => {
+    throw new TagError("invalid", message);
+  };
+  if (!FACET_KEY.test(facet)) invalid(`${facet} is not a facet key`);
+  if (!VALUE_SLUG.test(value)) {
+    invalid(`${value} is not a value: 1 to 128 lower-case letters, digits, '.', '_' or '-'`);
+  }
+  if (!(proposal.confidence >= 0 && proposal.confidence <= 1)) {
+    invalid("confidence must be in [0, 1]");
+  }
+  const { appliedBy, label } = proposal;
+  if (appliedBy !== undefined) {
+    if (!appliedBy.startsWith(`${proposal.source}:`)) {
+      invalid(`appliedBy must be a ${proposal.source}: principal`);
+    }
+    if (!PRINCIPAL.test(appliedBy) || appliedBy.length > PRINCIPAL_MAX) {
+      invalid(`appliedBy must be a principal of up to ${PRINCIPAL_MAX} characters`);
+    }
+  }
+  if (label !== undefined) {
+    const n = [...label].length;
+    if (n < 1 || n > LABEL_MAX || label.includes("\0") || label.trim() === "") {
+      invalid(`a label is 1 to ${LABEL_MAX} characters, not blank`);
+    }
+  }
 }
 
 /**
@@ -240,6 +330,8 @@ export async function rejectReview(
     );
   const ids = [reviewId];
   if (item.reason === "new-value") {
+    // The value's lock (taken by openItem) keeps other decisions on these items out; id order
+    // keeps this in line with anything else that locks several of them.
     const others = await tx
       .select({ id: tagReviews.id })
       .from(tagReviews)
@@ -253,6 +345,7 @@ export async function rejectReview(
           ne(tagReviews.id, reviewId),
         ),
       )
+      .orderBy(asc(tagReviews.id))
       .for("update");
     ids.push(...others.map((o) => o.id));
   }
@@ -272,10 +365,17 @@ export async function mergeReview(
   now?: Date,
 ): Promise<void> {
   const item = await openItem(tx, tenantId, reviewId);
-  if (intoValue === item.value) throw new Error("merging a value into itself; approve it instead");
-  const target = await findValue(tx, tenantId, item.facet, intoValue);
+  if (intoValue === item.value) {
+    throw new TagError("invalid", "merging a value into itself; approve it instead");
+  }
+  const target = VALUE_SLUG.test(intoValue)
+    ? await findValue(tx, tenantId, item.facet, intoValue)
+    : undefined;
   if (!target?.approved) {
-    throw new Error(`cannot merge into ${item.facet}:${intoValue}: not an approved value`);
+    throw new TagError(
+      "invalid",
+      `cannot merge into ${item.facet}:${intoValue}: not an approved value`,
+    );
   }
   await applyReviewed(tx, tenantId, item, intoValue);
   await resolve(
@@ -289,13 +389,18 @@ export async function mergeReview(
 
 type ReviewRow = typeof tagReviews.$inferSelect;
 
-/** The open item, locked, so two reviewers can't both resolve it. */
+/**
+ * The open item, locked, so two reviewers can't both resolve it. Locks in the order of locks.ts:
+ * the value (every decision about it), then the object, then the item's row.
+ */
 async function openItem(tx: Tx, tenantId: string, reviewId: string): Promise<ReviewRow> {
   const [peek] = await tx
-    .select({ objectId: tagReviews.objectId })
+    .select({ objectId: tagReviews.objectId, facet: tagReviews.facet, value: tagReviews.value })
     .from(tagReviews)
     .where(and(eq(tagReviews.tenantId, tenantId), eq(tagReviews.id, reviewId)));
-  if (!peek) throw new Error(`no review item ${reviewId}`);
+  if (!peek) throw new TagError("unknown-review", `no review item ${reviewId}`);
+  // An item's object, facet and value never change, so the unlocked peek names the right locks.
+  await lockTagValue(tx, tenantId, peek.facet, peek.value);
   await lockObject(tx, tenantId, peek.objectId);
   const [item] = await tx
     .select()
@@ -303,14 +408,14 @@ async function openItem(tx: Tx, tenantId: string, reviewId: string): Promise<Rev
     .where(and(eq(tagReviews.tenantId, tenantId), eq(tagReviews.id, reviewId)))
     .for("update");
   if (!item || item.resolvedAt !== null) {
-    throw new Error(`review item ${reviewId} is already resolved`);
+    throw new TagError("already-resolved", `review item ${reviewId} is already resolved`);
   }
   return item;
 }
 
 function openItemFor(tx: Tx, tenantId: string, objectId: string, facet: string, value: string) {
   return tx
-    .select({ id: tagReviews.id, reason: tagReviews.reason })
+    .select({ id: tagReviews.id, reason: tagReviews.reason, source: tagReviews.source })
     .from(tagReviews)
     .where(
       and(
@@ -342,7 +447,10 @@ async function applyReviewed(tx: Tx, tenantId: string, item: ReviewRow, value: s
     });
 }
 
-/** Closes items. The time is the database's unless given, so it can't predate their creation. */
+/**
+ * Closes items, in one statement. The time is the database's unless given, so it can't predate
+ * their creation.
+ */
 async function resolve(
   tx: Tx,
   tenantId: string,
@@ -350,12 +458,11 @@ async function resolve(
   set: Pick<ReviewRow, "decision" | "resolvedBy"> & { mergedInto?: string },
   now?: Date,
 ) {
-  for (const id of reviewIds) {
-    await tx
-      .update(tagReviews)
-      .set({ ...set, resolvedAt: now ?? sql`greatest(now(), ${tagReviews.createdAt})` })
-      .where(and(eq(tagReviews.tenantId, tenantId), eq(tagReviews.id, id)));
-  }
+  if (reviewIds.length === 0) return;
+  await tx
+    .update(tagReviews)
+    .set({ ...set, resolvedAt: now ?? sql`greatest(now(), ${tagReviews.createdAt})` })
+    .where(and(eq(tagReviews.tenantId, tenantId), inArray(tagReviews.id, reviewIds)));
 }
 
 async function findValue(tx: Tx, tenantId: string, facet: string, value: string) {
@@ -396,6 +503,6 @@ async function hasLiveGrant(tx: Tx, tenantId: string, facet: string, value: stri
 
 function splitTag(tag: string): { facet: string; value: string } {
   const at = tag.indexOf(":");
-  if (at <= 0 || at === tag.length - 1) throw new TypeError("a tag is facet:value");
+  if (at <= 0 || at === tag.length - 1) throw new TagError("invalid", "a tag is facet:value");
   return { facet: tag.slice(0, at), value: tag.slice(at + 1) };
 }
