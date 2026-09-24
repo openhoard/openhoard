@@ -6,6 +6,7 @@ import {
   IDENTITY_SOURCES,
   loadGrants,
   newId,
+  sqlState,
   USER_KINDS,
   userIdentities,
   users,
@@ -169,9 +170,16 @@ function checkName(what: string, name: string): string {
   return trimmed;
 }
 
-function checkExternalId(id: string | undefined | null): string | null {
+/**
+ * An external id for a user or group of `source`. It is the identity provider's id, so only
+ * SCIM records have one (the database checks that too).
+ */
+function checkExternalId(id: string | undefined | null, source: IdentitySource): string | null {
   if (id === undefined || id === null) return null;
-  if (id.length < 1 || chars(id) > 512 || /\p{Cc}/u.test(id)) {
+  if (source !== "scim") {
+    throw new IdentityError("invalid", "only SCIM users and groups have an externalId");
+  }
+  if (typeof id !== "string" || id.length < 1 || chars(id) > 512 || /\p{Cc}/u.test(id)) {
     throw new IdentityError("invalid", "externalId must be 1 to 512 characters");
   }
   return id;
@@ -227,26 +235,20 @@ const toGroup = (r: GroupRow): Group => ({
   createdAt: r.createdAt,
 });
 
-/** The SQLSTATE of a database error, however the driver wraps it. */
-function sqlState(e: unknown): string | undefined {
-  const err = e as { code?: unknown; cause?: { code?: unknown } };
-  const code = err.cause?.code ?? err.code;
-  return typeof code === "string" ? code : undefined;
-}
-
 export interface NewUser {
   email: string;
   displayName: string;
   /** Defaults to `member`. */
   kind?: UserKind;
   source: IdentitySource;
-  /** The identity provider's id; SCIM users should have one. */
+  /** The identity provider's id: SCIM users should have one, local users can't. */
   externalId?: string;
 }
 
 /** Adds a user. Refuses an email or external id a current user has (`conflict`). */
 export async function createUser(tx: Tx, tenantId: string, input: NewUser): Promise<User> {
   const { email, key } = checkEmail(input.email);
+  const source = checkSource(input.source);
   const row = {
     tenantId,
     id: newId("user"),
@@ -254,8 +256,8 @@ export async function createUser(tx: Tx, tenantId: string, input: NewUser): Prom
     emailKey: key,
     displayName: checkName("displayName", input.displayName),
     kind: checkKind(input.kind ?? "member"),
-    source: checkSource(input.source),
-    externalId: checkExternalId(input.externalId),
+    source,
+    externalId: checkExternalId(input.externalId, source),
   };
   // No conflict target: any unique key (email or external id) makes this a no-op, and a no-op
   // leaves the transaction usable, unlike a unique violation.
@@ -288,7 +290,7 @@ export async function findUserByEmail(
   return row ? toUser(row) : null;
 }
 
-/** The current (not retired) user with this identity-provider id. */
+/** The current (not retired) SCIM user with this identity-provider id. */
 export async function findUserByExternalId(
   tx: Tx,
   tenantId: string,
@@ -298,7 +300,12 @@ export async function findUserByExternalId(
     .select()
     .from(users)
     .where(
-      and(eq(users.tenantId, tenantId), eq(users.externalId, externalId), isNull(users.retiredAt)),
+      and(
+        eq(users.tenantId, tenantId),
+        eq(users.source, "scim"),
+        eq(users.externalId, externalId),
+        isNull(users.retiredAt),
+      ),
     );
   return row ? toUser(row) : null;
 }
@@ -354,7 +361,9 @@ export async function updateUser(
     set.displayName = checkName("displayName", changes.displayName);
   }
   if (changes.kind !== undefined) set.kind = checkKind(changes.kind);
-  if (changes.externalId !== undefined) set.externalId = checkExternalId(changes.externalId);
+  if (changes.externalId !== undefined) {
+    set.externalId = checkExternalId(changes.externalId, current.source);
+  }
   if (Object.keys(set).length === 0) return toUser(current);
   try {
     // A savepoint, so a unique violation from a concurrent insert leaves the caller's
@@ -552,7 +561,11 @@ export async function unlinkIdentity(
   return removed.length > 0;
 }
 
-/** The user a sign-in identity belongs to, or null. Sign-in then checks `active`. */
+/**
+ * The user a sign-in identity belongs to, or null. Never a retired user: retiring unlinks their
+ * identities, and this doesn't rely on that alone. Sign-in then checks `active` (a lock or a
+ * provider disable).
+ */
 export async function findUserByIdentity(
   tx: Tx,
   tenantId: string,
@@ -570,6 +583,7 @@ export async function findUserByIdentity(
         eq(userIdentities.tenantId, tenantId),
         eq(userIdentities.issuer, identity.issuer),
         eq(userIdentities.subject, identity.subject),
+        isNull(users.retiredAt),
       ),
     );
   return row ? toUser(row.user) : null;
@@ -578,18 +592,20 @@ export async function findUserByIdentity(
 export interface NewGroup {
   name: string;
   source: IdentitySource;
+  /** The identity provider's id: SCIM groups should have one, local groups can't. */
   externalId?: string;
 }
 
 export async function createGroup(tx: Tx, tenantId: string, input: NewGroup): Promise<Group> {
+  const source = checkSource(input.source);
   const [created] = await tx
     .insert(groups)
     .values({
       tenantId,
       id: newId("group"),
       name: checkName("name", input.name),
-      source: checkSource(input.source),
-      externalId: checkExternalId(input.externalId),
+      source,
+      externalId: checkExternalId(input.externalId, source),
     })
     .onConflictDoNothing()
     .returning();
@@ -605,6 +621,7 @@ export async function getGroup(tx: Tx, tenantId: string, groupId: string): Promi
   return row ? toGroup(row) : null;
 }
 
+/** The SCIM group with this identity-provider id. */
 export async function findGroupByExternalId(
   tx: Tx,
   tenantId: string,
@@ -613,7 +630,13 @@ export async function findGroupByExternalId(
   const [row] = await tx
     .select()
     .from(groups)
-    .where(and(eq(groups.tenantId, tenantId), eq(groups.externalId, externalId)));
+    .where(
+      and(
+        eq(groups.tenantId, tenantId),
+        eq(groups.source, "scim"),
+        eq(groups.externalId, externalId),
+      ),
+    );
   return row ? toGroup(row) : null;
 }
 
@@ -770,8 +793,13 @@ export async function membersOf(
 
 /**
  * Who a signed-in user is to authorize(): their groups and every grant they hold, directly or
- * through a group, at `at` (now by default). Null for an unknown user. A locked, deactivated or
- * retired user comes back inactive, which authorize() denies; callers shouldn't special-case it.
+ * through a group. Null for an unknown user. A locked, deactivated or retired user comes back
+ * inactive, which authorize() denies; callers shouldn't special-case it.
+ *
+ * `at` applies to grants only: which grants were live then (the database's now() by default).
+ * Group memberships, the user's kind and their stops are always the current ones, because their
+ * history isn't kept. So a past `at` answers "what would this person, as they are now, have
+ * held then?", not "what could they see then?".
  *
  * Uncached. T-107's cache must be invalidated, in the same transaction, by every change this
  * reads: memberships, grants, the user's stops (lock, provider disable, retirement) and kind.
@@ -784,7 +812,13 @@ export async function resolvePrincipal(
 ): Promise<AuthzPrincipal | null> {
   const user = await getUser(tx, tenantId, userId);
   if (!user) return null;
-  const groupIds = (await groupsOf(tx, tenantId, userId)).map((g) => g.id);
+  // Just the ids, in id order: groupsOf() loads whole groups and sorts them by name.
+  const memberships = await tx
+    .select({ groupId: groupMembers.groupId })
+    .from(groupMembers)
+    .where(and(eq(groupMembers.tenantId, tenantId), eq(groupMembers.userId, userId)))
+    .orderBy(asc(groupMembers.groupId));
+  const groupIds = memberships.map((m) => m.groupId);
   const held = await loadGrants(
     tx,
     tenantId,

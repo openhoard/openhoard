@@ -7,7 +7,6 @@ The tenant's people and groups, and who a signed-in person is to `authorize()`. 
 ask here, never the `users`, `groups` and `group_members` tables in core/db.
 
 - [`directory.ts`](src/directory.ts): users, groups, membership, `resolvePrincipal()` (T-101).
-- [`principals.ts`](src/principals.ts): namespaced principal sets for search filters.
 
 ## Sources
 
@@ -21,6 +20,10 @@ People and groups come from two places:
 Each user and group records its `source`, and only that source may change it. A SCIM group
 can't be edited in OpenHoard, where the next sync would silently undo the edit, and SCIM can't
 touch local groups.
+
+An `externalId` is the identity provider's id, so only SCIM users and groups have one: it is
+refused for local ones (and the database checks it), and `findUserByExternalId()` and
+`findGroupByExternalId()` look among SCIM records only.
 
 A user is active unless something stops them. There are three stops, and they are independent:
 
@@ -47,11 +50,13 @@ The row stays, because users own objects and appear in audit.
 ## Sign-in
 
 Sign-in matches an (issuer, subject) pair: `linkIdentity()` and `findUserByIdentity()`. It
-never matches on email, because an email is a label a person can change.
+never matches on email, because an email is a label a person can change, and it never returns
+a retired user.
 
 `resolvePrincipal()` returns what `authorize()` needs: groups, every grant held directly or
 through a group, guest status, and whether the user is active. A disabled user comes back
-inactive, and `authorize()` denies them. Caching arrives with T-107.
+inactive, and `authorize()` denies them. Its `at` applies to grants only (which were live
+then); memberships, kind and stops are always the current ones. Caching arrives with T-107.
 
 Emails are still unique among current users, keyed by `emailKey()`:
 

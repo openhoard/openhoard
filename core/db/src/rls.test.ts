@@ -1,7 +1,15 @@
 import { eq, getTableName, sql } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { fromDriver, queryRows, type Database, type Driver, type Tx } from "./database.js";
+import {
+  fromDriver,
+  openDriver,
+  queryRows,
+  TransactionEndedError,
+  type Database,
+  type Driver,
+  type Tx,
+} from "./database.js";
 import { newId } from "./ids.js";
 import {
   auditEvents,
@@ -17,7 +25,7 @@ import {
   versions,
   zones,
 } from "./schema.js";
-import { openTestDriver, seedTenant, type SeededTenant } from "./testing.js";
+import { openTestDriver, seedTenant, TEST_POSTGRES_ENV, type SeededTenant } from "./testing.js";
 
 /*
  * Tenant isolation (T-201: "RLS test passes"). Row-level security is the backstop under every
@@ -263,6 +271,68 @@ describe("withTenant", () => {
     const [obj] = await db.withTenant(a.tenantId, (tx) => tx.select().from(objects));
     expect(obj?.title).toBe("Report 1.docx");
   });
+
+  it("makes a handle that escaped its callback unusable", async () => {
+    let leaked: Tx | undefined;
+    let savepoint: Tx | undefined;
+    const returned = await db.withTenant(a.tenantId, async (tx) => {
+      leaked = tx;
+      await tx.transaction(async (sp) => {
+        savepoint = sp;
+        await sp.select().from(objects);
+      });
+      return tx; // not thenable, so returning it is harmless
+    });
+    expect(returned).toBe(leaked);
+    for (const handle of [leaked, savepoint]) {
+      expect(() => handle?.select().from(objects)).toThrow(TransactionEndedError);
+      expect(() => handle?.execute(sql`select 1`)).toThrow("this transaction has ended");
+      expect(() => handle?.transaction(() => Promise.resolve())).toThrow(TransactionEndedError);
+    }
+    // A query started from the callback but never awaited fails too, instead of running later.
+    let late: Promise<unknown> | undefined;
+    await db.withTenant(a.tenantId, (tx) => {
+      late = new Promise((r) => setTimeout(r, 10)).then(() => tx.select().from(objects));
+      return Promise.resolve();
+    });
+    await expect(late).rejects.toThrow(TransactionEndedError);
+  });
+
+  it.runIf(process.env[TEST_POSTGRES_ENV])(
+    "never lets a leaked handle read inside another tenant's later transaction (PostgreSQL)",
+    async () => {
+      // One pooled connection, so tenant B's transaction runs on the leaked handle's client.
+      const { createPostgresDatabase } = await import("./testing-postgres.js");
+      const own = await createPostgresDatabase(process.env[TEST_POSTGRES_ENV] ?? "");
+      const single = await openDriver({ url: own.url, postgres: { max: 1 } });
+      try {
+        await own.migrate();
+        const pg = fromDriver(single);
+        const ta = await seedTenant(pg, 1);
+        const tb = await seedTenant(pg, 2);
+        let leaked: Tx | undefined;
+        await pg.withTenant(ta.tenantId, async (tx) => {
+          leaked = tx;
+          await tx.select().from(objects);
+        });
+        const seen = await pg.withTenant(tb.tenantId, async (tx) => {
+          const mine = await tx.select({ id: objects.id }).from(objects);
+          let stolen: unknown;
+          try {
+            stolen = await leaked?.select({ id: objects.id }).from(objects);
+          } catch (e) {
+            stolen = e;
+          }
+          return { mine, stolen };
+        });
+        expect(seen.mine).toEqual([{ id: tb.objectId }]);
+        expect(seen.stolen).toBeInstanceOf(TransactionEndedError);
+      } finally {
+        await single.close();
+        await own.close();
+      }
+    },
+  );
 
   it.each([
     "",

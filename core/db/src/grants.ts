@@ -1,4 +1,4 @@
-import { and, eq, gt, inArray, isNull, lte, or } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { Tx } from "./database.js";
 import { newId } from "./ids.js";
 import { facetValues, grants, groups, users, type GRANT_ROLES } from "./schema.js";
@@ -9,6 +9,13 @@ import { facetValues, grants, groups, users, type GRANT_ROLES } from "./schema.j
  *
  * Callers record grant changes in the audit log in the same transaction (core/audit's
  * appendAudit); this package cannot, because core/audit depends on it.
+ *
+ * Times come from the database unless the caller passes one: creation, the default expiry,
+ * revocation and "live now" all use the transaction's now(), the same clock core/identity
+ * revokes with. The application's clock can drift from the database's; mixing the two let a
+ * quick revoke land "before" the grant's creation, which grants_revoked_after_creation refuses.
+ * An explicit `now` or `at` is for tests and for asking about another moment: it is then used
+ * as given, so it must agree with the database's clock where it meets rows the database dated.
  */
 
 /** How long a grant lasts when the caller does not say (T-602: grants expire by default). */
@@ -44,15 +51,16 @@ export interface GrantInput {
   /** Who granted it, e.g. `user:<id>` or `pack:<name>`. */
   grantedBy: string;
   /**
-   * When it stops working. Omitted: {@link DEFAULT_GRANT_DAYS} from now. `null`: never, which
-   * has to be asked for explicitly.
+   * When it stops working. Omitted: {@link DEFAULT_GRANT_DAYS} after its creation. `null`:
+   * never, which has to be asked for explicitly.
    */
   expiresAt?: Date | null;
 }
 
 /**
  * Adds a grant and returns its id. The principal must be a current user or an existing group,
- * and a tag an approved value of the tenant's vocabulary.
+ * and a tag an approved value of the tenant's vocabulary. It is created at the database's
+ * now(), or at `now` when given (tests).
  *
  * The principal's row is locked (FOR KEY SHARE) until the transaction ends, so a grant can't
  * slip in while its group is being deleted (core/identity deleteGroup revokes a group's grants
@@ -62,7 +70,7 @@ export async function addGrant(
   tx: Tx,
   tenantId: string,
   input: GrantInput,
-  now: Date = new Date(),
+  now?: Date,
 ): Promise<string> {
   const target = input.target as { tag?: unknown; objectId?: unknown };
   if ("tag" in target === "objectId" in target) {
@@ -70,10 +78,13 @@ export async function addGrant(
   }
   await lockPrincipal(tx, tenantId, input.principal);
   const id = newId("grant");
-  const expiresAt =
-    input.expiresAt === undefined
-      ? new Date(now.getTime() + DEFAULT_GRANT_DAYS * 24 * 60 * 60 * 1000)
-      : input.expiresAt;
+  const created: Date | SQL = now ?? sql`now()`;
+  const expiresAt: Date | SQL | null =
+    input.expiresAt !== undefined
+      ? input.expiresAt
+      : now === undefined
+        ? sql`now() + make_interval(days => ${DEFAULT_GRANT_DAYS})`
+        : new Date(now.getTime() + DEFAULT_GRANT_DAYS * 24 * 60 * 60 * 1000);
   let where: { facet: string; value: string } | { objectId: string };
   if ("tag" in input.target) {
     where = splitTag(input.target.tag);
@@ -104,7 +115,7 @@ export async function addGrant(
     role: input.role,
     ...where,
     grantedBy: input.grantedBy,
-    createdAt: now,
+    createdAt: created,
     expiresAt,
   });
   return id;
@@ -136,17 +147,20 @@ async function lockPrincipal(tx: Tx, tenantId: string, principal: string) {
   }
 }
 
-/** Revokes a live grant. Returns false when there is no such grant, or it was already revoked. */
+/**
+ * Revokes a live grant, at the database's now() (never before the grant's creation), or at `now`
+ * when given (tests). Returns false when there is no such grant, or it was already revoked.
+ */
 export async function revokeGrant(
   tx: Tx,
   tenantId: string,
   grantId: string,
   revokedBy: string,
-  now: Date = new Date(),
+  now?: Date,
 ): Promise<boolean> {
   const rows = await tx
     .update(grants)
-    .set({ revokedAt: now, revokedBy })
+    .set({ revokedAt: now ?? sql`greatest(now(), ${grants.createdAt})`, revokedBy })
     .where(and(eq(grants.tenantId, tenantId), eq(grants.id, grantId), isNull(grants.revokedAt)))
     .returning({ id: grants.id });
   return rows.length === 1;
@@ -177,14 +191,16 @@ export interface LiveGrant {
 /**
  * The grants of `principals` (a user and their groups) that were live at `at`: created by then,
  * not revoked by then, not expired. Expiry is part of this query, so a grant stops counting the
- * moment it expires, and asking about a past moment answers for that moment.
+ * moment it expires, and asking about a past moment answers for that moment. Without `at`, the
+ * moment is the database's now(), the clock grants are dated by.
  */
 export async function liveGrants(
   tx: Tx,
   tenantId: string,
   principals: readonly string[],
-  at: Date = new Date(),
+  at?: Date,
 ): Promise<LiveGrant[]> {
+  const moment: Date | SQL = at ?? sql`now()`;
   const relevant = principals.filter((p) => p.startsWith("user:") || p.startsWith("group:"));
   if (relevant.length === 0) return [];
   const rows = await tx
@@ -205,9 +221,9 @@ export async function liveGrants(
         eq(grants.tenantId, tenantId),
         inArray(grants.principal, [...new Set(relevant)]),
         // Live at `at`: created by then, not yet revoked, not yet expired.
-        lte(grants.createdAt, at),
-        or(isNull(grants.revokedAt), gt(grants.revokedAt, at)),
-        or(isNull(grants.expiresAt), gt(grants.expiresAt, at)),
+        lte(grants.createdAt, moment),
+        or(isNull(grants.revokedAt), gt(grants.revokedAt, moment)),
+        or(isNull(grants.expiresAt), gt(grants.expiresAt, moment)),
       ),
     )
     .orderBy(grants.id);
@@ -227,24 +243,24 @@ export async function loadGrants(
   tx: Tx,
   tenantId: string,
   principals: readonly string[],
-  at: Date = new Date(),
+  at?: Date,
 ): Promise<GrantSet> {
-  const set: GrantSet = {
-    tagGrants: [],
-    tagWriteGrants: [],
-    objectGrants: [],
-    objectWriteGrants: [],
-  };
-  const add = (list: string[], item: string) => {
-    if (!list.includes(item)) list.push(item);
-  };
+  const tagGrants = new Set<string>();
+  const tagWriteGrants = new Set<string>();
+  const objectGrants = new Set<string>();
+  const objectWriteGrants = new Set<string>();
   for (const g of await liveGrants(tx, tenantId, principals, at)) {
-    if (g.objectId !== null)
-      add(g.role === "write" ? set.objectWriteGrants : set.objectGrants, g.objectId);
-    else if (g.tag !== null) add(g.role === "write" ? set.tagWriteGrants : set.tagGrants, g.tag);
+    const write = g.role === "write";
+    if (g.objectId !== null) (write ? objectWriteGrants : objectGrants).add(g.objectId);
+    else if (g.tag !== null) (write ? tagWriteGrants : tagGrants).add(g.tag);
   }
-  for (const list of Object.values(set)) list.sort();
-  return set;
+  const sorted = (s: Set<string>) => [...s].sort();
+  return {
+    tagGrants: sorted(tagGrants),
+    tagWriteGrants: sorted(tagWriteGrants),
+    objectGrants: sorted(objectGrants),
+    objectWriteGrants: sorted(objectWriteGrants),
+  };
 }
 
 /** `facet:value` → its parts; the database checks both against the vocabulary. */

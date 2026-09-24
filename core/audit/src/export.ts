@@ -1,6 +1,7 @@
 import { auditEvents, type Database } from "@openhoard/core-db";
-import { and, asc, eq, gt, gte, lt, type SQL } from "drizzle-orm";
+import { and, asc, eq, gt, gte, lt, lte, type SQL } from "drizzle-orm";
 import { canonicalJson, type AuditEvent } from "./chain.js";
+import { chainEnd, chainPages } from "./pages.js";
 
 /*
  * Audit export (T-703): one tenant's events, filtered, as NDJSON or CSV, streamed to a sink.
@@ -43,8 +44,10 @@ export const CSV_COLUMNS = [
 ] as const;
 
 /**
- * Writes `tenantId`'s events that match `filter` to `sink`, oldest first, from one consistent
- * snapshot, and returns how many it wrote.
+ * Writes `tenantId`'s events that match `filter` to `sink`, oldest first, and returns how many
+ * it wrote. It exports the chain as it was when the call started, read in pages, each in its own
+ * short transaction (see pages.ts), and writes to the sink outside them, so a slow sink holds no
+ * connection. The chain is append-only, so that is what one snapshot would give.
  */
 export async function exportAudit(
   db: Database,
@@ -61,39 +64,41 @@ export async function exportAudit(
     if (d !== undefined && !Number.isFinite(d.getTime())) throw new RangeError("invalid date");
   }
   const conditions = filterConditions(filter);
-  return db.withTenant(
-    tenantId,
-    async (tx) => {
-      if (format === "csv") await sink(`${CSV_COLUMNS.join(",")}\r\n`);
-      let written = 0;
-      let after = 0;
-      for (;;) {
-        const rows = await tx
-          .select({ seq: auditEvents.seq, event: auditEvents.event, hash: auditEvents.hash })
-          .from(auditEvents)
-          .where(and(eq(auditEvents.tenantId, tenantId), gt(auditEvents.seq, after), ...conditions))
-          .orderBy(asc(auditEvents.seq))
-          .limit(pageSize);
-        for (const row of rows) {
-          let parsed: object;
-          try {
-            parsed = JSON.parse(row.event) as object;
-          } catch (e) {
-            throw new Error(`audit event ${row.seq} is not valid JSON; run verifyAudit`, {
-              cause: e,
-            });
-          }
-          const event = { ...parsed, hash: row.hash } as AuditEvent;
-          await sink(format === "ndjson" ? `${canonicalJson(event)}\n` : csvLine(event));
-          written++;
-        }
-        if (rows.length < pageSize) return written;
-        after = rows.at(-1)?.seq ?? after;
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    },
-    { isolationLevel: "repeatable read", accessMode: "read only" },
+  const end = await chainEnd(db, tenantId);
+  if (format === "csv") await sink(`${CSV_COLUMNS.join(",")}\r\n`);
+  let written = 0;
+  const pages = chainPages(db, tenantId, end, pageSize, (tx, after) =>
+    tx
+      .select({ seq: auditEvents.seq, event: auditEvents.event, hash: auditEvents.hash })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, tenantId),
+          gt(auditEvents.seq, after),
+          lte(auditEvents.seq, end),
+          ...conditions,
+        ),
+      )
+      .orderBy(asc(auditEvents.seq))
+      .limit(pageSize),
   );
+  // Each page is read in its own transaction; the sink is awaited outside all of them.
+  for await (const rows of pages) {
+    for (const row of rows) {
+      let parsed: object;
+      try {
+        parsed = JSON.parse(row.event) as object;
+      } catch (e) {
+        throw new Error(`audit event ${row.seq} is not valid JSON; run verifyAudit`, {
+          cause: e,
+        });
+      }
+      const event = { ...parsed, hash: row.hash } as AuditEvent;
+      await sink(format === "ndjson" ? `${canonicalJson(event)}\n` : csvLine(event));
+      written++;
+    }
+  }
+  return written;
 }
 
 /** The filter as SQL conditions on the query columns (which verifyAudit keeps honest). */

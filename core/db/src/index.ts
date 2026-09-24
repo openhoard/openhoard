@@ -8,11 +8,14 @@ export {
 export {
   openDatabase,
   queryRows,
+  TransactionEndedError,
   type Database,
   type OpenOptions,
+  type PostgresOptions,
   type Schema,
   type Tx,
 } from "./database.js";
+export { isRetryable, RETRYABLE_SQLSTATES, sqlState } from "./errors.js";
 export { ID_PREFIXES, idPattern, isId, newId, type IdKind } from "./ids.js";
 export * from "./schema.js";
 export {

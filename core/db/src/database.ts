@@ -27,6 +27,11 @@ export interface Database {
    * statement, and nothing carries over to the next transaction on a pooled connection. The
    * transaction commits when `work` resolves and rolls back when it throws.
    *
+   * `tx` works only while `work` runs: once `work` settles, every use of it throws. On a pool
+   * the connection goes back for another tenant's transaction, so a handle that escaped (kept
+   * in a variable, or used by a promise nobody awaited) must not reach it. Query builders
+   * already built from `tx` are not covered: build and await queries inside `work`.
+   *
    * Isolation holds against queries that forget a tenant filter or name another tenant's ids.
    * It does not hold against arbitrary SQL: `work` runs as the tables' owner, so raw SQL can
    * change the setting or the policies. Build queries with Drizzle and parameters, never
@@ -66,6 +71,27 @@ export interface OpenOptions {
   dataDir?: string;
   /** Apply pending migrations on open. Default true. */
   migrate?: boolean;
+  /** Pool and session limits for a `postgres://` URL; see {@link PostgresOptions}. */
+  postgres?: PostgresOptions;
+}
+
+/**
+ * Limits for the native PostgreSQL pool. Each has a default, so a stuck client, statement or
+ * transaction can't hold a connection (and the locks it took) indefinitely; 0 turns a timeout
+ * off.
+ */
+export interface PostgresOptions {
+  /** Connections in the pool. Default 10. */
+  max?: number;
+  /** How long to wait for a free connection, or a new one, before failing. Default 10 s. */
+  connectionTimeoutMillis?: number;
+  /** Longest a single statement may run (`statement_timeout`). Default 60 s. */
+  statementTimeoutMillis?: number;
+  /**
+   * Longest a transaction may sit idle between statements before the server ends the session
+   * (`idle_in_transaction_session_timeout`). Default 60 s.
+   */
+  idleInTransactionTimeoutMillis?: number;
 }
 
 /**
@@ -102,7 +128,7 @@ export async function openDriver(options: OpenOptions): Promise<Driver> {
   }
   if (/^postgres(ql)?:\/\//.test(url)) {
     const { openPostgres } = await import("./postgres.js");
-    return openPostgres(url);
+    return openPostgres(url, options.postgres);
   }
   // Never echo the URL: it may hold a password.
   throw new TypeError(
@@ -120,10 +146,80 @@ export function fromDriver(driver: Driver): Database {
       return driver.db.transaction(async (tx) => {
         // Transaction-local (the `true`), and parameterized, unlike SET LOCAL.
         await tx.execute(sql`select set_config('app.tenant_id', ${tenantId}, true)`);
-        return work(tx as Tx);
+        const guarded = guardTransaction(tx as Tx);
+        try {
+          return await work(guarded.tx);
+        } finally {
+          // Before COMMIT or ROLLBACK is even sent: nothing more may run in this transaction.
+          guarded.end();
+        }
       }, config);
     },
     close: () => driver.close(),
+  };
+}
+
+/** Thrown when a transaction handle is used after its withTenant() callback settled. */
+export class TransactionEndedError extends Error {
+  constructor() {
+    super(
+      "this transaction has ended: a withTenant() handle was used after its callback settled " +
+        "(await every query inside the callback, and never keep the handle)",
+    );
+    this.name = "TransactionEndedError";
+  }
+}
+
+/**
+ * Wraps `tx` in a proxy that works until `end()` is called and throws on every property access
+ * after, so a leaked handle fails loudly instead of running on a pooled connection inside some
+ * other tenant's transaction. Methods run on the real transaction, not the proxy.
+ */
+export function guardTransaction(tx: Tx): { tx: Tx; end: () => void } {
+  let ended = false;
+  const check = () => {
+    if (ended) throw new TransactionEndedError();
+  };
+  const proxy = new Proxy(tx, {
+    get(target, prop) {
+      // Not thenable, ended or not, so returning the handle from `work` resolves normally.
+      if (prop === "then") return undefined;
+      check();
+      if (prop === "transaction") {
+        // A savepoint's handle is guarded the same way, for as long as its callback runs.
+        return (work: (sp: Tx) => Promise<unknown>) => {
+          check();
+          return target.transaction(async (sp) => {
+            const nested = guardTransaction(sp as Tx);
+            try {
+              return await work(nested.tx);
+            } finally {
+              nested.end();
+            }
+          });
+        };
+      }
+      const value: unknown = Reflect.get(target, prop, target);
+      if (typeof value !== "function") return value;
+      return function (this: unknown, ...args: unknown[]) {
+        check();
+        return (value as (...a: unknown[]) => unknown).apply(this === proxy ? target : this, args);
+      };
+    },
+    set(target, prop, value) {
+      check();
+      return Reflect.set(target, prop, value, target);
+    },
+    has(target, prop) {
+      check();
+      return Reflect.has(target, prop);
+    },
+  });
+  return {
+    tx: proxy,
+    end: () => {
+      ended = true;
+    },
   };
 }
 

@@ -1,5 +1,14 @@
-import { auditEvents, queryRows, type Database, type Tx } from "@openhoard/core-db";
-import { openTestDatabase, seedTenant } from "@openhoard/core-db/testing";
+import { createHash } from "node:crypto";
+import {
+  auditEvents,
+  isRetryable,
+  objects,
+  queryRows,
+  sqlState,
+  type Database,
+  type Tx,
+} from "@openhoard/core-db";
+import { openTestDatabase, seedTenant, TEST_POSTGRES_ENV } from "@openhoard/core-db/testing";
 import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { appendEvent, GENESIS_HASH, hashedText, type AuditEvent } from "./chain.js";
@@ -84,16 +93,113 @@ describe("appendAudit", () => {
   });
 });
 
-describe("appendAudit refuses", () => {
-  it("a REPEATABLE READ or SERIALIZABLE transaction, whose snapshot predates the lock", async () => {
-    for (const isolationLevel of ["repeatable read", "serializable"] as const) {
+describe("appendAudit and isolation levels", () => {
+  it("appends in a SERIALIZABLE transaction, with the action it records", async () => {
+    await append(1);
+    const event = await db.withTenant(
+      tenant,
+      async (tx) => {
+        await tx.update(objects).set({ title: "Renamed.docx" });
+        return appendAudit(tx, tenant, record(2));
+      },
+      { isolationLevel: "serializable" },
+    );
+    expect(event.seq).toBe(2);
+    expect(await verifyAudit(db, tenant)).toMatchObject({ ok: true, count: 2 });
+  });
+
+  it("refuses REPEATABLE READ, whose snapshot predates the lock", async () => {
+    const attempt = db.withTenant(tenant, (tx) => appendAudit(tx, tenant, record(1)), {
+      isolationLevel: "repeatable read",
+    });
+    await expect(attempt).rejects.toThrow(
+      "needs a READ COMMITTED or SERIALIZABLE transaction, not repeatable read",
+    );
+  });
+
+  it("refuses a read-only transaction, before anything else", async () => {
+    for (const isolationLevel of ["read committed", "repeatable read", "serializable"] as const) {
       const attempt = db.withTenant(tenant, (tx) => appendAudit(tx, tenant, record(1)), {
         isolationLevel,
+        accessMode: "read only",
       });
-      await expect(attempt).rejects.toThrow("needs a READ COMMITTED transaction");
+      await expect(attempt).rejects.toThrow("can't write in a read-only transaction");
     }
   });
 
+  it("records a read after its read-only snapshot, in a transaction of its own", async () => {
+    const rows = await db.withTenant(tenant, (tx) => tx.select().from(objects), {
+      isolationLevel: "repeatable read",
+      accessMode: "read only",
+    });
+    const event = await db.withTenant(tenant, (tx) =>
+      appendAudit(tx, tenant, { ...record(1), object: rows[0]?.id ?? "none" }),
+    );
+    expect(event).toMatchObject({ seq: 1, object: rows[0]?.id });
+  });
+
+  describe.runIf(process.env[TEST_POSTGRES_ENV])("racing appends (PostgreSQL)", () => {
+    it.each(["serializable", "read committed"] as const)(
+      "fail a SERIALIZABLE append that lost to a %s one with 40001, and never fork",
+      async (winner) => {
+        await append(1);
+        let committed!: () => void;
+        const aDone = new Promise<void>((resolve) => (committed = resolve));
+        // B's snapshot is taken first (withTenant's first statement); it appends only after A
+        // committed, so the head it reads is stale.
+        const b = db.withTenant(
+          tenant,
+          async (tx) => {
+            await aDone;
+            return appendAudit(tx, tenant, record(3));
+          },
+          { isolationLevel: "serializable" },
+        );
+        const a = await db.withTenant(tenant, (tx) => appendAudit(tx, tenant, record(2)), {
+          isolationLevel: winner,
+        });
+        committed();
+        const failure: unknown = await b.then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+        expect(a.seq).toBe(2);
+        // PostgreSQL reports 40001 itself between two SERIALIZABLE transactions, and a
+        // duplicate key when the winner wasn't one; appendAudit reports that as 40001 too.
+        expect(sqlState(failure)).toBe("40001");
+        expect(isRetryable(failure)).toBe(true);
+        expect(await verifyAudit(db, tenant)).toMatchObject({ ok: true, count: 2 });
+        // Run again, it goes through.
+        const retried = await db.withTenant(tenant, (tx) => appendAudit(tx, tenant, record(3)), {
+          isolationLevel: "serializable",
+        });
+        expect(retried).toMatchObject({ seq: 3, prevHash: a.hash });
+        expect(await verifyAudit(db, tenant)).toMatchObject({ ok: true, count: 3 });
+      },
+    );
+  });
+
+  it("never forks under concurrent SERIALIZABLE appends that retry", async () => {
+    const appendRetrying = async (n: number): Promise<AuditEvent> => {
+      for (;;) {
+        try {
+          return await db.withTenant(tenant, (tx) => appendAudit(tx, tenant, record(n)), {
+            isolationLevel: "serializable",
+          });
+        } catch (e) {
+          if (!isRetryable(e)) throw e;
+        }
+      }
+    };
+    const events = await Promise.all(Array.from({ length: 10 }, (_, i) => appendRetrying(i)));
+    expect(events.map((e) => e.seq).sort((x, y) => x - y)).toEqual(
+      Array.from({ length: 10 }, (_, i) => i + 1),
+    );
+    expect(await verifyAudit(db, tenant)).toMatchObject({ ok: true, count: 10 });
+  });
+});
+
+describe("appendAudit refuses", () => {
   it.each([
     ["a lone surrogate", { object: `file${String.fromCharCode(0xd800)}.txt` }],
     ["a NUL character", { actor: `user:u1${String.fromCharCode(0)}` }],
@@ -109,6 +215,48 @@ describe("appendAudit refuses", () => {
     for (const now of [new Date("0005-01-01T00:00:00Z"), new Date("x"), new Date(-1)]) {
       const attempt = db.withTenant(tenant, (tx) => appendAudit(tx, tenant, record(1), now));
       await expect(attempt).rejects.toThrow("audit time out of range");
+    }
+  });
+
+  it("a top-level field that is bad, whatever the detail holds under the same key", async () => {
+    // The detail used to be merged over the record before checking, hiding the real field.
+    const shadowed = {
+      ...record(1),
+      object: `x${String.fromCharCode(0xd800)}`,
+      detail: { object: "fine", actor: "user:fine" },
+    };
+    await expect(db.withTenant(tenant, (tx) => appendAudit(tx, tenant, shadowed))).rejects.toThrow(
+      "audit field object is not well-formed text",
+    );
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ["an actor that isn't text", { actor: 42 }, "actor is not well-formed text"],
+    ["an actor that isn't a principal", { actor: "nobody" }, "actor is not a principal"],
+    ["an empty action", { action: "" }, "action is not well-formed text"],
+    ["an action that isn't a name", { action: "Open File" }, "action is not an action name"],
+    ["an unknown decision", { decision: "maybe" }, "decision is not allow or deny"],
+    ["a client that isn't text", { client: 5 }, "client is not well-formed text"],
+    ["an empty object", { object: "" }, "object is not well-formed text"],
+    ["a version that is null", { version: null }, "version is not well-formed text"],
+    ["a detail that is a list", { detail: ["a"] }, "detail is not an object"],
+    ["a detail that is null", { detail: null }, "detail is not an object"],
+    ["a detail number JSON can't hold", { detail: { n: Number.NaN } }, "detail.n is not finite"],
+    ["a nested detail", { detail: { n: { deep: 1 } } }, "detail.n is not a string, number"],
+    ["a chain field", { seq: 7 }, "audit field seq is not part of a record"],
+    ["a hash", { hash: "0".repeat(64) }, "audit field hash is not part of a record"],
+  ])("%s", async (_, patch, message) => {
+    const bad = { ...record(1), ...patch } as unknown as AuditRecord;
+    await expect(db.withTenant(tenant, (tx) => appendAudit(tx, tenant, bad))).rejects.toThrow(
+      message,
+    );
+  });
+
+  it("not a record at all", async () => {
+    for (const bad of [null, "open", ["open"]]) {
+      await expect(
+        db.withTenant(tenant, (tx) => appendAudit(tx, tenant, bad as unknown as AuditRecord)),
+      ).rejects.toThrow("an audit record is an object");
     }
   });
 });
@@ -140,6 +288,85 @@ describe("the database", () => {
     expect(await sqlState(raw(2, "b".repeat(64), "a".repeat(64)))).toBe("23514");
     // Rewriting an existing position is not extending the chain either.
     expect(await sqlState(raw(1, GENESIS_HASH, "a".repeat(64)))).toBe("23514");
+  });
+
+  describe("refuses a row in the right place that doesn't check out", () => {
+    const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+    /** The row appendAudit would insert next, after `head`. */
+    const next = (head: AuditEvent | undefined) => {
+      const e = appendEvent(head, {
+        ...record(9),
+        tenantId: tenant,
+        at: "2026-09-24T01:02:03.456Z",
+      });
+      return {
+        tenantId: tenant,
+        seq: e.seq,
+        at: new Date(e.at),
+        actor: e.actor,
+        action: e.action,
+        decision: e.decision,
+        client: e.client ?? null,
+        object: e.object ?? null,
+        version: e.version ?? null,
+        event: hashedText(e),
+        prevHash: e.prevHash,
+        hash: e.hash,
+      };
+    };
+    type Row = ReturnType<typeof next>;
+    /** Rewrites the stored event, with a hash that matches the new text. */
+    const withEvent = (row: Row, change: (e: Record<string, unknown>) => unknown): Row => {
+      const text = JSON.stringify(change(JSON.parse(row.event) as Record<string, unknown>));
+      return { ...row, event: text, hash: sha256(text) };
+    };
+    const reText = (row: Row, text: string): Row => ({ ...row, event: text, hash: sha256(text) });
+
+    it.each<[string, (row: Row) => Row]>([
+      ["a hash that isn't the event's", (r) => ({ ...r, hash: "a".repeat(64) })],
+      ["an edited event under its old hash", (r) => ({ ...r, event: r.event.replace("q9", "qX") })],
+      ["an event naming another actor", (r) => withEvent(r, (e) => ({ ...e, actor: "user:eve" }))],
+      ["an event naming another tenant", (r) => withEvent(r, (e) => ({ ...e, tenantId: "ten_x" }))],
+      ["an event with another seq", (r) => withEvent(r, (e) => ({ ...e, seq: 99 }))],
+      [
+        "an event with another link",
+        (r) => withEvent(r, (e) => ({ ...e, prevHash: "c".repeat(64) })),
+      ],
+      ["an event without its object", (r) => withEvent(r, (e) => ({ ...e, object: undefined }))],
+      ["an event with a client the row lacks", (r) => ({ ...r, client: null })],
+      [
+        "an event at another time",
+        (r) => withEvent(r, (e) => ({ ...e, at: "2026-09-24T01:02:03Z" })),
+      ],
+      [
+        "a time finer than milliseconds",
+        // A Date can't hold microseconds; the database can.
+        (r) => ({
+          ...r,
+          at: sql`${r.at.toISOString()}::timestamptz + interval '1 microsecond'` as unknown as Date,
+        }),
+      ],
+      ["an event carrying a hash", (r) => withEvent(r, (e) => ({ ...e, hash: r.hash }))],
+      ["an event with a field of its own", (r) => withEvent(r, (e) => ({ ...e, extra: 1 }))],
+      ["a nested detail", (r) => withEvent(r, (e) => ({ ...e, detail: { n: { deep: 1 } } }))],
+      ["an event that is a list", (r) => reText(r, "[]")],
+      ["an event that isn't JSON", (r) => reText(r, "{")],
+    ])("%s", async (_, spoil) => {
+      const head = await append(1);
+      const good = next(head);
+      const bad = spoil(good);
+      const insert = (row: Row) =>
+        db.withTenant(tenant, (tx) => tx.insert(auditEvents).values(row));
+      expect(
+        await insert(bad).then(
+          () => "no error",
+          (e: unknown) => sqlState(e),
+        ),
+      ).toBe("23514");
+      // The row as appendAudit makes it goes in, and the chain still verifies.
+      await insert(good);
+      expect(await verifyAudit(db, tenant)).toMatchObject({ ok: true, count: 2 });
+    });
   });
 
   it("accepts a batch that extends the chain row by row", async () => {

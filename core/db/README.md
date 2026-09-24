@@ -20,6 +20,15 @@ inside sees and writes one tenant's rows. Outside it nothing is visible, so a fo
 fails closed instead of leaking. Primary and foreign keys include `tenant_id` too, so a row can
 never reference another tenant's.
 
+The `tx` handle works only while the callback runs. Once it settles, every use of the handle
+throws `TransactionEndedError`, so a handle that escaped (kept in a variable, or used by a
+promise nobody awaited) can't run on a pooled connection that is by then inside another
+tenant's transaction. Await every query inside the callback.
+
+Errors keep the server's SQLSTATE: `sqlState(e)` reads it however the driver wrapped it, and
+`isRetryable(e)` says whether the transaction may succeed if run again (serialization failure
+40001, deadlock 40P01). Retry by running a new `withTenant()`; the failed one is gone.
+
 Nothing cascades from a tenant, a zone or a blob. Deleting an object removes its versions and
 source references; removing a whole tenant is a deliberate, ordered process.
 
@@ -41,11 +50,17 @@ live grants for a caller's principals (at a given moment), in the shape core/pol
 `authorize()` takes, so an expired or revoked grant stops working at once, with no job to run.
 Revoking keeps the row for history.
 
+Grant times come from the database's clock (`now()`, the transaction's start): creation, the
+default expiry, revocation (never before creation) and "live now". core/identity revokes with
+the same clock, so a skewed application clock can't date a revocation before its grant. The
+functions still take an explicit `now` or `at`, for tests and for asking about another moment.
+
 ## Server requirements
 
 `openDatabase()` refuses to start unless:
 
-- PostgreSQL is 17 or later (18 recommended), with pgvector 0.8 or later available;
+- PostgreSQL is 17 or later (18 recommended), with pgvector 0.8 or later: the version created
+  in the database, or until it is created, the one the server would install;
 - the connecting user is an ordinary role: not a superuser and without `BYPASSRLS`, both of
   which skip row-level security;
 - the database is UTF-8 and sorts by code point, like PGlite.
@@ -61,12 +76,24 @@ CREATE EXTENSION vector;  -- pgvector is not a trusted extension
 ```
 
 OpenHoard then connects as `openhoard`, runs the migrations (so it owns the tables) and every
-query. Each connection runs in UTC.
+query. Each connection runs in UTC, with limits that `openDatabase({ postgres: … })` can change
+(0 turns a timeout off):
+
+| Option                           | Default | What                                                                 |
+| -------------------------------- | ------- | -------------------------------------------------------------------- |
+| `max`                            | 10      | connections in the pool                                              |
+| `connectionTimeoutMillis`        | 10 s    | wait for a connection before failing                                 |
+| `statementTimeoutMillis`         | 60 s    | `statement_timeout` (migrations run without one)                     |
+| `idleInTransactionTimeoutMillis` | 60 s    | `idle_in_transaction_session_timeout`: an abandoned transaction ends |
 
 The embedded default (`pglite`) keeps its files in `<dataDir>/pgdata`. PGlite always connects
 as a superuser, so the driver hands the database to an ordinary `openhoard` role and switches
 the session to it. Only one process may open a data directory at a time; `<dataDir>/pgdata.lock`
-enforces that.
+enforces that. It holds the owner's pid and a random nonce. A lock whose process is gone is
+stale and taken over, and so is one naming this process's own pid that this process doesn't
+hold (after a crash in a container, the restarted process usually has the same pid). A takeover
+renames the stale lock aside and checks it is still the one judged stale, so two processes
+can't both take it over.
 
 ## Types
 

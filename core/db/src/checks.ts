@@ -48,17 +48,29 @@ export async function checkServer(query: QueryRows): Promise<string[]> {
     );
   }
 
+  // The version that counts is the one created in this database; until it is created, the one
+  // CREATE EXTENSION would install.
   const [vector] = await query(
-    `select default_version as version from pg_available_extensions where name = 'vector'`,
+    `select installed_version as installed, default_version as available
+       from pg_available_extensions where name = 'vector'`,
   );
   if (!vector) {
     problems.push(
-      `the pgvector extension is not installed on the server (${MIN_PGVECTOR}+ needed).`,
+      `the pgvector extension is not installed on the server: its files are missing ` +
+        `(pgvector ${MIN_PGVECTOR} or later is needed).`,
     );
-  } else if (compareVersions(String(vector.version), MIN_PGVECTOR) < 0) {
-    problems.push(
-      `pgvector ${String(vector.version)} is too old: ${MIN_PGVECTOR} or later is needed.`,
-    );
+  } else {
+    const installed = typeof vector.installed === "string" ? vector.installed : undefined;
+    const version = installed ?? String(vector.available);
+    if (compareVersions(version, MIN_PGVECTOR) < 0) {
+      problems.push(
+        `pgvector ${version} is too old: ${MIN_PGVECTOR} or later is needed ` +
+          (installed === undefined
+            ? `(the version this server would install).`
+            : `(the version installed in this database: install a newer pgvector on the ` +
+              `server, then run ALTER EXTENSION vector UPDATE).`),
+      );
+    }
   }
 
   const [db] = await query(

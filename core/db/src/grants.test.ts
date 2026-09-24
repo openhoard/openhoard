@@ -1,7 +1,7 @@
 import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
-import { eq } from "drizzle-orm";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { fromDriver, type Database, type Driver, type Tx } from "./database.js";
+import { eq, sql } from "drizzle-orm";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fromDriver, queryRows, type Database, type Driver, type Tx } from "./database.js";
 import {
   addGrant,
   DEFAULT_GRANT_DAYS,
@@ -236,11 +236,17 @@ describe("loadGrants", () => {
   });
 
   it("stops counting a grant the moment it expires, with no job run", async () => {
-    const now = new Date();
+    // Explicit moments rather than a real wait: expiry is part of the query, so the answer for
+    // a moment is the same whenever it is asked.
+    const now = new Date(Date.now() - 60_000);
     const expiresAt = new Date(now.getTime() + 1500);
     await grant({ expiresAt }, now);
-    expect((await load([ana])).tagGrants).toEqual(["client:globex"]);
-    await new Promise((r) => setTimeout(r, expiresAt.getTime() - Date.now() + 50));
+    expect((await load([ana], now)).tagGrants).toEqual(["client:globex"]);
+    expect((await load([ana], new Date(expiresAt.getTime() - 1))).tagGrants).toEqual([
+      "client:globex",
+    ]);
+    expect((await load([ana], expiresAt)).tagGrants).toEqual([]);
+    // And "now" (the database's) is long past it.
     expect((await load([ana])).tagGrants).toEqual([]);
   });
 
@@ -312,6 +318,57 @@ describe("revokeGrant", () => {
       tx.update(grants).set({ revokedAt: new Date() }).where(eq(grants.id, id)),
     );
     expect(await sqlState(half)).toBe(CHECK_VIOLATION);
+  });
+});
+
+describe("without an explicit time, the database's clock", () => {
+  // The application's clock an hour off the database's, either way.
+  afterEach(() => vi.useRealTimers());
+  const skew = (ms: number) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + ms);
+  };
+  const dbNow = () =>
+    inTenant(async (tx) => {
+      const [r] = await queryRows<{ now: Date | string }>(tx, sql`select now() as now`);
+      return new Date(r?.now ?? 0);
+    });
+
+  it.each([
+    ["ahead", 3_600_000],
+    ["behind", -3_600_000],
+  ])("dates, expires, revokes and counts a grant with the app clock %s", async (_, ms) => {
+    skew(ms);
+    const id = await grant();
+    const created = await row(id);
+    const at = await dbNow();
+    expect(Math.abs((created?.createdAt.getTime() ?? 0) - at.getTime())).toBeLessThan(60_000);
+    expect((created?.expiresAt?.getTime() ?? 0) - (created?.createdAt.getTime() ?? 0)).toBe(
+      DEFAULT_GRANT_DAYS * DAY,
+    );
+    // Live now, by the database's clock, whichever way the app's is off.
+    expect((await load([ana])).tagGrants).toEqual(["client:globex"]);
+    // A revoke right away never lands before the creation (grants_revoked_after_creation).
+    expect(await inTenant((tx) => revokeGrant(tx, t.tenantId, id, "user:admin"))).toBe(true);
+    const revoked = await row(id);
+    expect(revoked?.revokedAt?.getTime()).toBeGreaterThanOrEqual(created?.createdAt.getTime() ?? 0);
+    expect((await load([ana])).tagGrants).toEqual([]);
+  });
+
+  it("revokes in the same transaction that granted", async () => {
+    const id = await inTenant(async (tx) => {
+      const g = await addGrant(tx, t.tenantId, {
+        principal: ana,
+        role: "read",
+        target: { tag: "client:globex" },
+        grantedBy: "user:admin",
+      });
+      expect((await loadGrants(tx, t.tenantId, [ana])).tagGrants).toEqual(["client:globex"]);
+      expect(await revokeGrant(tx, t.tenantId, g, "user:admin")).toBe(true);
+      return g;
+    });
+    const r = await row(id);
+    expect(r?.revokedAt).toEqual(r?.createdAt);
   });
 });
 

@@ -4,7 +4,7 @@ import { and, asc, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { canonicalJson, hashedText, type AuditEvent } from "./chain.js";
 import { csvLine, CSV_COLUMNS, exportAudit, filterConditions, type AuditFilter } from "./export.js";
-import { appendAudit, type AuditRecord } from "./store.js";
+import { appendAudit, verifyAudit, type AuditRecord } from "./store.js";
 
 /* Audit export (T-703): what it writes must be exactly what the same query returns. */
 
@@ -159,6 +159,48 @@ describe("exportAudit", () => {
     await expect(run({}, "ndjson", 0)).rejects.toThrow("invalid pageSize");
     await expect(run({}, "xml" as "csv")).rejects.toThrow("unknown export format");
     await expect(run({ from: new Date("nope") }, "csv")).rejects.toThrow("invalid date");
+  });
+
+  it("holds no transaction while the sink waits, and exports the chain as it was at the start", async () => {
+    const other = await openTestDatabase();
+    try {
+      const t = (await seedTenant(other, 2)).tenantId;
+      const u = (await seedTenant(other, 3)).tenantId;
+      const add = (tenantId: string, n: number) =>
+        other.withTenant(tenantId, (tx) =>
+          appendAudit(tx, tenantId, {
+            actor: "user:a",
+            action: "open",
+            decision: "allow",
+            object: `o${n}`,
+          }),
+        );
+      for (let n = 1; n <= 3; n++) await add(t, n);
+      const lines: string[] = [];
+      const exported = exportAudit(
+        other,
+        t,
+        {},
+        "ndjson",
+        async (line) => {
+          if (lines.length === 0) {
+            // With a transaction open, this would wait forever on PGlite (one connection) and
+            // pin a connection on PostgreSQL. Another tenant, and this one, carry on.
+            await add(u, 1);
+            await add(t, 4);
+          }
+          lines.push(line);
+        },
+        { pageSize: 2 },
+      );
+      expect(await exported).toBe(3);
+      expect(ndjson(lines.join("")).map((e) => e.object)).toEqual(["o1", "o2", "o3"]);
+      // The event appended meanwhile is there for the next export, and verifies.
+      expect(await exportAudit(other, t, {}, "ndjson", () => {})).toBe(4);
+      expect(await verifyAudit(other, t, { pageSize: 3 })).toMatchObject({ ok: true, count: 4 });
+    } finally {
+      await other.close();
+    }
   });
 
   it("names the event it cannot read", async () => {

@@ -154,6 +154,8 @@ export const objects = pgTable(
       foreignColumns: [zones.tenantId, zones.id],
     }),
     index("objects_zone_idx").on(t.tenantId, t.zoneId),
+    // A person's own files, and ownership checks by principal.
+    index("objects_owner_idx").on(t.tenantId, t.ownerId),
     idCheck("objects_id_format", "id", "object"),
     check("objects_title_length", sql`char_length(title) between 1 and 1024`),
     check("objects_owner_principal", sql`owner_id ~ '^[a-z]+:.+$'`),
@@ -405,7 +407,7 @@ export const users = pgTable(
     /** Guests are people outside the organization: they never discover files (T-603). */
     kind: text("kind", { enum: USER_KINDS }).notNull().default("member"),
     source: text("source", { enum: IDENTITY_SOURCES }).notNull(),
-    /** The identity provider's id for the user (SCIM externalId); null for local users. */
+    /** The identity provider's id for the user (SCIM externalId); always null for local users. */
     externalId: text("external_id"),
     createdAt: createdAt(),
     lockedAt: timestamp("locked_at", { withTimezone: true }),
@@ -434,6 +436,8 @@ export const users = pgTable(
       "users_external_id_length",
       sql`external_id is null or char_length(external_id) between 1 and 512`,
     ),
+    // An external id is the identity provider's: only SCIM users have one.
+    check("users_external_id_scim", sql`source = 'scim' or external_id is null`),
     check("users_lock_complete", sql`(locked_at is null) = (locked_by is null)`),
     check("users_locked_by_admin", sql`locked_by is null or locked_by ~ '^(user|system):.+$'`),
     check(
@@ -462,6 +466,7 @@ export const groups = pgTable(
     /** Display name; not unique, identity providers allow duplicates. */
     name: text("name").notNull(),
     source: text("source", { enum: IDENTITY_SOURCES }).notNull(),
+    /** The identity provider's id for the group (SCIM externalId); always null for local groups. */
     externalId: text("external_id"),
     createdAt: createdAt(),
   },
@@ -477,6 +482,7 @@ export const groups = pgTable(
       "groups_external_id_length",
       sql`external_id is null or char_length(external_id) between 1 and 512`,
     ),
+    check("groups_external_id_scim", sql`source = 'scim' or external_id is null`),
   ],
 );
 
@@ -581,6 +587,10 @@ export const grants = pgTable(
     // Loading a caller's grants: by principal, live ones first.
     index("grants_principal_idx").on(t.tenantId, t.principal),
     index("grants_object_idx").on(t.tenantId, t.objectId),
+    // "Who can see this?" by tag (T-606), and merging a value (T-406) carrying its grants.
+    index("grants_tag_idx")
+      .on(t.tenantId, t.facet, t.value)
+      .where(sql`facet is not null`),
     idCheck("grants_id_format", "id", "grant"),
     check("grants_principal_format", sql`principal ~ '^(user|group):.+$'`),
     check("grants_role_valid", sql.raw(`role in (${quoted(GRANT_ROLES)})`)),
@@ -646,8 +656,16 @@ export const tagReviews = pgTable(
       columns: [t.tenantId, t.facet, t.mergedInto],
       foreignColumns: [facetValues.tenantId, facetValues.facet, facetValues.value],
     }),
-    // The inbox: open items, oldest first.
-    index("tag_reviews_open_idx").on(t.tenantId, t.resolvedAt, t.createdAt),
+    // The inbox (listOpenReviews): open items, oldest first, in its exact order.
+    index("tag_reviews_open_idx")
+      .on(t.tenantId, t.createdAt, t.id)
+      .where(sql`resolved_at is null`),
+    // Open items for a tag: what approving or merging a value resolves.
+    index("tag_reviews_tag_idx")
+      .on(t.tenantId, t.facet, t.value)
+      .where(sql`resolved_at is null`),
+    // An object's items, open or resolved (and the cascade when the object is deleted).
+    index("tag_reviews_object_idx").on(t.tenantId, t.objectId),
     // One open item per object and tag, however often it is proposed.
     uniqueIndex("tag_reviews_one_open")
       .on(t.tenantId, t.objectId, t.facet, t.value)
@@ -712,7 +730,8 @@ export const tenantPacks = pgTable(
  *
  * `event` is the exact canonical JSON the hash covers, so verification never depends on how the
  * database round-trips a type. The other columns repeat its fields for queries and exports.
- * Rows can be read and inserted in their tenant, never changed: see 0005_audit_rls.sql.
+ * Rows can be read and inserted in their tenant, never changed: see 0005_audit_rls.sql. Every
+ * insert must extend the chain with a row that checks out (0017_audit_check_event.sql).
  */
 export const auditSchema = pgSchema("audit");
 
@@ -741,6 +760,7 @@ export const auditEvents = auditSchema.table(
     // Exports filter by time, actor and object (T-703).
     index("audit_events_at_idx").on(t.tenantId, t.at),
     index("audit_events_object_idx").on(t.tenantId, t.object),
+    index("audit_events_actor_idx").on(t.tenantId, t.actor, t.seq),
     check("audit_events_seq_positive", sql`seq > 0`),
     check("audit_events_decision_valid", sql`decision in ('allow', 'deny')`),
     check("audit_events_hash_format", sql.raw(`hash ~ '${HASH}' and prev_hash ~ '${HASH}'`)),

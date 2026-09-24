@@ -46,8 +46,10 @@ export class AccessModel {
   }
 
   /**
-   * The principal set a correct identity layer would compute for the user (see
-   * `@openhoard/core-identity`'s principalSet): namespaced user, group and guest keys.
+   * The principal keys a correct identity layer gives the user: namespaced user and group keys
+   * (`user:<id>`, `group:<id>`, as core/identity's userPrincipal() and groupPrincipal() write
+   * them, so a group named like a user never collides), and a guest key for this fake tenant's
+   * guests.
    */
   principalsOf(userId: string): string[] {
     const user = this.users.get(userId);

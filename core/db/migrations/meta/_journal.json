@@ -106,6 +106,27 @@
       "when": 1790241627496,
       "tag": "0014_tenant_packs_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1790270021698,
+      "tag": "0015_local_external_ids",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1790270045311,
+      "tag": "0016_indexes_and_scim_external_ids",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1790270055233,
+      "tag": "0017_audit_check_event",
+      "breakpoints": true
     }
   ]
 }

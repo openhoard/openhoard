@@ -1,7 +1,8 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq, sql } from "drizzle-orm";
+import { migrate as migratePglite } from "drizzle-orm/pglite/migrator";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   fromDriver,
@@ -17,6 +18,8 @@ import { PGlite } from "@electric-sql/pglite";
 import { checkServer, DatabaseCheckError } from "./checks.js";
 import { newId } from "./ids.js";
 import { migrationsFolder } from "./migrations.js";
+import { openPglite } from "./pglite.js";
+import { poolSettings, POSTGRES_DEFAULTS } from "./postgres.js";
 import {
   blobs,
   facets,
@@ -286,6 +289,61 @@ describe("migrations", () => {
     expect(new Set(when).size).toBe(when.length);
   });
 
+  it("clear external ids from local users and groups before SCIM owns them (0015)", async () => {
+    // A database migrated up to 0014, with a local user and group that had external ids.
+    const journal = JSON.parse(
+      readFileSync(join(migrationsFolder, "meta", "_journal.json"), "utf8"),
+    ) as { entries: { tag: string }[] };
+    const upTo = journal.entries.findIndex((e) => e.tag === "0015_local_external_ids");
+    const older = mkdtempSync(join(tmpdir(), "openhoard-migrations-"));
+    const driver = await openPglite({});
+    try {
+      cpSync(migrationsFolder, older, { recursive: true });
+      writeFileSync(
+        join(older, "meta", "_journal.json"),
+        JSON.stringify({ ...journal, entries: journal.entries.slice(0, upTo) }),
+      );
+      await migratePglite(driver.db as never, { migrationsFolder: older });
+      const db = fromDriver(driver);
+      const s = await seedTenant(db, 1);
+      const scimUser = newId("user");
+      await db.withTenant(s.tenantId, async (tx) => {
+        await tx.update(users).set({ externalId: "local-1" }).where(eq(users.id, s.userId));
+        await tx.update(groups).set({ externalId: "local-g" }).where(eq(groups.id, s.groupId));
+        await tx.insert(users).values({
+          tenantId: s.tenantId,
+          id: scimUser,
+          email: "bo@example.com",
+          emailKey: "bo@example.com",
+          displayName: "Bo",
+          source: "scim",
+          externalId: "scim-1",
+        });
+      });
+      await driver.migrate();
+      const rows = await db.withTenant(s.tenantId, async (tx) => ({
+        users: await tx.select({ id: users.id, externalId: users.externalId }).from(users),
+        groups: await tx.select({ externalId: groups.externalId }).from(groups),
+      }));
+      expect(rows.users).toEqual(
+        expect.arrayContaining([
+          { id: s.userId, externalId: null },
+          { id: scimUser, externalId: "scim-1" },
+        ]),
+      );
+      expect(rows.groups).toEqual([{ externalId: null }]);
+      // Row-level security is forced again.
+      const [forced] = await driver.query(
+        `select bool_and(relforcerowsecurity) as forced from pg_class
+          where relname in ('users', 'groups') and relnamespace = 'public'::regnamespace`,
+      );
+      expect(forced?.forced).toBe(true);
+    } finally {
+      await driver.close();
+      rmSync(older, { recursive: true, force: true });
+    }
+  });
+
   it("give every test an empty database", async () => {
     const db = await openTestDatabase();
     try {
@@ -401,6 +459,50 @@ describe("openDatabase", () => {
       await driver.close();
     }
   });
+
+  it("limits the Postgres pool by default, and lets the configuration change each limit", () => {
+    expect(poolSettings()).toEqual({
+      max: 10,
+      connectionTimeoutMillis: 10_000,
+      statementTimeoutMillis: 60_000,
+      idleInTransactionTimeoutMillis: 60_000,
+    });
+    expect(poolSettings({ statementTimeoutMillis: 0, max: 3 })).toEqual({
+      ...POSTGRES_DEFAULTS,
+      statementTimeoutMillis: 0,
+      max: 3,
+    });
+    for (const bad of [
+      { max: 0 },
+      { connectionTimeoutMillis: -1 },
+      { statementTimeoutMillis: 1.5 },
+    ]) {
+      expect(() => poolSettings(bad)).toThrow(RangeError);
+    }
+  });
+
+  it.runIf(process.env[TEST_POSTGRES_ENV])(
+    "sets the timeouts on every Postgres connection (PostgreSQL)",
+    async () => {
+      const { createPostgresDatabase } = await import("./testing-postgres.js");
+      const own = await createPostgresDatabase(process.env[TEST_POSTGRES_ENV] ?? "");
+      const custom = await openDriver({
+        url: own.url,
+        postgres: { statementTimeoutMillis: 1234, idleInTransactionTimeoutMillis: 5000 },
+      });
+      try {
+        const settings = `select current_setting('statement_timeout') as statement,
+                 current_setting('idle_in_transaction_session_timeout') as idle`;
+        expect(await own.query(settings)).toEqual([{ statement: "1min", idle: "1min" }]);
+        expect(await custom.query(settings)).toEqual([{ statement: "1234ms", idle: "5s" }]);
+        // A statement over the limit is cancelled.
+        await expect(custom.query("select pg_sleep(2)")).rejects.toMatchObject({ code: "57014" });
+      } finally {
+        await custom.close();
+        await own.close();
+      }
+    },
+  );
 
   it("needs a data directory for pglite", async () => {
     await expect(openDriver({ url: "pglite" })).rejects.toThrow('"pglite" needs a dataDir');

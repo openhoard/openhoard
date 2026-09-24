@@ -1,7 +1,16 @@
-import { addGrant, grants, users, type Database, type Tx } from "@openhoard/core-db";
+import {
+  addGrant,
+  grants,
+  groups,
+  sqlState,
+  userIdentities,
+  users,
+  type Database,
+  type Tx,
+} from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   addMember,
@@ -86,13 +95,13 @@ describe("users", () => {
   });
 
   it("refuses a second user with the same email or external id, and the transaction goes on", async () => {
-    await newUser("bo@example.com", { externalId: "x-1" });
+    await newUser("bo@example.com", { source: "scim", externalId: "x-1" });
     const ok = await inTenant(async (tx) => {
       const make = (email: string, externalId?: string) =>
         createUser(tx, t.tenantId, {
           email,
           displayName: "Bo",
-          source: "local",
+          source: "scim",
           ...(externalId ? { externalId } : {}),
         });
       expect(await code(make("BO@EXAMPLE.COM"))).toBe("conflict");
@@ -123,7 +132,8 @@ describe("users", () => {
     ["an email with spaces", { email: "b o@example.com" }],
     ["a blank name", { displayName: "  " }],
     ["a long name", { displayName: "x".repeat(257) }],
-    ["an empty external id", { externalId: "" }],
+    ["an empty external id", { externalId: "", source: "scim" }],
+    ["an external id for a local user", { externalId: "e-1" }],
     ["a zero-width space in an email", { email: "ana\u200b@example.com" }],
     ["a Kelvin sign that folds into k", { email: "\u212aen@example.com" }],
     ["fullwidth letters", { email: "\uff41na@example.com" }],
@@ -178,9 +188,9 @@ describe("users", () => {
   });
 
   it("refuses to move a user onto another's email or external id", async () => {
-    const a = await newUser("a@example.com", { externalId: "e-a" });
-    await newUser("b@example.com", { externalId: "e-b" });
-    const change = (c: object) => inTenant((tx) => updateUser(tx, t.tenantId, a.id, c, "local"));
+    const a = await newUser("a@example.com", { source: "scim", externalId: "e-a" });
+    await newUser("b@example.com", { source: "scim", externalId: "e-b" });
+    const change = (c: object) => inTenant((tx) => updateUser(tx, t.tenantId, a.id, c, "scim"));
     expect(await code(change({ email: "B@example.com" }))).toBe("conflict");
     expect(await code(change({ externalId: "e-b" }))).toBe("conflict");
     expect(await change({ email: "A@example.com", externalId: null })).toMatchObject({
@@ -327,6 +337,33 @@ describe("users", () => {
     expect(await inTenant((tx) => findUserByEmail(tx, t.tenantId, "not an email"))).toBeNull();
   });
 
+  it("keeps external ids to SCIM users, in the directory and the database", async () => {
+    const local = await newUser("lo@example.com");
+    expect(
+      await code(
+        inTenant((tx) => updateUser(tx, t.tenantId, local.id, { externalId: "e-1" }, "local")),
+      ),
+    ).toBe("invalid");
+    // Clearing one is fine, and there is none to clear.
+    expect(
+      await inTenant((tx) => updateUser(tx, t.tenantId, local.id, { externalId: null }, "local")),
+    ).toMatchObject({ externalId: null });
+    const direct = inTenant((tx) =>
+      tx.update(users).set({ externalId: "e-1" }).where(eq(users.id, local.id)),
+    );
+    expect(await direct.then(() => "no error", sqlState)).toBe("23514");
+  });
+
+  it("finds only SCIM users by external id", async () => {
+    const local = await newUser("lo@example.com");
+    // A row from before the database checked it (the check dropped for this test's database).
+    await inTenant(async (tx) => {
+      await tx.execute(sql`alter table users drop constraint users_external_id_scim`);
+      await tx.update(users).set({ externalId: "e-1" }).where(eq(users.id, local.id));
+    });
+    expect(await inTenant((tx) => findUserByExternalId(tx, t.tenantId, "e-1"))).toBeNull();
+  });
+
   it("maps a concurrent email clash to a conflict and keeps the transaction usable", async () => {
     const a = await newUser("a@example.com");
     const result = await inTenant(async (tx) => {
@@ -382,6 +419,22 @@ describe("sign-in identities", () => {
     expect(await link(next.id)).toBe(true);
   });
 
+  it("never signs in a retired user, even with an identity still linked", async () => {
+    await link(t.userId);
+    // Retiring unlinks identities; a row retired some other way keeps its link.
+    await inTenant((tx) =>
+      tx
+        .update(users)
+        .set({ retiredAt: new Date(), retiredBy: "user:admin" })
+        .where(eq(users.id, t.userId)),
+    );
+    const [linked] = await inTenant((tx) =>
+      tx.select().from(userIdentities).where(eq(userIdentities.subject, ms.subject)),
+    );
+    expect(linked?.userId).toBe(t.userId);
+    expect(await find()).toBeNull();
+  });
+
   it("refuses empty or oversized issuers and subjects, and unknown users", async () => {
     expect(await code(link(t.userId, { issuer: "", subject: "x" }))).toBe("invalid");
     expect(await code(link(t.userId, { issuer: "i", subject: "x".repeat(513) }))).toBe("invalid");
@@ -410,6 +463,25 @@ describe("groups", () => {
         ),
       ),
     ).toBe("conflict");
+  });
+
+  it("keeps external ids to SCIM groups, and finds only those by it", async () => {
+    expect(
+      await code(
+        inTenant((tx) =>
+          createGroup(tx, t.tenantId, { name: "Local", source: "local", externalId: "g-9" }),
+        ),
+      ),
+    ).toBe("invalid");
+    const direct = inTenant((tx) =>
+      tx.update(groups).set({ externalId: "g-9" }).where(eq(groups.id, t.groupId)),
+    );
+    expect(await direct.then(() => "no error", sqlState)).toBe("23514");
+    await inTenant(async (tx) => {
+      await tx.execute(sql`alter table groups drop constraint groups_external_id_scim`);
+      await tx.update(groups).set({ externalId: "g-9" }).where(eq(groups.id, t.groupId));
+    });
+    expect(await inTenant((tx) => findGroupByExternalId(tx, t.tenantId, "g-9"))).toBeNull();
   });
 
   it("changes membership only as the group's source", async () => {
@@ -535,6 +607,29 @@ describe("resolvePrincipal", () => {
       active: false,
     });
     expect(await canRead(t.userId)).toBe(false);
+  });
+
+  it("lists group ids in id order", async () => {
+    const more = [];
+    for (const name of ["Zeta", "Alpha"]) {
+      const g = await inTenant((tx) => createGroup(tx, t.tenantId, { name, source: "local" }));
+      await inTenant((tx) => addMember(tx, t.tenantId, g.id, t.userId, "local"));
+      more.push(g.id);
+    }
+    const principal = await inTenant((tx) => resolvePrincipal(tx, t.tenantId, t.userId));
+    expect(principal?.groupIds).toEqual([t.groupId, ...more].sort());
+  });
+
+  it("applies `at` to grants only: memberships and stops are the current ones", async () => {
+    const at = new Date(Date.now() + 60 * 60 * 1000);
+    await inTenant((tx) => removeMember(tx, t.tenantId, t.groupId, t.userId, "local"));
+    await inTenant((tx) => lockUser(tx, t.tenantId, t.userId, "user:admin"));
+    // The group's grant is live at `at`, but the user is no longer in the group, and is locked.
+    expect(await inTenant((tx) => resolvePrincipal(tx, t.tenantId, t.userId, at))).toMatchObject({
+      groupIds: [],
+      tagGrants: [],
+      active: false,
+    });
   });
 
   it("marks guests, and answers for a given moment", async () => {

@@ -5,7 +5,10 @@ interface Fake {
   num?: number;
   version?: string;
   tz?: string;
+  /** What CREATE EXTENSION would install; null: pgvector isn't on the server at all. */
   vector?: string | null;
+  /** The version created in this database; null: not created yet. */
+  vectorInstalled?: string | null;
   provider?: string;
   collate?: string;
   locale?: string | null;
@@ -21,6 +24,7 @@ const fakeServer = (f: Fake = {}): QueryRows => {
     version: "18.3",
     tz: "UTC",
     vector: "0.8.1",
+    vectorInstalled: null as string | null,
     provider: "b",
     collate: "C.UTF-8",
     locale: "C.UTF-8",
@@ -37,7 +41,9 @@ const fakeServer = (f: Fake = {}): QueryRows => {
       return Promise.resolve([{ name: "openhoard", super: s.super, bypass: s.bypass }]);
     }
     if (sql.includes("pg_available_extensions")) {
-      return Promise.resolve(s.vector === null ? [] : [{ version: s.vector }]);
+      return Promise.resolve(
+        s.vector === null ? [] : [{ available: s.vector, installed: s.vectorInstalled }],
+      );
     }
     if (sql.includes("pg_database")) {
       return Promise.resolve([
@@ -72,12 +78,28 @@ describe("checkServer", () => {
 
   it("rejects a missing or old pgvector", async () => {
     expect(await checkServer(fakeServer({ vector: null }))).toEqual([
-      expect.stringMatching(/pgvector extension is not installed/),
+      expect.stringMatching(/pgvector extension is not installed on the server/),
     ]);
     expect(await checkServer(fakeServer({ vector: "0.6.0" }))).toEqual([
       expect.stringMatching(/pgvector 0\.6\.0 is too old/),
     ]);
     expect(await checkServer(fakeServer({ vector: "0.10.0" }))).toEqual([]);
+  });
+
+  it("checks the pgvector created in this database, not the newest on the server", async () => {
+    // The server has 0.8.1, but this database still runs an older one it was created with.
+    expect(await checkServer(fakeServer({ vector: "0.8.1", vectorInstalled: "0.7.4" }))).toEqual([
+      expect.stringMatching(
+        /pgvector 0\.7\.4 is too old.*installed in this database.*ALTER EXTENSION/,
+      ),
+    ]);
+    // And a current one there is fine, whatever the server's default is.
+    expect(await checkServer(fakeServer({ vector: "0.7.0", vectorInstalled: "0.8.0" }))).toEqual(
+      [],
+    );
+    expect(await checkServer(fakeServer({ vector: "0.7.0", vectorInstalled: null }))).toEqual([
+      expect.stringMatching(/pgvector 0\.7\.0 is too old.*this server would install/),
+    ]);
   });
 
   it("rejects a session that is not in UTC", async () => {
