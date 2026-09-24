@@ -332,7 +332,13 @@ describe("with authorize()", () => {
           ...held,
         },
         action: "open",
-        resource: { id: t.objectId, ownerId: "user:owner-1", tags: [], zone: "indexed" },
+        resource: {
+          id: t.objectId,
+          ownerId: "user:owner-1",
+          tags: [],
+          allTags: [],
+          zone: "indexed",
+        },
         client: { id: "openhoard-web", trust: "first-party" },
       }).allow;
     };

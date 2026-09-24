@@ -7,6 +7,7 @@ import {
   foreignKey,
   index,
   integer,
+  jsonb,
   pgSchema,
   pgTable,
   primaryKey,
@@ -677,6 +678,34 @@ export const tagReviews = pgTable(
 /** The tag string policy and search use for a facet and value. */
 export const tagOf = (facet: string, value: string): string => `${facet}:${value}`;
 
+/**
+ * Packs applied to a tenant (T-607): declarative facets, values, defaults, tag rules and Cedar
+ * policies. `content` is the pack as applied, the source of its rules and policies; the
+ * vocabulary it created lives in facets and facet_values like any other.
+ */
+export const tenantPacks = pgTable(
+  "tenant_packs",
+  {
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    name: text("name").notNull(),
+    version: text("version").notNull(),
+    content: jsonb("content").notNull(),
+    /** SHA-256 of the pack's canonical JSON, as reviewed. */
+    contentHash: text("content_hash").notNull(),
+    appliedBy: text("applied_by").notNull(),
+    appliedAt: timestamp("applied_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.name] }),
+    check("tenant_packs_name_format", sql`name ~ '^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$'`),
+    check("tenant_packs_version_length", sql`char_length(version) between 5 and 64`),
+    check("tenant_packs_hash_format", sql`content_hash ~ '^[0-9a-f]{64}$'`),
+    check("tenant_packs_applied_by_principal", sql`applied_by ~ '^[a-z]+:.+$'`),
+  ],
+);
+
 /*
  * Audit (T-701): one append-only, hash-chained log per tenant, in its own schema. core/audit
  * appends and verifies; the chain rules are in core/audit/src/chain.ts.
@@ -735,4 +764,5 @@ export const tables = {
   userIdentities,
   groups,
   groupMembers,
+  tenantPacks,
 } as const;

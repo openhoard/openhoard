@@ -56,6 +56,12 @@ export interface AuthzResource {
    * unreviewed model tags, so a model's guess never widens access.
    */
   tags: readonly string[];
+  /**
+   * Every tag on the object, unreviewed model guesses included (tagsForDecisions().levels).
+   * Rules that restrict (a pack's forbid) match these, so a guess that a file is sensitive
+   * restricts it at once. Required: a caller that left it out would silently lose that.
+   */
+  allTags: readonly string[];
   zone: string;
 }
 
@@ -165,6 +171,7 @@ function malformed(r: AuthzRequest): string | undefined {
   if (!res || !isId(res.id)) return "resource.id";
   if (typeof res.ownerId !== "string") return "resource.ownerId";
   if (!isStrings(res.tags) || !res.tags.every(isId)) return "resource.tags";
+  if (!isStrings(res.allTags) || !res.allTags.every(isId)) return "resource.allTags";
   if (typeof res.zone !== "string") return "resource.zone";
   if (!c || !isId(c.id)) return "client.id";
   if (!["first-party", "local", "commercial", "consumer"].includes(c.trust as string)) {

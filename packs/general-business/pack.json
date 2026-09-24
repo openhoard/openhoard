@@ -1,0 +1,408 @@
+{
+  "pack_version": 1,
+  "name": "general-business",
+  "version": "1.0.0",
+  "description": "Sensitivity levels, departments and document kinds, with folder and file-type rules and two guardrail policies. A starting point: edit freely.",
+  "defaults": {
+    "visibility": "discoverable",
+    "exposure": "commercial-only"
+  },
+  "facets": [
+    {
+      "key": "sensitivity",
+      "label": "Sensitivity",
+      "public": true,
+      "values": [
+        {
+          "value": "public",
+          "label": "Public",
+          "visibility": "readable",
+          "exposure": "full"
+        },
+        {
+          "value": "internal",
+          "label": "Internal",
+          "visibility": "discoverable",
+          "exposure": "commercial-only"
+        },
+        {
+          "value": "confidential",
+          "label": "Confidential",
+          "visibility": "hidden",
+          "exposure": "local-only"
+        },
+        {
+          "value": "restricted",
+          "label": "Restricted",
+          "visibility": "hidden",
+          "exposure": "metadata-only"
+        }
+      ]
+    },
+    {
+      "key": "department",
+      "label": "Department",
+      "public": true,
+      "values": [
+        {
+          "value": "executive",
+          "label": "Executive"
+        },
+        {
+          "value": "finance",
+          "label": "Finance"
+        },
+        {
+          "value": "hr",
+          "label": "HR"
+        },
+        {
+          "value": "legal",
+          "label": "Legal"
+        },
+        {
+          "value": "sales",
+          "label": "Sales"
+        },
+        {
+          "value": "marketing",
+          "label": "Marketing"
+        },
+        {
+          "value": "engineering",
+          "label": "Engineering"
+        },
+        {
+          "value": "operations",
+          "label": "Operations"
+        },
+        {
+          "value": "it",
+          "label": "IT"
+        }
+      ]
+    },
+    {
+      "key": "kind",
+      "label": "Document kind",
+      "public": true,
+      "values": [
+        {
+          "value": "contract",
+          "label": "Contract"
+        },
+        {
+          "value": "invoice",
+          "label": "Invoice"
+        },
+        {
+          "value": "report",
+          "label": "Report"
+        },
+        {
+          "value": "presentation",
+          "label": "Presentation"
+        },
+        {
+          "value": "spreadsheet",
+          "label": "Spreadsheet"
+        },
+        {
+          "value": "policy",
+          "label": "Policy"
+        },
+        {
+          "value": "proposal",
+          "label": "Proposal"
+        },
+        {
+          "value": "minutes",
+          "label": "Meeting minutes"
+        },
+        {
+          "value": "handbook",
+          "label": "Handbook"
+        }
+      ]
+    },
+    {
+      "key": "client",
+      "label": "Client",
+      "values": []
+    },
+    {
+      "key": "project",
+      "label": "Project",
+      "values": []
+    }
+  ],
+  "rules": [
+    {
+      "id": "finance-folder",
+      "tag": "department:finance",
+      "when": {
+        "path": "**/Finance/**"
+      }
+    },
+    {
+      "id": "hr-folder",
+      "tag": "department:hr",
+      "when": {
+        "path": "**/HR/**"
+      }
+    },
+    {
+      "id": "hr-confidential",
+      "tag": "sensitivity:confidential",
+      "when": {
+        "path": "**/HR/**"
+      }
+    },
+    {
+      "id": "legal-folder",
+      "tag": "department:legal",
+      "when": {
+        "path": "**/Legal/**"
+      }
+    },
+    {
+      "id": "sales-folder",
+      "tag": "department:sales",
+      "when": {
+        "path": "**/Sales/**"
+      }
+    },
+    {
+      "id": "marketing-folder",
+      "tag": "department:marketing",
+      "when": {
+        "path": "**/Marketing/**"
+      }
+    },
+    {
+      "id": "engineering-folder",
+      "tag": "department:engineering",
+      "when": {
+        "path": "**/Engineering/**"
+      }
+    },
+    {
+      "id": "confidential-folder",
+      "tag": "sensitivity:confidential",
+      "when": {
+        "path": "**/Confidential/**"
+      }
+    },
+    {
+      "id": "contracts-folder",
+      "tag": "kind:contract",
+      "when": {
+        "path": "**/Contracts/**"
+      }
+    },
+    {
+      "id": "invoices-folder",
+      "tag": "kind:invoice",
+      "when": {
+        "path": "**/Invoices/**"
+      }
+    },
+    {
+      "id": "spreadsheets",
+      "tag": "kind:spreadsheet",
+      "when": {
+        "extension": ["xlsx", "xls", "csv", "ods"]
+      }
+    },
+    {
+      "id": "presentations",
+      "tag": "kind:presentation",
+      "when": {
+        "extension": ["pptx", "ppt", "key", "odp"]
+      }
+    }
+  ],
+  "policies": {
+    "guests-no-hr-or-legal": "// Guests never reach HR or legal files, whatever they were granted, and even\n// when only a model has guessed the department.\nforbid (principal, action, resource)\n  when {\n    principal.guest &&\n    (resource.allTags.contains(\"department:hr\") || resource.allTags.contains(\"department:legal\"))\n  };",
+    "consumer-ai-no-confidential": "// Consumer AI clients can't read or open confidential or restricted files: no card\n// (it carries the summary), no content. They can still find them.\nforbid (\n  principal,\n  action in [OpenHoard::Action::\"read\", OpenHoard::Action::\"open\"],\n  resource\n)\n  when {\n    context.client.trust == \"consumer\" &&\n    (resource.allTags.contains(\"sensitivity:confidential\") ||\n      resource.allTags.contains(\"sensitivity:restricted\"))\n  };"
+  },
+  "tests": {
+    "policies": [
+      {
+        "name": "a member reads an HR file they were granted",
+        "action": "read",
+        "principal": {
+          "readGrants": ["department:hr"]
+        },
+        "resource": {
+          "tags": ["department:hr"]
+        },
+        "expect": "allow"
+      },
+      {
+        "name": "a guest can't read an HR file, even with a grant",
+        "action": "read",
+        "principal": {
+          "guest": true,
+          "readGrants": ["department:hr"]
+        },
+        "resource": {
+          "tags": ["department:hr"]
+        },
+        "expect": "forbid"
+      },
+      {
+        "name": "a guest can't read a file a model guessed is legal",
+        "action": "read",
+        "principal": {
+          "guest": true,
+          "readGrants": ["client:acme"]
+        },
+        "resource": {
+          "tags": ["client:acme"],
+          "unreviewedTags": ["department:legal"]
+        },
+        "expect": "forbid"
+      },
+      {
+        "name": "a guest reads a granted sales file",
+        "action": "read",
+        "principal": {
+          "guest": true,
+          "readGrants": ["client:acme"]
+        },
+        "resource": {
+          "tags": ["client:acme", "department:sales"]
+        },
+        "expect": "allow"
+      },
+      {
+        "name": "a guest can't open their own HR file",
+        "action": "open",
+        "principal": {
+          "guest": true,
+          "owner": true
+        },
+        "resource": {
+          "tags": ["department:hr"]
+        },
+        "expect": "forbid"
+      },
+      {
+        "name": "a consumer AI client can't open a confidential file",
+        "action": "open",
+        "principal": {
+          "readGrants": ["client:acme"]
+        },
+        "resource": {
+          "tags": ["client:acme", "sensitivity:confidential"]
+        },
+        "client": "consumer",
+        "expect": "forbid"
+      },
+      {
+        "name": "a consumer AI client can't read a confidential file's card",
+        "action": "read",
+        "principal": {
+          "readGrants": ["client:acme"]
+        },
+        "resource": {
+          "tags": ["client:acme", "sensitivity:confidential"]
+        },
+        "client": "consumer",
+        "expect": "forbid"
+      },
+      {
+        "name": "a consumer AI client can still find it",
+        "action": "search",
+        "principal": {
+          "readGrants": ["client:acme"]
+        },
+        "resource": {
+          "tags": ["client:acme", "sensitivity:confidential"]
+        },
+        "client": "consumer",
+        "expect": "allow"
+      },
+      {
+        "name": "a commercial AI client opens a confidential file for a reader",
+        "action": "open",
+        "principal": {
+          "readGrants": ["client:acme"]
+        },
+        "resource": {
+          "tags": ["client:acme", "sensitivity:confidential"]
+        },
+        "client": "commercial",
+        "expect": "allow"
+      },
+      {
+        "name": "a consumer AI client can't open a file a model guessed is restricted",
+        "action": "open",
+        "principal": {
+          "readGrants": ["client:acme"]
+        },
+        "resource": {
+          "tags": ["client:acme"],
+          "unreviewedTags": ["sensitivity:restricted"]
+        },
+        "client": "consumer",
+        "expect": "forbid"
+      },
+      {
+        "name": "no grant, no access",
+        "action": "read",
+        "resource": {
+          "tags": ["department:sales"]
+        },
+        "expect": "deny"
+      },
+      {
+        "name": "a deprovisioned member can't read",
+        "action": "read",
+        "principal": {
+          "active": false,
+          "readGrants": ["department:sales"]
+        },
+        "resource": {
+          "tags": ["department:sales"]
+        },
+        "expect": "forbid"
+      }
+    ],
+    "levels": [
+      {
+        "name": "untagged work is discoverable, commercial AI only",
+        "tags": [],
+        "expect": {
+          "visibility": "discoverable",
+          "exposure": "commercial-only"
+        }
+      },
+      {
+        "name": "public material is readable by everyone",
+        "tags": ["sensitivity:public"],
+        "expect": {
+          "visibility": "readable",
+          "exposure": "full"
+        }
+      },
+      {
+        "name": "confidential is hidden and local-only",
+        "tags": ["sensitivity:confidential", "department:finance"],
+        "expect": {
+          "visibility": "hidden",
+          "exposure": "local-only"
+        }
+      },
+      {
+        "name": "the most restrictive tag wins",
+        "tags": ["sensitivity:public", "sensitivity:restricted"],
+        "expect": {
+          "visibility": "hidden",
+          "exposure": "metadata-only"
+        }
+      }
+    ]
+  }
+}

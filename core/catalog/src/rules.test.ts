@@ -151,6 +151,26 @@ describe("validateRules", () => {
       [{ id: "d", facet: "client", dictionary: { a: ["--"] } }],
       /no letters/,
     ],
+    [
+      "an ignored exception",
+      [{ id: "r", tag: "a:b", when: { path: "**" }, unless: { path: "Public/**" } }],
+      /unknown field unless/,
+    ],
+    [
+      "a stray field on a dictionary rule",
+      [{ id: "d", facet: "client", dictionary: { a: ["A"] }, when: { path: "x" } }],
+      /unknown field when/,
+    ],
+    [
+      "a right-to-left override in a path",
+      [{ id: "r", tag: "a:b", when: { path: "HR/\u202e**" } }],
+      /visible characters/,
+    ],
+    [
+      "an invisible character in a term",
+      [{ id: "d", facet: "client", dictionary: { a: ["Ac\u200bme"] } }],
+      /list of terms/,
+    ],
   ])("reports %s", (_, rules, message) => {
     expect(validateRules(rules).join("\n")).toMatch(message);
   });

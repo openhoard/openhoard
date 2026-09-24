@@ -92,6 +92,20 @@
       "when": 1790239159249,
       "tag": "0012_users_and_groups_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1790241626453,
+      "tag": "0013_tenant_packs",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1790241627496,
+      "tag": "0014_tenant_packs_rls",
+      "breakpoints": true
     }
   ]
 }

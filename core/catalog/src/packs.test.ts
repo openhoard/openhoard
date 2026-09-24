@@ -1,0 +1,754 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import {
+  facets,
+  facetValues,
+  tenantPacks,
+  tenants,
+  type Database,
+  type Tx,
+} from "@openhoard/core-db";
+import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
+import { eq } from "drizzle-orm";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  APPLY_TRANSACTION,
+  applyPack,
+  canonicalJson,
+  packPolicies,
+  parsePack,
+  planPack,
+  runPackTests,
+  tenantPolicies,
+  tenantRules,
+  validatePack,
+  type Pack,
+  type PackFacet,
+} from "./packs.js";
+import { evaluateRules } from "./rules.js";
+
+/* T-607: a pack applies only with a reviewed diff, and only when its tests pass. */
+
+const STARTER = JSON.parse(
+  readFileSync(
+    fileURLToPath(new URL("../../../packs/general-business/pack.json", import.meta.url)),
+    "utf8",
+  ),
+) as Pack;
+
+let db: Database;
+let t: SeededTenant;
+beforeEach(async () => {
+  db = await openTestDatabase();
+  t = await seedTenant(db, 1);
+});
+afterEach(() => db?.close());
+
+const inTenant = <T>(work: (tx: Tx) => Promise<T>) => db.withTenant(t.tenantId, work);
+const plan = (pack: unknown) => inTenant((tx) => planPack(tx, t.tenantId, pack));
+const apply = (pack: unknown, planHash: string) =>
+  db.withTenant(
+    t.tenantId,
+    (tx) => applyPack(tx, t.tenantId, pack, { planHash, by: "user:admin" }),
+    APPLY_TRANSACTION,
+  );
+const small = (patch: Partial<Pack> = {}): Pack => ({
+  pack_version: 1,
+  name: "small",
+  version: "1.0.0",
+  facets: [
+    {
+      key: "sensitivity",
+      label: "Sensitivity",
+      values: [{ value: "secret", label: "Secret", visibility: "hidden", exposure: "local-only" }],
+    },
+  ],
+  ...patch,
+});
+
+describe("the general business starter pack", () => {
+  it("is a valid pack whose tests all pass", () => {
+    expect(validatePack(STARTER)).toEqual([]);
+    const results = runPackTests(STARTER);
+    expect(results.filter((r) => !r.passed)).toEqual([]);
+    expect(results.length).toBeGreaterThan(10);
+  });
+
+  it("applies with its reviewed diff, loosening flagged", async () => {
+    const p = await plan(STARTER);
+    expect(p).toMatchObject({ name: "general-business", version: "1.0.0", previous: null });
+    const kinds = p.changes.map((c) => c.kind);
+    expect(kinds).toContain("set-defaults");
+    expect(kinds.filter((k) => k === "add-value").length).toBe(22);
+    expect(p.warnings).toEqual(
+      expect.arrayContaining([
+        "tenant default goes from hidden/metadata-only to discoverable/commercial-only",
+        "new facet sensitivity is public: its tags show on title-only cards",
+      ]),
+    );
+    await apply(STARTER, p.planHash);
+
+    const [tenant] = await inTenant((tx) =>
+      tx.select().from(tenants).where(eq(tenants.id, t.tenantId)),
+    );
+    expect(tenant).toMatchObject({
+      defaultVisibility: "discoverable",
+      defaultExposure: "commercial-only",
+    });
+    const [restricted] = await inTenant((tx) =>
+      tx.select().from(facetValues).where(eq(facetValues.value, "restricted")),
+    );
+    expect(restricted).toMatchObject({
+      approved: true,
+      visibility: "hidden",
+      exposure: "metadata-only",
+    });
+    const [dept] = await inTenant((tx) =>
+      tx.select().from(facets).where(eq(facets.key, "department")),
+    );
+    expect(dept?.public).toBe(true);
+    // The seeded client facet keeps its value; the pack only adds.
+    expect(
+      await inTenant((tx) => tx.select().from(facetValues).where(eq(facetValues.facet, "client"))),
+    ).toHaveLength(1);
+
+    const policies = await inTenant((tx) => tenantPolicies(tx, t.tenantId));
+    expect(Object.keys(policies).sort()).toEqual([
+      "pack/general-business/consumer-ai-no-confidential",
+      "pack/general-business/guests-no-hr-or-legal",
+    ]);
+    const rules = await inTenant((tx) => tenantRules(tx, t.tenantId));
+    expect(evaluateRules(rules, { path: "Company/HR/2026/Review.docx" })).toEqual([
+      { tag: "department:hr", rule: "general-business.hr-folder" },
+      { tag: "sensitivity:confidential", rule: "general-business.hr-confidential" },
+    ]);
+    expect(evaluateRules(rules, { path: "Sales/Pipeline.xlsx" }).map((r) => r.tag)).toEqual([
+      "department:sales",
+      "kind:spreadsheet",
+    ]);
+
+    // Planning the same pack again finds nothing to do.
+    const again = await plan(STARTER);
+    expect(again.changes).toEqual([]);
+    expect(again.previous).toBe("1.0.0");
+  });
+});
+
+describe("planPack and applyPack", () => {
+  it("refuses a plan that no longer matches the tenant or the pack", async () => {
+    const p = await plan(small());
+    // Someone edits the vocabulary after the review.
+    await inTenant(async (tx) => {
+      await tx.insert(facets).values({ tenantId: t.tenantId, key: "sensitivity", label: "Other" });
+    });
+    await expect(apply(small(), p.planHash)).rejects.toMatchObject({ code: "stale-plan" });
+    const fresh = await plan(small());
+    await expect(apply(small({ version: "1.0.1" }), fresh.planHash)).rejects.toMatchObject({
+      code: "stale-plan",
+    });
+    expect((await apply(small(), fresh.planHash)).version).toBe("1.0.0");
+  });
+
+  it("refuses a pack whose tests fail, naming them", async () => {
+    const failing = small({
+      tests: {
+        levels: [
+          {
+            name: "secret is readable",
+            tags: ["sensitivity:secret"],
+            expect: { visibility: "readable", exposure: "full" },
+          },
+        ],
+      },
+    });
+    const p = await plan(failing);
+    expect(p.tests.find((r) => r.name === "secret is readable")).toMatchObject({
+      passed: false,
+      detail: "expected readable/full, got hidden/local-only",
+    });
+    await expect(apply(failing, p.planHash)).rejects.toMatchObject({
+      code: "tests-failed",
+      message: expect.stringContaining("secret is readable"),
+    });
+  });
+
+  it("refuses policies that don't compile, as a failed test", async () => {
+    const broken = small({ policies: { oops: "permit (principal, action" } });
+    const p = await plan(broken);
+    expect(p.tests[0]).toMatchObject({ name: "policies compile", passed: false });
+    await expect(apply(broken, p.planHash)).rejects.toMatchObject({ code: "tests-failed" });
+    const reserved = small({
+      policies: {
+        "no-core": 'forbid (principal, action, resource) when { resource.zone == "code" };',
+      },
+    });
+    expect(runPackTests(reserved).every((r) => r.passed)).toBe(true);
+  });
+
+  it("flags every loosening change to existing vocabulary", async () => {
+    await inTenant(async (tx) => {
+      await tx
+        .insert(facets)
+        .values({ tenantId: t.tenantId, key: "sensitivity", label: "Sensitivity" });
+      await tx.insert(facetValues).values([
+        {
+          tenantId: t.tenantId,
+          facet: "sensitivity",
+          value: "secret",
+          label: "Secret",
+          approved: true,
+          visibility: "hidden",
+          exposure: "metadata-only",
+        },
+        { tenantId: t.tenantId, facet: "sensitivity", value: "proposed", label: "Proposed" },
+      ]);
+    });
+    const loosen = small({
+      facets: [
+        {
+          key: "sensitivity",
+          label: "Sensitivity",
+          public: true,
+          values: [
+            { value: "secret", label: "Secret", visibility: "discoverable" },
+            { value: "proposed", label: "Proposed" },
+          ],
+        },
+      ],
+    });
+    const p = await plan(loosen);
+    expect(p.changes).toEqual([
+      {
+        kind: "change-facet",
+        facet: "sensitivity",
+        from: { label: "Sensitivity", public: false },
+        to: { label: "Sensitivity", public: true },
+        loosens: true,
+      },
+      {
+        kind: "change-value",
+        tag: "sensitivity:secret",
+        from: { label: "Secret", levels: { visibility: "hidden", exposure: "metadata-only" } },
+        to: { label: "Secret", levels: { visibility: "discoverable", exposure: null } },
+        loosens: true,
+      },
+      {
+        kind: "approve-value",
+        tag: "sensitivity:proposed",
+        label: "Proposed",
+        levels: { visibility: null, exposure: null },
+        loosens: true,
+      },
+    ]);
+    expect(p.warnings).toEqual([
+      "facet sensitivity becomes public: its tags show on title-only cards",
+      "sensitivity:secret goes from hidden/metadata-only to discoverable/no exposure",
+      "proposed value sensitivity:proposed becomes approved vocabulary: grants and trusted tags can use it",
+    ]);
+    // Tightening isn't flagged.
+    const tighten = small({
+      facets: [
+        {
+          key: "sensitivity",
+          label: "Sensitivity",
+          values: [
+            { value: "secret", label: "Secret", visibility: "hidden", exposure: "metadata-only" },
+          ],
+        },
+      ],
+    });
+    expect((await plan(tighten)).warnings).toEqual([]);
+  });
+
+  it("replaces its own rules and policies on upgrade and keeps vocabulary it dropped", async () => {
+    const v1 = small({
+      facets: [
+        {
+          key: "sensitivity",
+          label: "Sensitivity",
+          values: [
+            { value: "secret", label: "Secret" },
+            { value: "old", label: "Old" },
+          ],
+        },
+      ],
+      rules: [
+        { id: "a", tag: "sensitivity:secret", when: { path: "Secret/**" } },
+        { id: "b", tag: "sensitivity:old", when: { path: "Old/**" } },
+      ],
+      policies: { p1: 'forbid (principal, action, resource) when { resource.zone == "code" };' },
+    });
+    await apply(v1, (await plan(v1)).planHash);
+    const v2 = small({
+      version: "2.0.0",
+      facets: [
+        {
+          key: "sensitivity",
+          label: "Sensitivity",
+          values: [{ value: "secret", label: "Secret" }],
+        },
+      ],
+      rules: [
+        { id: "a", tag: "sensitivity:secret", when: { path: "Top Secret/**" } },
+        { id: "c", tag: "sensitivity:secret", when: { extension: ["key"] } },
+      ],
+      policies: { p2: "forbid (principal, action, resource) when { principal.guest };" },
+    });
+    const p = await plan(v2);
+    expect(p.previous).toBe("1.0.0");
+    expect(p.changes).toEqual([
+      {
+        kind: "keep-value",
+        tag: "sensitivity:old",
+        note: "no longer in the pack; left in place, since tags and grants may use it",
+      },
+      {
+        kind: "set-rules",
+        added: [{ id: "c", tag: "sensitivity:secret", when: { extension: ["key"] } }],
+        removed: [{ id: "b", tag: "sensitivity:old", when: { path: "Old/**" } }],
+        changed: [
+          {
+            from: { id: "a", tag: "sensitivity:secret", when: { path: "Secret/**" } },
+            to: { id: "a", tag: "sensitivity:secret", when: { path: "Top Secret/**" } },
+          },
+        ],
+        loosens: true,
+      },
+      {
+        kind: "set-policies",
+        added: [
+          {
+            id: "pack/small/p2",
+            text: "forbid (principal, action, resource) when { principal.guest };",
+          },
+        ],
+        removed: [
+          {
+            id: "pack/small/p1",
+            text: 'forbid (principal, action, resource) when { resource.zone == "code" };',
+          },
+        ],
+        changed: [],
+        // A forbid removed: something may now be allowed.
+        loosens: true,
+      },
+    ]);
+    await apply(v2, p.planHash);
+    expect(Object.keys(await inTenant((tx) => tenantPolicies(tx, t.tenantId)))).toEqual([
+      "pack/small/p2",
+    ]);
+    expect((await inTenant((tx) => tenantRules(tx, t.tenantId))).map((r) => r.id)).toEqual([
+      "small.a",
+      "small.c",
+    ]);
+    const [row] = await inTenant((tx) =>
+      tx.select().from(tenantPacks).where(eq(tenantPacks.name, "small")),
+    );
+    expect(row).toMatchObject({ version: "2.0.0", appliedBy: "user:admin" });
+    expect(row?.contentHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("refuses rules on facets that won't exist, and a bad approver", async () => {
+    const orphan = small({ rules: [{ id: "x", tag: "nowhere:x", when: { path: "**" } }] });
+    await expect(plan(orphan)).rejects.toMatchObject({
+      code: "invalid",
+      message: expect.stringContaining("unknown facet nowhere"),
+    });
+    const p = await plan(small());
+    await expect(
+      db.withTenant(
+        t.tenantId,
+        (tx) => applyPack(tx, t.tenantId, small(), { planHash: p.planHash, by: "admin" }),
+        APPLY_TRANSACTION,
+      ),
+    ).rejects.toMatchObject({ code: "invalid" });
+    await expect(
+      inTenant((tx) =>
+        applyPack(tx, t.tenantId, small(), { planHash: p.planHash, by: "user:admin" }),
+      ),
+    ).rejects.toThrow("serializable");
+  });
+});
+
+describe("what the review sees", () => {
+  it("flags every rule change: rule tags are trusted", async () => {
+    const everything = small({
+      facets: [
+        {
+          key: "sensitivity",
+          label: "Sensitivity",
+          values: [{ value: "public", label: "Public", visibility: "readable", exposure: "full" }],
+        },
+      ],
+      rules: [{ id: "all-public", tag: "sensitivity:public", when: { path: "**" } }],
+    });
+    const p = await plan(everything);
+    expect(p.warnings).toEqual(
+      expect.arrayContaining([
+        "new value sensitivity:public (readable/full) is looser than the tenant default",
+        "tag rules change (added all-public, removed none, changed none): rule tags are trusted, so review what each tags",
+      ]),
+    );
+    expect(p.changes).toContainEqual(
+      expect.objectContaining({
+        kind: "set-rules",
+        added: [{ id: "all-public", tag: "sensitivity:public", when: { path: "**" } }],
+      }),
+    );
+  });
+
+  it("flags added permits but not added forbids", async () => {
+    const forbid = small({
+      facets: [],
+      policies: { f: "forbid (principal, action, resource) when { principal.guest };" },
+    });
+    const pf = await plan(forbid);
+    expect(pf.changes).toContainEqual(
+      expect.objectContaining({ kind: "set-policies", loosens: false }),
+    );
+    expect(pf.warnings).toEqual([]);
+    const permit = small({
+      facets: [],
+      policies: { p: 'permit (principal, action, resource) when { resource.zone == "code" };' },
+    });
+    expect((await plan(permit)).warnings).toEqual([
+      "policies change so that more may be allowed (added pack/small/p, removed none, changed none): review each",
+    ]);
+  });
+
+  it("binds the plan to the tenant", async () => {
+    const other = await seedTenant(db, 2);
+    const here = await plan(small());
+    const there = await db.withTenant(other.tenantId, (tx) =>
+      planPack(tx, other.tenantId, small()),
+    );
+    expect(here.changes).toEqual(there.changes);
+    expect(here.planHash).not.toBe(there.planHash);
+    await expect(
+      db.withTenant(
+        other.tenantId,
+        (tx) =>
+          applyPack(tx, other.tenantId, small(), { planHash: here.planHash, by: "user:admin" }),
+        APPLY_TRANSACTION,
+      ),
+    ).rejects.toMatchObject({ code: "stale-plan" });
+  });
+
+  it("warns when the version goes down", async () => {
+    const v2 = small({ version: "2.0.0" });
+    await apply(v2, (await plan(v2)).planHash);
+    expect((await plan(small({ version: "1.9.9" }))).warnings).toContain(
+      "version goes down from 2.0.0 to 1.9.9",
+    );
+  });
+
+  it("flags a value going from no level to a looser one", async () => {
+    const add = small({
+      facets: [{ key: "department", label: "Department", values: [{ value: "hr", label: "HR" }] }],
+    });
+    await apply(add, (await plan(add)).planHash);
+    const open = small({
+      name: "other",
+      facets: [
+        {
+          key: "department",
+          label: "Department",
+          values: [{ value: "hr", label: "HR", visibility: "readable", exposure: "full" }],
+        },
+      ],
+    });
+    expect((await plan(open)).warnings).toContain(
+      "department:hr goes from no visibility/no exposure to readable/full",
+    );
+  });
+
+  it("warns on a pre-release after its release, and on changed content under one version", async () => {
+    await apply(small(), (await plan(small())).planHash);
+    expect((await plan(small({ version: "1.0.0-rc.1" }))).warnings).toContain(
+      "version goes down from 1.0.0 to 1.0.0-rc.1",
+    );
+    expect((await plan(small({ version: "1.0.1-rc.1" }))).warnings).toEqual([]);
+    const edited = small({ description: "Edited in place." });
+    expect((await plan(edited)).warnings).toContain(
+      "version 1.0.0 is already applied with different content",
+    );
+  });
+
+  it("names a stored pack that no longer validates, and stops there", async () => {
+    await apply(small(), (await plan(small())).planHash);
+    await inTenant((tx) =>
+      tx
+        .update(tenantPacks)
+        .set({
+          content: {
+            ...small(),
+            policies: {
+              p: 'permit (principal, action, resource) when { resource.allTags.contains("a:b") };',
+            },
+          },
+        })
+        .where(eq(tenantPacks.name, "small")),
+    );
+    await expect(inTenant((tx) => tenantPolicies(tx, t.tenantId))).rejects.toThrow(
+      "stored pack small no longer validates",
+    );
+  });
+
+  it("plans and applies one copy: getters and inherited fields don't slip through", async () => {
+    let reads = 0;
+    const loose: PackFacet[] = [
+      {
+        key: "sensitivity",
+        label: "Sensitivity",
+        values: [{ value: "secret", label: "Secret", visibility: "readable" }],
+      },
+    ];
+    const tricky = {
+      ...small(),
+      get facets() {
+        reads++;
+        return reads === 1 ? small().facets : loose;
+      },
+    };
+    const p = await plan(tricky);
+    // Planning read the getter once; applying copies again and gets the other value.
+    await expect(apply(tricky, p.planHash)).rejects.toMatchObject({ code: "stale-plan" });
+    const inherited = Object.create({
+      policies: { p: "permit (principal, action, resource);" },
+    }) as object;
+    Object.assign(inherited, small());
+    expect((await plan(inherited)).changes.some((c) => c.kind === "set-policies")).toBe(false);
+  });
+});
+
+describe("the tests of a pack", () => {
+  it("fail on a malformed test instead of passing it as a deny", () => {
+    const vacuous = small({
+      policies: { all: "permit (principal, action, resource);" },
+      tests: {
+        policies: [
+          {
+            name: "looks denied",
+            action: "read",
+            principal: { guest: "yes" as unknown as boolean },
+            resource: { tags: [] },
+            expect: "deny",
+          },
+        ],
+      },
+    });
+    expect(runPackTests(vacuous).find((r) => r.name === "looks denied")).toMatchObject({
+      passed: false,
+      detail: expect.stringContaining("got error"),
+    });
+    expect(validatePack(vacuous)).toContain(
+      "policy test looks denied: principal.guest must be true or false",
+    );
+  });
+
+  it("tell a forbid from a missing permit", () => {
+    const pack = small({
+      policies: { g: "forbid (principal, action, resource) when { principal.guest };" },
+      tests: {
+        policies: [
+          { name: "no grant", action: "read", resource: { tags: [] }, expect: "forbid" },
+          {
+            name: "a guest",
+            action: "read",
+            principal: { guest: true },
+            resource: { tags: [] },
+            expect: "forbid",
+          },
+        ],
+      },
+    });
+    const results = runPackTests(pack);
+    expect(results.find((r) => r.name === "no grant")).toMatchObject({
+      passed: false,
+      detail: "expected forbid, got no-permit (no policy permits it)",
+    });
+    expect(results.find((r) => r.name === "a guest")?.passed).toBe(true);
+  });
+
+  it("run against the tenant: its other packs' policies, values and defaults", async () => {
+    const guard = small({
+      name: "guard",
+      facets: [],
+      policies: { g: "forbid (principal, action, resource) when { principal.guest };" },
+    });
+    await apply(guard, (await plan(guard)).planHash);
+    const loose = small({
+      name: "loose",
+      facets: [],
+      tests: {
+        policies: [
+          {
+            name: "guests read granted files",
+            action: "read",
+            principal: { guest: true, readGrants: [t.tag] },
+            resource: { tags: [t.tag] },
+            expect: "allow",
+          },
+        ],
+        levels: [
+          {
+            name: "seeded tag, tenant default",
+            tags: [t.tag],
+            expect: { visibility: "hidden", exposure: "metadata-only" },
+          },
+          {
+            name: "typo",
+            tags: ["client:acmee"],
+            expect: { visibility: "hidden", exposure: "metadata-only" },
+          },
+        ],
+      },
+    });
+    const p = await plan(loose);
+    const byName = new Map(p.tests.map((r) => [r.name, r]));
+    // The guard pack's forbid is part of the tenant, so this test fails there.
+    expect(byName.get("guests read granted files")?.passed).toBe(false);
+    expect(byName.get("seeded tag, tenant default")?.passed).toBe(true);
+    expect(byName.get("typo")).toMatchObject({
+      passed: false,
+      detail: "unknown tags: client:acmee",
+    });
+  });
+});
+
+describe("validatePack", () => {
+  it.each<[string, unknown, string]>([
+    ["a non-object", [], "a pack is an object"],
+    ["an unknown field", { ...small(), code: "x" }, "pack: unknown field code"],
+    ["the wrong version", { ...small(), pack_version: 2 }, "pack_version must be 1"],
+    ["a bad name", { ...small(), name: "Small Pack" }, "name must be a lower-case slug"],
+    [
+      "a bad version",
+      { ...small(), version: "1.0" },
+      "version must be semver, at most 64 characters",
+    ],
+    [
+      "bad defaults",
+      { ...small(), defaults: { visibility: "open" } },
+      "defaults needs a visibility and an exposure level",
+    ],
+    [
+      "a duplicate facet",
+      small({ facets: [...(small().facets ?? []), ...(small().facets ?? [])] }),
+      "facet sensitivity: listed twice",
+    ],
+    [
+      "a bad value",
+      small({ facets: [{ key: "k", label: "K", values: [{ value: "Bad Value", label: "B" }] }] }),
+      "facet k value Bad Value: not a slug",
+    ],
+    [
+      "an unknown level",
+      small({
+        facets: [
+          {
+            key: "k",
+            label: "K",
+            values: [{ value: "v", label: "V", visibility: "open" as "hidden" }],
+          },
+        ],
+      }),
+      "facet k value v: unknown visibility",
+    ],
+    [
+      "a bad rule",
+      small({ rules: [{ id: "Bad" } as never] }),
+      "rules: rule 0: id must be a lower-case slug",
+    ],
+    [
+      "a bad policy id",
+      small({ policies: { "Bad Id": "permit (principal, action, resource);" } }),
+      "policy Bad Id: id must be a slug",
+    ],
+    [
+      "a bad policy test",
+      small({
+        tests: {
+          policies: [
+            { name: "t", action: "delete" as "read", resource: { tags: [] }, expect: "allow" },
+          ],
+        },
+      }),
+      "policy test t: unknown action",
+    ],
+    [
+      "a bad level test",
+      small({
+        tests: {
+          levels: [
+            { name: "l", tags: ["nope"], expect: { visibility: "hidden", exposure: "full" } },
+          ],
+        },
+      }),
+      "level test l: tags must list facet:value tags",
+    ],
+    [
+      "a typo in a value's level",
+      small({
+        facets: [
+          {
+            key: "k",
+            label: "K",
+            values: [{ value: "v", label: "V", visiblity: "hidden" } as never],
+          },
+        ],
+      }),
+      "facet k value v: unknown field visiblity",
+    ],
+    [
+      "an unknown key in defaults",
+      { ...small(), defaults: { visibility: "hidden", exposure: "full", x: 1 } },
+      "defaults: unknown field x",
+    ],
+    [
+      "a typo in a test's principal",
+      small({
+        tests: {
+          policies: [
+            {
+              name: "t",
+              action: "read",
+              principal: { readGrant: [] } as never,
+              resource: { tags: [] },
+              expect: "deny",
+            },
+          ],
+        },
+      }),
+      "policy test t principal: unknown field readGrant",
+    ],
+    [
+      "a label with a newline",
+      small({ facets: [{ key: "k", label: "K\nX", values: [] }] }),
+      "facet k: label must be 1 to 200 visible characters",
+    ],
+    [
+      "a version too long",
+      { ...small(), version: `1.0.0-${"x".repeat(60)}` },
+      "version must be semver, at most 64 characters",
+    ],
+  ])("refuses %s", (_, pack, problem) => {
+    expect(validatePack(pack)).toContain(problem);
+    expect(() => parsePack(pack)).toThrow(problem);
+  });
+});
+
+describe("helpers", () => {
+  it("hashes canonically, whatever the key order", () => {
+    expect(canonicalJson({ b: 1, a: [{ d: 2, c: undefined, e: null }] })).toBe(
+      '{"a":[{"d":2,"e":null}],"b":1}',
+    );
+  });
+
+  it("prefixes policy ids with the pack name", () => {
+    expect(Object.keys(packPolicies(STARTER))).toEqual([
+      "pack/general-business/guests-no-hr-or-legal",
+      "pack/general-business/consumer-ai-no-confidential",
+    ]);
+  });
+});

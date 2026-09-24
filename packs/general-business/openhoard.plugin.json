@@ -1,0 +1,12 @@
+{
+  "manifest_version": 1,
+  "name": "pack-general-business",
+  "version": "1.0.0",
+  "type": "pack",
+  "description": "Starter vocabulary for most organizations: sensitivity levels, departments and document kinds, folder and file-type rules, and two guardrail policies.",
+  "publisher": "openhoard",
+  "license": "Apache-2.0",
+  "capabilities": [],
+  "network": [],
+  "runtime": "declarative"
+}

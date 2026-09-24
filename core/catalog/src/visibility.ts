@@ -384,7 +384,13 @@ export async function viewObjects(
     const canRead = authz.authorize({
       principal,
       action: "read",
-      resource: { id: row.id, ownerId: row.ownerId, tags: tags.grantable, zone: row.zone },
+      resource: {
+        id: row.id,
+        ownerId: row.ownerId,
+        tags: tags.grantable,
+        allTags: tags.all,
+        zone: row.zone,
+      },
       client: request.client,
     }).allow;
     if (!canRead && !member) continue;

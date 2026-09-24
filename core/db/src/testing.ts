@@ -11,6 +11,7 @@ import {
   objects,
   objectTags,
   sourceRefs,
+  tenantPacks,
   tenants,
   userIdentities,
   users,
@@ -84,8 +85,8 @@ export interface SeededTenant {
 
 /**
  * Creates a tenant with one row in every table: a zone, a blob, an object with one version, the
- * object's source reference, one tag on it from a one-value vocabulary, a user in a group, and a
- * permanent read grant on that tag to the group. `n` makes names and hashes distinct between
+ * object's source reference, one tag on it from a one-value vocabulary, a user in a group, a
+ * permanent read grant on that tag to the group, and an (empty) applied pack. `n` makes names and hashes distinct between
  * seeded tenants.
  */
 export async function seedTenant(db: Database, n = 0): Promise<SeededTenant> {
@@ -175,6 +176,14 @@ export async function seedTenant(db: Database, n = 0): Promise<SeededTenant> {
     await tx
       .insert(groupMembers)
       .values({ tenantId: s.tenantId, groupId: s.groupId, userId: s.userId });
+    await tx.insert(tenantPacks).values({
+      tenantId: s.tenantId,
+      name: "seed-pack",
+      version: "0.0.1",
+      content: { pack_version: 1, name: "seed-pack", version: "0.0.1" },
+      contentHash: "0".repeat(64),
+      appliedBy: "system:seed",
+    });
   });
   return s;
 }

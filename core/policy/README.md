@@ -33,10 +33,15 @@ Following spike S3, **grants are data and rules are Cedar**:
 - Cedar applies the rules. The core rules permit search, read and open with a read grant,
   tagging with a write grant, anything to the owner, and forbid deprovisioned users. Packs
   (T-607) add their own. A `forbid` always wins.
-- The Cedar schema ([`cedar.ts`](src/cedar.ts)) has users in groups, objects in tags (so rules
-  can say `resource in OpenHoard::Tag::"sensitivity:restricted"`), and the client with its trust
-  label (`context.client.trust`). Rules see only the caller, the object and the client; there
-  is no owner entity to reach through, by design.
+- The Cedar schema ([`cedar.ts`](src/cedar.ts)) has users in groups, objects in tags, and the
+  client with its trust label (`context.client.trust`). Rules see only the caller, the object
+  and the client; there is no owner entity to reach through, by design.
+- An object's tags come two ways, for the two kinds of rule:
+  - `resource in OpenHoard::Tag::"x"` sees the trusted tags only (rules, packs, people and
+    reviewed model tags). Use it in a `permit`: a model's guess must never widen access.
+  - `resource.allTags.contains("x")` sees every tag, unreviewed model guesses included. Use it
+    in a `forbid`: a guess that a file is sensitive should restrict it at once.
+- Every decision has a `kind`: `allow`, `forbid`, `no-permit` or `error`.
 
 A decision takes about 0.2 ms.
 

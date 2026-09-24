@@ -485,7 +485,13 @@ describe("resolvePrincipal", () => {
     return authz.authorize({
       principal,
       action: "read",
-      resource: { id: t.objectId, ownerId: "user:owner-1", tags: [t.tag], zone: "indexed" },
+      resource: {
+        id: t.objectId,
+        ownerId: "user:owner-1",
+        tags: [t.tag],
+        allTags: [],
+        zone: "indexed",
+      },
       client: { id: "openhoard-web", trust: "first-party" },
     }).allow;
   };

@@ -157,6 +157,7 @@ export async function explainAccess(
     id: request.objectId,
     ownerId: object.ownerId,
     tags: [...grantable].sort(),
+    allTags: tags.levels,
     zone: object.zone,
   };
   const decision = authz.authorize({ principal, action, resource, client });

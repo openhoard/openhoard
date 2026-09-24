@@ -75,7 +75,13 @@ function namesWhatDecided(e: AccessExplanation, engine: Authorizer) {
     return engine.authorize({
       principal,
       action: e.action,
-      resource: { id: e.objectId, ownerId, tags: e.object.grantableTags, zone: e.object.zone },
+      resource: {
+        id: e.objectId,
+        ownerId,
+        tags: e.object.grantableTags,
+        allTags: [...e.object.grantableTags, ...e.object.unreviewedTags],
+        zone: e.object.zone,
+      },
       client: e.client,
     }).allow;
   };

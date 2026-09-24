@@ -1,7 +1,14 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { ACTIONS, Authorizer, type Action, type AuthzRequest } from "./authorize.js";
-import { CORE_POLICIES, createCedarEngine, fromCedar, PolicyError } from "./cedar.js";
+import {
+  allTagsMisuse,
+  CORE_POLICIES,
+  createCedarEngine,
+  fromCedar,
+  PolicyError,
+  policyEffect,
+} from "./cedar.js";
 
 const request = (patch: Partial<AuthzRequest> = {}): AuthzRequest => ({
   principal: {
@@ -15,7 +22,13 @@ const request = (patch: Partial<AuthzRequest> = {}): AuthzRequest => ({
     active: true,
   },
   action: "read",
-  resource: { id: "obj_1", ownerId: "user:u2", tags: ["client:acme"], zone: "indexed" },
+  resource: {
+    id: "obj_1",
+    ownerId: "user:u2",
+    tags: ["client:acme"],
+    allTags: [],
+    zone: "indexed",
+  },
   client: { id: "openhoard-web", trust: "first-party" },
   ...patch,
 });
@@ -27,6 +40,106 @@ const withGrants = (
   const r = request(patch);
   return { ...r, principal: { ...r.principal, tagGrants, tagWriteGrants } };
 };
+
+describe("trusted and all tags", () => {
+  const authz = new Authorizer(
+    createCedarEngine({
+      "pack/hr-no-guests": `forbid (principal, action, resource)
+        when { principal.guest && resource.allTags.contains("department:hr") };`,
+      "pack/handbook": `permit (principal, action == OpenHoard::Action::"read", resource)
+        when { resource in OpenHoard::Tag::"kind:handbook" };`,
+    }),
+  );
+  const guest = (resource: Partial<AuthzRequest["resource"]>) => {
+    const r = withGrants(["client:acme"], { resource: { ...request().resource, ...resource } });
+    return { ...r, principal: { ...r.principal, guest: true } };
+  };
+
+  it("lets a forbid see a model's unreviewed guess", () => {
+    expect(authz.authorize(guest({})).allow).toBe(true);
+    expect(authz.authorize(guest({ allTags: ["department:hr"] }))).toMatchObject({
+      allow: false,
+      kind: "forbid",
+      policies: ["pack/hr-no-guests"],
+    });
+  });
+
+  it("keeps a permit to the trusted tags", () => {
+    const member = request({
+      resource: { ...request().resource, tags: [], allTags: ["kind:handbook"] },
+    });
+    expect(authz.authorize(member).allow).toBe(false);
+    const trusted = request({ resource: { ...request().resource, tags: ["kind:handbook"] } });
+    expect(authz.authorize(trusted)).toMatchObject({ allow: true, policies: ["pack/handbook"] });
+  });
+
+  it("treats the trusted tags as part of all tags", () => {
+    expect(authz.authorize(guest({ tags: ["client:acme", "department:hr"] })).allow).toBe(false);
+  });
+
+  it("refuses a malformed allTags", () => {
+    const bad = request({
+      resource: { ...request().resource, allTags: [""] },
+    });
+    expect(authz.authorize(bad)).toMatchObject({
+      kind: "error",
+      reason: "malformed request: resource.allTags",
+    });
+  });
+});
+
+describe("policyEffect", () => {
+  it("reads a policy's effect", () => {
+    expect(policyEffect("// a comment\npermit (principal, action, resource);")).toBe("permit");
+    expect(policyEffect('@id("x") forbid (principal, action, resource);')).toBe("forbid");
+    expect(policyEffect("permit (principal")).toBeNull();
+  });
+});
+
+describe("allTagsMisuse", () => {
+  it.each([
+    'forbid (principal, action, resource) when { resource.allTags.contains("x") };',
+    'forbid (principal, action, resource) when { principal.guest && (resource.allTags.containsAny(["a", "b"]) || resource.zone == "code") };',
+    'forbid (principal, action, resource) when { if principal.guest then resource.allTags.contains("x") else false };',
+    'forbid (principal, action, resource) when { !(!resource.allTags.contains("x")) };',
+    'permit (principal, action, resource in OpenHoard::Tag::"x");',
+  ])("accepts %s", (text) => {
+    expect(allTagsMisuse(text)).toEqual([]);
+  });
+
+  it.each([
+    ['permit (principal, action, resource) when { resource.allTags.contains("x") };', "a permit"],
+    [
+      'forbid (principal, action, resource) unless { resource.allTags.contains("public") };',
+      "only in `when`",
+    ],
+    [
+      'forbid (principal, action, resource) when { !resource.allTags.contains("public") };',
+      "un-negated",
+    ],
+    ["forbid (principal, action, resource) when { resource.allTags.isEmpty() };", "with contains"],
+    ["forbid (principal, action, resource) when { resource.allTags == [] };", "with contains"],
+    [
+      'forbid (principal, action, resource) when { if resource.allTags.contains("x") then false else true };',
+      "only in `when`",
+    ],
+    [
+      'forbid (principal, action, resource) when { ["x"].containsAll(resource.allTags) };',
+      "with contains",
+    ],
+    [
+      'permit (principal, action, resource) when { resource == OpenHoard::Object::"o" && OpenHoard::Object::"o".allTags.contains("a:b") };',
+      "a permit",
+    ],
+    [
+      'forbid (principal, action, resource) when { !(OpenHoard::Object::"o".allTags.contains("a:b")) };',
+      "un-negated",
+    ],
+  ])("refuses %s", (text, why) => {
+    expect(allTagsMisuse(text).join(" ")).toContain(why);
+    expect(() => createCedarEngine({ "pack/x": text })).toThrow("resource.allTags used where");
+  });
+});
 
 describe("core rules", () => {
   const authz = new Authorizer(createCedarEngine());
@@ -105,7 +218,13 @@ describe("core rules", () => {
 
   it("takes ids and tags as data, never as policy text", () => {
     const tricky = 'x" || true || "';
-    const resource = { id: tricky, ownerId: `user:${tricky}`, tags: [tricky, "ü:ñ"], zone: tricky };
+    const resource = {
+      id: tricky,
+      ownerId: `user:${tricky}`,
+      tags: [tricky, "ü:ñ"],
+      allTags: [],
+      zone: tricky,
+    };
     expect(authz.authorize(withGrants(['x"'], { resource })).allow).toBe(false);
     expect(authz.authorize(withGrants(["ü:ñ"], { resource })).policies).toEqual([
       "core/read-grant",
@@ -124,7 +243,9 @@ describe("core rules", () => {
         "pack/hr": `permit (principal in OpenHoard::Group::"g-hr", action, resource);`,
       }),
     );
-    const r = request({ resource: { id: same, ownerId: `user:${same}`, tags: [same], zone: "x" } });
+    const r = request({
+      resource: { id: same, ownerId: `user:${same}`, tags: [same], allTags: [], zone: "x" },
+    });
     const namedLikeTheGroup = { ...r, principal: { ...r.principal, userId: same, groupIds: [] } };
     // Owner, because the owner is user:g-hr; but not a member of the group g-hr.
     expect(hrPack.authorize(namedLikeTheGroup).policies).toEqual(["core/owner"]);
@@ -156,6 +277,7 @@ describe("pack rules", () => {
     id: "obj_2",
     ownerId: "user:u9",
     tags: ["client:acme", "sensitivity:restricted"],
+    allTags: [],
     zone: "indexed",
   };
 
@@ -188,7 +310,13 @@ describe("pack rules", () => {
   });
 
   it("can permit through group membership and tag hierarchy", () => {
-    const hr = { id: "obj_3", ownerId: "user:u9", tags: ["department:hr"], zone: "indexed" };
+    const hr = {
+      id: "obj_3",
+      ownerId: "user:u9",
+      tags: ["department:hr"],
+      allTags: [],
+      zone: "indexed",
+    };
     const member = request({ resource: hr });
     const inHr = { ...member, principal: { ...member.principal, groupIds: ["g-sales", "g-hr"] } };
     expect(authz.authorize(inHr)).toMatchObject({ allow: true, policies: ["pack/hr"] });
@@ -376,6 +504,7 @@ describe("Cedar engine against a reference evaluator (property)", () => {
         fc.constantFrom("group:g-hr", ""),
       ),
       tags: fc.array(tag, { maxLength: 4 }),
+      allTags: fc.array(tag, { maxLength: 2 }),
       zone: fc.constantFrom("indexed", "managed"),
     }),
     client: fc.record({

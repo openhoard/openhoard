@@ -105,8 +105,18 @@ export function validateRules(rules: unknown): string[] {
   const TAG = /^[a-z][a-z0-9-]{0,63}:[a-z0-9][a-z0-9._-]{0,127}$/;
   const FACET = /^[a-z][a-z0-9-]{0,63}$/;
   const VALUE = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+  // Control and format characters (a right-to-left override, say) make a rule read differently
+  // from what it matches.
+  const visible = (s: string) => !/\p{C}/u.test(s);
   const strings = (v: unknown) =>
-    Array.isArray(v) && v.length > 0 && v.every((s) => typeof s === "string" && s.length > 0);
+    Array.isArray(v) &&
+    v.length > 0 &&
+    v.every((s) => typeof s === "string" && s.length > 0 && visible(s));
+  const unknownKeys = (rule: Record<string, unknown>, id: string, allowed: string[]) => {
+    for (const k of Object.keys(rule)) {
+      if (!allowed.includes(k)) problems.push(`${id}: unknown field ${k}`);
+    }
+  };
   rules.forEach((r: unknown, i) => {
     const at = `rule ${i}`;
     if (typeof r !== "object" || r === null) return void problems.push(`${at}: not an object`);
@@ -117,6 +127,7 @@ export function validateRules(rules: unknown): string[] {
     if (ids.has(rule.id)) problems.push(`${at}: duplicate id ${rule.id}`);
     ids.add(rule.id);
     if ("dictionary" in rule) {
+      unknownKeys(rule, rule.id, ["id", "facet", "dictionary"]);
       if (typeof rule.facet !== "string" || !FACET.test(rule.facet)) {
         problems.push(`${rule.id}: facet must be a facet key`);
       }
@@ -133,6 +144,7 @@ export function validateRules(rules: unknown): string[] {
       }
       return;
     }
+    unknownKeys(rule, rule.id, ["id", "tag", "when"]);
     if (typeof rule.tag !== "string" || !TAG.test(rule.tag)) {
       problems.push(`${rule.id}: tag must be facet:value`);
     }
@@ -148,8 +160,9 @@ export function validateRules(rules: unknown): string[] {
       }
     }
     for (const key of ["path", "site"] as const) {
-      if (key in when && (typeof when[key] !== "string" || when[key] === "")) {
-        problems.push(`${rule.id}: ${key} must be a non-empty string`);
+      const v = when[key];
+      if (key in when && (typeof v !== "string" || v === "" || !visible(v))) {
+        problems.push(`${rule.id}: ${key} must be a non-empty string of visible characters`);
       }
     }
     for (const key of ["extension", "mime"] as const) {

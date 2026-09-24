@@ -11,6 +11,8 @@ Part of the OpenHoard trusted core. See [../README.md](../README.md) and
 - [`visibility.ts`](src/visibility.ts): visibility levels, display titles and what non-readers
   see (T-603).
 - [`explain.ts`](src/explain.ts): "why can X see this?" (T-606).
+- [`packs.ts`](src/packs.ts): declarative packs, planned as a reviewed diff and applied only if
+  their tests pass (T-607); see [packs/](../../packs/README.md).
 - [`rules.ts`](src/rules.ts): the rule tagger (T-403), deterministic tags from path, site,
   file type and a client dictionary, applied before any model sees a file.
 

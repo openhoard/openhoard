@@ -322,6 +322,30 @@ describe("viewObjects", () => {
     expect(await view(reader())).toEqual([]);
   });
 
+  it("lets a pack's forbid see a model's unreviewed guess", async () => {
+    const strict = new Authorizer(
+      createCedarEngine({
+        "pack/no-restricted": `forbid (principal, action, resource)
+          when { resource.allTags.contains("sensitivity:restricted") };`,
+      }),
+    );
+    await tag("sensitivity:restricted", t.objectId, "model");
+    const got = await db.withTenant(
+      t.tenantId,
+      (tx) =>
+        viewObjects(
+          tx,
+          t.tenantId,
+          strict,
+          { principal: reader(), client: { id: "openhoard-web", trust: "first-party" } },
+          [t.objectId],
+        ),
+      VIEW_TRANSACTION,
+    );
+    // The reader's grant no longer reads it, and the guess hides it from non-readers.
+    expect(got).toEqual([]);
+  });
+
   it("keeps the order asked, drops duplicates, deleted objects and unknown ids", async () => {
     const second = newId("object");
     await inTenant(async (tx) => {

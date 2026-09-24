@@ -8,9 +8,15 @@ import { deny, type AuthzDecision, type EngineRequest, type PolicyEngine } from 
  */
 
 /**
- * Entities and actions the rules can use. Tags are parents of objects, so rules can say
- * `resource in OpenHoard::Tag::"x"`. Facts computed from data rather than rules (grants,
+ * Entities and actions the rules can use. Facts computed from data rather than rules (grants,
  * ownership) arrive in the context, so no rule depends on entities the request doesn't carry.
+ *
+ * An object's tags come two ways, for the two kinds of rule:
+ *
+ * - `resource in OpenHoard::Tag::"x"`: the trusted tags only (rules, packs, people, reviewed
+ *   model tags). Use it in permits: a model's guess must never widen access.
+ * - `resource.allTags.contains("x")`: every tag, unreviewed model guesses included. Use it in
+ *   forbids: a guess that a file is sensitive should restrict it at once.
  */
 export const CEDAR_SCHEMA = `
 namespace OpenHoard {
@@ -18,7 +24,7 @@ namespace OpenHoard {
   entity User in [Group] { guest: Bool, active: Bool };
   entity Tag;
   entity Client { trust: String };
-  entity Object in [Tag] { zone: String };
+  entity Object in [Tag] { zone: String, allTags: Set<String> };
   type RequestContext = {
     client: Client,
     readGranted: Bool,
@@ -68,6 +74,11 @@ export class PolicyError extends Error {
 export function createCedarEngine(policies: Readonly<Record<string, string>> = {}): PolicyEngine {
   const clash = Object.keys(policies).filter((id) => id.startsWith("core/"));
   if (clash.length) throw new PolicyError("policy ids reserved for the core rules", clash);
+  const misuse = Object.entries(policies).flatMap(([id, text]) =>
+    allTagsMisuse(text).map((m) => `${id}: ${m}`),
+  );
+  if (misuse.length)
+    throw new PolicyError("resource.allTags used where a guess could widen access", misuse);
   const staticPolicies = { ...CORE_POLICIES, ...policies };
 
   const validation = cedar.validate({
@@ -130,7 +141,10 @@ export function toCedar(r: EngineRequest) {
     ...tags.map((t) => ({ uid: uid("Tag", t), attrs: {}, parents: [] })),
     {
       uid: uid("Object", r.resource.id),
-      attrs: { zone: r.resource.zone },
+      attrs: {
+        zone: r.resource.zone,
+        allTags: [...new Set([...r.resource.allTags, ...r.resource.tags])].sort(),
+      },
       parents: tags.map((t) => uid("Tag", t)),
     },
     { uid: uid("Client", r.client.id), attrs: { trust: r.client.trust }, parents: [] },
@@ -169,3 +183,71 @@ export function fromCedar(answer: cedar.AuthorizationAnswer): AuthzDecision {
 }
 
 const messages = (errors: readonly cedar.DetailedError[]) => errors.map((e) => e.message);
+
+type Json = Record<string, unknown>;
+
+/** A policy's effect, or null if the text isn't one parsable policy. */
+export function policyEffect(text: string): "permit" | "forbid" | null {
+  const answer = cedar.policyToJson(text);
+  if (answer.type === "failure") return null;
+  const effect = (answer.json as unknown as Json).effect;
+  return effect === "permit" || effect === "forbid" ? effect : null;
+}
+const SET_TESTS = new Set(["contains", "containsAll", "containsAny"]);
+
+/**
+ * Where `resource.allTags` may appear. It carries model guesses, so it may only make a forbid
+ * fire: inside a forbid's `when`, not negated, as the set tested by contains / containsAll /
+ * containsAny. Anywhere else (a permit, an `unless`, under `!`, in an `if` condition, compared
+ * with `==`, `isEmpty()`) a guess could lift a restriction or grant access. Returns what is
+ * wrong; empty when fine. Text that doesn't parse is left to validation.
+ */
+export function allTagsMisuse(text: string): string[] {
+  const answer = cedar.policyToJson(text);
+  if (answer.type === "failure") return [];
+  const policy = answer.json as unknown as Json;
+  const problems: string[] = [];
+  const forbid = policy.effect === "forbid";
+  // polarity: true = may only make the policy apply more; null = anywhere else.
+  const visit = (node: unknown, polarity: boolean | null, underSetTest: boolean) => {
+    if (typeof node !== "object" || node === null) return;
+    if (Array.isArray(node)) {
+      for (const n of node) visit(n, null, false);
+      return;
+    }
+    const obj = node as Json;
+    const dot = obj["."] as Json | undefined;
+    // Any `.allTags`, on `resource` or on an entity literal such as OpenHoard::Object::"o".
+    if (dot && dot.attr === "allTags") {
+      if (!forbid) problems.push("a permit can't test resource.allTags; use `resource in Tag`");
+      else if (polarity !== true || !underSetTest) {
+        problems.push(
+          "a forbid may use resource.allTags only in `when`, un-negated, with contains",
+        );
+      }
+      return;
+    }
+    for (const [op, arg] of Object.entries(obj)) {
+      const a = arg as Json;
+      if (op === "!") visit(a.arg, polarity === null ? null : !polarity, false);
+      else if (op === "&&" || op === "||") {
+        visit(a.left, polarity, false);
+        visit(a.right, polarity, false);
+      } else if (SET_TESTS.has(op)) {
+        visit(a.left, polarity, true);
+        visit(a.right, null, false);
+      } else if (op === "if-then-else") {
+        visit(a.if, null, false);
+        visit(a.then, polarity, false);
+        visit(a.else, polarity, false);
+      } else if (typeof arg === "object" && arg !== null) {
+        // Any other operator: nothing inside may touch allTags.
+        for (const child of Object.values(arg as Json)) visit(child, null, false);
+      }
+    }
+  };
+  for (const c of (policy.conditions as Json[] | undefined) ?? []) {
+    visit(c.body, c.kind === "when", false);
+  }
+  return [...new Set(problems)];
+}

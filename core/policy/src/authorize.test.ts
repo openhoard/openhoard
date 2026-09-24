@@ -19,7 +19,13 @@ const request = (): AuthzRequest => ({
     active: true,
   },
   action: "read",
-  resource: { id: "obj_1", ownerId: "user:u2", tags: ["client:acme"], zone: "indexed" },
+  resource: {
+    id: "obj_1",
+    ownerId: "user:u2",
+    tags: ["client:acme"],
+    allTags: [],
+    zone: "indexed",
+  },
   client: { id: "claude", trust: "commercial" },
 });
 
