@@ -37,7 +37,7 @@ beforeEach(async () => {
   a = await seedTenant(db, 1);
   b = await seedTenant(db, 2);
 });
-afterEach(() => driver.close());
+afterEach(() => driver?.close());
 
 const counts = (tenantId: string) =>
   db.withTenant(tenantId, async (tx) => ({

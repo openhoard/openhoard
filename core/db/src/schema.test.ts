@@ -48,7 +48,7 @@ describe("schema", () => {
     db = fromDriver(driver);
     t = await seedTenant(db);
   });
-  afterEach(() => driver.close());
+  afterEach(() => driver?.close());
 
   const inTenant = <T>(work: (tx: Tx) => Promise<T>) => db.withTenant(t.tenantId, work);
 
