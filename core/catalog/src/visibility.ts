@@ -66,13 +66,56 @@ export const VIEW_TRANSACTION = {
   accessMode: "read only",
 } as const;
 
+/** A tag (applied or waiting in review) whose value sets a level, and how it counts. */
+export interface LevelContribution {
+  tag: string;
+  visibility: Visibility | null;
+  exposure: Exposure | null;
+  /** Trusted tags decide; the others can only tighten (see the header). */
+  trusted: boolean;
+  /** Why an untrusted tag only tightens; null for a trusted one. */
+  untrustedBecause: "pending-review" | "unreviewed-model-tag" | "unapproved-value" | null;
+  /** Waiting in the review inbox rather than applied. */
+  pending: boolean;
+}
+
+/** Why an object has its levels (T-606). */
+export interface LevelsExplanation extends ObjectLevels {
+  /** The tenant default, which applies when no trusted tag sets a level. */
+  defaults: { visibility: Visibility; exposure: Exposure };
+  contributions: LevelContribution[];
+}
+
 /** Effective levels for each object that exists; missing ids are left out. */
 export async function levelsFor(
   tx: Tx,
   tenantId: string,
   objectIds: readonly string[],
 ): Promise<Map<string, ObjectLevels>> {
-  const out = new Map<string, ObjectLevels>();
+  const explained = await collectLevels(tx, tenantId, objectIds);
+  return new Map(
+    [...explained].map(([id, e]) => [
+      id,
+      { visibility: e.visibility, exposure: e.exposure, processed: e.processed },
+    ]),
+  );
+}
+
+/** Levels with the tags behind them, for one object; null if it doesn't exist. */
+export async function explainLevels(
+  tx: Tx,
+  tenantId: string,
+  objectId: string,
+): Promise<LevelsExplanation | null> {
+  return (await collectLevels(tx, tenantId, [objectId])).get(objectId) ?? null;
+}
+
+async function collectLevels(
+  tx: Tx,
+  tenantId: string,
+  objectIds: readonly string[],
+): Promise<Map<string, LevelsExplanation>> {
+  const out = new Map<string, LevelsExplanation>();
   const ids = [...new Set(objectIds)];
   if (ids.length === 0) return out;
   const [tenant] = await tx
@@ -95,9 +138,13 @@ export async function levelsFor(
   const applied = tx
     .select({
       objectId: objectTags.objectId,
+      facet: objectTags.facet,
+      value: objectTags.value,
       visibility: facetValues.visibility,
       exposure: facetValues.exposure,
       trusted: sql<boolean>`(${facetValues.approved} and (${objectTags.source} <> 'model' or ${objectTags.reviewed}))`,
+      approved: facetValues.approved,
+      pending: sql<boolean>`false`,
     })
     .from(objectTags)
     .innerJoin(
@@ -112,9 +159,13 @@ export async function levelsFor(
   const pending = tx
     .select({
       objectId: tagReviews.objectId,
+      facet: tagReviews.facet,
+      value: tagReviews.value,
       visibility: facetValues.visibility,
       exposure: facetValues.exposure,
       trusted: sql<boolean>`false`,
+      approved: facetValues.approved,
+      pending: sql<boolean>`true`,
     })
     .from(tagReviews)
     .innerJoin(
@@ -136,17 +187,35 @@ export async function levelsFor(
   interface Collected {
     trusted: { visibilities: string[]; exposures: string[] };
     tighten: { visibilities: string[]; exposures: string[] };
+    contributions: LevelContribution[];
   }
   const byObject = new Map<string, Collected>();
   for (const row of [...(await applied), ...(await pending)]) {
     const entry = byObject.get(row.objectId) ?? {
       trusted: { visibilities: [], exposures: [] },
       tighten: { visibilities: [], exposures: [] },
+      contributions: [],
     };
     // Raw SQL booleans come back as booleans on both drivers; anything else is untrusted.
-    const side = row.trusted === true ? entry.trusted : entry.tighten;
+    const trusted = row.trusted === true;
+    const side = trusted ? entry.trusted : entry.tighten;
     if (row.visibility !== null) side.visibilities.push(row.visibility);
     if (row.exposure !== null) side.exposures.push(row.exposure);
+    const isPending = row.pending === true;
+    entry.contributions.push({
+      tag: tagOf(row.facet, row.value),
+      visibility: row.visibility,
+      exposure: row.exposure,
+      trusted,
+      untrustedBecause: trusted
+        ? null
+        : isPending
+          ? "pending-review"
+          : row.approved
+            ? "unreviewed-model-tag"
+            : "unapproved-value",
+      pending: isPending,
+    });
     byObject.set(row.objectId, entry);
   }
 
@@ -170,6 +239,11 @@ export async function levelsFor(
       ]),
       exposure: mostRestrictiveExposure([base.exposure, ...(entry?.tighten.exposures ?? [])]),
       processed: isProcessed,
+      defaults: { visibility: tenant.visibility, exposure: tenant.exposure },
+      contributions: (entry?.contributions ?? []).sort(
+        (a, b) =>
+          Number(a.pending) - Number(b.pending) || (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0),
+      ),
     });
   }
   return out;
@@ -349,13 +423,13 @@ export async function viewObjects(
 }
 
 /** Refuses to read across snapshots: see VIEW_TRANSACTION. */
-async function requireSnapshot(tx: Tx) {
+export async function requireSnapshot(tx: Tx, what = "viewObjects"): Promise<void> {
   const [row] = await queryRows<{ level: string }>(
     tx,
     sql`select current_setting('transaction_isolation') as level`,
   );
   if (row?.level !== "repeatable read" && row?.level !== "serializable") {
-    throw new Error("viewObjects needs a repeatable read transaction (VIEW_TRANSACTION)");
+    throw new Error(`${what} needs a repeatable read transaction (VIEW_TRANSACTION)`);
   }
 }
 

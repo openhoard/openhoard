@@ -277,6 +277,9 @@ importers:
       '@openhoard/core-db':
         specifier: workspace:^
         version: link:../db
+      '@openhoard/core-identity':
+        specifier: workspace:^
+        version: link:../identity
       '@openhoard/core-policy':
         specifier: workspace:^
         version: link:../policy

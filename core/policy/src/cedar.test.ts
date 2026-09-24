@@ -34,6 +34,7 @@ describe("core rules", () => {
   it("denies by default", () => {
     expect(authz.authorize(request())).toEqual({
       allow: false,
+      kind: "no-permit",
       reason: "no policy permits it",
       policies: [],
     });
@@ -44,6 +45,7 @@ describe("core rules", () => {
     (action) => {
       expect(authz.authorize(withGrants(["client:acme"], { action }))).toEqual({
         allow: true,
+        kind: "allow",
         reason: "permitted by core/read-grant",
         policies: ["core/read-grant"],
       });
@@ -54,11 +56,13 @@ describe("core rules", () => {
     expect(authz.authorize(withGrants(["client:acme"], { action: "tag" })).allow).toBe(false);
     expect(authz.authorize(withGrants([], { action: "tag" }, ["client:acme"]))).toMatchObject({
       allow: true,
+      kind: "allow",
       policies: ["core/write-grant"],
     });
     // A write grant also lets you open.
     expect(authz.authorize(withGrants([], { action: "open" }, ["client:acme"]))).toMatchObject({
       allow: true,
+      kind: "allow",
       policies: ["core/read-grant"],
     });
   });
@@ -87,6 +91,7 @@ describe("core rules", () => {
     });
     expect(decision).toEqual({
       allow: false,
+      kind: "forbid",
       reason: "forbidden by core/inactive",
       policies: ["core/inactive"],
     });
@@ -162,6 +167,7 @@ describe("pack rules", () => {
     });
     expect(authz.authorize(consumer)).toMatchObject({
       allow: false,
+      kind: "forbid",
       policies: ["pack/restricted-consumer"],
     });
     // The same caller through a commercial client, or asking for a card, is allowed.
@@ -176,6 +182,7 @@ describe("pack rules", () => {
     expect(authz.authorize(r).allow).toBe(true);
     expect(authz.authorize({ ...r, principal: { ...r.principal, guest: true } })).toMatchObject({
       allow: false,
+      kind: "forbid",
       policies: ["pack/guests-no-tag"],
     });
   });
@@ -198,6 +205,7 @@ describe("pack rules", () => {
     const decision = new Authorizer(engine).authorize(withGrants(["client:acme"]));
     expect(decision).toEqual({
       allow: false,
+      kind: "error",
       reason: "policy error in pack/overflows",
       policies: ["pack/overflows"],
     });
@@ -216,7 +224,12 @@ describe("request-time failures", () => {
       writeGranted: true,
       owner: true,
     });
-    expect(decision).toEqual({ allow: false, reason: "policy evaluation failed", policies: [] });
+    expect(decision).toEqual({
+      allow: false,
+      kind: "error",
+      reason: "policy evaluation failed",
+      policies: [],
+    });
   });
 });
 
@@ -291,6 +304,7 @@ describe("fromCedar", () => {
   it("denies a failed evaluation", () => {
     expect(fromCedar({ type: "failure", errors: [], warnings: [] })).toEqual({
       allow: false,
+      kind: "error",
       reason: "policy evaluation failed",
       policies: [],
     });

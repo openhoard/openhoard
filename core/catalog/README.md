@@ -10,6 +10,7 @@ Part of the OpenHoard trusted core. See [../README.md](../README.md) and
 - [`tagging.ts`](src/tagging.ts): applying tags and the review inbox (T-406).
 - [`visibility.ts`](src/visibility.ts): visibility levels, display titles and what non-readers
   see (T-603).
+- [`explain.ts`](src/explain.ts): "why can X see this?" (T-606).
 - [`rules.ts`](src/rules.ts): the rule tagger (T-403), deterministic tags from path, site,
   file type and a client dictionary, applied before any model sees a file.
 
@@ -84,6 +85,38 @@ clears it with `setDisplayTitle()`. Non-readers see:
 - the real title when nobody has flagged it.
 
 A rename lets models propose again, even over the owner's earlier decision.
+
+## Why can X see this?
+
+`explainAccess()` replays one decision the way the product makes it, using the same principal
+resolution, grants, `authorize()` and levels. It returns what decided the outcome:
+
+- **For an allow:** the permitting policies, plus the grants behind them (direct or through a
+  group, with expiry) or ownership. Tests check on every fixture that the listed grants alone
+  still allow the action, and that nothing else does.
+- **For a deny:** every blocker, most fundamental first. A blocker is one of:
+  - a deleted file;
+  - an account stop (retired, locked, deactivated by the provider);
+  - a pack's forbid;
+  - a policy error;
+  - no grant.
+
+  It also lists grants that would apply once a person reviews a model's tag.
+
+- **The object's levels:** which tags set them, why an untrusted tag only tightens, and the
+  tenant default.
+- **What the user sees in a listing,** and why the listing shows nothing when it doesn't.
+
+It also returns a one- to three-sentence summary, for example:
+
+> Ana can read "Q3 plan.docx": through group Sales's read grant on client:acme, until
+> 2026-12-01.
+
+It answers for now. Questions about the past need the history of memberships, tags and stops,
+which lives in the audit log.
+
+It is for admins and owners only: it shows real titles, every tag, grant ids and who locked an
+account. Run it in one snapshot: `db.withTenant(tenant, work, VIEW_TRANSACTION)`.
 
 ## Tagging
 

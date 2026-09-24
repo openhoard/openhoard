@@ -160,9 +160,12 @@ export function fromCedar(answer: cedar.AuthorizationAnswer): AuthzDecision {
     return deny(`policy error in ${ids.join(", ")}`, ids);
   }
   const ids = [...diagnostics.reason].sort();
-  if (decision === "allow")
-    return { allow: true, reason: `permitted by ${ids.join(", ")}`, policies: ids };
-  return ids.length ? deny(`forbidden by ${ids.join(", ")}`, ids) : deny("no policy permits it");
+  if (decision === "allow") {
+    return { allow: true, kind: "allow", reason: `permitted by ${ids.join(", ")}`, policies: ids };
+  }
+  return ids.length
+    ? deny(`forbidden by ${ids.join(", ")}`, ids, "forbid")
+    : deny("no policy permits it", [], "no-permit");
 }
 
 const messages = (errors: readonly cedar.DetailedError[]) => errors.map((e) => e.message);

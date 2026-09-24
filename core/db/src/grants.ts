@@ -161,10 +161,64 @@ export interface GrantSet {
   objectWriteGrants: string[];
 }
 
+/** A grant that was live at some moment, as liveGrants() returns it. */
+export interface LiveGrant {
+  id: string;
+  principal: string;
+  role: GrantRole;
+  /** `facet:value` for a tag grant; null for an object grant. */
+  tag: string | null;
+  objectId: string | null;
+  grantedBy: string;
+  createdAt: Date;
+  expiresAt: Date | null;
+}
+
 /**
  * The grants of `principals` (a user and their groups) that were live at `at`: created by then,
  * not revoked by then, not expired. Expiry is part of this query, so a grant stops counting the
- * moment it expires, and asking about a past moment answers for that moment (T-606).
+ * moment it expires, and asking about a past moment answers for that moment.
+ */
+export async function liveGrants(
+  tx: Tx,
+  tenantId: string,
+  principals: readonly string[],
+  at: Date = new Date(),
+): Promise<LiveGrant[]> {
+  const relevant = principals.filter((p) => p.startsWith("user:") || p.startsWith("group:"));
+  if (relevant.length === 0) return [];
+  const rows = await tx
+    .select({
+      id: grants.id,
+      principal: grants.principal,
+      role: grants.role,
+      facet: grants.facet,
+      value: grants.value,
+      objectId: grants.objectId,
+      grantedBy: grants.grantedBy,
+      createdAt: grants.createdAt,
+      expiresAt: grants.expiresAt,
+    })
+    .from(grants)
+    .where(
+      and(
+        eq(grants.tenantId, tenantId),
+        inArray(grants.principal, [...new Set(relevant)]),
+        // Live at `at`: created by then, not yet revoked, not yet expired.
+        lte(grants.createdAt, at),
+        or(isNull(grants.revokedAt), gt(grants.revokedAt, at)),
+        or(isNull(grants.expiresAt), gt(grants.expiresAt, at)),
+      ),
+    )
+    .orderBy(grants.id);
+  return rows.map(({ facet, value, ...r }) => ({
+    ...r,
+    tag: facet !== null && value !== null ? `${facet}:${value}` : null,
+  }));
+}
+
+/**
+ * What `principals` held at `at` (see liveGrants()), in the shape AuthzPrincipal takes.
  *
  * Search needs the same answer per object (readable_by, T-504); object grants must be added to
  * that index too, not only to this set.
@@ -181,34 +235,13 @@ export async function loadGrants(
     objectGrants: [],
     objectWriteGrants: [],
   };
-  const relevant = principals.filter((p) => p.startsWith("user:") || p.startsWith("group:"));
-  if (relevant.length === 0) return set;
-  const rows = await tx
-    .select({
-      role: grants.role,
-      facet: grants.facet,
-      value: grants.value,
-      objectId: grants.objectId,
-    })
-    .from(grants)
-    .where(
-      and(
-        eq(grants.tenantId, tenantId),
-        inArray(grants.principal, [...new Set(relevant)]),
-        // Live at `at`: created by then, not yet revoked, not yet expired.
-        lte(grants.createdAt, at),
-        or(isNull(grants.revokedAt), gt(grants.revokedAt, at)),
-        or(isNull(grants.expiresAt), gt(grants.expiresAt, at)),
-      ),
-    );
   const add = (list: string[], item: string) => {
     if (!list.includes(item)) list.push(item);
   };
-  for (const r of rows) {
-    if (r.objectId !== null)
-      add(r.role === "write" ? set.objectWriteGrants : set.objectGrants, r.objectId);
-    else if (r.facet !== null && r.value !== null)
-      add(r.role === "write" ? set.tagWriteGrants : set.tagGrants, `${r.facet}:${r.value}`);
+  for (const g of await liveGrants(tx, tenantId, principals, at)) {
+    if (g.objectId !== null)
+      add(g.role === "write" ? set.objectWriteGrants : set.objectGrants, g.objectId);
+    else if (g.tag !== null) add(g.role === "write" ? set.tagWriteGrants : set.tagGrants, g.tag);
   }
   for (const list of Object.values(set)) list.sort();
   return set;

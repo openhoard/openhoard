@@ -5,6 +5,7 @@ import { fromDriver, type Database, type Driver, type Tx } from "./database.js";
 import {
   addGrant,
   DEFAULT_GRANT_DAYS,
+  liveGrants,
   loadGrants,
   revokeGrant,
   type GrantInput,
@@ -266,6 +267,27 @@ describe("loadGrants", () => {
     await grant({ target: { objectId: t.objectId } });
     await inTenant((tx) => tx.delete(objects).where(eq(objects.id, t.objectId)));
     expect((await load([ana])).objectGrants).toEqual([]);
+  });
+});
+
+describe("liveGrants", () => {
+  it("returns each live grant with its id, holder and target", async () => {
+    const id = await grant({ principal: sales, target: { objectId: t.objectId }, role: "write" });
+    await grant({ principal: bo });
+    const got = await inTenant((tx) => liveGrants(tx, t.tenantId, [sales, "tag:x"]));
+    expect(got).toEqual([
+      {
+        id,
+        principal: sales,
+        role: "write",
+        tag: null,
+        objectId: t.objectId,
+        grantedBy: "user:admin",
+        createdAt: expect.any(Date),
+        expiresAt: expect.any(Date),
+      },
+    ]);
+    expect(await inTenant((tx) => liveGrants(tx, t.tenantId, []))).toEqual([]);
   });
 });
 

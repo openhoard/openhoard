@@ -29,7 +29,7 @@ const recording = () => {
   const engine: PolicyEngine = {
     evaluate(r): AuthzDecision {
       seen.push(r);
-      return { allow: true, reason: "test engine", policies: [] };
+      return { allow: true, kind: "allow", reason: "test engine", policies: [] };
     },
   };
   return { engine, seen };
@@ -103,7 +103,12 @@ describe("Authorizer", () => {
   });
 
   it("returns the engine's decision", () => {
-    const decision = { allow: false, reason: "forbidden by x", policies: ["x"] };
+    const decision = {
+      allow: false,
+      kind: "forbid",
+      reason: "forbidden by x",
+      policies: ["x"],
+    } as const;
     const authz = new Authorizer({ evaluate: () => decision });
     expect(authz.authorize(request())).toBe(decision);
   });
@@ -121,6 +126,7 @@ describe("Authorizer", () => {
     );
     expect(authz.authorize(request())).toEqual({
       allow: false,
+      kind: "error",
       reason: "policy engine error",
       policies: [],
     });
@@ -176,7 +182,12 @@ describe("Authorizer", () => {
   ])("denies a request with a bad %s without asking the engine", (field, bad) => {
     const { engine, seen } = recording();
     const decision = new Authorizer(engine).authorize(bad as AuthzRequest);
-    expect(decision).toEqual({ allow: false, reason: `malformed request: ${field}`, policies: [] });
+    expect(decision).toEqual({
+      allow: false,
+      kind: "error",
+      reason: `malformed request: ${field}`,
+      policies: [],
+    });
     expect(seen).toEqual([]);
   });
 });

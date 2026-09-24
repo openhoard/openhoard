@@ -23,6 +23,7 @@
   "dependencies": {
     "@noble/hashes": "^2.4.0",
     "@openhoard/core-db": "workspace:^",
+    "@openhoard/core-identity": "workspace:^",
     "@openhoard/core-policy": "workspace:^",
     "drizzle-orm": "^0.45.3"
   },

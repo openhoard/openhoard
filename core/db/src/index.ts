@@ -19,10 +19,12 @@ export {
   addGrant,
   DEFAULT_GRANT_DAYS,
   GrantError,
+  liveGrants,
   loadGrants,
   revokeGrant,
   type GrantErrorCode,
   type GrantInput,
   type GrantRole,
   type GrantSet,
+  type LiveGrant,
 } from "./grants.js";

@@ -34,6 +34,7 @@ export {
   type SourceItemState,
 } from "./ingest.js";
 export {
+  explainLevels,
   GENERIC_TITLE,
   levelsFor,
   markProcessed,
@@ -43,8 +44,18 @@ export {
   VIEW_TRANSACTION,
   viewObjects,
   type CardView,
+  type LevelContribution,
+  type LevelsExplanation,
   type ObjectLevels,
   type ObjectView,
   type TitleOnlyView,
   type ViewRequest,
 } from "./visibility.js";
+export {
+  explainAccess,
+  ExplainError,
+  type AccessExplanation,
+  type Blocker,
+  type ExplainRequest,
+  type GrantReason,
+} from "./explain.js";

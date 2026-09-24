@@ -68,6 +68,11 @@ export interface AuthzRequest {
 
 export interface AuthzDecision {
   allow: boolean;
+  /**
+   * What kind of decision: a permit, a forbid, no permit applying, or an error (a malformed
+   * request, a failing engine or rule), which always denies.
+   */
+  kind: "allow" | "forbid" | "no-permit" | "error";
   /** A short explanation for logs, audit and "why can X see this?" (T-606). */
   reason: string;
   /** Ids of the policies that decided it: the permits for an allow, the forbids for a deny. */
@@ -128,11 +133,12 @@ export class Authorizer {
   }
 }
 
-export const deny = (reason: string, policies: readonly string[] = []): AuthzDecision => ({
-  allow: false,
-  reason,
-  policies,
-});
+/** A deny; `kind` defaults to `error`, the fail-closed case. */
+export const deny = (
+  reason: string,
+  policies: readonly string[] = [],
+  kind: "forbid" | "no-permit" | "error" = "error",
+): AuthzDecision => ({ allow: false, kind, reason, policies });
 
 const isId = (v: unknown): v is string => typeof v === "string" && v.length > 0;
 /** A dense array of strings. `every()` skips holes, so this walks the indices instead. */
