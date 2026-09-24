@@ -48,7 +48,7 @@ query (keyword and vector), before ranking or counting. Top hits are re-checked 
 policy engine. Counts, facets, autocomplete and summaries are computed only over what the
 caller may see.
 
-v1 engine: Postgres + ParadeDB `pg_search` + pgvector. Scale-out option: Meilisearch.
+v1 engine: Postgres full-text search + pgvector, fused with reciprocal rank fusion ([ADR-0005](adr/0005-search-v1.md)). ParadeDB or Meilisearch can replace it later behind the same interface. The application picks the vector plan from the caller's visible-row count: exact search over small visible sets, HNSW with iterative scans over large ones ([spike S1](spikes/s1-search-scale.md)).
 
 ## Extension points
 
@@ -68,8 +68,14 @@ Manifest schema: [`schemas/plugin-manifest.v1.schema.json`](../schemas/plugin-ma
 `access_review`, `audit`, `subscribe`, `repo_context`. Reads return compact file cards;
 writes require a user confirmation issued by an OpenHoard client.
 
-## Proposed stack
+## Stack
 
-TypeScript gateway + MCP server · Python enrichment workers · Postgres 16 + pgvector ·
-S3 by default, Azure Blob supported (via a storage abstraction such as Apache OpenDAL) ·
-Cedar or OpenFGA for policy · Next.js web app · Tauri desktop shell.
+TypeScript (Node 24 LTS) for the gateway, MCP server and core, per the [ADRs](adr/README.md):
+
+- Hono and the MCP TypeScript SDK;
+- Postgres 17+ with pgvector 0.8+ in production, and PGlite for development and tests ([ADR-0004](adr/0004-database.md), [spike S2](spikes/s2-pglite-parity.md));
+- S3 by default and Azure Blob first-class, through Apache OpenDAL;
+- Cedar for policy rules, with tag grants kept as data ([ADR-0007](adr/0007-policy-engine.md), [spike S3](spikes/s3-cedar.md));
+- a React + Vite PWA, and a Tauri desktop shell.
+
+No Docker anywhere.
