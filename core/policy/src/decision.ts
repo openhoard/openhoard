@@ -50,12 +50,3 @@ export function decideRead(req: ReadRequest): ReadDecision {
     reason: `exposure ${req.exposure} blocks content for ${req.clientTrust} client`,
   };
 }
-
-/** Pluggable authorization engine (Cedar adapter first, per ADR-007). */
-export interface PolicyEngine {
-  authorize(input: {
-    principals: readonly string[];
-    action: string;
-    resource: { id: string; tags: readonly string[] };
-  }): Promise<{ allow: boolean; reason: string }>;
-}

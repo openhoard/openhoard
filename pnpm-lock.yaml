@@ -317,6 +317,10 @@ importers:
         version: link:../../packages/config
 
   core/policy:
+    dependencies:
+      '@cedar-policy/cedar-wasm':
+        specifier: 4.13.0
+        version: 4.13.0
     devDependencies:
       '@openhoard/config':
         specifier: workspace:*

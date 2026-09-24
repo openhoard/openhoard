@@ -23,5 +23,8 @@
   "devDependencies": {
     "@openhoard/config": "workspace:*"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@cedar-policy/cedar-wasm": "4.13.0"
+  }
 }
