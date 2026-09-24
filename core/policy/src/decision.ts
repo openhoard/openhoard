@@ -9,12 +9,16 @@ import {
 export type ResultShape = "none" | "title-only" | "card" | "content";
 
 export interface ReadRequest {
-  /** Whether the caller's principal set grants read access. */
+  /** Whether the caller's principal set grants read access. Only `true` makes a reader. */
   canRead: boolean;
   visibility: Visibility;
   exposure: Exposure;
-  /** Present when the caller is an AI client rather than a person in an OpenHoard UI. */
-  clientTrust?: ClientTrust;
+  /**
+   * The client the request comes through (authorize()'s `client.trust`): `first-party` for
+   * OpenHoard's own apps, otherwise the AI client's trust label. Required, so a caller can't
+   * get first-party treatment by leaving it out.
+   */
+  clientTrust: "first-party" | ClientTrust;
   /** Whether the caller asked for file content (vs. a card). */
   wantsContent: boolean;
 }
@@ -24,12 +28,14 @@ export interface ReadDecision {
   reason: string;
 }
 
+const AI_TRUST: readonly string[] = ["local", "commercial", "consumer"] satisfies ClientTrust[];
+
 /**
  * Decides what a caller may see of one file. Pure and deterministic: the policy engine
  * computes `canRead`; this applies visibility and exposure on top.
  */
 export function decideRead(req: ReadRequest): ReadDecision {
-  if (!req.canRead) {
+  if (req.canRead !== true) {
     if (req.visibility === "hidden") return { shape: "none", reason: "hidden to non-readers" };
     if (req.visibility === "discoverable")
       return { shape: "title-only", reason: "discoverable: title and request-access only" };
@@ -41,8 +47,11 @@ export function decideRead(req: ReadRequest): ReadDecision {
     return { shape: "none", reason: "unknown visibility" };
   }
   if (!req.wantsContent) return { shape: "card", reason: "reader asked for a card" };
-  if (req.clientTrust === undefined)
-    return { shape: "content", reason: "person via OpenHoard client" };
+  if (req.clientTrust === "first-party")
+    return { shape: "content", reason: "person via OpenHoard app" };
+  // A trust label it doesn't know (bad input) gets no content, whatever the exposure.
+  if (!AI_TRUST.includes(req.clientTrust))
+    return { shape: "card", reason: "unknown client trust: card without content" };
   if (exposureAllowsContent(req.exposure, req.clientTrust))
     return {
       shape: "content",

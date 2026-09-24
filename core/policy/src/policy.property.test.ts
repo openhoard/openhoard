@@ -20,6 +20,8 @@ import {
 const visibility = fc.constantFrom(...VISIBILITY);
 const exposure = fc.constantFrom(...EXPOSURE);
 const trust = fc.constantFrom<ClientTrust>("local", "commercial", "consumer");
+/** Any client: OpenHoard's own app or an AI client. */
+const anyTrust = fc.oneof(fc.constant("first-party" as const), trust);
 /** Level strings as they may come back from storage: valid values, typos and garbage. */
 const storedVisibility = fc.oneof(visibility, fc.string());
 const storedExposure = fc.oneof(exposure, fc.string());
@@ -130,23 +132,17 @@ describe("content release (properties)", () => {
 
   it("a caller without read access never receives content, and hidden files stay invisible", () => {
     fc.assert(
-      fc.property(
-        visibility,
-        exposure,
-        fc.option(trust, { nil: undefined }),
-        fc.boolean(),
-        (v, e, t, wants) => {
-          const d = decideRead({
-            canRead: false,
-            visibility: v,
-            exposure: e,
-            wantsContent: wants,
-            ...(t === undefined ? {} : { clientTrust: t }),
-          });
-          expect(d.shape).not.toBe("content");
-          if (v === "hidden") expect(d.shape).toBe("none");
-        },
-      ),
+      fc.property(visibility, exposure, anyTrust, fc.boolean(), (v, e, t, wants) => {
+        const d = decideRead({
+          canRead: false,
+          visibility: v,
+          exposure: e,
+          clientTrust: t,
+          wantsContent: wants,
+        });
+        expect(d.shape).not.toBe("content");
+        if (v === "hidden") expect(d.shape).toBe("none");
+      }),
     );
   });
 
@@ -161,6 +157,26 @@ describe("content release (properties)", () => {
           wantsContent: true,
         });
         expect(d.shape === "content").toBe(exposureAllowsContent(e, t));
+      }),
+    );
+  });
+
+  it("content goes only to a reader (canRead === true) who asked for it", () => {
+    const canRead = fc.oneof(
+      fc.boolean(),
+      fc.constantFrom<unknown>(1, "true", {}, [], null, undefined),
+    );
+    fc.assert(
+      fc.property(canRead, visibility, exposure, anyTrust, fc.boolean(), (c, v, e, t, wants) => {
+        const d = decideRead({
+          canRead: c as boolean,
+          visibility: v,
+          exposure: e,
+          clientTrust: t,
+          wantsContent: wants,
+        });
+        const content = c === true && wants && (t === "first-party" || exposureAllowsContent(e, t));
+        expect(d.shape === "content").toBe(content);
       }),
     );
   });

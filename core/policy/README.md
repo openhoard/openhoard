@@ -16,8 +16,18 @@ import { Authorizer, createCedarEngine, decideRead } from "@openhoard/core-polic
 
 const authz = new Authorizer(createCedarEngine(packPolicies), { onError: (e) => log.error(e) });
 const { allow, reason } = authz.authorize({ principal, action: "open", resource, client });
-const shape = decideRead({ canRead: allow, visibility, exposure, clientTrust, wantsContent: true });
+const shape = decideRead({
+  canRead: allow,
+  visibility,
+  exposure,
+  clientTrust: client.trust,
+  wantsContent: true,
+});
 ```
+
+`clientTrust` is required: `first-party` (OpenHoard's own app, which gets a reader the content
+whatever the exposure) or an AI client's trust label, which exposure then limits. Only
+`canRead === true` counts as a reader.
 
 ## How authorize() decides
 
@@ -40,10 +50,24 @@ Following spike S3, **grants are data and rules are Cedar**:
   - `resource in OpenHoard::Tag::"x"` sees the trusted tags only (rules, packs, people and
     reviewed model tags). Use it in a `permit`: a model's guess must never widen access.
   - `resource.allTags.contains("x")` sees every tag, unreviewed model guesses included. Use it
-    in a `forbid`: a guess that a file is sensitive should restrict it at once.
+    in a `forbid`: a guess that a file is sensitive should restrict it at once. The engine
+    refuses any other use when it is built: in a permit, an `unless`, under `!`, in an `if`
+    condition, compared with `==`, or read from anything but `resource` itself (an entity
+    literal, or a record such as `{allTags: resource.allTags}.allTags`).
 - Every decision has a `kind`: `allow`, `forbid`, `no-permit` or `error`.
+- Cedar gets only the caller's groups that some policy names (`OpenHoard::Group::"x"`, in a
+  scope or a condition); the others cannot change a decision. With the core rules alone, none
+  are sent. This keeps a decision under a millisecond for a caller in a thousand groups.
 
-A decision takes about 0.2 ms.
+A decision takes well under a millisecond.
+
+## Engines are cached
+
+`createCedarEngine(policies)` returns the same engine for the same policy set (the same ids
+and texts, in any order), validating it once. Cedar keeps each parsed set in a process-wide
+cache that cannot be freed, so every distinct set stays in memory until the process exits.
+Build an engine when the rules change and share it; don't build one per request. A set that
+fails to build is not cached and throws every time.
 
 ## Fails closed
 

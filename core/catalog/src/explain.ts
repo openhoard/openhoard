@@ -224,6 +224,7 @@ export async function explainAccess(
       canRead: read.allow,
       visibility: levels.visibility,
       exposure: levels.exposure,
+      clientTrust: client.trust,
       wantsContent: false,
     }).shape;
     if (view === "none") hiddenBecause = levels.processed ? "hidden" : "unprocessed";

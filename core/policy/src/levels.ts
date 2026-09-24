@@ -20,11 +20,12 @@ export type ClientTrust = "local" | "commercial" | "consumer";
  * A file that has not finished ingest/tagging is treated as `hidden` + `metadata-only`, so a
  * sensitive file's title and content never leak in the window before its tags are known.
  * Tenant defaults (e.g. `discoverable` for internal work) apply only once a file is processed.
+ * Frozen, so no caller can loosen the default for everyone.
  */
-export const UNPROCESSED: { visibility: Visibility; exposure: Exposure } = {
+export const UNPROCESSED: Readonly<{ visibility: Visibility; exposure: Exposure }> = Object.freeze({
   visibility: "hidden",
   exposure: "metadata-only",
-};
+});
 
 export interface TenantDefaults {
   visibility: Visibility;
@@ -33,7 +34,8 @@ export interface TenantDefaults {
 
 /**
  * Effective visibility/exposure for one file.
- * - Unprocessed files get {@link UNPROCESSED}, whatever their (possibly partial) tags say.
+ * - Unprocessed files get a copy of {@link UNPROCESSED}, whatever their (possibly partial)
+ *   tags say.
  * - Processed files: the most restrictive level among their tags wins; with no level-bearing
  *   tags, the tenant default applies.
  */
@@ -43,7 +45,8 @@ export function resolveLevels(input: {
   exposures: readonly string[];
   defaults: TenantDefaults;
 }): { visibility: Visibility; exposure: Exposure } {
-  if (!input.processed) return UNPROCESSED;
+  // A copy: the caller owns the result and may change it without touching the default.
+  if (!input.processed) return { ...UNPROCESSED };
   return {
     visibility: mostRestrictiveVisibility(input.visibilities, input.defaults.visibility),
     exposure: mostRestrictiveExposure(input.exposures, input.defaults.exposure),

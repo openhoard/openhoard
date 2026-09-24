@@ -8,6 +8,7 @@ import {
   UNPROCESSED,
   type ClientTrust,
   type Exposure,
+  type ReadRequest,
 } from "./index.js";
 
 describe("most restrictive wins", () => {
@@ -64,6 +65,21 @@ describe("resolveLevels", () => {
       }),
     ).toEqual({ visibility: "hidden", exposure: "local-only" });
   });
+
+  it("keeps the fail-closed default out of reach of callers", () => {
+    const input = { processed: false, visibilities: [], exposures: [], defaults };
+    const first = resolveLevels(input);
+    expect(first).not.toBe(UNPROCESSED);
+    first.visibility = "readable";
+    first.exposure = "full";
+    expect(UNPROCESSED).toEqual({ visibility: "hidden", exposure: "metadata-only" });
+    expect(resolveLevels(input)).toEqual({ visibility: "hidden", exposure: "metadata-only" });
+    expect(Object.isFrozen(UNPROCESSED)).toBe(true);
+    expect(() => {
+      (UNPROCESSED as { visibility: string }).visibility = "readable";
+    }).toThrow(TypeError);
+    expect(UNPROCESSED.visibility).toBe("hidden");
+  });
 });
 
 describe("exposureAllowsContent", () => {
@@ -86,7 +102,12 @@ describe("exposureAllowsContent", () => {
 });
 
 describe("decideRead", () => {
-  const base = { visibility: "readable", exposure: "full", wantsContent: true } as const;
+  const base = {
+    visibility: "readable",
+    exposure: "full",
+    clientTrust: "first-party",
+    wantsContent: true,
+  } as const;
 
   it("non-readers see according to visibility", () => {
     expect(decideRead({ ...base, canRead: false, visibility: "hidden" }).shape).toBe("none");
@@ -112,5 +133,29 @@ describe("decideRead", () => {
     const blocked = decideRead({ ...r, clientTrust: "consumer" });
     expect(blocked.shape).toBe("card");
     expect(blocked.reason).toMatch(/blocks content for consumer/);
+  });
+
+  it("gives content without an exposure check only to OpenHoard's own app", () => {
+    const r = { ...base, canRead: true, exposure: "metadata-only" } as const;
+    expect(decideRead(r)).toEqual({ shape: "content", reason: "person via OpenHoard app" });
+    expect(decideRead({ ...r, clientTrust: "local" }).shape).toBe("card");
+  });
+
+  it("treats a missing or unknown client trust as no content", () => {
+    // Callers may pass parsed input; leaving the trust out must not mean first-party.
+    const { clientTrust: _, ...noTrust } = { ...base, canRead: true };
+    expect(decideRead(noTrust as unknown as ReadRequest).shape).toBe("card");
+    const bogus = { ...base, canRead: true, clientTrust: "trusted" as unknown as "local" };
+    expect(decideRead(bogus)).toEqual({
+      shape: "card",
+      reason: "unknown client trust: card without content",
+    });
+  });
+
+  it("only canRead === true makes a reader", () => {
+    for (const truthy of [1, "yes", {}, [true]]) {
+      const r = { ...base, canRead: truthy as unknown as boolean, visibility: "hidden" } as const;
+      expect(decideRead(r).shape).toBe("none");
+    }
   });
 });

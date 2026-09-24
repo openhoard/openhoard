@@ -398,6 +398,7 @@ export async function viewObjects(
       canRead,
       visibility: level.visibility,
       exposure: level.exposure,
+      clientTrust: request.client.trust,
       wantsContent: false,
     });
     const base = {

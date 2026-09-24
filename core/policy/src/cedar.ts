@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import * as cedar from "@cedar-policy/cedar-wasm/nodejs";
 import { deny, type AuthzDecision, type EngineRequest, type PolicyEngine } from "./authorize.js";
 
@@ -63,23 +63,54 @@ export class PolicyError extends Error {
   }
 }
 
+const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+
+/*
+ * Cedar's cache of parsed schemas and policy sets is shared by the whole process (other copies
+ * of this module included) and has no way to free an entry. Ids are therefore derived from the
+ * content: a copy that parses the same text under the same id stores the same thing, and the
+ * same text is parsed once, not once per engine.
+ */
+let schemaName: string | undefined;
+function preparsedSchema(): string {
+  if (schemaName === undefined) {
+    const name = `openhoard-schema-${sha256(CEDAR_SCHEMA)}`;
+    const schema = cedar.preparseSchema(name, CEDAR_SCHEMA);
+    if (schema.type === "failure") throw new PolicyError("invalid schema", messages(schema.errors));
+    schemaName = name;
+  }
+  return schemaName;
+}
+
+/** Engines by the SHA-256 of their canonical policy set. Only sets that built are kept. */
+const engines = new Map<string, PolicyEngine>();
+
 /**
  * Builds an engine for the core rules plus `policies` (id → Cedar text). Every policy is
  * validated strictly against {@link CEDAR_SCHEMA} here, so a broken rule fails when it is
  * loaded, not when a request happens to reach it.
  *
- * Each engine keeps one parsed policy set in Cedar's in-process cache for the life of the
- * process; build a new engine when the rules change, which is rare.
+ * Engines are cached by their policy set: the same set (the same ids and texts, in any order)
+ * returns the same engine, validated once. Cedar cannot free a parsed set, so every distinct set
+ * stays resident for the life of the process (roughly 25–400 KB each). Build an engine when the
+ * rules change, which is rare, and share it; never build one per request.
  */
 export function createCedarEngine(policies: Readonly<Record<string, string>> = {}): PolicyEngine {
   const clash = Object.keys(policies).filter((id) => id.startsWith("core/"));
   if (clash.length) throw new PolicyError("policy ids reserved for the core rules", clash);
+  const staticPolicies = { ...CORE_POLICIES, ...policies };
+  const canonical = Object.keys(staticPolicies)
+    .sort()
+    .map((id) => [id, staticPolicies[id]]);
+  const key = sha256(JSON.stringify(canonical));
+  const cached = engines.get(key);
+  if (cached) return cached;
+
   const misuse = Object.entries(policies).flatMap(([id, text]) =>
     allTagsMisuse(text).map((m) => `${id}: ${m}`),
   );
   if (misuse.length)
     throw new PolicyError("resource.allTags used where a guess could widen access", misuse);
-  const staticPolicies = { ...CORE_POLICIES, ...policies };
 
   const validation = cedar.validate({
     schema: CEDAR_SCHEMA,
@@ -103,34 +134,77 @@ export function createCedarEngine(policies: Readonly<Record<string, string>> = {
   ];
   if (warnings.length) throw new PolicyError("policies with validation warnings", warnings);
 
-  // Cedar's cache is shared by the whole process, including other copies of this module, so
-  // the id must be unique across all of them, not just counted here.
-  const setId = `openhoard-${randomUUID()}`;
-  const schema = cedar.preparseSchema(setId, CEDAR_SCHEMA);
+  const groups = namedGroups(staticPolicies);
+  const schema = preparsedSchema();
+  // The content hash makes the id the same in every copy of this module for the same set, and
+  // different for different sets.
+  const setId = `openhoard-policies-${key}`;
   const set = cedar.preparsePolicySet(setId, { staticPolicies });
-  if (schema.type === "failure") throw new PolicyError("invalid schema", messages(schema.errors));
   if (set.type === "failure") throw new PolicyError("invalid policies", messages(set.errors));
 
-  return {
-    evaluate(request) {
+  // Frozen: every caller asking for this set shares the object.
+  const engine: PolicyEngine = Object.freeze({
+    evaluate(request: EngineRequest) {
       const answer = cedar.statefulIsAuthorized({
-        ...toCedar(request),
+        ...toCedar(request, groups),
         preparsedPolicySetId: setId,
-        preparsedSchemaName: setId,
+        preparsedSchemaName: schema,
         validateRequest: true,
       });
       return fromCedar(answer);
     },
-  };
+  });
+  engines.set(key, engine);
+  return engine;
 }
 
 const ns = "OpenHoard::";
+const GROUP = `${ns}Group`;
 const uid = (type: string, id: string) => ({ type: `${ns}${type}`, id });
 
-/** The request as Cedar sees it, with only the entities this decision needs. */
-export function toCedar(r: EngineRequest) {
+/**
+ * Every group the policies name, in their scope (`principal in OpenHoard::Group::"x"`) or in a
+ * condition. Only these groups can change a decision: a group reaches a rule only as an entity
+ * literal, because no attribute or context field in {@link CEDAR_SCHEMA} has the type Group and
+ * groups have no parents. (A schema change that adds one must revisit this.) So a decision
+ * sends only the caller's groups in this set; with hundreds of groups on a caller, sending them
+ * all made each decision several times slower.
+ */
+function namedGroups(staticPolicies: Readonly<Record<string, string>>): ReadonlySet<string> {
+  const found = new Set<string>();
+  const walk = (node: unknown) => {
+    if (typeof node !== "object" || node === null) return;
+    if (Array.isArray(node)) {
+      for (const n of node) walk(n);
+      return;
+    }
+    const obj = node as Json;
+    if (obj.type === GROUP && typeof obj.id === "string") found.add(obj.id);
+    for (const child of Object.values(obj)) walk(child);
+  };
+  for (const [id, text] of Object.entries(staticPolicies)) {
+    const answer = cedar.policyToJson(text);
+    // Validation has already parsed every policy; if this one can't be read, the set of groups
+    // would be incomplete and a forbid on a group could be skipped, so refuse the engine.
+    if (answer.type === "failure") {
+      throw new PolicyError("invalid policies", [`${id}: ${messages(answer.errors).join("; ")}`]);
+    }
+    walk(answer.json);
+  }
+  return found;
+}
+
+/**
+ * The request as Cedar sees it, with only the entities this decision needs: of the caller's
+ * groups, only those in `named` (the groups the engine's policies mention).
+ */
+export function toCedar(r: EngineRequest, named: ReadonlySet<string>) {
   const tags = [...new Set(r.resource.tags)];
-  const groups = [...new Set(r.principal.groupIds)];
+  // A value that isn't a string still goes to Cedar, which refuses it: leaving groups out must
+  // not turn a malformed request into a well-formed one.
+  const groups = [...new Set(r.principal.groupIds)].filter(
+    (g) => typeof g !== "string" || named.has(g),
+  );
   const entities: cedar.EntityJson[] = [
     {
       uid: uid("User", r.principal.userId),
@@ -198,9 +272,10 @@ const SET_TESTS = new Set(["contains", "containsAll", "containsAny"]);
 /**
  * Where `resource.allTags` may appear. It carries model guesses, so it may only make a forbid
  * fire: inside a forbid's `when`, not negated, as the set tested by contains / containsAll /
- * containsAny. Anywhere else (a permit, an `unless`, under `!`, in an `if` condition, compared
- * with `==`, `isEmpty()`) a guess could lift a restriction or grant access. Returns what is
- * wrong; empty when fine. Text that doesn't parse is left to validation.
+ * containsAny, and read straight off `resource`. Anywhere else (a permit, an `unless`, under
+ * `!`, in an `if` condition, compared with `==`, `isEmpty()`, copied into a record) a guess
+ * could lift a restriction or grant access. Returns what is wrong; empty when fine. Text that
+ * doesn't parse is left to validation.
  */
 export function allTagsMisuse(text: string): string[] {
   const answer = cedar.policyToJson(text);
@@ -217,8 +292,21 @@ export function allTagsMisuse(text: string): string[] {
     }
     const obj = node as Json;
     const dot = obj["."] as Json | undefined;
-    // Any `.allTags`, on `resource` or on an entity literal such as OpenHoard::Object::"o".
+    // Any `.allTags`: on `resource`, an entity literal such as OpenHoard::Object::"o", or a
+    // record built to look like one (`{allTags: ...}.allTags`, or an `if` choosing between
+    // records), which could hide a guess from the rules below.
     if (dot && dot.attr === "allTags") {
+      const left = dot.left as Json | undefined;
+      const onResource =
+        typeof left === "object" &&
+        left !== null &&
+        Object.keys(left).length === 1 &&
+        left.Var === "resource";
+      if (!onResource) {
+        problems.push("allTags may be read as resource.allTags only");
+        // What it's read from may itself hide a misuse; report that too.
+        visit(left, null, false);
+      }
       if (!forbid) problems.push("a permit can't test resource.allTags; use `resource in Tag`");
       else if (polarity !== true || !underSetTest) {
         problems.push(

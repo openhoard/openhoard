@@ -8,6 +8,7 @@ import {
   fromCedar,
   PolicyError,
   policyEffect,
+  toCedar,
 } from "./cedar.js";
 
 const request = (patch: Partial<AuthzRequest> = {}): AuthzRequest => ({
@@ -135,9 +136,39 @@ describe("allTagsMisuse", () => {
       'forbid (principal, action, resource) when { !(OpenHoard::Object::"o".allTags.contains("a:b")) };',
       "un-negated",
     ],
+    [
+      'forbid (principal, action, resource) when { OpenHoard::Object::"o".allTags.contains("a:b") };',
+      "resource.allTags only",
+    ],
+    // A record that copies allTags, chosen by a guess: the guess "model:ok" lifts the forbid.
+    [
+      'forbid (principal, action, resource) when { (if resource.allTags.contains("model:ok") then {allTags: ["none"]} else {allTags: resource.allTags}).allTags.contains("sensitivity:secret") };',
+      "resource.allTags only",
+    ],
+    [
+      'forbid (principal, action, resource) when { {allTags: (if resource.allTags.contains("model:ok") then ["none"] else resource.allTags)}.allTags.contains("sensitivity:secret") };',
+      "resource.allTags only",
+    ],
+    [
+      'forbid (principal, action, resource) when { {allTags: resource.allTags}.allTags.contains("sensitivity:secret") };',
+      "resource.allTags only",
+    ],
+    [
+      'forbid (principal, action, resource) when { {tags: resource.allTags}.tags.contains("sensitivity:secret") };',
+      "with contains",
+    ],
   ])("refuses %s", (text, why) => {
     expect(allTagsMisuse(text).join(" ")).toContain(why);
     expect(() => createCedarEngine({ "pack/x": text })).toThrow("resource.allTags used where");
+  });
+
+  it("also reports a misuse inside what allTags is read from", () => {
+    const text =
+      'forbid (principal, action, resource) when { (if resource.allTags.contains("model:ok") then {allTags: ["none"]} else {allTags: resource.allTags}).allTags.contains("sensitivity:secret") };';
+    expect(allTagsMisuse(text)).toEqual([
+      "allTags may be read as resource.allTags only",
+      "a forbid may use resource.allTags only in `when`, un-negated, with contains",
+    ]);
   });
 });
 
@@ -380,8 +411,8 @@ describe("createCedarEngine", () => {
 
   it("keeps engines apart even across copies of this module", async () => {
     // Cedar's cache is per process; a second copy of this module (a bundler duplicate, or src
-    // and dist loaded side by side) must not overwrite the first copy's policy sets. The query
-    // string makes Vite load a separate instance.
+    // and dist loaded side by side) must not overwrite the first copy's policy sets with
+    // different ones. The query string makes Vite load a separate instance.
     const closed = [createCedarEngine(), createCedarEngine(), createCedarEngine()];
     const path = "./cedar.js?copy";
     const copy = (await import(/* @vite-ignore */ path)) as typeof import("./cedar.js");
@@ -425,6 +456,120 @@ describe("createCedarEngine", () => {
     const closed = createCedarEngine();
     expect(new Authorizer(open).authorize(request()).allow).toBe(true);
     expect(new Authorizer(closed).authorize(request()).allow).toBe(false);
+  });
+
+  it("returns the same engine for the same policy set, in any order", () => {
+    const a = {
+      "pack/all": "permit (principal, action, resource);",
+      "pack/guests": "forbid (principal, action, resource) when { principal.guest };",
+    };
+    const b = { "pack/guests": a["pack/guests"], "pack/all": a["pack/all"] };
+    const first = createCedarEngine(a);
+    const second = createCedarEngine(b);
+    expect(second).toBe(first);
+    const guest = { ...request(), principal: { ...request().principal, guest: true } };
+    for (const r of [request(), guest]) {
+      expect(new Authorizer(second).authorize(r)).toEqual(new Authorizer(first).authorize(r));
+    }
+    expect(new Authorizer(first).authorize(request()).allow).toBe(true);
+    expect(new Authorizer(first).authorize(guest).allow).toBe(false);
+    expect(createCedarEngine()).toBe(createCedarEngine({}));
+    // Shared, so no caller can swap its evaluate for everyone else.
+    expect(Object.isFrozen(first)).toBe(true);
+  });
+
+  it("returns a different engine for a different policy set", () => {
+    const base = { "pack/all": "permit (principal, action, resource);" };
+    const engine = createCedarEngine(base);
+    expect(createCedarEngine()).not.toBe(engine);
+    // Same text under another id, and another text under the same id, are different sets.
+    expect(createCedarEngine({ "pack/every": base["pack/all"] })).not.toBe(engine);
+    const changed = createCedarEngine({
+      "pack/all": 'permit (principal, action == OpenHoard::Action::"search", resource);',
+    });
+    expect(changed).not.toBe(engine);
+    expect(new Authorizer(changed).authorize(request()).allow).toBe(false);
+    expect(new Authorizer(engine).authorize(request()).allow).toBe(true);
+  });
+
+  it("does not cache a set that fails to build", () => {
+    const broken = { "pack/typo": "forbid (principal, action, resource) when { principal.gest };" };
+    const misuse = {
+      "pack/x": 'permit (principal, action, resource) when { resource.allTags.contains("x") };',
+    };
+    for (let i = 0; i < 3; i++) {
+      expect(() => createCedarEngine(broken)).toThrow("policies do not match the schema");
+      expect(() => createCedarEngine(misuse)).toThrow("resource.allTags used where");
+    }
+  });
+});
+
+describe("groups sent to Cedar", () => {
+  const authz = new Authorizer(
+    createCedarEngine({
+      "pack/hr": `permit (principal in OpenHoard::Group::"g-hr", action == OpenHoard::Action::"read", resource);`,
+      "pack/banned": `forbid (principal in OpenHoard::Group::"g-banned", action, resource);`,
+      "pack/contractors": `forbid (principal, action == OpenHoard::Action::"open", resource)
+        when { principal in [OpenHoard::Group::"g-temp", OpenHoard::Group::"g-vendor"] };`,
+    }),
+  );
+  // 500 groups the policies never mention, as a large tenant's caller may carry.
+  const unrelated = Array.from({ length: 500 }, (_, i) => `g-team-${i}`);
+  const inGroups = (groupIds: string[], patch: Partial<AuthzRequest> = {}) => {
+    const r = withGrants(["client:acme"], patch);
+    return { ...r, principal: { ...r.principal, groupIds } };
+  };
+  const noGrants = (groupIds: string[]) => {
+    const r = request({ resource: { ...request().resource, tags: [] } });
+    return { ...r, principal: { ...r.principal, groupIds } };
+  };
+
+  /*
+   * Measured with 0, 200 and 1000 unrelated groups on the caller (plus g-hr), on the dev
+   * container: before sending only named groups, 0.6, 2.5 and 11.8 ms per decision, because
+   * every group went to Cedar as an entity; after, 0.3–0.5 ms at every size.
+   */
+  it("still permits through a named group among many unrelated ones", () => {
+    expect(authz.authorize(noGrants([...unrelated, "g-hr"]))).toMatchObject({
+      allow: true,
+      policies: ["pack/hr"],
+    });
+    expect(authz.authorize(noGrants(unrelated)).allow).toBe(false);
+  });
+
+  it("still forbids through a named group among many unrelated ones", () => {
+    expect(authz.authorize(inGroups(unrelated)).allow).toBe(true);
+    expect(authz.authorize(inGroups([...unrelated, "g-banned"]))).toMatchObject({
+      allow: false,
+      kind: "forbid",
+      policies: ["pack/banned"],
+    });
+  });
+
+  it("sends only the caller's groups that the policies name", () => {
+    const r = { ...inGroups(["g-a", "g-hr", "g-b"]), readGranted: false, writeGranted: false };
+    const uidOf = (e: { uid: unknown }) => e.uid as { type: string; id: string };
+    const sent = toCedar({ ...r, owner: false }, new Set(["g-hr", "g-other"]));
+    const groups = sent.entities.filter((e) => uidOf(e).type === "OpenHoard::Group");
+    expect(groups.map((e) => uidOf(e).id)).toEqual(["g-hr"]);
+    const user = sent.entities.find((e) => uidOf(e).type === "OpenHoard::User");
+    expect(user?.parents).toEqual([{ type: "OpenHoard::Group", id: "g-hr" }]);
+    expect(toCedar({ ...r, owner: false }, new Set()).entities.map((e) => uidOf(e).type)).toEqual([
+      "OpenHoard::User",
+      "OpenHoard::Tag",
+      "OpenHoard::Object",
+      "OpenHoard::Client",
+    ]);
+  });
+
+  it("sees groups named in a condition, not only in the scope", () => {
+    const open = { action: "open" as const };
+    expect(authz.authorize(inGroups(unrelated, open)).allow).toBe(true);
+    expect(authz.authorize(inGroups([...unrelated, "g-vendor"], open))).toMatchObject({
+      allow: false,
+      kind: "forbid",
+      policies: ["pack/contractors"],
+    });
   });
 });
 
