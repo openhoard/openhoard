@@ -36,7 +36,9 @@ jobs:
       - run: pnpm format:check
       - run: pnpm build
       - run: pnpm typecheck
-      - run: pnpm test:coverage
+      # macOS runners have three cores, and every database suite starts PGlite (WASM) per test:
+      # run fewer suites at once there, or setup hooks time out.
+      - run: pnpm test:coverage ${{ matrix.os == 'macos-latest' && '--concurrency=2' || '' }}
       - name: Generated types are up to date
         run: |
           pnpm --filter @openhoard/schemas run generate
