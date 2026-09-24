@@ -57,6 +57,20 @@
       "when": 1790231560674,
       "tag": "0007_grants_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790232603544,
+      "tag": "0008_tag_reviews",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790232604461,
+      "tag": "0009_tag_reviews_rls",
+      "breakpoints": true
     }
   ]
 }

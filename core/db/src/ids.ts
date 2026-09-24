@@ -20,6 +20,7 @@ export const ID_PREFIXES = {
   object: "obj",
   version: "ver",
   grant: "grt",
+  review: "rev",
 } as const;
 export type IdKind = keyof typeof ID_PREFIXES;
 

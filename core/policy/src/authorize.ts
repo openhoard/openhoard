@@ -51,6 +51,10 @@ export interface AuthzResource {
   id: string;
   /** The owner's principal, e.g. `user:u42`. */
   ownerId: string;
+  /**
+   * The tags grants may match: core/catalog's tagsForDecisions().grantable, which leaves out
+   * unreviewed model tags, so a model's guess never widens access.
+   */
   tags: readonly string[];
   zone: string;
 }

@@ -22,7 +22,9 @@
   },
   "dependencies": {
     "@noble/hashes": "^2.4.0",
-    "@openhoard/core-policy": "workspace:^"
+    "@openhoard/core-db": "workspace:^",
+    "@openhoard/core-policy": "workspace:^",
+    "drizzle-orm": "^0.45.3"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*"

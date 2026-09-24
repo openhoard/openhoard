@@ -14,6 +14,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { idPattern, type IdKind } from "./ids.js";
 
@@ -308,6 +309,11 @@ export const objectTags = pgTable(
       "object_tags_applied_by_principal",
       sql`applied_by is null or applied_by ~ '^[a-z]+:.+$'`,
     ),
+    // A model's tag can't be recorded as a person's: the applier is of the source's kind.
+    check(
+      "object_tags_applied_by_matches_source",
+      sql`applied_by is null or starts_with(applied_by, source || ':')`,
+    ),
   ],
 );
 
@@ -378,6 +384,81 @@ export const grants = pgTable(
   ],
 );
 
+/*
+ * The review inbox (T-406). A tag that must not apply on its own waits here instead of in
+ * object_tags: a value not yet in the approved vocabulary, a model's low-confidence guess, or a
+ * model setting a value that carries visibility or exposure levels. A person approves (the tag
+ * applies, reviewed, and a new value joins the vocabulary), rejects, or merges it into an
+ * existing value. Resolved items stay, as the record of who decided.
+ */
+export const REVIEW_REASONS = ["new-value", "low-confidence", "sensitive"] as const;
+export const REVIEW_DECISIONS = ["approved", "rejected", "merged"] as const;
+
+export const tagReviews = pgTable(
+  "tag_reviews",
+  {
+    tenantId: text("tenant_id").notNull(),
+    id: text("id").notNull(),
+    objectId: text("object_id").notNull(),
+    facet: text("facet").notNull(),
+    value: text("value").notNull(),
+    reason: text("reason", { enum: REVIEW_REASONS }).notNull(),
+    source: text("source", { enum: TAG_SOURCES }).notNull(),
+    appliedBy: text("applied_by"),
+    confidence: real("confidence").notNull(),
+    createdAt: createdAt(),
+    decision: text("decision", { enum: REVIEW_DECISIONS }),
+    /** For a merge: the approved value the tag was applied as instead. */
+    mergedInto: text("merged_into"),
+    resolvedBy: text("resolved_by"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    foreignKey({
+      name: "tag_reviews_object_fk",
+      columns: [t.tenantId, t.objectId],
+      foreignColumns: [objects.tenantId, objects.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "tag_reviews_value_fk",
+      columns: [t.tenantId, t.facet, t.value],
+      foreignColumns: [facetValues.tenantId, facetValues.facet, facetValues.value],
+    }),
+    foreignKey({
+      name: "tag_reviews_merged_fk",
+      columns: [t.tenantId, t.facet, t.mergedInto],
+      foreignColumns: [facetValues.tenantId, facetValues.facet, facetValues.value],
+    }),
+    // The inbox: open items, oldest first.
+    index("tag_reviews_open_idx").on(t.tenantId, t.resolvedAt, t.createdAt),
+    // One open item per object and tag, however often it is proposed.
+    uniqueIndex("tag_reviews_one_open")
+      .on(t.tenantId, t.objectId, t.facet, t.value)
+      .where(sql`resolved_at is null`),
+    idCheck("tag_reviews_id_format", "id", "review"),
+    check("tag_reviews_reason_valid", sql.raw(`reason in (${quoted(REVIEW_REASONS)})`)),
+    check("tag_reviews_source_valid", sql.raw(`source in (${quoted(TAG_SOURCES)})`)),
+    check("tag_reviews_confidence_range", sql`confidence >= 0 and confidence <= 1`),
+    check(
+      "tag_reviews_applied_by_principal",
+      sql`applied_by is null or applied_by ~ '^[a-z]+:.+$'`,
+    ),
+    check(
+      "tag_reviews_applied_by_matches_source",
+      sql`applied_by is null or starts_with(applied_by, source || ':')`,
+    ),
+    check(
+      "tag_reviews_resolution_complete",
+      sql.raw(`(decision is null and resolved_by is null and resolved_at is null and merged_into is null)
+       or (decision is not null and decision in (${quoted(REVIEW_DECISIONS)})
+           and resolved_by is not null and resolved_by ~ '^[a-z]+:.+$'
+           and resolved_at is not null and resolved_at >= created_at
+           and (decision = 'merged') = (merged_into is not null))`),
+    ),
+  ],
+);
+
 /** The tag string policy and search use for a facet and value. */
 export const tagOf = (facet: string, value: string): string => `${facet}:${value}`;
 
@@ -434,4 +515,5 @@ export const tables = {
   facetValues,
   objectTags,
   grants,
+  tagReviews,
 } as const;

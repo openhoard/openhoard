@@ -167,9 +167,11 @@ describe("object tags", () => {
     const other = await seedTenant(db, 2);
     // Tenant 1 tags its object with tenant 2's value, then tags tenant 2's object.
     expect(await sqlState(tag({ value: "acme-2" }))).toBe(FOREIGN_KEY_VIOLATION);
-    expect(await sqlState(tag({ objectId: other.objectId, value: "acme-1", source: "user" }))).toBe(
-      FOREIGN_KEY_VIOLATION,
-    );
+    expect(
+      await sqlState(
+        tag({ objectId: other.objectId, value: "acme-1", source: "user", appliedBy: "user:ana" }),
+      ),
+    ).toBe(FOREIGN_KEY_VIOLATION);
   });
 
   it.each([
