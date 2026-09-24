@@ -22,3 +22,14 @@ export {
   type RuleInput,
   type TagRule,
 } from "./rules.js";
+export {
+  blobIdOf,
+  ingest,
+  IngestError,
+  normalizeMime,
+  removeFromSource,
+  sourceItemState,
+  type IngestInput,
+  type IngestResult,
+  type SourceItemState,
+} from "./ingest.js";

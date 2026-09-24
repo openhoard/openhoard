@@ -10,6 +10,7 @@ import {
   type Tx,
 } from "@openhoard/core-db";
 import { and, asc, eq, gt, isNull, ne, or, sql } from "drizzle-orm";
+import { lockObject } from "./locks.js";
 
 /*
  * Applying tags, and the review inbox (T-406). The one rule: nothing creates vocabulary, and
@@ -57,9 +58,6 @@ export type TagOutcome =
 
 /** Model tags below this confidence go to review. */
 export const DEFAULT_MIN_CONFIDENCE = 0.75;
-
-/** Advisory lock namespace for tagging one object (the object fills the second key). */
-const OBJECT_LOCK = 7422;
 
 export async function proposeTag(
   tx: Tx,
@@ -289,16 +287,6 @@ export async function mergeReview(
 }
 
 type ReviewRow = typeof tagReviews.$inferSelect;
-
-/**
- * Serializes everything that tags one object, so a proposal can't slip a second open item past
- * a review being resolved. Held until the transaction ends.
- */
-async function lockObject(tx: Tx, tenantId: string, objectId: string) {
-  await tx.execute(
-    sql`select pg_advisory_xact_lock(${OBJECT_LOCK}, hashtext(${tenantId} || '/' || ${objectId}))`,
-  );
-}
 
 /** The open item, locked, so two reviewers can't both resolve it. */
 async function openItem(tx: Tx, tenantId: string, reviewId: string): Promise<ReviewRow> {
