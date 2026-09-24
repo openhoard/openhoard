@@ -22,9 +22,12 @@ import {
   facets,
   facetValues,
   grants,
+  groups,
   objects,
   sourceRefs,
   tenants,
+  userIdentities,
+  users,
   versions,
   zones,
 } from "./schema.js";
@@ -231,6 +234,9 @@ describe("schema", () => {
       await tx.delete(facets);
       await tx.delete(blobs);
       await tx.delete(zones);
+      await tx.delete(groups); // takes memberships with it
+      await tx.delete(userIdentities);
+      await tx.delete(users);
       await tx.delete(tenants);
     });
     // The policies match on tenant_id alone, so orphans would still be visible here.
@@ -241,7 +247,10 @@ describe("schema", () => {
                    (select count(*) from blobs) + (select count(*) from objects) +
                    (select count(*) from versions) + (select count(*) from source_refs) +
                    (select count(*) from facets) + (select count(*) from facet_values) +
-                   (select count(*) from object_tags) + (select count(*) from grants) as n`,
+                   (select count(*) from object_tags) + (select count(*) from grants) +
+                   (select count(*) from users) + (select count(*) from user_identities) +
+                   (select count(*) from groups) +
+                   (select count(*) from group_members) as n`,
       ),
     );
     expect(left).toEqual([{ n: "0" }]); // raw int8 is a string (see above)

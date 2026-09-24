@@ -6,10 +6,14 @@ import {
   facets,
   facetValues,
   grants,
+  groupMembers,
+  groups,
   objects,
   objectTags,
   sourceRefs,
   tenants,
+  userIdentities,
+  users,
   versions,
   zones,
 } from "./schema.js";
@@ -72,12 +76,17 @@ export interface SeededTenant {
   externalId: string;
   /** The object's one tag, `client:acme-<n>`, an approved value. */
   tag: string;
+  /** A local member user, `ana-<n>@example.com`, in the group below, signing in as `ana-<n>`. */
+  userId: string;
+  /** A local group "Readers <n>", holding a permanent read grant on the tag. */
+  groupId: string;
 }
 
 /**
  * Creates a tenant with one row in every table: a zone, a blob, an object with one version, the
- * object's source reference, one tag on it from a one-value vocabulary, and a permanent read
- * grant on that tag to `group:readers-<n>`. `n` makes names and hashes distinct between seeded tenants.
+ * object's source reference, one tag on it from a one-value vocabulary, a user in a group, and a
+ * permanent read grant on that tag to the group. `n` makes names and hashes distinct between
+ * seeded tenants.
  */
 export async function seedTenant(db: Database, n = 0): Promise<SeededTenant> {
   const s: SeededTenant = {
@@ -88,6 +97,8 @@ export async function seedTenant(db: Database, n = 0): Promise<SeededTenant> {
     versionId: newId("version"),
     externalId: `item-${n}`,
     tag: `client:acme-${n}`,
+    userId: newId("user"),
+    groupId: newId("group"),
   };
   await db.withTenant(s.tenantId, async (tx) => {
     await tx.insert(tenants).values({ id: s.tenantId, name: `Tenant ${n}` });
@@ -137,13 +148,33 @@ export async function seedTenant(db: Database, n = 0): Promise<SeededTenant> {
     await tx.insert(grants).values({
       tenantId: s.tenantId,
       id: newId("grant"),
-      principal: `group:readers-${n}`,
+      principal: `group:${s.groupId}`,
       role: "read",
       facet: "client",
       value: `acme-${n}`,
       grantedBy: `user:owner-${n}`,
       expiresAt: null,
     });
+    await tx.insert(users).values({
+      tenantId: s.tenantId,
+      id: s.userId,
+      email: `ana-${n}@example.com`,
+      emailKey: `ana-${n}@example.com`,
+      displayName: `Ana ${n}`,
+      source: "local",
+    });
+    await tx.insert(userIdentities).values({
+      tenantId: s.tenantId,
+      issuer: "https://login.example.com",
+      subject: `ana-${n}`,
+      userId: s.userId,
+    });
+    await tx
+      .insert(groups)
+      .values({ tenantId: s.tenantId, id: s.groupId, name: `Readers ${n}`, source: "local" });
+    await tx
+      .insert(groupMembers)
+      .values({ tenantId: s.tenantId, groupId: s.groupId, userId: s.userId });
   });
   return s;
 }

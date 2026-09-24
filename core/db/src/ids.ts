@@ -21,6 +21,8 @@ export const ID_PREFIXES = {
   version: "ver",
   grant: "grt",
   review: "rev",
+  user: "usr",
+  group: "grp",
 } as const;
 export type IdKind = keyof typeof ID_PREFIXES;
 

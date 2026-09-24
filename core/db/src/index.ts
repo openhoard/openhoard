@@ -18,8 +18,10 @@ export * from "./schema.js";
 export {
   addGrant,
   DEFAULT_GRANT_DAYS,
+  GrantError,
   loadGrants,
   revokeGrant,
+  type GrantErrorCode,
   type GrantInput,
   type GrantRole,
   type GrantSet,

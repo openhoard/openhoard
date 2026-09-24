@@ -2,7 +2,7 @@
   "name": "@openhoard/core-identity",
   "version": "0.0.0",
   "private": true,
-  "description": "Identity: users, groups, principal sets.",
+  "description": "Identity: users, groups, memberships and who a signed-in person is to authorize().",
   "type": "module",
   "exports": {
     ".": {
@@ -19,6 +19,11 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "clean": "rimraf dist coverage"
+  },
+  "dependencies": {
+    "@openhoard/core-db": "workspace:^",
+    "@openhoard/core-policy": "workspace:^",
+    "drizzle-orm": "^0.45.3"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*"

@@ -374,6 +374,165 @@ export const objectTags = pgTable(
 );
 
 /*
+ * People and groups (T-101). Users come from the tenant's identity provider over SCIM (T-103)
+ * or are created in OpenHoard, by invitation or an admin (T-108, T-110): `source` records which,
+ * and only that side may change them (core/identity enforces it). Their principal is
+ * `user:<id>`, a group's `group:<id>`, so a rename never breaks a grant.
+ *
+ * A user is active unless something stops them, and the stops are independent, so lifting one
+ * never lifts another:
+ *
+ * - an admin lock (`user:` or `system:`), for an investigation or an emergency;
+ * - a provider disable (`scim:`), when the identity provider deactivates the user;
+ * - retirement, which is final: the person left or the account was deleted upstream. It frees
+ *   the email for someone new. Rows are never deleted: users own objects and appear in audit.
+ */
+export const IDENTITY_SOURCES = ["scim", "local"] as const;
+export const USER_KINDS = ["member", "guest"] as const;
+
+export const users = pgTable(
+  "users",
+  {
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    id: text("id").notNull(),
+    email: text("email").notNull(),
+    /** The email normalized for matching (core/identity emailKey()). */
+    emailKey: text("email_key").notNull(),
+    displayName: text("display_name").notNull(),
+    /** Guests are people outside the organization: they never discover files (T-603). */
+    kind: text("kind", { enum: USER_KINDS }).notNull().default("member"),
+    source: text("source", { enum: IDENTITY_SOURCES }).notNull(),
+    /** The identity provider's id for the user (SCIM externalId); null for local users. */
+    externalId: text("external_id"),
+    createdAt: createdAt(),
+    lockedAt: timestamp("locked_at", { withTimezone: true }),
+    lockedBy: text("locked_by"),
+    providerDisabledAt: timestamp("provider_disabled_at", { withTimezone: true }),
+    providerDisabledBy: text("provider_disabled_by"),
+    retiredAt: timestamp("retired_at", { withTimezone: true }),
+    retiredBy: text("retired_by"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    // Among current users only: a retired address can belong to someone new.
+    uniqueIndex("users_email_unique")
+      .on(t.tenantId, t.emailKey)
+      .where(sql`retired_at is null`),
+    uniqueIndex("users_external_id_unique")
+      .on(t.tenantId, t.externalId)
+      .where(sql`external_id is not null and retired_at is null`),
+    idCheck("users_id_format", "id", "user"),
+    check("users_email_length", sql`char_length(email) between 3 and 320`),
+    check("users_email_key_length", sql`char_length(email_key) between 3 and 320`),
+    check("users_display_name_length", sql`char_length(display_name) between 1 and 256`),
+    check("users_kind_valid", sql.raw(`kind in (${quoted(USER_KINDS)})`)),
+    check("users_source_valid", sql.raw(`source in (${quoted(IDENTITY_SOURCES)})`)),
+    check(
+      "users_external_id_length",
+      sql`external_id is null or char_length(external_id) between 1 and 512`,
+    ),
+    check("users_lock_complete", sql`(locked_at is null) = (locked_by is null)`),
+    check("users_locked_by_admin", sql`locked_by is null or locked_by ~ '^(user|system):.+$'`),
+    check(
+      "users_provider_disabled_complete",
+      sql`(provider_disabled_at is null) = (provider_disabled_by is null)`,
+    ),
+    check(
+      "users_provider_disabled_by_scim",
+      sql`provider_disabled_by is null or (provider_disabled_by ~ '^scim:.+$' and source = 'scim')`,
+    ),
+    check("users_retired_complete", sql`(retired_at is null) = (retired_by is null)`),
+    check(
+      "users_retired_by_principal",
+      sql`retired_by is null or retired_by ~ '^(user|system|scim):.+$'`,
+    ),
+  ],
+);
+
+export const groups = pgTable(
+  "groups",
+  {
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    id: text("id").notNull(),
+    /** Display name; not unique, identity providers allow duplicates. */
+    name: text("name").notNull(),
+    source: text("source", { enum: IDENTITY_SOURCES }).notNull(),
+    externalId: text("external_id"),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    uniqueIndex("groups_external_id_unique")
+      .on(t.tenantId, t.externalId)
+      .where(sql`external_id is not null`),
+    idCheck("groups_id_format", "id", "group"),
+    check("groups_name_length", sql`char_length(name) between 1 and 256`),
+    check("groups_source_valid", sql.raw(`source in (${quoted(IDENTITY_SOURCES)})`)),
+    check(
+      "groups_external_id_length",
+      sql`external_id is null or char_length(external_id) between 1 and 512`,
+    ),
+  ],
+);
+
+/**
+ * How a user signs in: an OpenID Connect issuer and the subject it gives them (T-102, T-109), or
+ * OpenHoard's own issuer for passkeys and email links (T-108). Sign-in matches on this pair,
+ * never on email. Retiring a user removes their identities, so the pair can be linked anew.
+ */
+export const userIdentities = pgTable(
+  "user_identities",
+  {
+    tenantId: text("tenant_id").notNull(),
+    /** The issuer URL, e.g. `https://login.microsoftonline.com/<tid>/v2.0`. */
+    issuer: text("issuer").notNull(),
+    subject: text("subject").notNull(),
+    userId: text("user_id").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.issuer, t.subject] }),
+    foreignKey({
+      name: "user_identities_user_fk",
+      columns: [t.tenantId, t.userId],
+      foreignColumns: [users.tenantId, users.id],
+    }),
+    index("user_identities_user_idx").on(t.tenantId, t.userId),
+    check("user_identities_issuer_length", sql`char_length(issuer) between 1 and 1024`),
+    check("user_identities_subject_length", sql`char_length(subject) between 1 and 512`),
+  ],
+);
+
+/** Who is in which group. Direct membership only; nested groups arrive with SCIM (T-103). */
+export const groupMembers = pgTable(
+  "group_members",
+  {
+    tenantId: text("tenant_id").notNull(),
+    groupId: text("group_id").notNull(),
+    userId: text("user_id").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.groupId, t.userId] }),
+    foreignKey({
+      name: "group_members_group_fk",
+      columns: [t.tenantId, t.groupId],
+      foreignColumns: [groups.tenantId, groups.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "group_members_user_fk",
+      columns: [t.tenantId, t.userId],
+      foreignColumns: [users.tenantId, users.id],
+    }),
+    index("group_members_user_idx").on(t.tenantId, t.userId),
+  ],
+);
+
+/*
  * Grants (T-602): who may read or write what, as data (spike S3). A grant gives a principal, a
  * user or a group, access to every object carrying a tag, or to one object. Grants expire by
  * default; the expiry is checked when grants are read, so an expired grant stops working the
@@ -572,4 +731,8 @@ export const tables = {
   objectTags,
   grants,
   tagReviews,
+  users,
+  userIdentities,
+  groups,
+  groupMembers,
 } as const;
