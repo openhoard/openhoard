@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fromDriver, queryRows, type Database, type Driver, type Tx } from "./database.js";
 import { newId } from "./ids.js";
 import {
+  auditEvents,
   blobs,
   facets,
   facetValues,
@@ -105,8 +106,32 @@ describe("catalog", () => {
     }
   });
 
+  it("keeps the audit log append-only: read and insert policies, no grants, guard triggers", async () => {
+    const [r] = await driver.query(`
+      select c.relrowsecurity as enabled, c.relforcerowsecurity as forced,
+             c.relacl is null as owner_only,
+             (select json_agg(json_build_object('name', p.polname, 'cmd', p.polcmd,
+                       'using', pg_get_expr(p.polqual, p.polrelid),
+                       'check', pg_get_expr(p.polwithcheck, p.polrelid)) order by p.polname)
+                from pg_policy p where p.polrelid = c.oid) as policies,
+             (select json_agg(t.tgname order by t.tgname) from pg_trigger t
+                where t.tgrelid = c.oid and not t.tgisinternal) as triggers
+        from pg_class c where c.oid = 'audit.events'::regclass`);
+    const predicate = "(tenant_id = current_setting('app.tenant_id'::text, true))";
+    expect(r).toEqual({
+      enabled: true,
+      forced: true,
+      owner_only: true,
+      policies: [
+        { name: "tenant_append", cmd: "a", using: null, check: predicate },
+        { name: "tenant_read", cmd: "r", using: predicate, check: null },
+      ],
+      triggers: ["events_append_only", "events_extend_chain", "events_no_truncate"],
+    });
+  });
+
   it("puts tenant_id in every foreign key, so no row can point into another tenant", () => {
-    for (const table of Object.values(tables)) {
+    for (const table of [...Object.values(tables), auditEvents]) {
       for (const fk of getTableConfig(table).foreignKeys) {
         const { columns, foreignColumns, foreignTable } = fk.reference();
         const name = `${getTableName(table)}.${fk.getName()}`;

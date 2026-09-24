@@ -7,9 +7,10 @@ import {
   foreignKey,
   index,
   integer,
+  pgSchema,
   pgTable,
-  real,
   primaryKey,
+  real,
   text,
   timestamp,
   unique,
@@ -313,7 +314,48 @@ export const objectTags = pgTable(
 /** The tag string policy and search use for a facet and value. */
 export const tagOf = (facet: string, value: string): string => `${facet}:${value}`;
 
-/** Every table, for tests and tooling that must cover all of them. */
+/*
+ * Audit (T-701): one append-only, hash-chained log per tenant, in its own schema. core/audit
+ * appends and verifies; the chain rules are in core/audit/src/chain.ts.
+ *
+ * `event` is the exact canonical JSON the hash covers, so verification never depends on how the
+ * database round-trips a type. The other columns repeat its fields for queries and exports.
+ * Rows can be read and inserted in their tenant, never changed: see 0005_audit_rls.sql.
+ */
+export const auditSchema = pgSchema("audit");
+
+const HASH = "^[0-9a-f]{64}$";
+
+export const auditEvents = auditSchema.table(
+  "events",
+  {
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull(),
+    actor: text("actor").notNull(),
+    action: text("action").notNull(),
+    decision: text("decision", { enum: ["allow", "deny"] }).notNull(),
+    client: text("client"),
+    object: text("object"),
+    version: text("version"),
+    event: text("event").notNull(),
+    prevHash: text("prev_hash").notNull(),
+    hash: text("hash").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.seq] }),
+    // Exports filter by time, actor and object (T-703).
+    index("audit_events_at_idx").on(t.tenantId, t.at),
+    index("audit_events_object_idx").on(t.tenantId, t.object),
+    check("audit_events_seq_positive", sql`seq > 0`),
+    check("audit_events_decision_valid", sql`decision in ('allow', 'deny')`),
+    check("audit_events_hash_format", sql.raw(`hash ~ '${HASH}' and prev_hash ~ '${HASH}'`)),
+  ],
+);
+
+/** Every table in the public schema, for tests and tooling that must cover all of them. */
 export const tables = {
   tenants,
   zones,

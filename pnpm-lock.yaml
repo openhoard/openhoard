@@ -257,6 +257,13 @@ importers:
         version: link:../../packages/config
 
   core/audit:
+    dependencies:
+      '@openhoard/core-db':
+        specifier: workspace:^
+        version: link:../db
+      drizzle-orm:
+        specifier: ^0.45.3
+        version: 0.45.3(@electric-sql/pglite@0.5.8)(@types/pg@8.23.1)(pg@8.23.0)
     devDependencies:
       '@openhoard/config':
         specifier: workspace:*

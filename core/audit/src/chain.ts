@@ -38,12 +38,23 @@ export function canonicalJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function hashOf(event: Omit<AuditEvent, "hash">): string {
-  return createHash("sha256").update(canonicalJson(event)).digest("hex");
+/** The exact text an event's hash covers: its canonical JSON without the hash itself. */
+export function hashedText(event: Omit<AuditEvent, "hash"> | AuditEvent): string {
+  return canonicalJson({ ...event, hash: undefined });
 }
 
-/** Appends an event after `prev` (or starts a chain when `prev` is undefined). */
-export function appendEvent(prev: AuditEvent | undefined, input: AuditInput): AuditEvent {
+function hashOf(event: Omit<AuditEvent, "hash">): string {
+  return createHash("sha256").update(hashedText(event)).digest("hex");
+}
+
+/**
+ * Appends an event after `prev` (or starts a chain when `prev` is undefined). Only the previous
+ * event's `seq` and `hash` matter, so a store can pass just its chain head.
+ */
+export function appendEvent(
+  prev: Pick<AuditEvent, "seq" | "hash"> | undefined,
+  input: AuditInput,
+): AuditEvent {
   const body = {
     ...input,
     seq: prev ? prev.seq + 1 : 1,
@@ -57,23 +68,52 @@ export type VerifyResult = { ok: true } | { ok: false; seq: number; problem: str
 /**
  * Detects edited, deleted, inserted, reordered or cross-tenant events in one tenant's chain.
  *
- * LIMIT: a hash chain is only tamper-EVIDENT against someone who cannot rewrite the whole chain.
- * A database admin could recompute every hash. The planned defence (T-701) is periodic anchors
- * of the latest hash to WORM storage (S3 Object Lock / Azure immutable blobs), verified here.
+ * LIMIT: a hash chain is only tamper-EVIDENT. Removing the newest events, or rewriting them with
+ * fresh hashes, leaves a chain that still verifies, because nothing after them links back; a
+ * database admin could even recompute every hash. The planned defence is periodic anchors of
+ * the latest hash to WORM storage (S3 Object Lock / Azure immutable blobs), verified here.
  */
 export function verifyChain(events: readonly AuditEvent[]): VerifyResult {
-  let prevHash = GENESIS_HASH;
-  let expectedSeq = 1;
-  const tenantId = events[0]?.tenantId;
+  const verifier = new ChainVerifier(events[0]?.tenantId ?? "");
   for (const e of events) {
-    if (e.tenantId !== tenantId) return { ok: false, seq: e.seq, problem: "mixed tenants" };
-    if (e.seq !== expectedSeq)
-      return { ok: false, seq: e.seq, problem: `expected seq ${expectedSeq}` };
-    if (e.prevHash !== prevHash) return { ok: false, seq: e.seq, problem: "prevHash mismatch" };
-    const { hash, ...body } = e;
-    if (hashOf(body) !== hash) return { ok: false, seq: e.seq, problem: "content altered" };
-    prevHash = hash;
-    expectedSeq++;
+    const result = verifier.push(e);
+    if (!result.ok) return result;
   }
   return { ok: true };
+}
+
+/**
+ * {@link verifyChain} one event at a time, for chains too long to hold in memory. Feed events in
+ * seq order; the first failure is sticky.
+ */
+export class ChainVerifier {
+  private prevHash = GENESIS_HASH;
+  private expectedSeq = 1;
+  private failure: VerifyResult | undefined;
+
+  constructor(private readonly tenantId: string) {}
+
+  /** Events accepted so far. */
+  get count(): number {
+    return this.expectedSeq - 1;
+  }
+
+  /** The hash of the last accepted event: what an anchor must match. */
+  get head(): string {
+    return this.prevHash;
+  }
+
+  push(e: AuditEvent): VerifyResult {
+    if (this.failure) return this.failure;
+    const fail = (problem: string): VerifyResult =>
+      (this.failure = { ok: false, seq: e.seq, problem });
+    if (e.tenantId !== this.tenantId) return fail("mixed tenants");
+    if (e.seq !== this.expectedSeq) return fail(`expected seq ${this.expectedSeq}`);
+    if (e.prevHash !== this.prevHash) return fail("prevHash mismatch");
+    const { hash, ...body } = e;
+    if (hashOf(body) !== hash) return fail("content altered");
+    this.prevHash = hash;
+    this.expectedSeq++;
+    return { ok: true };
+  }
 }

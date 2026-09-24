@@ -56,8 +56,9 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: pnpm --filter @openhoard/testkit run injection:report
 
-  # The database suite on native PostgreSQL 18 (ADR-0004, spike S2); the node jobs run it on
-  # PGlite. It connects as an ordinary role, as production must. PGDG packages, no Docker.
+  # The database suites (core-db, core-audit) on native PostgreSQL 18 (ADR-0004, spike S2); the
+  # node jobs run them on PGlite. They connect as an ordinary role, as production must. PGDG
+  # packages, no Docker.
   postgres:
     name: postgres (18)
     runs-on: ubuntu-latest
@@ -81,9 +82,12 @@ jobs:
           sudo -u postgres psql -p 5499 -v ON_ERROR_STOP=1 \
             -c "create role openhoard_ci login createdb password 'ci'"
       - run: pnpm install --frozen-lockfile
-      # The packages core-db imports (core-policy) are used from their build output.
-      - run: pnpm --filter "@openhoard/core-db^..." run build
+      # Workspace packages the suites import are used from their build output.
+      - run: pnpm --filter "@openhoard/core-audit^..." run build
       - run: pnpm --filter @openhoard/core-db run test:coverage
+        env:
+          OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
+      - run: pnpm --filter @openhoard/core-audit run test:coverage
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
 
