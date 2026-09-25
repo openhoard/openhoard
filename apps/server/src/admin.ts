@@ -35,6 +35,22 @@ import { ensureDataDir, loadConfig, type Config } from "./config.js";
 
 export const ADMIN_ACTOR = "system:admin-cli";
 
+/**
+ * Where `admin` is in the server's arguments, when it is the first one that isn't an option
+ * (`--data-dir x admin …` too); undefined when they start the server.
+ */
+export function adminArgument(args: readonly string[]): number | undefined {
+  const { tokens } = parseArgs({
+    args: [...args],
+    options: { "data-dir": { type: "string" } },
+    strict: false,
+    allowPositionals: true,
+    tokens: true,
+  });
+  const first = tokens.find((t) => t.kind === "positional");
+  return first?.kind === "positional" && first.value === "admin" ? first.index : undefined;
+}
+
 export interface AdminIo {
   env?: NodeJS.ProcessEnv;
   cwd?: string;

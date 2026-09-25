@@ -340,8 +340,11 @@ export async function patchScimGroup(
         else plan.add(memberIds(value));
         return;
       case "id":
+        // Repeating the group's own id is harmless (Okta's value objects include it).
+        if (op !== "remove" && value === g.id) return;
+        throw new ScimError(400, "id can't be changed", "mutability");
       case "meta":
-        throw new ScimError(400, `${path.attr} can't be changed`, "mutability");
+        throw new ScimError(400, "meta can't be changed", "mutability");
       default:
         return; // attributes OpenHoard doesn't keep
     }
@@ -419,9 +422,7 @@ export async function listScimGroups(
             ? ("memberId" as const)
             : path.sub !== undefined
               ? undefined
-              : ({ displayname: "name", externalid: "externalId", id: "id" } as const)[
-                  path.attr as "displayname" | "externalid" | "id"
-                ];
+              : GROUP_FILTERS.get(path.attr);
       if (key === undefined) throw refuse(path);
       if (typeof value !== "string") {
         throw invalidFilter(`${pathName(path)} is compared with a string`);
@@ -434,6 +435,13 @@ export async function listScimGroups(
   }
   return listGroups(tx, tenantId, query, page);
 }
+
+/** Group attributes a filter may compare, by lower-cased name (a Map: no inherited keys). */
+const GROUP_FILTERS = new Map<string, "name" | "externalId" | "id">([
+  ["displayname", "name"],
+  ["externalid", "externalId"],
+  ["id", "id"],
+]);
 
 /** The terms of a filter joined by `and`. */
 function andTerms(filter: Filter): Filter[] {

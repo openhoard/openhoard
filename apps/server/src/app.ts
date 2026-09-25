@@ -57,7 +57,7 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
       db: deps.db,
       ...(log ? { log } : {}),
       ...(config.auth ? { publicUrl: config.auth.publicUrl } : {}),
-      ...(deps.scim ? { options: deps.scim } : {}),
+      options: { trustedProxies: config.scim.trustedProxies, ...deps.scim },
     });
   }
 

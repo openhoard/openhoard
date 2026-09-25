@@ -55,3 +55,71 @@ export class FailureLimiter {
     if (this.#counts.size > 100_000) this.#counts.clear();
   }
 }
+
+/**
+ * Token ids that authenticated recently, so an address or tenant block (anyone's guesses,
+ * behind a shared proxy address) never turns away the identity provider's real token. A
+ * token's own failures still count against it. Bounded: the least recently seen go first.
+ */
+export class RecentTokens {
+  readonly #seen = new Map<string, number>();
+
+  constructor(
+    readonly ttlMs: number,
+    readonly max = 1000,
+    readonly now: () => number = Date.now,
+  ) {}
+
+  add(tokenId: string): void {
+    this.#seen.delete(tokenId);
+    this.#seen.set(tokenId, this.now() + this.ttlMs);
+    while (this.#seen.size > this.max) {
+      this.#seen.delete(this.#seen.keys().next().value as string);
+    }
+  }
+
+  has(tokenId: string): boolean {
+    const until = this.#seen.get(tokenId);
+    if (until === undefined) return false;
+    if (until > this.now()) return true;
+    this.#seen.delete(tokenId);
+    return false;
+  }
+}
+
+/**
+ * Refusals of token ids a tenant doesn't have (guesses: tenant ids aren't secret), counted per
+ * tenant and written as one summary per tenant per window, so guessing can't grow the audit log
+ * or queue on its lock. At most `maxTenants` tenants are counted at once; beyond that, only the
+ * count of dropped ones is kept (returned by note()).
+ */
+export class RefusalSummary {
+  readonly #counts = new Map<string, number>();
+
+  constructor(
+    readonly windowMs: number,
+    readonly flush: (tenantId: string, count: number) => Promise<void>,
+    readonly maxTenants = 10_000,
+  ) {}
+
+  /** Counts one refusal; false when it couldn't be counted (too many tenants at once). */
+  note(tenantId: string): boolean {
+    const count = this.#counts.get(tenantId);
+    if (count !== undefined) {
+      this.#counts.set(tenantId, count + 1);
+      return true;
+    }
+    if (this.#counts.size >= this.maxTenants) return false;
+    this.#counts.set(tenantId, 1);
+    setTimeout(() => {
+      const total = this.#counts.get(tenantId) ?? 0;
+      this.#counts.delete(tenantId);
+      void this.flush(tenantId, total);
+    }, this.windowMs).unref();
+    return true;
+  }
+
+  get pending(): number {
+    return this.#counts.size;
+  }
+}

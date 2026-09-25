@@ -55,6 +55,8 @@ import { identityError, type Page } from "./shared.js";
 
 /** A user as SCIM sees it while a request changes it. */
 export interface UserState {
+  /** The user's own id, when changing one: a value object may repeat it (Okta does). */
+  id?: string;
   userName: string | null;
   externalId: string | null;
   /** Given explicitly; when null, derived (see derive()). */
@@ -78,6 +80,7 @@ export function stateOf(u: User): UserState {
   const derivedEmail =
     u.userName !== null && u.email !== null && emailKey(u.email) === emailKey(u.userName);
   return {
+    id: u.id,
     userName: u.userName,
     externalId: u.externalId,
     displayName: u.displayName,
@@ -151,8 +154,12 @@ function userType(v: unknown): boolean {
   throw invalidValue('userType must be "Member" or "Guest"');
 }
 
-/** State from a POST or PUT body. `active` defaults to `activeIfAbsent`. */
-export function stateFromBody(body: Json, activeIfAbsent: boolean): UserState {
+/**
+ * State from a POST or PUT body. `active` and `userType` default to `current` when absent (a PUT
+ * never re-enables anyone, or makes a guest a member, by leaving something out); a POST passes
+ * active and a member.
+ */
+export function stateFromBody(body: Json, current: { active: boolean; guest: boolean }): UserState {
   requireSchema(body, USER_SCHEMA);
   const name = field(body, "name");
   if (name !== undefined && name !== null && !isObject(name)) {
@@ -160,6 +167,7 @@ export function stateFromBody(body: Json, activeIfAbsent: boolean): UserState {
   }
   const part = (sub: string) => (isObject(name) ? text(field(name, sub), `name.${sub}`) : null);
   const active = field(body, "active");
+  const kind = field(body, "userType");
   return {
     userName: text(field(body, "userName"), "userName"),
     externalId: text(field(body, "externalId"), "externalId"),
@@ -168,8 +176,8 @@ export function stateFromBody(body: Json, activeIfAbsent: boolean): UserState {
     familyName: part("familyName"),
     formatted: part("formatted"),
     email: pickEmail(field(body, "emails")),
-    active: active === undefined || active === null ? activeIfAbsent : bool(active, "active"),
-    guest: userType(field(body, "userType")),
+    active: active === undefined || active === null ? current.active : bool(active, "active"),
+    guest: kind === undefined || kind === null ? current.guest : userType(kind),
   };
 }
 
@@ -232,7 +240,9 @@ export function patchUser(
       s.active = bool(value, "active");
       return;
     case "usertype":
-      s.guest = clear ? false : userType(value);
+      // Removing userType keeps the kind: making a guest a member by omission would loosen what
+      // they see. The provider changes it by sending "Member".
+      if (!clear) s.guest = userType(value);
       return;
     case "name":
       patchName(s, op, path, value);
@@ -241,6 +251,9 @@ export function patchUser(
       patchEmails(s, op, path, value);
       return;
     case "id":
+      // Repeating the user's own id is harmless (Okta's value objects include it).
+      if (op !== "remove" && s.id !== undefined && value === s.id) return;
+      throw new ScimError(400, "id can't be changed", "mutability");
     case "meta":
     case "groups":
       throw new ScimError(400, `${path.attr} can't be changed`, "mutability");
@@ -338,7 +351,7 @@ export async function scimUser(tx: Tx, tenantId: string, id: string): Promise<Us
 
 /** Creates a SCIM user from a POST body. */
 export async function createScimUser(tx: Tx, tenantId: string, body: Json, actor: string) {
-  const d = derive(stateFromBody(body, true));
+  const d = derive(stateFromBody(body, { active: true, guest: false }));
   let u: User;
   try {
     u = await createUser(tx, tenantId, {

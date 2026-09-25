@@ -2,19 +2,26 @@ import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
 import { openDatabase } from "@openhoard/core-db";
 import { startJobs, type Jobs } from "@openhoard/core-jobs";
+import { adminArgument, runAdmin } from "./admin.js";
 import { createApp } from "./app.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 
-// `main.js admin …` runs an admin command (admin.ts) instead of the server, then exits.
-if (process.argv[2] === "admin") {
-  const { runAdmin } = await import("./admin.js");
-  process.exit(
-    await runAdmin(process.argv.slice(3), {
-      out: (s) => void process.stdout.write(s),
-      err: (s) => void process.stderr.write(s),
-    }),
+// `main.js [options] admin …` runs an admin command (admin.ts) instead of the server, then exits.
+// `admin` is the first argument that isn't an option (`--data-dir x admin …` is admin too).
+const adminAt = adminArgument(process.argv.slice(2));
+if (adminAt !== undefined) {
+  const args = process.argv.slice(2);
+  const code = await runAdmin([...args.slice(0, adminAt), ...args.slice(adminAt + 1)], {
+    out: (s) => void process.stdout.write(s),
+    err: (s) => void process.stderr.write(s),
+  });
+  // Let what was written (the one-time token) reach a pipe before exiting: on Windows pipes
+  // are asynchronous, and exit() would cut it off.
+  await Promise.all(
+    [process.stdout, process.stderr].map((s) => new Promise((done) => s.write("", done))),
   );
+  process.exit(code);
 }
 
 // `--data-dir` overrides OPENHOARD_DATA_DIR; the dev script points it at the repo root.

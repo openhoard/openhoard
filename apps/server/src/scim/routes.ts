@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { appendAudit } from "@openhoard/core-audit";
 import { getTenant, lockPrincipals, type Database, type Tx } from "@openhoard/core-db";
@@ -6,6 +7,7 @@ import {
   parseScimToken,
   scimActor,
   touchScimToken,
+  type ScimTokenCheck,
 } from "@openhoard/core-identity";
 import { Hono, type Context, type Env } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -32,7 +34,8 @@ import {
   scimGroup,
 } from "./groups.js";
 import { field, isObject, parseBody, requireSchema, type Json } from "./json.js";
-import { FailureLimiter } from "./limiter.js";
+import { addressKey, clientAddress, trustedSet } from "./address.js";
+import { FailureLimiter, RecentTokens, RefusalSummary } from "./limiter.js";
 import {
   createScimUser,
   deleteScimUser,
@@ -56,16 +59,24 @@ import {
  *   `openhoard admin scim-token issue`) names its tenant, and is checked in that tenant's
  *   transaction on every request (core/identity checkScimToken()), so a revoked or expired token
  *   fails on the next one. Changes are recorded as `scim:<token id>`.
- * - Every request is audited, allowed or refused, in the transaction that serves it and last
- *   (core/audit: its lock is the last taken). A refused token on a real token id is audited as
- *   `scim.auth` with why; the caller only ever hears 401.
- * - Failed authentications are limited per client address and per token id (limiter.ts).
- * - Each request is one transaction. A write takes the tenant's principal lock first (core/db
- *   lockPrincipals(), lock order step 0), so SCIM writes to one tenant run one at a time and its
- *   uniqueness checks hold; the directory's triggers invalidate the principal cache.
+ * - The token is checked before the body is read. A refused token on a real token id is audited
+ *   as `scim.auth` with why (wrong secret, revoked, expired). Token ids a tenant doesn't have
+ *   (guesses: tenant ids aren't secret) are counted in memory and summed up in one `scim.auth`
+ *   record per tenant per window, written after the response, so guessing can't grow the log,
+ *   queue on its lock, or tell a tenant that exists from one that doesn't. The caller only ever
+ *   hears 401.
+ * - Failed authentications are limited per client address (IPv6 by /64; behind trusted proxies,
+ *   from X-Forwarded-For), per token id, and, for unknown token ids, per tenant (limiter.ts). An
+ *   address or tenant block never turns away a token id that authenticated recently, so
+ *   strangers sharing a proxy's address can't lock the identity provider out.
+ * - Each request's work is one transaction, which checks the token again, audits the request,
+ *   allowed or refused, last (core/audit: its lock is the last taken). A write takes the tenant's
+ *   principal lock first (core/db lockPrincipals(), lock order step 0), so SCIM writes to one
+ *   tenant run one at a time and its uniqueness checks hold; the directory's triggers invalidate
+ *   the principal cache.
  * - A request's work runs in a savepoint: a refusal (4xx) undoes whatever it had done, and the
  *   refusal is still audited. Nothing internal reaches the caller: an unexpected error is a
- *   plain 500, logged here.
+ *   plain 500 with a request id, logged here and audited in a transaction of its own.
  */
 
 export interface ScimOptions {
@@ -75,6 +86,11 @@ export interface ScimOptions {
   failureWindowMs?: number;
   /** Largest request body, in bytes (1 MiB). */
   maxBodyBytes?: number;
+  /**
+   * Proxies (exact addresses) whose X-Forwarded-For names the client (config
+   * `scim.trustedProxies`); none by default.
+   */
+  trustedProxies?: readonly string[];
 }
 
 export interface ScimDeps {
@@ -89,7 +105,15 @@ const CONTENT_TYPE = "application/scim+json";
 const REALM = 'Bearer realm="OpenHoard SCIM"';
 const MAX_OPERATIONS = 1000;
 
-type ScimEnv = { Variables: { scim: { tenantId: string; token: string; keys: string[] } } };
+type ScimEnv = {
+  Variables: {
+    scim: { tenantId: string; token: string; tokenId: string; actor: string; keys: string[] };
+  };
+};
+
+/** The resource a path names, for the audit record: an id, never arbitrary input. */
+const targetOf = (id: string | undefined) =>
+  id !== undefined && /^(usr|grp)_[0-9a-hjkmnp-tv-z]{26}$/.test(id) ? { target: id } : {};
 
 /** What a request's work produced: a response, and what the audit record says of it. */
 interface Done {
@@ -102,8 +126,28 @@ interface Done {
 export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): void {
   const { db, log } = deps;
   const opts = deps.options ?? {};
-  const limiter = new FailureLimiter(opts.maxFailures ?? 10, opts.failureWindowMs ?? 60_000);
+  const windowMs = opts.failureWindowMs ?? 60_000;
+  const limiter = new FailureLimiter(opts.maxFailures ?? 10, windowMs);
+  // A token that authenticated within the last 10 windows isn't turned away by others' failures.
+  const recent = new RecentTokens(windowMs * 10);
+  const trusted = trustedSet(opts.trustedProxies ?? []);
   const maxBody = opts.maxBodyBytes ?? 1024 * 1024;
+  const unknownTokens = new RefusalSummary(windowMs, async (tenantId, count) => {
+    try {
+      await db.withTenant(tenantId, async (tx) => {
+        // Written only for a tenant that exists (it has a log), after the responses went out.
+        if (!(await getTenant(tx, tenantId))) return;
+        await appendAudit(tx, tenantId, {
+          actor: "scim:unknown-token",
+          action: "scim.auth",
+          decision: "deny",
+          detail: { reason: "unknown-token", count, windowSeconds: Math.ceil(windowMs / 1000) },
+        });
+      });
+    } catch (err) {
+      log?.error({ err }, "scim: writing the unknown-token summary failed");
+    }
+  });
   const scim = new Hono<ScimEnv>();
 
   const send = (status: number, body?: Json, headers: Record<string, string> = {}) =>
@@ -116,6 +160,74 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): void {
   const base = (c: Context) =>
     new URL("/scim/v2", deps.publicUrl ?? new URL(c.req.url).origin).href;
 
+  /** A refused token on a real token id, audited with why, in the transaction that checked it. */
+  const auditRefusal = async (
+    tx: Tx,
+    tenantId: string,
+    refused: { tokenId: string; reason: string },
+    method: string,
+  ) =>
+    appendAudit(tx, tenantId, {
+      actor: scimActor(refused.tokenId),
+      action: "scim.auth",
+      decision: "deny",
+      detail: { reason: refused.reason, method },
+    });
+
+  // Who is asking, before the body is read: the token must be good, and a client that failed too
+  // often is turned away first.
+  scim.use("*", async (c, next) => {
+    const header = c.req.header("authorization") ?? "";
+    const m = /^Bearer +(\S+) *$/i.exec(header);
+    const named = m ? parseScimToken(m[1]) : null;
+    if (!m || !named) {
+      // Refused without touching the database or the log, so not counted: counting them would
+      // let anyone lock out a proxy's address (every client behind it shares one) for free.
+      return unauthorized(m !== null);
+    }
+    const token = m[1] as string;
+    const { tenantId, tokenId } = named;
+    const address = `address:${addressKey(clientAddress(peerOf(c), c.req.header("x-forwarded-for"), trusted))}`;
+    const tokenKey = `token:${tokenId}`;
+    const tenantKey = `tenant:${tenantId}`;
+    let wait = limiter.blockedFor(tokenKey);
+    if (wait === 0 && !recent.has(tokenId)) {
+      wait = Math.max(limiter.blockedFor(address), limiter.blockedFor(tenantKey));
+    }
+    if (wait > 0) {
+      return fail(new ScimError(429, "too many failed authentications; try again later"), {
+        "retry-after": String(Math.ceil(wait / 1000)),
+      });
+    }
+    let check: ScimTokenCheck;
+    try {
+      // The same work for a tenant that doesn't exist as for one that does: one lookup.
+      check = await db.withTenant(tenantId, async (tx) => {
+        const checked = await checkScimToken(tx, tenantId, token);
+        if (!checked.ok && checked.refused) {
+          await auditRefusal(tx, tenantId, checked.refused, c.req.method);
+        }
+        return checked;
+      });
+    } catch (err) {
+      log?.error({ err }, "scim: checking a token failed");
+      return fail(new ScimError(500, "internal error"));
+    }
+    if (!check.ok) {
+      if (check.refused) {
+        limiter.fail(address, tokenKey);
+      } else {
+        limiter.fail(address, tenantKey);
+        if (!unknownTokens.note(tenantId)) log?.warn({ tenantId }, "scim: refusals not summed");
+      }
+      return unauthorized(true);
+    }
+    recent.add(tokenId);
+    c.set("scim", { tenantId, token, tokenId, actor: check.actor, keys: [address, tokenKey] });
+    await next();
+  });
+
+  // Only then is the body read, and only so much of it.
   scim.use(
     "*",
     bodyLimit({
@@ -123,28 +235,6 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): void {
       onError: () => fail(new ScimError(413, `the body is over ${maxBody} bytes`)),
     }),
   );
-
-  // Who is asking, before anything is read: a client that failed too often is turned away.
-  scim.use("*", async (c, next) => {
-    const address = clientAddress(c);
-    const header = c.req.header("authorization") ?? "";
-    const m = /^Bearer +(\S+) *$/i.exec(header);
-    const named = m ? parseScimToken(m[1]) : null;
-    const keys = [`address:${address}`, ...(named ? [`token:${named.tokenId}`] : [])];
-    const wait = Math.max(...keys.map((k) => limiter.blockedFor(k)));
-    if (wait > 0) {
-      return fail(new ScimError(429, "too many failed authentications; try again later"), {
-        "retry-after": String(Math.ceil(wait / 1000)),
-      });
-    }
-    if (!m || !named) {
-      // Refused without touching the database or the log, so not counted: counting them would
-      // let anyone lock out a proxy's address (every client behind it shares one) for free.
-      return unauthorized(m !== null);
-    }
-    c.set("scim", { tenantId: named.tenantId, token: m[1] as string, keys });
-    await next();
-  });
 
   const unauthorized = (presented: boolean) =>
     fail(new ScimError(401, "authentication failed"), {
@@ -161,22 +251,15 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): void {
     access: "read" | "write",
     work: (tx: Tx, actor: string) => Promise<Done>,
   ): Promise<Response> => {
-    const { tenantId, token, keys } = c.var.scim;
-    const target = c.req.param("id");
+    const { tenantId, token, actor, keys } = c.var.scim;
+    const target = targetOf(c.req.param("id"));
     let outcome: { refused: true } | { done: Done } | { error: ScimError };
     try {
       outcome = await db.withTenant(tenantId, async (tx) => {
+        // Again, in the transaction that acts: a token revoked a moment ago acts no more.
         const check = await checkScimToken(tx, tenantId, token);
         if (!check.ok) {
-          // A tenant that doesn't exist has no log to write to (and nothing to protect).
-          if (await getTenant(tx, tenantId)) {
-            await appendAudit(tx, tenantId, {
-              actor: check.refused ? scimActor(check.refused.tokenId) : "scim:unknown-token",
-              action: "scim.auth",
-              decision: "deny",
-              detail: { reason: check.refused?.reason ?? "unknown-token", request: action },
-            });
-          }
+          if (check.refused) await auditRefusal(tx, tenantId, check.refused, c.req.method);
           return { refused: true as const };
         }
         if (access === "write") await lockPrincipals(tx, tenantId);
@@ -201,19 +284,28 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): void {
           actor: check.actor,
           action,
           decision,
-          detail: {
-            ...detail,
-            // The resource asked for, when the path names one (never arbitrary input).
-            ...(target !== undefined && /^(usr|grp)_[0-9a-hjkmnp-tv-z]{26}$/.test(target)
-              ? { target }
-              : {}),
-          },
+          detail: { ...detail, ...target },
         });
         return result;
       });
     } catch (err) {
-      log?.error({ err, action }, "scim: request failed");
-      return fail(new ScimError(500, "internal error"));
+      // The transaction rolled back, audit record and all: record the failure in one of its own,
+      // as well as it can, under an id the log and the caller share.
+      const requestId = randomUUID();
+      log?.error({ err, action, requestId }, "scim: request failed");
+      try {
+        await db.withTenant(tenantId, (tx) =>
+          appendAudit(tx, tenantId, {
+            actor,
+            action,
+            decision: "deny",
+            detail: { status: 500, reason: "internal-error", request: requestId, ...target },
+          }),
+        );
+      } catch (auditErr) {
+        log?.error({ err: auditErr, action, requestId }, "scim: auditing the failure failed");
+      }
+      return fail(new ScimError(500, `internal error (request ${requestId})`));
     }
     if ("refused" in outcome) {
       limiter.fail(...keys);
@@ -309,8 +401,12 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): void {
     const body = await bodyOf(c);
     return run(c, "scim.user.replace", "write", async (tx, actor) => {
       const current = await scimUser(tx, tenantOf(c), c.req.param("id"));
-      // A PUT without `active` leaves it as it is: it never re-enables a user by omission.
-      const next = stateFromBody(body(), current.providerDisabled === null);
+      // A PUT without `active` or `userType` leaves them as they are: it never re-enables a user,
+      // or makes a guest a member, by omission.
+      const next = stateFromBody(body(), {
+        active: current.providerDisabled === null,
+        guest: current.kind === "guest",
+      });
       const u = await saveUser(tx, tenantOf(c), current, next, actor);
       return { status: 200, body: userResource(u, base(c)) };
     });
@@ -499,11 +595,11 @@ function wantsMembers(c: Context): boolean {
   return !(attributeNames(c.req.query("excludedAttributes"))?.has("members") ?? false);
 }
 
-/** The client's address, for counting failures; "unknown" when the server can't tell. */
-function clientAddress(c: Context): string {
+/** The socket's peer address, or undefined when there is no socket (in-process requests). */
+function peerOf(c: Context): string | undefined {
   try {
-    return getConnInfo(c).remote.address ?? "unknown";
+    return getConnInfo(c).remote.address;
   } catch {
-    return "unknown";
+    return undefined;
   }
 }

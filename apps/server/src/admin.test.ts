@@ -5,7 +5,7 @@ import { exportAudit } from "@openhoard/core-audit";
 import { openDatabase, type Database } from "@openhoard/core-db";
 import { openTestDatabase, TEST_POSTGRES_ENV } from "@openhoard/core-db/testing";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ADMIN_ACTOR, runAdmin } from "./admin.js";
+import { ADMIN_ACTOR, adminArgument, runAdmin } from "./admin.js";
 import { createApp } from "./app.js";
 import { ConfigSchema } from "./config.js";
 
@@ -52,6 +52,18 @@ async function inspect<T>(work: (db: Database) => Promise<T>): Promise<T> {
     await db.close();
   }
 }
+
+describe("adminArgument", () => {
+  it("finds admin as the first positional argument, after options", () => {
+    expect(adminArgument(["admin", "tenant", "list"])).toBe(0);
+    expect(adminArgument(["--data-dir", "/x", "admin", "tenant", "list"])).toBe(2);
+    expect(adminArgument(["--data-dir=/x", "admin"])).toBe(1);
+    expect(adminArgument([])).toBeUndefined();
+    expect(adminArgument(["--data-dir", "/x"])).toBeUndefined();
+    expect(adminArgument(["--data-dir", "admin"])).toBeUndefined(); // a directory named admin
+    expect(adminArgument(["serve", "admin"])).toBeUndefined();
+  });
+});
 
 describe("openhoard admin", () => {
   it("creates a tenant, issues a SCIM token that works, lists and revokes it, all audited", async () => {

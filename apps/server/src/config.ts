@@ -222,7 +222,18 @@ export const ConfigSchema = z
      * token nothing gets in.
      */
     scim: z
-      .object({ enabled: z.boolean().default(true) })
+      .object({
+        enabled: z.boolean().default(true),
+        /**
+         * Reverse proxies or tunnels in front of this server (exact IPv4 or IPv6 addresses,
+         * e.g. "127.0.0.1"): for requests from them, the client's address, which failed
+         * authentications are counted by, is read from X-Forwarded-For. None by default.
+         */
+        trustedProxies: z
+          .array(z.union([z.ipv4(), z.ipv6()]))
+          .max(100)
+          .default([]),
+      })
       .strict()
       .prefault({}),
   })

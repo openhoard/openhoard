@@ -282,16 +282,44 @@ recorded as `scim:<token id>`.
 
 **What is audited.** Every request is written to the audit log, allowed or refused, as
 `scim.user.*`, `scim.group.*` or `scim.discovery.read`. The record holds ids, the status and the
-reason for a refusal, and no personal data. A refused token is logged as `scim.auth`. For a real
-token id the record says why (`wrong-secret`, `revoked` or `expired`); otherwise it says
-`unknown-token`. The caller only ever gets a 401.
+reason for a refusal, and no personal data.
 
-**Failed authentications.** A token that is well formed but refused counts as a failure, against
-the client's address and the token id. After 10 failures in a minute on either, requests from
-that address or with that token id get 429 until the minute is over. A request with no token, or
-with something that isn't one, gets 401 without a database lookup, and isn't counted. The count
-is kept in each process's memory. Behind a reverse proxy or a tunnel, every client has the
-proxy's address.
+- **Refused tokens.** A refused token on a real token id is logged as `scim.auth` with why
+  (`wrong-secret`, `revoked` or `expired`).
+- **Guessed token ids.** Tenant ids aren't secret, so token ids a tenant doesn't have are counted
+  in memory, not logged one by one. Each tenant gets at most one `scim.auth` record per minute
+  (`unknown-token`, with the count), written after the responses went out. A tenant that doesn't
+  exist gets the same answer after the same work, and nothing is logged. The caller only ever
+  gets a 401.
+- **Unexpected errors.** An unexpected error rolls its transaction back. The failure is then
+  logged and audited in a transaction of its own (`internal-error`), and the 500 names a request
+  id to find both by.
+- **The body.** The token is checked before the body is read.
+
+**Failed authentications.** Refused tokens that are well formed count as failures:
+
+- against the client's address (IPv6 by /64);
+- against the token id;
+- against the tenant, for token ids it doesn't have.
+
+After 10 failures in a minute on any of these, requests with that address, token id or tenant get
+429 until the minute is over. There is one exception: a token id that authenticated in the last
+10 minutes is never turned away by its address's or its tenant's count, only by its own. So
+strangers sharing an address with the identity provider (behind a tunnel, say) can't lock it out.
+
+A request with no token, or with something that isn't one, gets 401 without a database lookup
+and isn't counted. The counts are kept in each process's memory.
+
+Behind a reverse proxy or tunnel, every client has the proxy's address unless the proxy is
+trusted. For requests from a trusted proxy, X-Forwarded-For is read from the right, skipping
+trusted proxies, and the first other address is the client:
+
+```json
+{ "scim": { "trustedProxies": ["127.0.0.1", "::1"] } }
+```
+
+Trusted proxies are exact addresses, and none are trusted by default. Trust only the proxy that
+sets the header: the client writes everything to its left.
 
 **Endpoints.** `Users`, `Groups`, `ServiceProviderConfig`, `ResourceTypes` and `Schemas`. PATCH
 is supported. Bulk, sorting, ETags and `/Me` are not. Filters support `eq`, joined by `and`:
@@ -314,7 +342,7 @@ id (`usr_…`).
 | `displayName`                        | as sent; else `name.formatted`, else given and family name, else `userName` |
 | `name.givenName`, `name.familyName`  | kept                                                                        |
 | `active`                             | the provider's switch; `false` ends sessions and OAuth grants at once       |
-| `userType` (`Member`, `Guest`)       | the kind: a guest never discovers files                                     |
+| `userType` (`Member`, `Guest`)       | the kind: a guest never discovers files; left out, the kind stays           |
 
 - **Dropped attributes.** Anything else (title, phone numbers, addresses, other emails, the
   enterprise extension, a password) is accepted and dropped.
@@ -331,15 +359,21 @@ id (`usr_…`).
 - **Local users.** A local user (invited, T-108) with the same email is a 409, never adopted.
   Adopting a local user into SCIM must be an explicit admin action (not built yet). Local users,
   service accounts and retired users don't exist here (404).
-- **PUT.** A PUT replaces the attributes above; one it leaves out is removed, except `active`,
-  which a PUT without it leaves as it is (it never re-enables anyone by omission).
+- **PUT.** A PUT replaces the attributes above; one it leaves out is removed, except `active` and
+  `userType`, which stay as they are: a PUT never re-enables anyone, or makes a guest a member,
+  by omission. A PATCH that removes `userType` changes nothing either; only `"Member"` makes a
+  guest a member.
+- **The resource's own id.** A PATCH value object may repeat the resource's own `id` (Okta's
+  does); any other `id` is refused (`mutability`).
 
 **Groups.** A SCIM group is an OpenHoard group of source `scim`, and its `id` is `grp_…`.
 
 - `displayName` is unique among SCIM groups (409), compared exactly.
 - Members are users, by their SCIM id. A group as a member is refused (400): membership in
   OpenHoard is direct, and Entra doesn't provision nested groups anyway.
-- A service account, an unknown user or a retired user is refused (400).
+- A service account, a local user (invited, or a break-glass admin), an unknown user or a
+  retired user is refused (400). What the identity provider's groups hold goes only to the people
+  it provisions, whom it can take it from again.
 - Members are added and removed the way Entra sends them: `Add`/`Remove` with a value list, or
   `remove` with `members[value eq "usr_…"]`. `replace` sets the exact list.
 - PATCH answers 204.
@@ -358,7 +392,8 @@ one tenant run one at a time (the principal lock). A refused request (4xx) chang
 ## Admin commands (T-103)
 
 Until there is an admin UI, the server's entry point has a few admin commands. They read the same
-configuration as the server, and accept `--data-dir` as it does.
+configuration as the server, and accept `--data-dir` as it does (before or after `admin`). They
+never start the server or the job queue.
 
 ```sh
 node apps/server/dist/main.js admin tenant create --name "Acme"            # prints ten_…

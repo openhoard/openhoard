@@ -21,7 +21,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import type { AuthEnv } from "./auth.js";
 import { ConfigSchema } from "./config.js";
-import { FailureLimiter } from "./scim/limiter.js";
+import { addressKey, clientAddress, normalizeAddress, trustedSet } from "./scim/address.js";
+import { FailureLimiter, RecentTokens, RefusalSummary } from "./scim/limiter.js";
 
 /*
  * T-103: a SCIM 2.0 compliance suite, modelled on the Microsoft SCIM validator's cases and the
@@ -1071,28 +1072,132 @@ describe("SCIM authentication", () => {
         expect.objectContaining({
           actor: `scim:${issued.id}`,
           decision: "deny",
-          detail: { reason: "wrong-secret", request: "scim.user.list" },
+          detail: { reason: "wrong-secret", method: "GET" },
         }),
         expect.objectContaining({
           actor: `scim:${issued.id}`,
           decision: "deny",
-          detail: { reason: "revoked", request: "scim.user.list" },
+          detail: { reason: "revoked", method: "GET" },
         }),
         expect.objectContaining({
           actor: `scim:${old.id}`,
           decision: "deny",
-          detail: { reason: "expired", request: "scim.user.list" },
+          detail: { reason: "expired", method: "GET" },
         }),
       ]),
     );
+    // A token id the tenant doesn't have writes nothing at once (a summary comes later).
     const elsewhere = (await auditEvents(other.tenantId)).filter((e) => e.action === "scim.auth");
-    expect(elsewhere).toEqual([
+    expect(elsewhere).toEqual([]);
+  });
+
+  it("sums up guessed token ids per tenant, once a window, within a budget", async () => {
+    // Behind a trusted proxy, so each guess comes from its own address and only the tenant's
+    // budget adds up.
+    const guarded = createApp(
+      ConfigSchema.parse({ dataDir: "/tmp/unused", scim: { trustedProxies: ["127.0.0.1"] } }),
+      undefined,
+      { db, scim: { maxFailures: 3, failureWindowMs: 400 } },
+    );
+    const target = await seedTenant(db, 7);
+    const real = await issue(target.tenantId);
+    const guess = () =>
+      `ohscim.${target.tenantId}.${newId("scimToken")}.${randomBytes(32).toString("base64url")}`;
+    const from = (address: string, tok: string) =>
+      guarded.request(
+        `${BASE}/Users?count=0`,
+        { headers: { authorization: `Bearer ${tok}`, "x-forwarded-for": address } },
+        { incoming: { socket: { remoteAddress: "127.0.0.1" } } },
+      );
+    expect((await from("198.51.100.1", real.token)).status).toBe(200);
+    for (let i = 0; i < 3; i++) {
+      expect((await from(`198.51.100.${10 + i}`, guess())).status).toBe(401);
+    }
+    // The tenant's budget is spent: more guesses are turned away before any lookup…
+    expect((await from("198.51.100.20", guess())).status).toBe(429);
+    // …but not the token that authenticated recently.
+    expect((await from("198.51.100.21", real.token)).status).toBe(200);
+    // Nothing written yet; then one summary with the count.
+    const auth = async () =>
+      (await auditEvents(target.tenantId)).filter((e) => e.action === "scim.auth");
+    expect(await auth()).toEqual([]);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    expect(await auth()).toEqual([
       expect.objectContaining({
         actor: "scim:unknown-token",
         decision: "deny",
-        detail: { reason: "unknown-token", request: "scim.user.list" },
+        detail: { reason: "unknown-token", count: 3, windowSeconds: 1 },
       }),
     ]);
+    // A tenant that doesn't exist: the same answer, and no log anywhere.
+    const nowhere = newId("tenant");
+    const res = await from(
+      "198.51.100.30",
+      `ohscim.${nowhere}.${newId("scimToken")}.${"A".repeat(43)}`,
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("never lets strangers behind one address lock out the identity provider's token", async () => {
+    // Every in-process request has the same (unknown) address, as behind a tunnel.
+    const shared = createApp(config(), undefined, {
+      db,
+      scim: { maxFailures: 3, failureWindowMs: 60_000 },
+    });
+    const as = (tok: string) =>
+      call("GET", "/Users?count=0", undefined, { authorization: `Bearer ${tok}` }, shared);
+    expect((await as(token)).status).toBe(200);
+    const fresh = await issue();
+    for (let i = 0; i < 3; i++) {
+      expect(
+        (await as(`ohscim.${other.tenantId}.${newId("scimToken")}.${"B".repeat(43)}`)).status,
+      ).toBe(401);
+    }
+    // The address is blocked for anyone new…
+    expectError(await as(fresh.token), 429);
+    // …but the token that authenticated recently goes on.
+    expect((await as(token)).status).toBe(200);
+  });
+
+  it("counts clients by the address a trusted proxy names, and IPv6 by /64", async () => {
+    const proxied = createApp(
+      ConfigSchema.parse({ dataDir: "/tmp/unused", scim: { trustedProxies: ["::1"] } }),
+      undefined,
+      { db, scim: { maxFailures: 2 } },
+    );
+    const bad = `ohscim.${t.tenantId}.${tokenId}.${"C".repeat(43)}`;
+    const fresh = await issue();
+    const from = (peer: string, forwarded: string | undefined, tok: string) =>
+      proxied.request(
+        `${BASE}/Users?count=0`,
+        {
+          headers: {
+            authorization: `Bearer ${tok}`,
+            ...(forwarded === undefined ? {} : { "x-forwarded-for": forwarded }),
+          },
+        },
+        { incoming: { socket: { remoteAddress: peer } } },
+      );
+    // Two failures from one /64 (different addresses in it) block that /64 only. The token id
+    // is blocked too (its own failures), so the checks below use another token.
+    await from("::1", "2001:db8:1:2::1", bad);
+    await from("::1", "spoofed, 2001:db8:1:2::ffff", bad);
+    expect((await from("::1", "2001:db8:1:2:aaaa::5", fresh.token)).status).toBe(429);
+    expect((await from("::1", "2001:db8:1:3::1", fresh.token)).status).toBe(200);
+    // An untrusted peer's X-Forwarded-For is ignored: the peer is the client.
+    const other2 = await issue();
+    await from(
+      "203.0.113.9",
+      "198.51.100.1",
+      `ohscim.${t.tenantId}.${other2.id}.${"D".repeat(43)}`,
+    );
+    await from(
+      "203.0.113.9",
+      "198.51.100.2",
+      `ohscim.${t.tenantId}.${other2.id}.${"D".repeat(43)}`,
+    );
+    const third = await issue();
+    expect((await from("203.0.113.9", "198.51.100.3", third.token)).status).toBe(429);
   });
 
   it("audits every allowed use and every refusal, as scim:<token id>", async () => {
@@ -1180,5 +1285,272 @@ describe("SCIM authentication", () => {
       authorization: `Bearer ${theirs.token}`,
     });
     expect(list.body.totalResults).toBe(0);
+  });
+});
+
+describe("SCIM review regressions", () => {
+  it("never puts a local user in a SCIM group (a break-glass admin keeps only their own grants)", async () => {
+    const created = await call("POST", "/Groups", {
+      schemas: [GROUP],
+      displayName: `Local refused ${n}`,
+      members: [{ value: t.userId }],
+    });
+    expectError(created, 400, "invalidValue");
+    expect(created.body.detail).toMatch(/isn't provisioned by SCIM/);
+    const g = (await call("POST", "/Groups", { schemas: [GROUP], displayName: `Local ${n}` })).body;
+    const patched = await call("PATCH", `/Groups/${String(g.id)}`, {
+      schemas: [PATCH],
+      Operations: [{ op: "add", path: "members", value: [{ value: t.userId }] }],
+    });
+    expectError(patched, 400, "invalidValue");
+    const principal = await db.withTenant(t.tenantId, (tx) =>
+      resolvePrincipal(tx, t.tenantId, t.userId),
+    );
+    expect(principal?.groupIds).not.toContain(g.id);
+  });
+
+  it("keeps a guest a guest when PUT or PATCH leaves userType out", async () => {
+    const guest = await createUser({ userType: "Guest" });
+    const id = guest.id as string;
+    const put = await call("PUT", `/Users/${id}`, {
+      schemas: [USER],
+      userName: guest.userName,
+      emails: guest.emails,
+    });
+    expect(put.status, JSON.stringify(put.body)).toBe(200);
+    expect(put.body.userType).toBe("Guest");
+    const removed = await call("PATCH", `/Users/${id}`, {
+      schemas: [PATCH],
+      Operations: [{ op: "remove", path: "userType" }],
+    });
+    expect(removed.body.userType).toBe("Guest");
+    const stored = await db.withTenant(t.tenantId, (tx) => getUser(tx, t.tenantId, id));
+    expect(stored?.kind).toBe("guest");
+    // Only an explicit "Member" makes them one.
+    const member = await call("PUT", `/Users/${id}`, {
+      schemas: [USER],
+      userName: guest.userName,
+      emails: guest.emails,
+      userType: "Member",
+    });
+    expect(member.body.userType).toBe("Member");
+  });
+
+  it("treats inherited object keys as the unknown attributes they are", async () => {
+    for (const attr of ["constructor", "toString", "hasOwnProperty", "valueOf"]) {
+      for (const resource of ["Users", "Groups"]) {
+        const res = await call(
+          "GET",
+          `/${resource}?filter=${encodeURIComponent(`${attr} eq "x"`)}`,
+        );
+        expectError(res, 400, "invalidFilter");
+      }
+    }
+  });
+
+  it("audits a request that fails unexpectedly, in a transaction of its own", async () => {
+    let explode = false;
+    const faulty: Database = {
+      ...db,
+      withTenant: (id, work, cfg) =>
+        db.withTenant(
+          id,
+          (tx) =>
+            work(
+              explode
+                ? new Proxy(tx, {
+                    get: (target, prop) =>
+                      prop === "transaction"
+                        ? () => {
+                            throw new Error("boom: a secret internal detail");
+                          }
+                        : Reflect.get(target, prop),
+                  })
+                : tx,
+            ),
+          cfg,
+        ),
+    };
+    const broken = createApp(config(), undefined, { db: faulty });
+    explode = true;
+    const res = await call("GET", "/Users?count=0", undefined, {}, broken);
+    explode = false;
+    expectError(res, 500);
+    expect(res.body.detail).not.toContain("boom");
+    const requestId = /request ([0-9a-f-]{36})/.exec(res.body.detail as string)?.[1];
+    expect(requestId).toBeDefined();
+    const [event] = (await auditEvents()).filter(
+      (e) => e.detail?.request === requestId && e.action === "scim.user.list",
+    );
+    expect(event).toMatchObject({
+      actor: `scim:${tokenId}`,
+      decision: "deny",
+      detail: { status: 500, reason: "internal-error", request: requestId },
+    });
+  });
+
+  it("accepts a value object repeating the resource's own id, as Okta sends", async () => {
+    const u = await createUser();
+    const okta = await call("PATCH", `/Users/${String(u.id)}`, {
+      schemas: [PATCH],
+      Operations: [{ op: "replace", value: { id: u.id, displayName: "Okta Name", active: true } }],
+    });
+    expect(okta.status, JSON.stringify(okta.body)).toBe(200);
+    expect(okta.body.displayName).toBe("Okta Name");
+    expectError(
+      await call("PATCH", `/Users/${String(u.id)}`, {
+        schemas: [PATCH],
+        Operations: [{ op: "replace", value: { id: `usr_${"0".repeat(26)}` } }],
+      }),
+      400,
+      "mutability",
+    );
+    const g = (await call("POST", "/Groups", { schemas: [GROUP], displayName: `Okta ${n}` })).body;
+    const renamed = await call("PATCH", `/Groups/${String(g.id)}`, {
+      schemas: [PATCH],
+      Operations: [{ op: "replace", value: { id: g.id, displayName: `Okta renamed ${n}` } }],
+    });
+    expect(renamed.status).toBe(204);
+    expect((await call("GET", `/Groups/${String(g.id)}`)).body.displayName).toBe(
+      `Okta renamed ${n}`,
+    );
+    expectError(
+      await call("PATCH", `/Groups/${String(g.id)}`, {
+        schemas: [PATCH],
+        Operations: [{ op: "remove", path: "id" }],
+      }),
+      400,
+      "mutability",
+    );
+  });
+
+  it("reads no body before the token checks out", async () => {
+    const small = createApp(config(), undefined, { db, scim: { maxBodyBytes: 100 } });
+    const big = JSON.stringify(entraUser({ displayName: "x".repeat(500) }));
+    const anonymous = await small.request(`${BASE}/Users`, {
+      method: "POST",
+      headers: { "content-type": "application/scim+json" },
+      body: big,
+    });
+    expect(anonymous.status).toBe(401);
+    const wrong = await call(
+      "POST",
+      "/Users",
+      big,
+      {
+        authorization: `Bearer ohscim.${t.tenantId}.${newId("scimToken")}.${"E".repeat(43)}`,
+      },
+      small,
+    );
+    expect(wrong.status).toBe(401);
+    expectError(await call("POST", "/Users", big, {}, small), 413);
+  });
+
+  it("serializes parallel writes without deadlocks, and loses none", async () => {
+    const g = (await call("POST", "/Groups", { schemas: [GROUP], displayName: `Busy ${n}` })).body;
+    const created = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        call("POST", "/Users", entraUser({ userName: `parallel.${i}.${n}@contoso.example` })),
+      ),
+    );
+    expect(created.map((r) => r.status)).toEqual(Array(20).fill(201));
+    const ids = created.map((r) => r.body.id as string);
+    const [patched, groups] = await Promise.all([
+      Promise.all(
+        ids.map((id) =>
+          call("PATCH", `/Groups/${String(g.id)}`, {
+            schemas: [PATCH],
+            Operations: [{ op: "add", path: "members", value: [{ value: id }] }],
+          }),
+        ),
+      ),
+      Promise.all(
+        Array.from({ length: 10 }, (_, i) =>
+          call("POST", "/Groups", { schemas: [GROUP], displayName: `Parallel ${i} ${n}` }),
+        ),
+      ),
+    ]);
+    expect(patched.map((r) => r.status)).toEqual(Array(20).fill(204));
+    expect(groups.map((r) => r.status)).toEqual(Array(10).fill(201));
+    const members = ((await call("GET", `/Groups/${String(g.id)}`)).body.members as Json[])
+      .map((m) => m.value)
+      .sort();
+    expect(members).toEqual([...ids].sort());
+    // Half leave while the other half's names change, all at once.
+    const mixed = await Promise.all(
+      ids.map((id, i) =>
+        i % 2 === 0
+          ? call("PATCH", `/Groups/${String(g.id)}`, {
+              schemas: [PATCH],
+              Operations: [{ op: "remove", path: `members[value eq "${id}"]` }],
+            })
+          : call("PATCH", `/Users/${id}`, {
+              schemas: [PATCH],
+              Operations: [{ op: "replace", path: "displayName", value: `Renamed ${i}` }],
+            }),
+      ),
+    );
+    expect(mixed.every((r) => r.status === 200 || r.status === 204)).toBe(true);
+    const left = ((await call("GET", `/Groups/${String(g.id)}`)).body.members as Json[])
+      .map((m) => m.value)
+      .sort();
+    expect(left).toEqual(ids.filter((_, i) => i % 2 === 1).sort());
+  });
+});
+
+describe("SCIM client addresses and counters", () => {
+  it("spells addresses one way, and counts IPv6 by /64", () => {
+    expect(normalizeAddress("::ffff:192.0.2.1")).toBe("192.0.2.1");
+    expect(normalizeAddress("[2001:DB8::1]")).toBe("2001:0db8:0000:0000:0000:0000:0000:0001");
+    expect(normalizeAddress("fe80::1%eth0")).toBe("fe80:0000:0000:0000:0000:0000:0000:0001");
+    expect(normalizeAddress("64:ff9b::192.0.2.1")).toBe("0064:ff9b:0000:0000:0000:0000:c000:0201");
+    expect(normalizeAddress("::")).toBe("0000:0000:0000:0000:0000:0000:0000:0000");
+    expect(normalizeAddress("not an address")).toBeNull();
+    expect(addressKey("2001:db8:1:2:3:4:5:6")).toBe("2001:0db8:0001:0002::/64");
+    expect(addressKey("2001:db8:1:2::9")).toBe(addressKey("2001:db8:1:2:ffff::"));
+    expect(addressKey("192.0.2.1")).toBe("192.0.2.1");
+    expect(addressKey("")).toBe("unknown");
+    expect(addressKey("garbage")).toBe("garbage");
+  });
+
+  it("believes X-Forwarded-For only from trusted proxies, from the right", () => {
+    const trusted = trustedSet(["127.0.0.1", "10.0.0.1"]);
+    expect(clientAddress(undefined, "198.51.100.1", trusted)).toBe("unknown");
+    expect(clientAddress("203.0.113.5", "198.51.100.1", trusted)).toBe("203.0.113.5");
+    expect(clientAddress("127.0.0.1", undefined, trusted)).toBe("127.0.0.1");
+    expect(clientAddress("::ffff:127.0.0.1", "1.1.1.1, 198.51.100.1, 10.0.0.1", trusted)).toBe(
+      "198.51.100.1",
+    );
+    expect(clientAddress("127.0.0.1", "10.0.0.1, 127.0.0.1", trusted)).toBe("10.0.0.1");
+    expect(clientAddress("127.0.0.1", "198.51.100.1, junk", trusted)).toBe("127.0.0.1");
+    expect(() => trustedSet(["localhost"])).toThrow(TypeError);
+    expect(() =>
+      ConfigSchema.parse({ dataDir: "/tmp/unused", scim: { trustedProxies: ["localhost"] } }),
+    ).toThrow();
+  });
+
+  it("remembers recent tokens for a while, the newest first, and sums refusals per tenant", async () => {
+    let now = 0;
+    const recent = new RecentTokens(100, 2, () => now);
+    recent.add("a");
+    recent.add("b");
+    recent.add("c");
+    expect([recent.has("a"), recent.has("b"), recent.has("c")]).toEqual([false, true, true]);
+    now = 100;
+    expect(recent.has("b")).toBe(false);
+
+    const flushed: [string, number][] = [];
+    const summary = new RefusalSummary(
+      20,
+      async (tenant, count) => void flushed.push([tenant, count]),
+      1,
+    );
+    expect(summary.note("t1")).toBe(true);
+    expect(summary.note("t1")).toBe(true);
+    expect(summary.note("t2")).toBe(false);
+    expect(summary.pending).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(flushed).toEqual([["t1", 2]]);
+    expect(summary.pending).toBe(0);
   });
 });
