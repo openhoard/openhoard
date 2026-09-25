@@ -648,13 +648,15 @@ describe("groups", () => {
   });
 
   it("changes membership only as the group's source", async () => {
-    const bo = await newUser("bo@example.com");
+    const bo = await newUser("bo@example.com", { source: "scim" });
     const scimGroup = await inTenant((tx) =>
       createGroup(tx, t.tenantId, { name: "Sales", source: "scim" }),
     );
     const add = (groupId: string, userId: string, as: "scim" | "local") =>
       inTenant((tx) => addMember(tx, t.tenantId, groupId, userId, as));
     expect(await code(add(scimGroup.id, bo.id, "local"))).toBe("wrong-source");
+    // SCIM gives its groups only to the people it provisions, never to local ones.
+    expect(await code(add(scimGroup.id, t.userId, "scim"))).toBe("invalid");
     expect(await add(scimGroup.id, bo.id, "scim")).toBe(true);
     expect(await add(scimGroup.id, bo.id, "scim")).toBe(false);
     expect(await code(add(t.groupId, "usr_01aaaaaaaaaaaaaaaaaaaaaaaa", "local"))).toBe("not-found");

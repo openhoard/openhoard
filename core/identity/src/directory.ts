@@ -1085,7 +1085,7 @@ export async function addMember(
   await ownedGroup(tx, tenantId, groupId, as);
   // Key-share: a retirement (FOR UPDATE) can't run between this check and the insert.
   const [user] = await tx
-    .select({ retiredAt: users.retiredAt, kind: users.kind })
+    .select({ retiredAt: users.retiredAt, kind: users.kind, source: users.source })
     .from(users)
     .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)))
     .for("key share");
@@ -1094,6 +1094,11 @@ export async function addMember(
   // What a service account holds is decided in OpenHoard, not by the identity provider.
   if (user.kind === "service" && as === "scim") {
     throw new IdentityError("invalid", "a service account joins only OpenHoard's own groups");
+  }
+  // Nor does the identity provider give OpenHoard's own people (a break-glass admin, an invited
+  // guest) what its groups hold: an admin couldn't take it away, and the provider can't see it.
+  if (user.source !== "scim" && as === "scim") {
+    throw new IdentityError("invalid", `user ${userId} isn't provisioned by SCIM`);
   }
   const added = await tx
     .insert(groupMembers)

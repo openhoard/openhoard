@@ -142,7 +142,10 @@ Refused: invisible characters, characters that fold into ASCII (the Kelvin sign,
 letters), and domains that aren't plain host names (percent-escapes, IP addresses, trailing
 dots).
 
-Group membership is direct. The SCIM endpoint refuses a group as a member (Entra doesn't
+Group membership is direct. A SCIM group's members are SCIM users: `addMember()` as `scim`
+refuses a local user (an invited guest, a break-glass admin) as it refuses a service account,
+since what the identity provider's groups hold would reach people it can't see or take it from.
+The SCIM endpoint also refuses a group as a member (Entra doesn't
 provision nested groups either); nesting would need resolution through groups first.
 
 A SCIM user also keeps its `userName` (the identity provider's sign-in name, Entra's UPN) as
