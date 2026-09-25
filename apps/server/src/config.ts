@@ -216,6 +216,15 @@ export const ConfigSchema = z
       .strict()
       .prefault({}),
     auth: AuthSchema.optional(),
+    /**
+     * The SCIM 2.0 endpoint (T-103) at /scim/v2, where each tenant's identity provider
+     * provisions its users and groups with the tenant's SCIM token. On by default: without a
+     * token nothing gets in.
+     */
+    scim: z
+      .object({ enabled: z.boolean().default(true) })
+      .strict()
+      .prefault({}),
   })
   .strict();
 

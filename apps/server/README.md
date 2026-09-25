@@ -258,3 +258,229 @@ Quick tunnels are for testing: the URL changes on every run, and there is no upt
 OpenHoard depends on no domain of ours. A self-hoster serves it at their own `publicUrl`, behind
 their own proxy or tunnel. A tunnel plugin running on the self-hoster's own Cloudflare account may
 come later.
+
+## Provisioning over SCIM (T-103)
+
+The tenant's identity provider keeps OpenHoard's users and groups in step with its own, over
+SCIM 2.0 (RFC 7643 and 7644), at one URL for every tenant:
+
+```text
+<publicUrl>/scim/v2    (the Tenant URL, for example https://hoard.example.com/scim/v2)
+```
+
+It is on by default (`"scim": { "enabled": false }` turns it off), and nothing gets in without a
+token.
+
+**Tokens.** Each tenant has its own SCIM bearer tokens, `ohscim.<tenant id>.<token id>.<secret>`.
+They are not API keys: a token acts only as that tenant's identity provider, and its changes are
+recorded as `scim:<token id>`.
+
+- `openhoard admin scim-token issue` prints a token once; only a SHA-256 of its secret is kept.
+- A token expires within a year (the default is a year). Before it does, issue a new one, paste
+  it into the identity provider, then revoke the old one.
+- A revoked or expired token fails on the next request.
+
+**What is audited.** Every request is written to the audit log, allowed or refused, as
+`scim.user.*`, `scim.group.*` or `scim.discovery.read`. The record holds ids, the status and the
+reason for a refusal, and no personal data. A refused token is logged as `scim.auth`. For a real
+token id the record says why (`wrong-secret`, `revoked` or `expired`); otherwise it says
+`unknown-token`. The caller only ever gets a 401.
+
+**Failed authentications.** A token that is well formed but refused counts as a failure, against
+the client's address and the token id. After 10 failures in a minute on either, requests from
+that address or with that token id get 429 until the minute is over. A request with no token, or
+with something that isn't one, gets 401 without a database lookup, and isn't counted. The count
+is kept in each process's memory. Behind a reverse proxy or a tunnel, every client has the
+proxy's address.
+
+**Endpoints.** `Users`, `Groups`, `ServiceProviderConfig`, `ResourceTypes` and `Schemas`. PATCH
+is supported. Bulk, sorting, ETags and `/Me` are not. Filters support `eq`, joined by `and`:
+
+- on users: `userName` (compared without regard to case), `externalId` (exact), `id`, `emails`
+  (or `emails.value`, or `emails[type eq "work"].value`), `displayName` and `active`;
+- on groups: `displayName` (exact), `externalId` and `id`.
+
+Pages have at most 200 resources (`startIndex`, `count`). `attributes` and `excludedAttributes`
+work on top-level attributes, and `excludedAttributes=members` skips loading members.
+
+**Users.** A SCIM user is an OpenHoard user of source `scim`, and its SCIM `id` is the OpenHoard
+id (`usr_…`).
+
+| SCIM                                 | OpenHoard                                                                   |
+| ------------------------------------ | --------------------------------------------------------------------------- |
+| `userName` (required)                | kept as sent; unique regardless of case                                     |
+| `externalId`                         | matched once at sign-in (T-102): map Entra's **objectId** here              |
+| `emails` (primary, else type `work`) | the email; with none, `userName` when it is an address, else refused        |
+| `displayName`                        | as sent; else `name.formatted`, else given and family name, else `userName` |
+| `name.givenName`, `name.familyName`  | kept                                                                        |
+| `active`                             | the provider's switch; `false` ends sessions and OAuth grants at once       |
+| `userType` (`Member`, `Guest`)       | the kind: a guest never discovers files                                     |
+
+- **Dropped attributes.** Anything else (title, phone numbers, addresses, other emails, the
+  enterprise extension, a password) is accepted and dropped.
+- **Entra's quirks.** Entra's PATCH quirks are handled: `op` in any case, `active` as `"True"` or
+  `"False"`, `emails[type eq "work"].value`, `name.givenName`, and value objects without a path,
+  including dotted keys (with or without `?aadOptscim062020`).
+- **Soft delete.** `active: false` stops the user, ending their sessions and revoking their
+  OAuth grants (T-105), as any stop does. They are still returned by GET and filters,
+  and `active: true` lets them back in. `active` reports only the provider's own switch: an
+  OpenHoard admin's lock is separate, isn't reported, and isn't lifted by `active: true`.
+- **DELETE.** DELETE retires the user for good. They leave every group, their grants are
+  revoked, and their email and userName are freed. A later POST creates a new user with a new
+  id.
+- **Local users.** A local user (invited, T-108) with the same email is a 409, never adopted.
+  Adopting a local user into SCIM must be an explicit admin action (not built yet). Local users,
+  service accounts and retired users don't exist here (404).
+- **PUT.** A PUT replaces the attributes above; one it leaves out is removed, except `active`,
+  which a PUT without it leaves as it is (it never re-enables anyone by omission).
+
+**Groups.** A SCIM group is an OpenHoard group of source `scim`, and its `id` is `grp_…`.
+
+- `displayName` is unique among SCIM groups (409), compared exactly.
+- Members are users, by their SCIM id. A group as a member is refused (400): membership in
+  OpenHoard is direct, and Entra doesn't provision nested groups anyway.
+- A service account, an unknown user or a retired user is refused (400).
+- Members are added and removed the way Entra sends them: `Add`/`Remove` with a value list, or
+  `remove` with `members[value eq "usr_…"]`. `replace` sets the exact list.
+- PATCH answers 204.
+- DELETE removes the group and its memberships, and revokes its grants.
+
+**Limits.**
+
+- A request body is at most 1 MiB (413).
+- A request may name at most 1,000 member values and 1,000 operations.
+- A response returns at most 10,000 members (a 400 `tooMany` asks for
+  `excludedAttributes=members`).
+
+**Transactions.** Each request is one transaction, with its audit record written last. Writes to
+one tenant run one at a time (the principal lock). A refused request (4xx) changes nothing.
+
+## Admin commands (T-103)
+
+Until there is an admin UI, the server's entry point has a few admin commands. They read the same
+configuration as the server, and accept `--data-dir` as it does.
+
+```sh
+node apps/server/dist/main.js admin tenant create --name "Acme"            # prints ten_…
+node apps/server/dist/main.js admin tenant list
+node apps/server/dist/main.js admin scim-token issue --tenant ten_… --name "Entra provisioning" [--days 365]
+node apps/server/dist/main.js admin scim-token list --tenant ten_…
+node apps/server/dist/main.js admin scim-token revoke --tenant ten_… --id sct_…
+```
+
+- **Output.** The id or token goes to standard output, and messages go to standard error. The
+  exit code is 0 for done, 1 for failed and 2 for misused.
+- **Embedded database.** The embedded database (PGlite) belongs to one process at a time. While
+  the server runs on it, these commands refuse and say so: stop the server, run the command, and
+  start the server again. With PostgreSQL they run beside the server.
+- **What a new tenant gets.** `tenant create` makes the tenant row, with the fail-closed
+  defaults (hidden, metadata-only), and its principal epoch: nothing else.
+- **Audit.** Creating a tenant, and issuing or revoking a token, are audited as
+  `system:admin-cli`.
+
+## Testing with a new Entra tenant (T-102 and T-103 together)
+
+Entra's provisioning service calls the Tenant URL from Microsoft's cloud, so it must be public
+HTTPS with a valid certificate. For a trial, put a tunnel in front of the local server (for
+example `cloudflared tunnel --url http://127.0.0.1:7420`), and use the tunnel's address as
+`publicUrl`.
+
+1. **Configure the server.** Set `auth.publicUrl` in `<dataDir>/config.json` to the public
+   address. Build (`pnpm build`) and create the tenant and a token (with the server stopped, on
+   PGlite):
+
+   ```sh
+   node apps/server/dist/main.js admin tenant create --name "Contoso trial" --data-dir .openhoard
+   node apps/server/dist/main.js admin scim-token issue --tenant ten_… --name "Entra provisioning" --data-dir .openhoard
+   ```
+
+2. **Create the enterprise app.** In the Entra admin center (entra.microsoft.com), go to
+   **Entra ID** › **Enterprise apps** › **New application** › **Create your own application**.
+   Name it "OpenHoard", choose _Integrate any other application you don't find in the gallery
+   (Non-gallery)_, and create it.
+
+3. **Connect provisioning.** In the app, open **Provisioning** (**New configuration**, or
+   **Get started**). Set Mode to **Automatic**, then fill in **Admin Credentials**:
+   - Tenant URL: `https://<public host>/scim/v2`. Adding `?aadOptscim062020` is optional: both
+     request styles work.
+   - Secret Token: the `ohscim.…` token.
+
+   **Test Connection** should succeed. Entra asks for a random userName and gets 200 with an
+   empty list.
+
+4. **Map the user attributes.** Under **Mappings** › **Provision Microsoft Entra ID Users**:
+   - **Change `externalId` to `objectId`.** Entra's default is `mailNickname`, and with it people
+     aren't matched on their first sign-in. Edit the `externalId` row and set the source
+     attribute to `objectId`.
+   - Keep `userName` ← `userPrincipalName`, the matching attribute.
+   - Keep `active` ← `Switch([IsSoftDeleted], , "False", "True", "True", "False")`.
+   - Keep `emails[type eq "work"].value` ← `mail`. A new tenant's users often have no mail;
+     OpenHoard then uses the UPN.
+   - Keep `displayName` ← `displayName`, `name.givenName` ← `givenName`, and
+     `name.familyName` ← `surname`.
+   - Optional: `userType` ← `userType`, so Entra guests become OpenHoard guests.
+   - Delete the other rows (title, phone numbers, addresses, the enterprise extension,
+     proxy-addresses). OpenHoard drops them anyway, and less data flows.
+
+5. **Map the group attributes.** Under **Provision Microsoft Entra ID Groups**, keep
+   `displayName` ← `displayName`, `externalId` ← `objectId` and `members` ← `members`.
+
+6. **Choose who is provisioned.** Under **Settings**, set Scope to _Sync only assigned users and
+   groups_. Assign a test user (and a group) under **Users and groups**. Then either use
+   **Provision on demand** for one user, or set **Provisioning Status** to **On**. After the
+   first cycle, Entra syncs every 40 minutes.
+
+7. **Set up sign-in.** Add the tenant's provider to `auth.providers`. Use the same enterprise
+   app's registration (**App registrations** › the app), or a new one. Add a Web redirect URI
+   `https://<public host>/auth/callback/entra`, and create a client secret.
+
+   ```json
+   {
+     "auth": {
+       "publicUrl": "https://<public host>",
+       "providers": [
+         {
+           "id": "entra",
+           "label": "Contoso (Microsoft)",
+           "kind": "entra",
+           "tenantId": "ten_…",
+           "issuer": "https://login.microsoftonline.com/<directory (tenant) id>/v2.0",
+           "clientId": "<application (client) id>"
+         }
+       ]
+     }
+   }
+   ```
+
+   Start the server with `OPENHOARD_AUTH_ENTRA_CLIENT_SECRET=<secret>`. The `entra` kind matches
+   a first sign-in's `oid` claim to the SCIM `externalId`, which is why step 4 maps `objectId`.
+
+8. **Try it.**
+   - Sign in at `https://<public host>/auth/login/entra`, then check `GET /auth/me`.
+   - Block the user's sign-in in Entra, or remove them from the app, and provision on demand:
+     Entra sends `active: false`, and the session ends on the next request.
+   - Deleting a user in Entra first soft-deletes them (`active: false`). The permanent deletion
+     sends DELETE, which retires them.
+   - `node apps/server/dist/main.js admin scim-token list --tenant ten_…` shows when the token
+     was last used.
+   - The audit log has every request.
+
+Sources relied on for Entra's behaviour:
+
+- Microsoft Learn: [Tutorial: Develop and plan provisioning for a SCIM
+  endpoint](https://learn.microsoft.com/en-us/entra/identity/app-provisioning/use-scim-to-provision-users-and-groups).
+  It covers the request and response shapes, the default mappings, Test Connection, and
+  `excludedAttributes=members`.
+- Microsoft Learn: [Known issues and resolutions with SCIM 2.0 protocol
+  compliance](https://learn.microsoft.com/en-us/entra/identity/app-provisioning/application-provisioning-config-problem-scim-compatibility).
+  It covers capitalized ops, `active` as a string, value objects without a path, and removing
+  members by path filter (`aadOptscim062020`).
+- Microsoft Learn: [Configure automatic user provisioning to Microsoft Entra
+  apps](https://learn.microsoft.com/en-us/entra/identity/app-provisioning/configure-automatic-user-provisioning-portal),
+  for the admin center steps and the 40-minute cycle.
+- Microsoft Q&A: [SCIM validator "Filter for an existing user with a different
+  case"](https://learn.microsoft.com/en-us/answers/questions/5580319/scim-validator-fails-filter-for-an-existing-user-w).
+  `userName` is compared without regard to case, and `externalId` exactly.
+- [RFC 7643](https://www.rfc-editor.org/rfc/rfc7643) and
+  [RFC 7644](https://www.rfc-editor.org/rfc/rfc7644), for the schemas, filters, PATCH, errors and
+  paging.

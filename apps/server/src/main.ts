@@ -6,6 +6,17 @@ import { createApp } from "./app.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 
+// `main.js admin …` runs an admin command (admin.ts) instead of the server, then exits.
+if (process.argv[2] === "admin") {
+  const { runAdmin } = await import("./admin.js");
+  process.exit(
+    await runAdmin(process.argv.slice(3), {
+      out: (s) => void process.stdout.write(s),
+      err: (s) => void process.stderr.write(s),
+    }),
+  );
+}
+
 // `--data-dir` overrides OPENHOARD_DATA_DIR; the dev script points it at the repo root.
 const { values } = parseArgs({ options: { "data-dir": { type: "string" } }, strict: false });
 const dataDir = typeof values["data-dir"] === "string" ? values["data-dir"] : undefined;

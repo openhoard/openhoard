@@ -9,18 +9,21 @@ import { loginKey } from "./login-state.js";
 import { mountMcp, type McpTool } from "./mcp.js";
 import type { MetadataFetcher } from "./oauth/clients.js";
 import { mountOAuth } from "./oauth/routes.js";
+import { mountScim, type ScimOptions } from "./scim/routes.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   version: string;
 };
 
 export interface AppDeps {
-  /** The database; needed when sign-in is configured. */
+  /** The database; needed when sign-in is configured, and for SCIM. */
   db?: Database;
   /** Fetches MCP clients' metadata documents (tests pass their own). */
   fetchMetadata?: MetadataFetcher;
   /** The MCP tools to serve; mcp.ts TOOLS by default. */
   mcpTools?: readonly McpTool[];
+  /** SCIM limits (tests lower or raise them). */
+  scim?: ScimOptions;
 }
 
 /** Builds the HTTP app. Kept free of listeners so tests can call it directly. */
@@ -45,6 +48,16 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
         },
         "request",
       );
+    });
+  }
+
+  // SCIM first: its requests carry a bearer token, never the session cookie.
+  if (deps.db && config.scim.enabled) {
+    mountScim(app, {
+      db: deps.db,
+      ...(log ? { log } : {}),
+      ...(config.auth ? { publicUrl: config.auth.publicUrl } : {}),
+      ...(deps.scim ? { options: deps.scim } : {}),
     });
   }
 
