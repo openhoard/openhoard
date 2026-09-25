@@ -45,12 +45,14 @@ const server = serve(
 /**
  * Graceful shutdown (security review #14): stop accepting connections, close idle keep-alive
  * sockets so close() can finish, and force-exit after 10 s if something still hangs. The job
- * queue stops before the database closes: running jobs get a few seconds to finish (any still
- * running then are failed, and retried by whichever worker runs next), and nothing polls a
- * closed database.
+ * queue stops at the same time: running jobs get 5 s to finish (any still running then are
+ * failed, retried by whichever worker runs next, and told to stop), then up to 2 s more for
+ * their handlers to return. The database closes once both are done, so nothing polls it or
+ * writes to it after; 7 s and the close fit in the 10 s.
  */
 const SHUTDOWN_TIMEOUT_MS = 10_000;
-const JOBS_STOP_TIMEOUT_MS = 6_000;
+const JOBS_STOP_TIMEOUT_MS = 5_000;
+const JOBS_GRACE_MS = 2_000;
 let stopping = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
@@ -61,19 +63,19 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
       log.warn("shutdown timed out; forcing exit");
       process.exit(1);
     }, SHUTDOWN_TIMEOUT_MS).unref();
-    server.close(() => {
-      jobs
-        .stop({ timeoutMs: JOBS_STOP_TIMEOUT_MS })
-        .catch((err: unknown) => log.error({ err }, "stopping the job queue failed"))
-        .then(() => db.close())
-        .then(
-          () => process.exit(0),
-          (err: unknown) => {
-            log.error({ err }, "closing the database failed");
-            process.exit(1);
-          },
-        );
-    });
+    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
     if ("closeIdleConnections" in server) server.closeIdleConnections();
+    const stopped = jobs
+      .stop({ timeoutMs: JOBS_STOP_TIMEOUT_MS, graceMs: JOBS_GRACE_MS })
+      .catch((err: unknown) => log.error({ err }, "stopping the job queue failed"));
+    void Promise.all([closed, stopped])
+      .then(() => db.close())
+      .then(
+        () => process.exit(0),
+        (err: unknown) => {
+          log.error({ err }, "closing the database failed");
+          process.exit(1);
+        },
+      );
   });
 }

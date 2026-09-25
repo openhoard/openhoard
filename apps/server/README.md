@@ -24,8 +24,10 @@ schedule; every process can enqueue. A single node leaves it on.
 { "jobs": { "worker": false } }
 ```
 
-On SIGINT or SIGTERM the server stops listening, then stops the job queue (running jobs get a
-few seconds to finish; any still running are retried later), then closes the database.
+On SIGINT or SIGTERM the server stops listening and stops the job queue at the same time:
+running jobs get 5 s to finish, then any still running are failed (retried later) and told to
+stop, with up to 2 s more for their handlers to return. Then it closes the database, all within
+the 10 s after which it forces an exit.
 
 ## Signing in (T-102)
 
