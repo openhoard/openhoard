@@ -1,7 +1,7 @@
 CREATE TABLE "activity_events" (
 	"tenant_id" text NOT NULL,
 	"id" text NOT NULL,
-	"at" timestamp with time zone DEFAULT now() NOT NULL,
+	"at" timestamp with time zone DEFAULT date_trunc('milliseconds', now()) NOT NULL,
 	"actor" text NOT NULL,
 	"type" text NOT NULL,
 	"object_id" text NOT NULL,
@@ -12,6 +12,7 @@ CREATE TABLE "activity_events" (
 	"external_id" text,
 	CONSTRAINT "activity_events_tenant_id_id_pk" PRIMARY KEY("tenant_id","id"),
 	CONSTRAINT "activity_events_id_format" CHECK (id ~ '^act_[0-9a-hjkmnp-tv-z]{26}$'),
+	CONSTRAINT "activity_events_at_milliseconds" CHECK (at = date_trunc('milliseconds', at)),
 	CONSTRAINT "activity_events_actor_principal" CHECK (actor ~ '^[a-z]+:.+$'),
 	CONSTRAINT "activity_events_type_valid" CHECK (type in ('view', 'open', 'edit', 'share')),
 	CONSTRAINT "activity_events_client_complete" CHECK ((client_id is null) = (client_trust is null)),

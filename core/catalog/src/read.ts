@@ -183,8 +183,8 @@ export interface OpenedContent {
  * Opening a file (T-205): which content the caller may have, the current version's or, with
  * `versionId`, an earlier one's. It takes a reader, `open` authorized for them, and levels that
  * let their client have the content (an AI client's trust against the file's exposure); an
- * earlier version, only through a first-party client, since the levels are the current
- * content's. Null when any of that fails, or there is no such file or version,
+ * earlier version, only its owner through a first-party client, since the levels and rules are
+ * the current content's. Null when any of that fails, or there is no such file or version,
  * indistinguishably; viewObject() tells a reader whether they can read the file at all.
  * Records an `open` of that version.
  */
@@ -235,9 +235,14 @@ export async function openContent(
   const row = rows[i];
   if (!row) return null;
   // Levels and rules describe the current content: an earlier version may have been tagged
-  // stricter, or never processed. Until levels are kept per version, only a person, through
-  // OpenHoard, opens one.
-  if (i !== 0 && request.client.trust !== "first-party") return null;
+  // stricter (a pack forbidding `open` on a tag it lost), or never processed. Until levels are
+  // kept per version, only the file's owner opens one, through OpenHoard.
+  if (
+    i !== 0 &&
+    (request.client.trust !== "first-party" || view.ownerId !== `user:${request.principal.userId}`)
+  ) {
+    return null;
+  }
   noteActivity(request, "open", view.id, row.id);
   return {
     view,

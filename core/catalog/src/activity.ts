@@ -179,7 +179,11 @@ export async function writeActivity(
   const checked = events.map(check);
   let added = 0;
   for (const e of checked) {
-    const at = e.at === null ? sql`now()` : sql`${e.at.toISOString()}::timestamptz`;
+    // Whole milliseconds, as the table requires (a Date has no more).
+    const at =
+      e.at === null
+        ? sql`date_trunc('milliseconds', now())`
+        : sql`${e.at.toISOString()}::timestamptz`;
     const merge =
       MERGED.includes(e.type) && e.externalId === null
         ? sql`and not exists (

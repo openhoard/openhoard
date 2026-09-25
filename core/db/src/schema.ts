@@ -900,7 +900,10 @@ export const activityEvents = pgTable(
   {
     tenantId: text("tenant_id").notNull(),
     id: text("id").notNull(),
-    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    /** Whole milliseconds, like a JS Date, so a page cursor taken from a row finds its place. */
+    at: timestamp("at", { withTimezone: true })
+      .notNull()
+      .default(sql`date_trunc('milliseconds', now())`),
     /** The principal who acted, e.g. `user:usr_…`. */
     actor: text("actor").notNull(),
     type: text("type").notNull(),
@@ -938,6 +941,7 @@ export const activityEvents = pgTable(
       .on(t.tenantId, t.origin, t.externalId)
       .where(sql`external_id is not null`),
     idCheck("activity_events_id_format", "id", "activity"),
+    check("activity_events_at_milliseconds", sql`at = date_trunc('milliseconds', at)`),
     check("activity_events_actor_principal", sql`actor ~ '^[a-z]+:.+$'`),
     check("activity_events_type_valid", sql.raw(`type in (${quoted(ACTIVITY_TYPES)})`)),
     check("activity_events_client_complete", sql`(client_id is null) = (client_trust is null)`),

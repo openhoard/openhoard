@@ -1,6 +1,6 @@
 {
-  "id": "31719bd2-faa2-4072-8cae-163701fb552b",
-  "prevId": "d59bf90b-1352-4fa9-aa98-9d1aa37dd368",
+  "id": "c77bdd75-2e0e-4c77-845d-7c502421d85e",
+  "prevId": "987198ea-6e57-4143-84b0-74219fac03cf",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -25,7 +25,7 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "default": "now()"
+          "default": "date_trunc('milliseconds', now())"
         },
         "actor": {
           "name": "actor",
@@ -231,6 +231,10 @@
         "activity_events_id_format": {
           "name": "activity_events_id_format",
           "value": "id ~ '^act_[0-9a-hjkmnp-tv-z]{26}$'"
+        },
+        "activity_events_at_milliseconds": {
+          "name": "activity_events_at_milliseconds",
+          "value": "at = date_trunc('milliseconds', at)"
         },
         "activity_events_actor_principal": {
           "name": "activity_events_actor_principal",

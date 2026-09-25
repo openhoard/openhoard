@@ -250,15 +250,15 @@ describe("the catalog's export surface", () => {
     const text = source("./read.ts");
     for (const name of Object.keys(RECORDING)) {
       const from = text.indexOf(`export async function ${name}(`);
-      const next = text.indexOf("\nexport ", from + 1);
-      const body = text.slice(from, next === -1 ? undefined : next);
+      // To the end of the function: its closing brace is the first at the start of a line.
+      const body = text.slice(from, text.indexOf("\n}\n", from) + 2);
       // The recorder is checked before anything is read, and something records.
       const check = body.indexOf("requireRecorder(");
       expect(check, name).toBeGreaterThan(-1);
       for (const read of [body.search(/\btx\s*\./), body.search(/\bviewObjects\(/)]) {
         if (read > -1) expect(check, name).toBeLessThan(read);
       }
-      expect(body, name).toMatch(/\bnote(View|Activity)\(/);
+      expect(body, name).toMatch(/\bnote(View|Activity)\(request,/);
     }
   });
 

@@ -73,6 +73,8 @@ const person = (more: Partial<AuthzPrincipal> = {}): AuthzPrincipal => ({
   ...more,
 });
 const reader = () => person({ tagGrants: [t.tag] });
+/** The seeded file's owner (`user:owner-1`). */
+const owner = () => person({ userId: "owner-1" });
 const open = (
   principal: AuthzPrincipal,
   options: { trust?: Trust; versionId?: string; gate?: Authorizer; objectId?: string } = {},
@@ -134,23 +136,25 @@ describe("openContent", () => {
     ]);
   });
 
-  it("opens an earlier version by id, and says it isn't the current one", async () => {
+  it("opens an earlier version by id for its owner, and says it isn't the current one", async () => {
     const v2 = await saveVersion(2);
     const current = await open(reader());
     expect(current.opened?.version).toMatchObject({ id: v2.versionId, seq: 2, current: true });
-    const first = await open(reader(), { versionId: t.versionId });
+    // Levels describe the current content: an earlier version is its owner's to open.
+    expect((await open(reader(), { versionId: t.versionId })).opened).toBeNull();
+    const first = await open(owner(), { versionId: t.versionId });
     expect(first.opened?.version).toMatchObject({ id: t.versionId, seq: 1, current: false });
     expect(first.opened?.blobId).toBe(t.blobId);
     expect(first.events.map((e) => e.versionId)).toEqual([t.versionId]);
   });
 
-  it("opens an earlier version only through a first-party client", async () => {
+  it("opens an earlier version only through a first-party client, even for its owner", async () => {
     const saved = await saveVersion(2);
     await db.withTenant(t.tenantId, (tx) =>
       markProcessed(tx, t.tenantId, { versionId: saved.versionId, title: "Report 1.docx" }),
     );
     for (const trust of ["local", "commercial", "consumer"] as const) {
-      const old = await open(reader(), { trust, versionId: t.versionId });
+      const old = await open(owner(), { trust, versionId: t.versionId });
       expect(old.opened, trust).toBeNull();
       expect(old.events, trust).toEqual([]);
     }

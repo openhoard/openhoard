@@ -116,8 +116,9 @@ applies the file's levels (T-206). The read API is built on it, in a snapshot (`
 - `openContent(id, { versionId? })`: which bytes to serve (blob id, and location for a managed
   zone), never the bytes; the caller reads them from core/storage. It takes a reader, `open`
   authorized, and levels that let the client have content (an AI client's trust against the
-  file's exposure: `viewObjects(…, { content: true })`). An earlier version opens only through
-  a first-party client, since the levels describe the current content. Null otherwise, alike for
+  file's exposure: `viewObjects(…, { content: true })`). An earlier version opens only for the
+  file's owner, through a first-party client, since the levels and rules describe the current
+  content. Null otherwise, alike for
   every reason.
 - Each checks for a snapshot before it reads anything, and treats input that can't name
   anything (a malformed id, a NUL byte) as unknown.

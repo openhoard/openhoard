@@ -218,6 +218,23 @@ describe("listActivity paging and clients", () => {
     expect(new Set(seen).size).toBe(7);
   });
 
+  it("keeps times to whole milliseconds, so a cursor from a row finds its place", async () => {
+    await write([view()]);
+    const [row] = await db
+      .withTenant(t.tenantId, (tx) =>
+        tx.execute(
+          sql`select (extract(microseconds from at)::bigint % 1000)::int as us from activity_events`,
+        ),
+      )
+      .then((r) => (r as unknown as { rows: { us: number }[] }).rows);
+    expect(row?.us).toBe(0);
+    await expect(
+      db.withTenant(t.tenantId, (tx) =>
+        tx.execute(sql`update activity_events set at = at + interval '1 microsecond'`),
+      ),
+    ).rejects.toThrow();
+  });
+
   it("lists AI reads by client trust", async () => {
     await write([
       view(),
