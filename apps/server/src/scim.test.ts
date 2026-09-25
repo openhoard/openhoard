@@ -18,7 +18,7 @@ import {
 } from "@openhoard/core-identity";
 import type { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createApp } from "./app.js";
+import { closeApp, createApp } from "./app.js";
 import type { AuthEnv } from "./auth.js";
 import { ConfigSchema } from "./config.js";
 import { addressKey, clientAddress, normalizeAddress, trustedSet } from "./scim/address.js";
@@ -1115,8 +1115,10 @@ describe("SCIM authentication", () => {
     }
     // The tenant's budget is spent: more guesses are turned away before any lookup…
     expect((await from("198.51.100.20", guess())).status).toBe(429);
-    // …but not the token that authenticated recently.
+    // …but never a valid token: the recent one, nor one never seen before.
     expect((await from("198.51.100.21", real.token)).status).toBe(200);
+    const unseen = await issue(target.tenantId);
+    expect((await from("198.51.100.22", unseen.token)).status).toBe(200);
     // Nothing written yet; then one summary with the count.
     const auth = async () =>
       (await auditEvents(target.tenantId)).filter((e) => e.action === "scim.auth");
@@ -1153,9 +1155,10 @@ describe("SCIM authentication", () => {
         (await as(`ohscim.${other.tenantId}.${newId("scimToken")}.${"B".repeat(43)}`)).status,
       ).toBe(401);
     }
-    // The address is blocked for anyone new…
-    expectError(await as(fresh.token), 429);
-    // …but the token that authenticated recently goes on.
+    // The address is blocked for guesses…
+    expectError(await as(`ohscim.${other.tenantId}.${newId("scimToken")}.${"B".repeat(43)}`), 429);
+    // …but never for a valid token, recent or not (after a restart, none is recent).
+    expect((await as(fresh.token)).status).toBe(200);
     expect((await as(token)).status).toBe(200);
   });
 
@@ -1178,12 +1181,14 @@ describe("SCIM authentication", () => {
         },
         { incoming: { socket: { remoteAddress: peer } } },
       );
-    // Two failures from one /64 (different addresses in it) block that /64 only. The token id
-    // is blocked too (its own failures), so the checks below use another token.
+    const guess = () => `ohscim.${t.tenantId}.${newId("scimToken")}.${"G".repeat(43)}`;
+    // Two failures from one /64 (different addresses in it, one with a port) block that /64
+    // for guesses only.
     await from("::1", "2001:db8:1:2::1", bad);
-    await from("::1", "spoofed, 2001:db8:1:2::ffff", bad);
-    expect((await from("::1", "2001:db8:1:2:aaaa::5", fresh.token)).status).toBe(429);
-    expect((await from("::1", "2001:db8:1:3::1", fresh.token)).status).toBe(200);
+    await from("::1", "spoofed, [2001:db8:1:2::ffff]:443", bad);
+    expect((await from("::1", "2001:db8:1:2:aaaa::5", guess())).status).toBe(429);
+    expect((await from("::1", "2001:db8:1:3::1", guess())).status).toBe(401);
+    expect((await from("::1", "2001:db8:1:2:aaaa::5", fresh.token)).status).toBe(200);
     // An untrusted peer's X-Forwarded-For is ignored: the peer is the client.
     const other2 = await issue();
     await from(
@@ -1197,7 +1202,79 @@ describe("SCIM authentication", () => {
       `ohscim.${t.tenantId}.${other2.id}.${"D".repeat(43)}`,
     );
     const third = await issue();
-    expect((await from("203.0.113.9", "198.51.100.3", third.token)).status).toBe(429);
+    expect((await from("203.0.113.9", "198.51.100.3", guess())).status).toBe(429);
+    expect((await from("203.0.113.9", "198.51.100.3", third.token)).status).toBe(200);
+    // IPv4 hops with ports (Azure Application Gateway, Front Door, IIS ARR) count by address.
+    const ported = await issue();
+    const wrong = `ohscim.${t.tenantId}.${ported.id}.${"P".repeat(43)}`;
+    await from("::1", "192.0.2.7:50123", wrong);
+    await from("::1", "192.0.2.7:50999", wrong);
+    expect((await from("::1", "192.0.2.7:1", guess())).status).toBe(429);
+    expect((await from("::1", "192.0.2.8:1", guess())).status).toBe(401);
+  });
+
+  it("never locks out a token in use by someone knowing only its id", async () => {
+    const proxied = createApp(
+      ConfigSchema.parse({ dataDir: "/tmp/unused", scim: { trustedProxies: ["127.0.0.1"] } }),
+      undefined,
+      { db, scim: { maxFailures: 2 } },
+    );
+    const inUse = await issue();
+    const from = (address: string, tok: string) =>
+      proxied.request(
+        `${BASE}/Users?count=0`,
+        { headers: { authorization: `Bearer ${tok}`, "x-forwarded-for": address } },
+        { incoming: { socket: { remoteAddress: "127.0.0.1" } } },
+      );
+    expect((await from("198.51.100.50", inUse.token)).status).toBe(200);
+    const wrong = `ohscim.${t.tenantId}.${inUse.id}.${"W".repeat(43)}`;
+    // From many addresses, so only the token id's count could add up: it doesn't.
+    for (let i = 0; i < 5; i++) {
+      expect((await from(`198.51.100.${60 + i}`, wrong)).status).toBe(401);
+    }
+    expect((await from("198.51.100.70", inUse.token)).status).toBe(200);
+    // Every attempt is still audited.
+    const refused = (await auditEvents()).filter(
+      (e) => e.actor === `scim:${inUse.id}` && e.action === "scim.auth",
+    );
+    expect(refused).toHaveLength(5);
+  });
+
+  it("writes pending summaries at shutdown, and nothing after", async () => {
+    const target = await seedTenant(db, 8);
+    const app2 = createApp(config(), undefined, {
+      db,
+      scim: { maxFailures: 100, failureWindowMs: 60_000 },
+    });
+    for (let i = 0; i < 2; i++) {
+      const res = await call(
+        "GET",
+        "/Users",
+        undefined,
+        {
+          authorization: `Bearer ohscim.${target.tenantId}.${newId("scimToken")}.${"S".repeat(43)}`,
+        },
+        app2,
+      );
+      expect(res.status).toBe(401);
+    }
+    const auth = async () =>
+      (await auditEvents(target.tenantId)).filter((e) => e.action === "scim.auth");
+    expect(await auth()).toEqual([]);
+    await closeApp(app2);
+    expect(await auth()).toEqual([
+      expect.objectContaining({ detail: { reason: "unknown-token", count: 2, windowSeconds: 60 } }),
+    ]);
+    // Closed: a refusal is still answered, but no longer summed or written.
+    await call(
+      "GET",
+      "/Users",
+      undefined,
+      { authorization: `Bearer ohscim.${target.tenantId}.${newId("scimToken")}.${"S".repeat(43)}` },
+      app2,
+    );
+    await closeApp(app2);
+    expect(await auth()).toHaveLength(1);
   });
 
   it("audits every allowed use and every refusal, as scim:<token id>", async () => {
@@ -1242,9 +1319,14 @@ describe("SCIM authentication", () => {
         401,
       );
     }
-    const blocked = await call("GET", "/Users", undefined, {}, limited);
+    const before = (await auditEvents()).length;
+    const blocked = await call("GET", "/Users", undefined, { authorization: bad }, limited);
     expectError(blocked, 429);
     expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThan(0);
+    // Turned away quietly: nothing more is audited for it.
+    expect((await auditEvents()).length).toBe(before);
+    // The block never refuses the valid token itself.
+    expect((await call("GET", "/Users?count=0", undefined, {}, limited)).status).toBe(200);
   });
 
   it("counts failures per key in fixed windows", () => {
@@ -1506,6 +1588,9 @@ describe("SCIM client addresses and counters", () => {
     expect(normalizeAddress("64:ff9b::192.0.2.1")).toBe("0064:ff9b:0000:0000:0000:0000:c000:0201");
     expect(normalizeAddress("::")).toBe("0000:0000:0000:0000:0000:0000:0000:0000");
     expect(normalizeAddress("not an address")).toBeNull();
+    expect(normalizeAddress("192.0.2.1:5678")).toBe("192.0.2.1");
+    expect(normalizeAddress("[2001:db8::1]:443")).toBe("2001:0db8:0000:0000:0000:0000:0000:0001");
+    expect(normalizeAddress("192.0.2.1:99999")).toBeNull();
     expect(addressKey("2001:db8:1:2:3:4:5:6")).toBe("2001:0db8:0001:0002::/64");
     expect(addressKey("2001:db8:1:2::9")).toBe(addressKey("2001:db8:1:2:ffff::"));
     expect(addressKey("192.0.2.1")).toBe("192.0.2.1");
@@ -1552,5 +1637,15 @@ describe("SCIM client addresses and counters", () => {
     await new Promise((resolve) => setTimeout(resolve, 60));
     expect(flushed).toEqual([["t1", 2]]);
     expect(summary.pending).toBe(0);
+    // close() writes what is pending at once, cancels its timer, and counts nothing more.
+    summary.note("t3");
+    await summary.close();
+    expect(flushed).toEqual([
+      ["t1", 2],
+      ["t3", 1],
+    ]);
+    expect(summary.note("t4")).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(flushed).toHaveLength(2);
   });
 });

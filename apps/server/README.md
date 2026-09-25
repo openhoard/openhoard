@@ -299,20 +299,26 @@ reason for a refusal, and no personal data.
 **Failed authentications.** Refused tokens that are well formed count as failures:
 
 - against the client's address (IPv6 by /64);
-- against the token id;
+- against the token id, except while that token is in use (it authenticated in the last 10
+  minutes): a wrong secret for it is audited but not counted, so knowing a token's id isn't
+  enough to lock it out;
 - against the tenant, for token ids it doesn't have.
 
-After 10 failures in a minute on any of these, requests with that address, token id or tenant get
-429 until the minute is over. There is one exception: a token id that authenticated in the last
-10 minutes is never turned away by its address's or its tenant's count, only by its own. So
-strangers sharing an address with the identity provider (behind a tunnel, say) can't lock it out.
+After 10 failures in a minute on any of these, requests with that address, token id or tenant are
+blocked until the minute is over. A block never refuses a valid token on its own, since tenant
+ids aren't secret and strangers may share the identity provider's address (behind a tunnel, say).
+A blocked request gets a quiet check instead: one lookup, with nothing written and nothing
+counted. A valid token goes on; anything else gets 429. So a block only stops guesses, and it
+holds after a restart too.
 
 A request with no token, or with something that isn't one, gets 401 without a database lookup
 and isn't counted. The counts are kept in each process's memory.
 
 Behind a reverse proxy or tunnel, every client has the proxy's address unless the proxy is
 trusted. For requests from a trusted proxy, X-Forwarded-For is read from the right, skipping
-trusted proxies, and the first other address is the client:
+trusted proxies, and the first other address is the client. Hops with a port (`192.0.2.1:5678`,
+`[2001:db8::1]:443`, as Azure Application Gateway, Front Door and IIS ARR write them) count by
+their address:
 
 ```json
 { "scim": { "trustedProxies": ["127.0.0.1", "::1"] } }
@@ -385,6 +391,9 @@ id (`usr_…`).
 - A request may name at most 1,000 member values and 1,000 operations.
 - A response returns at most 10,000 members (a 400 `tooMany` asks for
   `excludedAttributes=members`).
+
+**Shutdown.** At shutdown the server writes the unknown-token summaries still pending, before the
+database closes, and writes none after.
 
 **Transactions.** Each request is one transaction, with its audit record written last. Writes to
 one tenant run one at a time (the principal lock). A refused request (4xx) changes nothing.

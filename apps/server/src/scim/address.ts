@@ -13,7 +13,11 @@ import { isIP } from "node:net";
 
 /** An address in one spelling: IPv4-mapped IPv6 as IPv4, IPv6 expanded, lower case. */
 export function normalizeAddress(address: string): string | null {
-  const trimmed = address.trim().replace(/^\[(.*)\]$/, "$1");
+  // With a port, as Azure Application Gateway, Front Door and IIS ARR write X-Forwarded-For:
+  // `1.2.3.4:5678`, `[2001:db8::1]:443`. (A bare IPv6 address has colons but no brackets.)
+  const ported = /^(?:\[(.*)\]|(\d{1,3}(?:\.\d{1,3}){3}))(?::(\d{1,5}))?$/.exec(address.trim());
+  if (ported?.[3] !== undefined && Number(ported[3]) > 65535) return null;
+  const trimmed = ported ? (ported[1] ?? ported[2] ?? "") : address.trim();
   const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(trimmed);
   if (mapped?.[1] !== undefined && isIP(mapped[1]) === 4) return mapped[1];
   const kind = isIP(trimmed);

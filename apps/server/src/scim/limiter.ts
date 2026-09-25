@@ -94,7 +94,8 @@ export class RecentTokens {
  * count of dropped ones is kept (returned by note()).
  */
 export class RefusalSummary {
-  readonly #counts = new Map<string, number>();
+  readonly #pending = new Map<string, { count: number; timer: NodeJS.Timeout }>();
+  #closed = false;
 
   constructor(
     readonly windowMs: number,
@@ -102,24 +103,38 @@ export class RefusalSummary {
     readonly maxTenants = 10_000,
   ) {}
 
-  /** Counts one refusal; false when it couldn't be counted (too many tenants at once). */
+  /** Counts one refusal; false when it couldn't be counted (too many tenants, or closed). */
   note(tenantId: string): boolean {
-    const count = this.#counts.get(tenantId);
-    if (count !== undefined) {
-      this.#counts.set(tenantId, count + 1);
+    if (this.#closed) return false;
+    const entry = this.#pending.get(tenantId);
+    if (entry !== undefined) {
+      entry.count++;
       return true;
     }
-    if (this.#counts.size >= this.maxTenants) return false;
-    this.#counts.set(tenantId, 1);
-    setTimeout(() => {
-      const total = this.#counts.get(tenantId) ?? 0;
-      this.#counts.delete(tenantId);
-      void this.flush(tenantId, total);
-    }, this.windowMs).unref();
+    if (this.#pending.size >= this.maxTenants) return false;
+    const timer = setTimeout(() => {
+      const done = this.#pending.get(tenantId);
+      this.#pending.delete(tenantId);
+      if (done !== undefined) void this.flush(tenantId, done.count);
+    }, this.windowMs);
+    timer.unref();
+    this.#pending.set(tenantId, { count: 1, timer });
     return true;
   }
 
+  /**
+   * Writes what is pending now, cancels the timers, and counts nothing more: at shutdown, before
+   * the database closes, so no summary is lost and none is written after.
+   */
+  async close(): Promise<void> {
+    this.#closed = true;
+    const due = [...this.#pending];
+    this.#pending.clear();
+    for (const [, { timer }] of due) clearTimeout(timer);
+    await Promise.all(due.map(([tenantId, { count }]) => this.flush(tenantId, count)));
+  }
+
   get pending(): number {
-    return this.#counts.size;
+    return this.#pending.size;
   }
 }

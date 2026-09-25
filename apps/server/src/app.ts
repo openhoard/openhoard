@@ -26,6 +26,19 @@ export interface AppDeps {
   scim?: ScimOptions;
 }
 
+/** What each app must finish before the database closes (see closeApp()). */
+const closers = new WeakMap<object, (() => Promise<void>)[]>();
+
+/**
+ * Finishes what the app keeps in memory for the database (SCIM's pending audit summaries). Call
+ * it at shutdown, after the listener stops and before the database closes.
+ */
+export async function closeApp(app: object): Promise<void> {
+  const pending = closers.get(app) ?? [];
+  closers.delete(app);
+  await Promise.all(pending.map((close) => close()));
+}
+
 /** Builds the HTTP app. Kept free of listeners so tests can call it directly. */
 export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hono<AuthEnv> {
   const app = new Hono<AuthEnv>();
@@ -53,12 +66,13 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
 
   // SCIM first: its requests carry a bearer token, never the session cookie.
   if (deps.db && config.scim.enabled) {
-    mountScim(app, {
+    const scim = mountScim(app, {
       db: deps.db,
       ...(log ? { log } : {}),
       ...(config.auth ? { publicUrl: config.auth.publicUrl } : {}),
       options: { trustedProxies: config.scim.trustedProxies, ...deps.scim },
     });
+    closers.set(app, [() => scim.close()]);
   }
 
   if (config.auth) {

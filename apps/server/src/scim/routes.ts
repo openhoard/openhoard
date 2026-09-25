@@ -65,10 +65,11 @@ import {
  *   record per tenant per window, written after the response, so guessing can't grow the log,
  *   queue on its lock, or tell a tenant that exists from one that doesn't. The caller only ever
  *   hears 401.
- * - Failed authentications are limited per client address (IPv6 by /64; behind trusted proxies,
- *   from X-Forwarded-For), per token id, and, for unknown token ids, per tenant (limiter.ts). An
- *   address or tenant block never turns away a token id that authenticated recently, so
- *   strangers sharing a proxy's address can't lock the identity provider out.
+ * - Failed authentications are counted per client address (IPv6 by /64; behind trusted
+ *   proxies, from X-Forwarded-For), per token id (not while the token is in use, so knowing its
+ *   id can't lock it out), and, for unknown token ids, per tenant (limiter.ts). A block never
+ *   refuses a valid token on its own: blocked requests get a quiet check (one lookup, nothing
+ *   written or counted), and only an invalid token gets 429.
  * - Each request's work is one transaction, which checks the token again, audits the request,
  *   allowed or refused, last (core/audit: its lock is the last taken). A write takes the tenant's
  *   principal lock first (core/db lockPrincipals(), lock order step 0), so SCIM writes to one
@@ -123,7 +124,13 @@ interface Done {
   detail?: Record<string, string | number | boolean>;
 }
 
-export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): void {
+/** What the server calls at shutdown, before closing the database. */
+export interface ScimHandle {
+  /** Writes pending unknown-token summaries and stops their timers; nothing is written after. */
+  close(): Promise<void>;
+}
+
+export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): ScimHandle {
   const { db, log } = deps;
   const opts = deps.options ?? {};
   const windowMs = opts.failureWindowMs ?? 60_000;
@@ -190,14 +197,29 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): void {
     const address = `address:${addressKey(clientAddress(peerOf(c), c.req.header("x-forwarded-for"), trusted))}`;
     const tokenKey = `token:${tokenId}`;
     const tenantKey = `tenant:${tenantId}`;
-    let wait = limiter.blockedFor(tokenKey);
-    if (wait === 0 && !recent.has(tokenId)) {
-      wait = Math.max(limiter.blockedFor(address), limiter.blockedFor(tenantKey));
-    }
+    const wait = Math.max(...[address, tokenKey, tenantKey].map((k) => limiter.blockedFor(k)));
     if (wait > 0) {
-      return fail(new ScimError(429, "too many failed authentications; try again later"), {
-        "retry-after": String(Math.ceil(wait / 1000)),
-      });
+      // A block never refuses a valid token on its own: anyone who knows a tenant id, or shares
+      // the identity provider's address, could otherwise halt provisioning. Blocked requests
+      // get a quiet check instead (one lookup; nothing written, nothing counted): a valid token
+      // goes on, anything else is turned away.
+      let quiet: ScimTokenCheck;
+      try {
+        quiet = await db.withTenant(tenantId, (tx) => checkScimToken(tx, tenantId, token), {
+          accessMode: "read only",
+        });
+      } catch (err) {
+        log?.error({ err }, "scim: checking a token failed");
+        return fail(new ScimError(500, "internal error"));
+      }
+      if (!quiet.ok) {
+        return fail(new ScimError(429, "too many failed authentications; try again later"), {
+          "retry-after": String(Math.ceil(wait / 1000)),
+        });
+      }
+      recent.add(tokenId);
+      c.set("scim", { tenantId, token, tokenId, actor: quiet.actor, keys: [address, tokenKey] });
+      return next();
     }
     let check: ScimTokenCheck;
     try {
@@ -215,7 +237,9 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): void {
     }
     if (!check.ok) {
       if (check.refused) {
-        limiter.fail(address, tokenKey);
+        // Audited above either way; but while its token id is in use, a wrong secret doesn't
+        // count toward blocking it, so knowing a token id isn't enough to lock it out.
+        limiter.fail(address, ...(recent.has(tokenId) ? [] : [tokenKey]));
       } else {
         limiter.fail(address, tenantKey);
         if (!unknownTokens.note(tenantId)) log?.warn({ tenantId }, "scim: refusals not summed");
@@ -308,6 +332,7 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): void {
       return fail(new ScimError(500, `internal error (request ${requestId})`));
     }
     if ("refused" in outcome) {
+      // Revoked or expired since the middleware's check: counted like any refusal.
       limiter.fail(...keys);
       return unauthorized(true);
     }
@@ -518,6 +543,7 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): void {
   );
 
   app.route("/scim/v2", scim);
+  return { close: () => unknownTokens.close() };
 }
 
 const tenantOf = (c: Context<ScimEnv>) => c.var.scim.tenantId;

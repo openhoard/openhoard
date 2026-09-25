@@ -1,4 +1,4 @@
-export { createApp, type AppDeps } from "./app.js";
+export { closeApp, createApp, type AppDeps } from "./app.js";
 export { requireSignIn, type AuthEnv, type SignedIn } from "./auth.js";
 export {
   loadConfig,

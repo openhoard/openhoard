@@ -3,7 +3,7 @@ import { serve } from "@hono/node-server";
 import { openDatabase } from "@openhoard/core-db";
 import { startJobs, type Jobs } from "@openhoard/core-jobs";
 import { adminArgument, runAdmin } from "./admin.js";
-import { createApp } from "./app.js";
+import { closeApp, createApp } from "./app.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 
@@ -54,10 +54,9 @@ try {
 }
 log.info({ worker: config.jobs.worker }, "job queue ready");
 
-const server = serve(
-  { fetch: createApp(config, log, { db }).fetch, hostname: config.host, port: config.port },
-  (info) =>
-    log.info({ address: info.address, port: info.port, dataDir: config.dataDir }, "listening"),
+const app = createApp(config, log, { db });
+const server = serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) =>
+  log.info({ address: info.address, port: info.port, dataDir: config.dataDir }, "listening"),
 );
 
 /**
@@ -65,7 +64,8 @@ const server = serve(
  * sockets so close() can finish, and force-exit after 10 s if something still hangs. The job
  * queue stops at the same time: running jobs get 5 s to finish (any still running then are
  * failed, retried by whichever worker runs next, and told to stop), then up to 2 s more for
- * their handlers to return. The database closes once both are done, so nothing polls it or
+ * their handlers to return. Once both are done, the app writes what it still holds (SCIM's
+ * pending audit summaries, closeApp()), and then the database closes, so nothing polls it or
  * writes to it after; 7 s and the close fit in the 10 s.
  */
 const SHUTDOWN_TIMEOUT_MS = 10_000;
@@ -87,6 +87,8 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
       .stop({ timeoutMs: JOBS_STOP_TIMEOUT_MS, graceMs: JOBS_GRACE_MS })
       .catch((err: unknown) => log.error({ err }, "stopping the job queue failed"));
     void Promise.all([closed, stopped])
+      // What the app still holds for the database (SCIM's audit summaries), then the database.
+      .then(() => closeApp(app))
       .then(() => db.close())
       .then(
         () => process.exit(0),
