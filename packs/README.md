@@ -38,8 +38,11 @@ In policies, match `resource.allTags.contains("x")` in a `forbid` (it sees model
 and `resource in OpenHoard::Tag::"x"` in a `permit` (trusted tags only). See core/policy.
 
 **Actions.** Listings (core/catalog `viewObjects()`, which builds every card and title-only
-card) authorize `read`, not `search`. `search` applies to search queries only. So a forbid on
-`read` already keeps a file out of listings; a forbid on `search` alone doesn't.
+card) authorize `read`; search (`searchObjects()`) authorizes `read` and `search`. A forbid on
+`read` takes away a file's content and full card, but a member still sees the title-only card of
+a file whose level is `discoverable`. A forbid on `search` takes a file out of search results
+(for readers too) but not out of listings. To keep a file out of both, give its tag
+`visibility: hidden` (or set the tenant default to hidden).
 
 **Zones.** `resource.zone` is the zone's kind: `managed`, `indexed`, `local-only` or `code`,
 never its name. A policy test's `zone` must be one of those, and policy text that compares

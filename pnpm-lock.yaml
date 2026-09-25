@@ -438,6 +438,15 @@ importers:
       '@openhoard/config':
         specifier: workspace:*
         version: link:../config
+      '@openhoard/core-db':
+        specifier: workspace:^
+        version: link:../../core/db
+      '@openhoard/core-identity':
+        specifier: workspace:^
+        version: link:../../core/identity
+      '@openhoard/core-policy':
+        specifier: workspace:^
+        version: link:../../core/policy
       '@types/oidc-provider':
         specifier: ^9.12.1
         version: 9.12.1

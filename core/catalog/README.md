@@ -122,6 +122,35 @@ answer without a caller's policy, for enrichment, connectors, admins and the API
 on a new export until it is classified; it also checks each gated read reaches the gate before
 reading anything but source refs, and answers nothing for a caller `authorize()` refuses.
 
+## Search
+
+`searchObjects({ query, limit })` (T-504) filters inside the query, then uses the gate:
+
+1. SQL picks the candidates the caller may see: files they own or read by a grant (on the file,
+   or on one of its trusted tags), and, for members, files whose effective level is discoverable
+   or readable (the same rule as `levelsFor()`). A key's scope narrows it, and needs both
+   `search` and `read`. Each candidate is matched twice: as a reader sees it (words in the real
+   title, `facet:value` terms against every tag) and as anyone else does (the title they are
+   shown, trusted tags of public facets). Up to `SEARCH_CANDIDATES` (1,000), best match first.
+2. `viewObjects(…, { search: true })` checks every candidate: `read` and `search`, pack rules
+   included (a forbid on `search` takes a file out), and the levels. A view is kept, and ranked,
+   by the match for what it shows, so a grant holder a pack turns into a non-reader matches only
+   the title-only card. Hits and `total` come only from what passes. Title-only views are
+   ordered without their update time, which they don't show.
+
+Titles and queries are split on `.`, `_`, `/` and `\` first: Postgres reads `Forecast.xlsx` as
+one token.
+
+**Limits (option 1).** SQL knows grants, ownership and levels, not a pack's Cedar rules. A file
+someone may read only through a pack permit may be missed by their search (it still opens by
+id). Past the candidate cap, SQL's guess picks which candidates are checked, so a pack-forbidden
+file can crowd out a visible one or set `totalIsLowerBound`. Every search scans the tenant's
+files; T-501 brings an index.
+
+**Upgrade (option 3).** Compile the subset of Cedar that packs use (tag, zone, group and client
+conditions) into the candidate SQL, keep the gate as the final check, and drop the candidate cap
+so counts are exact. `search.test.ts` pins today's behaviour; flip that test when this lands.
+
 ## Why can X see this?
 
 `explainAccess()` replays one decision the way the product makes it, using the same principal

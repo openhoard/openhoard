@@ -63,8 +63,10 @@ export {
   type ObjectLevels,
   type ObjectView,
   type TitleOnlyView,
+  type ViewOptions,
   type ViewRequest,
 } from "./visibility.js";
+export { SEARCH_CANDIDATES, searchObjects, type SearchQuery, type SearchResult } from "./search.js";
 export {
   listVersions,
   viewBySource,

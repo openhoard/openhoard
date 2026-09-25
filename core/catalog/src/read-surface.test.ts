@@ -20,7 +20,7 @@ import type { ViewRequest } from "./visibility.js";
  * - value: constants and error classes.
  */
 const SURFACE = {
-  gated: ["listVersions", "viewBySource", "viewObject", "viewObjects"],
+  gated: ["listVersions", "searchObjects", "viewBySource", "viewObject", "viewObjects"],
   write: [
     "applyPack",
     "applyRuleTags",
@@ -76,6 +76,7 @@ const SURFACE = {
     "IngestError",
     "MAX_OBJECT_IDS",
     "PackError",
+    "SEARCH_CANDIDATES",
     "TagError",
     "VIEW_TRANSACTION",
   ],
@@ -95,7 +96,8 @@ describe("the catalog's export surface", () => {
     for (const name of SURFACE.gated) {
       expect(typeof exported[name], name).toBe("function");
       const text = String(exported[name]);
-      const gate = name === "viewObjects" ? /\.authorize\(/ : /\bviewObjects?\(/;
+      // An imported call may be rewritten as `(0, module.viewObjects)(`.
+      const gate = name === "viewObjects" ? /\.authorize\(/ : /\bviewObjects?\)?\(/;
       expect(text, `${name} doesn't decide through the gate`).toMatch(gate);
     }
     // The gate reads decisions before it builds any view: canRead feeds decideRead.
@@ -106,7 +108,9 @@ describe("the catalog's export surface", () => {
     const text = source("./read.ts");
     const starts = [...text.matchAll(/^export async function (\w+)/gm)];
     const names = starts.map((m) => m[1]).sort();
-    expect(names).toEqual(SURFACE.gated.filter((n) => n !== "viewObjects").sort());
+    expect(names).toEqual(
+      SURFACE.gated.filter((n) => n !== "viewObjects" && n !== "searchObjects").sort(),
+    );
     for (const [i, m] of starts.entries()) {
       const whole = text.slice(m.index, starts[i + 1]?.index ?? text.length);
       // From the function's body on: its signature names it.
@@ -126,6 +130,17 @@ describe("the catalog's export surface", () => {
       const firstQuery = before.search(/\btx\s*\./);
       if (firstQuery > -1) expect(snapshot).toBeLessThan(firstQuery);
     }
+  });
+
+  it("lets search show and count only what the gate returns", () => {
+    const text = source("./search.ts");
+    const body = text.slice(text.indexOf("export async function searchObjects"));
+    // The snapshot first; every hit and the total come from viewObjects' answer.
+    expect(body.indexOf("requireSnapshot(")).toBeGreaterThan(-1);
+    expect(body.indexOf("requireSnapshot(")).toBeLessThan(body.indexOf("queryRows"));
+    expect(body).toMatch(/const views = [^;]*viewObjects\(/);
+    expect(body).toMatch(/hits: views\.slice\(/);
+    expect(body).toMatch(/total: views\.length/);
   });
 
   it("answers every gated read with nothing for a hidden file and a caller authorize() refuses", async () => {
@@ -159,6 +174,8 @@ describe("the catalog's export surface", () => {
             externalId: t.externalId,
           }),
         listVersions: (tx) => catalog.listVersions(tx, t.tenantId, deny, request, t.objectId),
+        searchObjects: async (tx) =>
+          (await catalog.searchObjects(tx, t.tenantId, deny, request, { query: "" })).hits,
       };
       expect(Object.keys(CALLS).sort()).toEqual([...SURFACE.gated].sort());
       // The seeded file is unprocessed, so hidden to anyone authorize() refuses.

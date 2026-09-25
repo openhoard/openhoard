@@ -384,6 +384,15 @@ export interface ViewRequest {
   client: AuthzClient;
 }
 
+export interface ViewOptions {
+  /**
+   * The views are search results (searchObjects): `search` is authorized too, and a file it
+   * forbids (a pack rule, or a key's scope without `search`) is left out entirely, as is one
+   * whose rules fail to evaluate (fail closed).
+   */
+  search?: boolean;
+}
+
 /**
  * The views a caller may have of some objects, in the order asked, as search results and
  * listings show them. Objects the caller may not know about, deleted ones and unknown ids are
@@ -395,6 +404,7 @@ export async function viewObjects(
   authz: Authorizer,
   request: ViewRequest,
   objectIds: readonly string[],
+  options: ViewOptions = {},
 ): Promise<ObjectView[]> {
   const ids = distinctIds(objectIds, "viewObjects");
   if (ids.length === 0) return [];
@@ -470,20 +480,31 @@ export async function viewObjects(
     const tags = tagsOf.get(row.id) ?? none();
     const level = levels.get(row.id);
     if (!level) continue;
+    const resource = {
+      id: row.id,
+      ownerId: row.ownerId,
+      tags: tags.grantable,
+      allTags: tags.all,
+      zone: row.zone,
+      zoneId: row.zoneId,
+    };
     const canRead = authz.authorize({
       principal,
       action: "read",
-      resource: {
-        id: row.id,
-        ownerId: row.ownerId,
-        tags: tags.grantable,
-        allTags: tags.all,
-        zone: row.zone,
-        zoneId: row.zoneId,
-      },
+      resource,
       client: request.client,
     }).allow;
     if (!canRead && !member) continue;
+    if (options.search === true) {
+      // No permit is fine (members find by level); a forbid or an error takes the file out.
+      const { kind } = authz.authorize({
+        principal,
+        action: "search",
+        resource,
+        client: request.client,
+      });
+      if (kind === "forbid" || kind === "error") continue;
+    }
     const decision = decideRead({
       canRead,
       visibility: level.visibility,
