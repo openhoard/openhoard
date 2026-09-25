@@ -65,7 +65,9 @@ describe("adminArgument", () => {
   });
 });
 
-describe("openhoard admin", () => {
+// Every command opens the data directory afresh, as the CLI does: on PGlite that is several
+// cold starts per test, which the Windows runners take well over the suite's 30 s for.
+describe("openhoard admin", { timeout: 180_000 }, () => {
   it("creates a tenant, issues a SCIM token that works, lists and revokes it, all audited", async () => {
     const created = await admin("tenant", "create", "--name", "Acme");
     expect(created.code, created.err).toBe(0);
