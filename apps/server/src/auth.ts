@@ -74,6 +74,9 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
   const loginCookie = (state: string) => loginCookieName(state, secure);
   // Without a configured key, sign-ins under way don't survive a restart (or reach another node).
   const key = loginKey(auth.cookieKey);
+  if (auth.cookieKey === undefined) {
+    log?.info("sign-in: no auth.cookieKey, so this process made its own (fine for one server)");
+  }
   const providers = new Map(auth.providers.map((p) => [p.id, p]));
   const cache = new PrincipalCache();
   const discovered = new Map<string, Promise<oidc.Configuration>>();
@@ -179,7 +182,7 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
       state,
       codeVerifier,
       nonce,
-      returnTo: localPath(returnTo) ?? "/",
+      returnTo: returnPath(returnTo),
       expiresAt: Date.now() + LOGIN_TTL * 1000,
     });
     setCookie(c, loginCookie(state), sealed, {
@@ -208,6 +211,11 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
       !sameText(state, login.state) ||
       login.expiresAt <= Date.now()
     ) {
+      // Often another server's key (set auth.cookieKey on every node), or an old tab.
+      log?.info(
+        { provider: p.id, cookie: sealed !== undefined },
+        "sign-in: no usable sign-in cookie",
+      );
       return c.json(FAILED, 400);
     }
     const refuse = async (reason: string, subject?: string, userId?: string | null) => {
@@ -351,6 +359,15 @@ export const requireSignIn: MiddlewareHandler<AuthEnv> = async (c, next) => {
   if (!c.get("auth")) return c.json({ error: "not signed in" }, 401);
   await next();
 };
+
+/**
+ * Where to return after signing in: a path on this server, at most 512 characters (every sign-in
+ * under way rides in a cookie sent to the callback, and headers have a limit), else `/`.
+ */
+function returnPath(asked: string | undefined): string {
+  const path = localPath(asked);
+  return path !== null && path.length <= 512 ? path : "/";
+}
 
 /** Equal strings, compared in constant time. */
 function sameText(a: string, b: string): boolean {

@@ -82,13 +82,13 @@ only a hash is stored.
 
 **Routes:**
 
-| Route                     | What it does                                                                               |
-| ------------------------- | ------------------------------------------------------------------------------------------ |
-| `GET /auth/providers`     | The providers to offer on a sign-in page.                                                  |
-| `GET /auth/login/<id>`    | Starts sign-in. `?return_to=/path` sets where to come back to (only paths on this server). |
-| `GET /auth/callback/<id>` | The provider sends the browser back here.                                                  |
-| `GET /auth/me`            | Who is signed in (401 if nobody).                                                          |
-| `POST /auth/logout`       | Ends the session (204).                                                                    |
+| Route                     | What it does                                                                                                   |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `GET /auth/providers`     | The providers to offer on a sign-in page.                                                                      |
+| `GET /auth/login/<id>`    | Starts sign-in. `?return_to=/path` sets where to come back to (a path on this server, at most 512 characters). |
+| `GET /auth/callback/<id>` | The provider sends the browser back here.                                                                      |
+| `GET /auth/me`            | Who is signed in (401 if nobody).                                                                              |
+| `POST /auth/logout`       | Ends the session (204).                                                                                        |
 
 Every sign-in is written to the audit log (`auth.sign-in`), whether it was allowed or refused, and
 so is every sign-out (`auth.sign-out`). A refused person nobody provisioned is logged as

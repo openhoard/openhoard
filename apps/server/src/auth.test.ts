@@ -349,7 +349,12 @@ describe("the sign-in round trip is bound to its browser", () => {
   });
 
   it("returns only to this server, and knows only its providers", async () => {
-    for (const evil of ["//evil.example/x", "https://evil.example", "/\\evil.example"]) {
+    for (const evil of [
+      "//evil.example/x",
+      "https://evil.example",
+      "/\\evil.example",
+      `/${"a".repeat(600)}`,
+    ]) {
       const back = await new Browser().signIn(anaFake.upn, evil);
       expect(back.headers.get("location"), evil).toBe("/");
     }
