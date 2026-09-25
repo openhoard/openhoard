@@ -37,3 +37,4 @@ export {
   type LiveGrant,
 } from "./grants.js";
 export { lockPrincipals } from "./principals.js";
+export { createTenant, getTenant, type NewTenant, type TenantRow } from "./tenants.js";

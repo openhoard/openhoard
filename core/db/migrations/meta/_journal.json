@@ -232,6 +232,20 @@
       "when": 1790372293835,
       "tag": "0032_versions_superseded",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1790373408608,
+      "tag": "0033_scim_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1790373409530,
+      "tag": "0034_scim_tokens_rls",
+      "breakpoints": true
     }
   ]
 }

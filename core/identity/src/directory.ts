@@ -19,7 +19,7 @@ import {
   oauthCodes,
 } from "@openhoard/core-db";
 import type { AuthzPrincipal } from "@openhoard/core-policy";
-import { and, asc, eq, gt, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, count, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
 
 /*
  * The directory (T-101): the tenant's people and groups, and what a signed-in person is to the
@@ -73,6 +73,10 @@ export interface User {
   active: boolean;
   source: IdentitySource;
   externalId: string | null;
+  /** The identity provider's sign-in name (SCIM userName): SCIM users only. */
+  userName: string | null;
+  givenName: string | null;
+  familyName: string | null;
   createdAt: Date;
   lock: Stop | null;
   providerDisabled: Stop | null;
@@ -177,11 +181,49 @@ function checkEmail(email: string): { email: string; key: string } {
 }
 
 function checkName(what: string, name: string): string {
-  const trimmed = name.trim();
+  const trimmed = typeof name === "string" ? name.trim() : "";
   if (trimmed === "" || chars(trimmed) > 256 || INVISIBLE.test(trimmed.replace(/\s/gu, ""))) {
     throw new IdentityError("invalid", `${what} must be 1 to 256 visible characters`);
   }
   return trimmed;
+}
+
+/**
+ * A SCIM userName as matched: Unicode NFC, in lower case (SCIM compares userName without regard
+ * to case, RFC 7643 section 4.1). Case folding happens here, not in the database (spike S2).
+ */
+export function userNameKey(userName: string): string {
+  return userName.normalize("NFC").toLowerCase();
+}
+
+/**
+ * A userName for a user of `source`: only SCIM users have one (the identity provider's sign-in
+ * name). Kept as sent (Entra compares what it reads back), so only refused when blank, over 512
+ * characters, or holding control or invisible characters, which would make two names look alike.
+ */
+function checkUserName(
+  name: string | undefined | null,
+  source: IdentitySource,
+): { userName: string; userNameKey: string } | { userName: null; userNameKey: null } {
+  if (name === undefined || name === null) return { userName: null, userNameKey: null };
+  if (source !== "scim") throw new IdentityError("invalid", "only SCIM users have a userName");
+  if (
+    typeof name !== "string" ||
+    name.trim() === "" ||
+    chars(name) > 512 ||
+    chars(userNameKey(name)) > 512 ||
+    INVISIBLE.test(name)
+  ) {
+    throw new IdentityError("invalid", "userName must be 1 to 512 visible characters");
+  }
+  return { userName: name, userNameKey: userNameKey(name) };
+}
+
+/** A name part (given or family name), or null to have none. */
+function checkNamePart(what: string, part: string | undefined | null): string | null {
+  if (part === undefined || part === null) return null;
+  if (typeof part !== "string") throw new IdentityError("invalid", `${what} must be text`);
+  return checkName(what, part);
 }
 
 /**
@@ -241,6 +283,9 @@ const toUser = (r: UserRow): User => ({
   active: r.lockedAt === null && r.providerDisabledAt === null && r.retiredAt === null,
   source: r.source,
   externalId: r.externalId,
+  userName: r.userName,
+  givenName: r.givenName,
+  familyName: r.familyName,
   createdAt: r.createdAt,
   lock: stop(r.lockedAt, r.lockedBy),
   providerDisabled: stop(r.providerDisabledAt, r.providerDisabledBy),
@@ -263,9 +308,13 @@ export interface NewUser {
   source: IdentitySource;
   /** The identity provider's id: SCIM users should have one, local users can't. */
   externalId?: string;
+  /** The identity provider's sign-in name (SCIM userName): SCIM users only. */
+  userName?: string;
+  givenName?: string;
+  familyName?: string;
 }
 
-/** Adds a user. Refuses an email or external id a current user has (`conflict`). */
+/** Adds a user. Refuses an email, external id or userName a current user has (`conflict`). */
 export async function createUser(tx: Tx, tenantId: string, input: NewUser): Promise<User> {
   const { email, key } = checkEmail(input.email);
   const source = checkSource(input.source);
@@ -278,11 +327,17 @@ export async function createUser(tx: Tx, tenantId: string, input: NewUser): Prom
     kind: checkKind(input.kind ?? "member"),
     source,
     externalId: checkExternalId(input.externalId, source),
+    ...checkUserName(input.userName, source),
+    givenName: checkNamePart("givenName", input.givenName),
+    familyName: checkNamePart("familyName", input.familyName),
   };
-  // No conflict target: any unique key (email or external id) makes this a no-op, and a no-op
+  // No conflict target: any unique key (email, external id or userName) makes this a no-op,
+  // and a no-op
   // leaves the transaction usable, unlike a unique violation.
   const [created] = await tx.insert(users).values(row).onConflictDoNothing().returning();
-  if (!created) throw new IdentityError("conflict", "a user with that email or external id exists");
+  if (!created) {
+    throw new IdentityError("conflict", "a user with that email, external id or userName exists");
+  }
   return toUser(created);
 }
 
@@ -357,6 +412,26 @@ export async function findUserByExternalId(
   return row ? toUser(row) : null;
 }
 
+/** The current (not retired) SCIM user with this userName, compared by {@link userNameKey}. */
+export async function findUserByUserName(
+  tx: Tx,
+  tenantId: string,
+  userName: string,
+): Promise<User | null> {
+  const [row] = await tx
+    .select()
+    .from(users)
+    .where(
+      and(
+        eq(users.tenantId, tenantId),
+        eq(users.source, "scim"),
+        eq(users.userNameKey, userNameKey(userName)),
+        isNull(users.retiredAt),
+      ),
+    );
+  return row ? toUser(row) : null;
+}
+
 /** The user, locked for the rest of the transaction; refuses unknown and retired users. */
 async function lockUserRow(tx: Tx, tenantId: string, userId: string) {
   const [row] = await tx
@@ -384,6 +459,11 @@ export interface UserChanges {
   displayName?: string;
   kind?: PersonKind;
   externalId?: string | null;
+  /** SCIM users only; null removes it. */
+  userName?: string | null;
+  /** null removes it. */
+  givenName?: string | null;
+  familyName?: string | null;
 }
 
 /**
@@ -415,6 +495,15 @@ export async function updateUser(
   if (changes.externalId !== undefined) {
     set.externalId = checkExternalId(changes.externalId, current.source);
   }
+  if (changes.userName !== undefined) {
+    Object.assign(set, checkUserName(changes.userName, current.source));
+  }
+  if (changes.givenName !== undefined) {
+    set.givenName = checkNamePart("givenName", changes.givenName);
+  }
+  if (changes.familyName !== undefined) {
+    set.familyName = checkNamePart("familyName", changes.familyName);
+  }
   if (Object.keys(set).length === 0) return toUser(current);
   try {
     // A savepoint, so a unique violation from a concurrent insert leaves the caller's
@@ -429,7 +518,7 @@ export async function updateUser(
     return toUser(row as UserRow);
   } catch (e) {
     if (sqlState(e) === "23505") {
-      throw new IdentityError("conflict", "another user has that email or external id");
+      throw new IdentityError("conflict", "another user has that email, external id or userName");
     }
     throw e;
   }
@@ -796,13 +885,164 @@ export async function renameGroup(
   name: string,
   as: IdentitySource,
 ): Promise<Group> {
-  await ownedGroup(tx, tenantId, groupId, as);
-  const [row] = await tx
-    .update(groups)
-    .set({ name: checkName("name", name) })
-    .where(and(eq(groups.tenantId, tenantId), eq(groups.id, groupId)))
-    .returning();
-  return toGroup(row as GroupRow);
+  return updateGroup(tx, tenantId, groupId, { name }, as);
+}
+
+/**
+ * Changes a group's name or external id, as the source that manages it. Another group's external
+ * id is a `conflict`, and the transaction stays usable.
+ */
+export async function updateGroup(
+  tx: Tx,
+  tenantId: string,
+  groupId: string,
+  changes: { name?: string; externalId?: string | null },
+  as: IdentitySource,
+): Promise<Group> {
+  const current = await ownedGroup(tx, tenantId, groupId, as);
+  const set: Partial<typeof groups.$inferInsert> = {};
+  if (changes.name !== undefined) set.name = checkName("name", changes.name);
+  if (changes.externalId !== undefined) {
+    set.externalId = checkExternalId(changes.externalId, current.source);
+  }
+  if (Object.keys(set).length === 0) return toGroup(current);
+  try {
+    // A savepoint, so a unique violation leaves the caller's transaction usable.
+    const [row] = await tx.transaction((sp) =>
+      sp
+        .update(groups)
+        .set(set)
+        .where(and(eq(groups.tenantId, tenantId), eq(groups.id, groupId)))
+        .returning(),
+    );
+    return toGroup(row as GroupRow);
+  } catch (e) {
+    if (sqlState(e) === "23505") {
+      throw new IdentityError("conflict", "another group has that external id");
+    }
+    throw e;
+  }
+}
+
+/** Most rows one listUsers() or listGroups() call returns. */
+export const MAX_LIST = 1000;
+
+/**
+ * What listUsers() matches: every given field must match (and). `userName` compares by
+ * {@link userNameKey}, `email` by {@link emailKey}; the rest exactly.
+ */
+export interface UserQuery {
+  source?: IdentitySource;
+  id?: string;
+  userName?: string;
+  externalId?: string;
+  email?: string;
+  displayName?: string;
+  /** Whether the identity provider has them active (no provider disable). */
+  providerActive?: boolean;
+}
+
+function checkPage(page: { offset?: number; limit?: number }): { offset: number; limit: number } {
+  const offset = page.offset ?? 0;
+  const limit = page.limit ?? 100;
+  if (!Number.isSafeInteger(offset) || offset < 0) {
+    throw new IdentityError("invalid", "offset must be a whole number of at least 0");
+  }
+  if (!Number.isSafeInteger(limit) || limit < 0 || limit > MAX_LIST) {
+    throw new IdentityError("invalid", `limit must be 0 to ${MAX_LIST}`);
+  }
+  return { offset, limit };
+}
+
+/**
+ * A page of the current (not retired) users matching `query`, in id order (which is creation
+ * order), and how many match in all: for the SCIM endpoint's lists and admin screens.
+ */
+export async function listUsers(
+  tx: Tx,
+  tenantId: string,
+  query: UserQuery,
+  page: { offset?: number; limit?: number } = {},
+): Promise<{ total: number; users: User[] }> {
+  const { offset, limit } = checkPage(page);
+  const where = and(
+    eq(users.tenantId, tenantId),
+    isNull(users.retiredAt),
+    query.source === undefined ? undefined : eq(users.source, query.source),
+    query.id === undefined ? undefined : eq(users.id, query.id),
+    query.userName === undefined ? undefined : eq(users.userNameKey, userNameKey(query.userName)),
+    query.externalId === undefined ? undefined : eq(users.externalId, query.externalId),
+    // An address that has no key matches nobody (the key column is never "").
+    query.email === undefined ? undefined : eq(users.emailKey, emailKey(query.email)),
+    query.displayName === undefined ? undefined : eq(users.displayName, query.displayName),
+    query.providerActive === undefined
+      ? undefined
+      : query.providerActive
+        ? isNull(users.providerDisabledAt)
+        : isNotNull(users.providerDisabledAt),
+  );
+  const [counted] = await tx.select({ n: count() }).from(users).where(where);
+  const rows =
+    limit === 0
+      ? []
+      : await tx
+          .select()
+          .from(users)
+          .where(where)
+          .orderBy(asc(users.id))
+          .limit(limit)
+          .offset(offset);
+  return { total: counted?.n ?? 0, users: rows.map(toUser) };
+}
+
+/** What listGroups() matches: every given field must match, exactly. */
+export interface GroupQuery {
+  source?: IdentitySource;
+  id?: string;
+  name?: string;
+  externalId?: string;
+  /** Groups this user is directly in. */
+  memberId?: string;
+}
+
+/** A page of the groups matching `query`, in id order, and how many match in all. */
+export async function listGroups(
+  tx: Tx,
+  tenantId: string,
+  query: GroupQuery,
+  page: { offset?: number; limit?: number } = {},
+): Promise<{ total: number; groups: Group[] }> {
+  const { offset, limit } = checkPage(page);
+  const where = and(
+    eq(groups.tenantId, tenantId),
+    query.source === undefined ? undefined : eq(groups.source, query.source),
+    query.id === undefined ? undefined : eq(groups.id, query.id),
+    query.name === undefined ? undefined : eq(groups.name, query.name),
+    query.externalId === undefined ? undefined : eq(groups.externalId, query.externalId),
+    query.memberId === undefined
+      ? undefined
+      : inArray(
+          groups.id,
+          tx
+            .select({ id: groupMembers.groupId })
+            .from(groupMembers)
+            .where(
+              and(eq(groupMembers.tenantId, tenantId), eq(groupMembers.userId, query.memberId)),
+            ),
+        ),
+  );
+  const [counted] = await tx.select({ n: count() }).from(groups).where(where);
+  const rows =
+    limit === 0
+      ? []
+      : await tx
+          .select()
+          .from(groups)
+          .where(where)
+          .orderBy(asc(groups.id))
+          .limit(limit)
+          .offset(offset);
+  return { total: counted?.n ?? 0, groups: rows.map(toGroup) };
 }
 
 /**

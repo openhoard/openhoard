@@ -463,6 +463,16 @@ export const users = pgTable(
     source: text("source", { enum: IDENTITY_SOURCES }).notNull(),
     /** The identity provider's id for the user (SCIM externalId); always null for local users. */
     externalId: text("external_id"),
+    /**
+     * The identity provider's sign-in name for the user (SCIM userName, Entra's UPN), as sent:
+     * SCIM users only. Entra finds its users by it, so it is kept even when it isn't the email.
+     */
+    userName: text("user_name"),
+    /** The userName as matched: Unicode NFC, lower case (core/identity userNameKey()). */
+    userNameKey: text("user_name_key"),
+    /** Name parts, as the identity provider sent them (SCIM name.givenName, name.familyName). */
+    givenName: text("given_name"),
+    familyName: text("family_name"),
     createdAt: createdAt(),
     lockedAt: timestamp("locked_at", { withTimezone: true }),
     lockedBy: text("locked_by"),
@@ -500,6 +510,22 @@ export const users = pgTable(
     ),
     // An external id is the identity provider's: only SCIM users have one.
     check("users_external_id_scim", sql`source = 'scim' or external_id is null`),
+    // A userName is unique among current users, compared by its key (SCIM: case-insensitive).
+    uniqueIndex("users_user_name_unique")
+      .on(t.tenantId, t.userNameKey)
+      .where(sql`user_name_key is not null and retired_at is null`),
+    check("users_user_name_scim", sql`source = 'scim' or user_name is null`),
+    check(
+      "users_user_name_complete",
+      sql`(user_name is null) = (user_name_key is null)
+       and (user_name is null or char_length(user_name) between 1 and 512)
+       and (user_name_key is null or char_length(user_name_key) between 1 and 512)`,
+    ),
+    check(
+      "users_name_parts_length",
+      sql`(given_name is null or char_length(given_name) between 1 and 256)
+       and (family_name is null or char_length(family_name) between 1 and 256)`,
+    ),
     check("users_lock_complete", sql`(locked_at is null) = (locked_by is null)`),
     check("users_locked_by_admin", sql`locked_by is null or locked_by ~ '^(user|system):.+$'`),
     check(
@@ -706,6 +732,54 @@ export const apiKeys = pgTable(
     ),
     check(
       "api_keys_revoked_by_principal",
+      sql`revoked_by is null or revoked_by ~ '^(user|system):.+$'`,
+    ),
+  ],
+);
+
+/**
+ * SCIM bearer tokens (T-103): how a tenant's identity provider (Entra's provisioning service)
+ * authenticates to `/scim/v2`. Not API keys: a token belongs to the tenant, not to a user, and
+ * acts only as that tenant's SCIM client (`scim:<token id>`). The token is
+ * `ohscim.<tenant id>.<token id>.<secret>`; only a SHA-256 of the secret is kept. Every token
+ * expires within a year and can be revoked; core/identity reads it on every request.
+ */
+export const scimTokens = pgTable(
+  "scim_tokens",
+  {
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    id: text("id").notNull(),
+    /** What it is for, as an admin wrote it: "Entra provisioning". */
+    name: text("name").notNull(),
+    /** SHA-256 of the secret, hex. The secret is 32 random bytes, so a fast hash is enough. */
+    secretHash: text("secret_hash").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    /** When it last authenticated a request (written at most once a minute). */
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: text("revoked_by"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    idCheck("scim_tokens_id_format", "id", "scimToken"),
+    check("scim_tokens_name_length", sql`char_length(name) between 1 and 200`),
+    check("scim_tokens_secret_hash_format", sql`secret_hash ~ '^[0-9a-f]{64}$'`),
+    check(
+      "scim_tokens_expiry",
+      sql`expires_at > created_at and expires_at <= created_at + interval '366 days'`,
+    ),
+    check("scim_tokens_last_used", sql`last_used_at is null or last_used_at >= created_at`),
+    check("scim_tokens_created_by_principal", sql`created_by ~ '^(user|system):.+$'`),
+    check(
+      "scim_tokens_revocation_complete",
+      sql`(revoked_at is null) = (revoked_by is null) and (revoked_at is null or revoked_at >= created_at)`,
+    ),
+    check(
+      "scim_tokens_revoked_by_principal",
       sql`revoked_by is null or revoked_by ~ '^(user|system):.+$'`,
     ),
   ],
@@ -1322,4 +1396,5 @@ export const tables = {
   oauthCodes,
   oauthGrants,
   oauthTokens,
+  scimTokens,
 } as const;

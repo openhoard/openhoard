@@ -10,6 +10,8 @@ ask here, never the `users`, `groups` and `group_members` tables in core/db.
 - [`principal-cache.ts`](src/principal-cache.ts): `PrincipalCache`, `resolvePrincipal()` with a
   cache in front (T-107).
 - [`api-keys.ts`](src/api-keys.ts): service accounts' API keys (T-111).
+- [`sessions.ts`](src/sessions.ts): signing in and sessions (T-102).
+- [`scim-tokens.ts`](src/scim-tokens.ts): each tenant's SCIM bearer tokens (T-103).
 
 ## Sources
 
@@ -140,7 +142,32 @@ Refused: invisible characters, characters that fold into ASCII (the Kelvin sign,
 letters), and domains that aren't plain host names (percent-escapes, IP addresses, trailing
 dots).
 
-Group membership is direct for now. Nested groups come with SCIM.
+Group membership is direct. The SCIM endpoint refuses a group as a member (Entra doesn't
+provision nested groups either); nesting would need resolution through groups first.
+
+A SCIM user also keeps its `userName` (the identity provider's sign-in name, Entra's UPN) as
+sent, and its given and family names. `userName` is for SCIM users only, unique among current
+users compared as `userNameKey()` (NFC, lower case: SCIM compares it without regard to case), and
+freed by retirement like the email. `findUserByUserName()` finds one. `listUsers()` and
+`listGroups()` return a page of current users or groups matching what SCIM filters on, with the
+total; `updateGroup()` changes a group's name or external id.
+
+## SCIM tokens
+
+The SCIM endpoint (apps/server, T-103) authenticates the tenant's identity provider with a
+token of the tenant's own, not an API key: it acts as the provider (`scim:<token id>`, the actor
+the directory lets manage SCIM users and groups), not as a principal with grants.
+
+- `issueScimToken()` returns `ohscim.<tenant id>.<token id>.<secret>` once; only a SHA-256 of
+  the secret is kept. The tenant in the token says which tenant's transaction to check it in, so
+  the endpoint is one URL for all tenants (`parseScimToken()`).
+- A token expires within a year (`expiresAt`, or `days` by the database's clock) and can be
+  revoked (`revokeScimToken()`). `listScimTokens()` shows them without secrets, with when each
+  was last used (`touchScimToken()`, at most once a minute).
+- `checkScimToken()` reads the token on every request, so a revoked or expired one fails on the
+  next, compares the secret in constant time, and for a refused attempt on a real token id says
+  why (`wrong-secret`, `revoked`, `expired`), for the audit log only. The server audits every
+  use, allowed or refused, and limits failed attempts.
 
 ## Service accounts and API keys
 

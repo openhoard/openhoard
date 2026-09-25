@@ -324,15 +324,11 @@ describe("migrations", () => {
           sql`insert into groups (tenant_id, id, name, source, external_id)
               values (${s.tenantId}, ${s.groupId}, 'Readers', 'local', 'local-g')`,
         );
-        await tx.insert(users).values({
-          tenantId: s.tenantId,
-          id: scimUser,
-          email: "bo@example.com",
-          emailKey: "bo@example.com",
-          displayName: "Bo",
-          source: "scim",
-          externalId: "scim-1",
-        });
+        await tx.execute(
+          sql`insert into users (tenant_id, id, email, email_key, display_name, source, external_id)
+              values (${s.tenantId}, ${scimUser}, 'bo@example.com', 'bo@example.com', 'Bo',
+                      'scim', 'scim-1')`,
+        );
       });
       await driver.migrate();
       const rows = await db.withTenant(s.tenantId, async (tx) => ({

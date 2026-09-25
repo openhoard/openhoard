@@ -24,6 +24,7 @@ import {
   grants,
   objects,
   objectTags,
+  scimTokens,
   sourceRefs,
   tables,
   tenants,
@@ -219,6 +220,35 @@ describe("withTenant", () => {
       tx.insert(tenants).values({ id: newId("tenant"), name: "Sneaky" }),
     );
     expect(await sqlState(newTenant)).toBe(INSUFFICIENT_PRIVILEGE);
+  });
+
+  it("keeps SCIM tokens to their tenant: unseen, unwritable and unrevocable from another", async () => {
+    // A token of tenant B's, as core/identity issues them (T-103).
+    const tokenId = newId("scimToken");
+    const token = {
+      id: tokenId,
+      name: "Entra",
+      secretHash: "0".repeat(64),
+      createdBy: "system:test",
+      expiresAt: sql`now() + interval '30 days'`,
+    };
+    await db.withTenant(b.tenantId, (tx) =>
+      tx.insert(scimTokens).values({ tenantId: b.tenantId, ...token }),
+    );
+    const seenFromA = await db.withTenant(a.tenantId, async (tx) => {
+      await tx
+        .update(scimTokens)
+        .set({ revokedAt: sql`now()`, revokedBy: "user:x" })
+        .where(eq(scimTokens.id, tokenId));
+      return tx.select().from(scimTokens);
+    });
+    expect(seenFromA).toEqual([]);
+    const planted = db.withTenant(a.tenantId, (tx) =>
+      tx.insert(scimTokens).values({ tenantId: b.tenantId, ...token, id: newId("scimToken") }),
+    );
+    expect(await sqlState(planted)).toBe(INSUFFICIENT_PRIVILEGE);
+    const [own] = await db.withTenant(b.tenantId, (tx) => tx.select().from(scimTokens));
+    expect(own).toMatchObject({ id: tokenId, revokedAt: null });
   });
 
   it("cannot move its rows to another tenant", async () => {

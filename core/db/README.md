@@ -72,6 +72,13 @@ Two narrow doors besides `withTenant()`, both for core/jobs:
     issues none: a check against mistakes, not a boundary (quoting gets past it). What holds is
     below. It refuses to run inside a `withTenant()` callback too.
 
+A new tenant is made with **`createTenant(tx, id, { name })`**, in a `withTenant()` transaction for
+the new id (`newId("tenant")`): the `tenants` row, with the fail-closed defaults (hidden,
+metadata-only), and its `principal_epochs` row, so the principal cache serves it from the first
+request. Nothing else: zones, vocabulary, packs and people are added deliberately afterwards.
+`getTenant(tx, id)` reads the tenant's own row. `openhoard admin tenant create` (apps/server) uses
+both.
+
 PGlite's session starts as a superuser and switches to the `openhoard` role, and a superuser
 skips row-level security. So on PGlite every `withTenant()` and `tenantIds()` checks, in the same
 statement that sets its context, that it runs as `openhoard`, and throws `SessionRoleError`

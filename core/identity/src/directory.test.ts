@@ -22,6 +22,7 @@ import {
   findUserByEmail,
   findUserByExternalId,
   findUserByIdentity,
+  findUserByUserName,
   getGroup,
   getUser,
   groupPrincipal,
@@ -38,8 +39,14 @@ import {
   unlinkIdentity,
   unlockUser,
   updateUser,
+  listGroups,
+  listUsers,
+  updateGroup,
+  userNameKey,
   userPrincipal,
+  type GroupQuery,
   type NewUser,
+  type UserQuery,
 } from "./directory.js";
 
 /* T-101: users and groups from SCIM or OpenHoard itself, and who a user is to authorize(). */
@@ -354,6 +361,84 @@ describe("users", () => {
     expect(await direct.then(() => "no error", sqlState)).toBe("23514");
   });
 
+  it("keeps a SCIM userName as sent, unique among current users regardless of case (T-103)", async () => {
+    // "Émile", with the accent as a combining mark: NFC makes it one character.
+    const emile = `E${String.fromCodePoint(0x301)}mile`;
+    const u = await newUser("ana@example.com", {
+      source: "scim",
+      externalId: "oid-1",
+      userName: "Ana.Lopez@Contoso.onmicrosoft.com",
+      givenName: "Ana",
+      familyName: "Lopez",
+    });
+    expect(u).toMatchObject({
+      userName: "Ana.Lopez@Contoso.onmicrosoft.com",
+      givenName: "Ana",
+      familyName: "Lopez",
+    });
+    const find = (name: string) => inTenant((tx) => findUserByUserName(tx, t.tenantId, name));
+    expect((await find("ana.lopez@contoso.ONMICROSOFT.com"))?.id).toBe(u.id);
+    expect(await find("ana.lopez@contoso")).toBeNull();
+    expect(userNameKey("ÉLAN")).toBe("élan");
+    // Another user can't take it in another case, by creating or renaming.
+    expect(
+      await code(
+        newUser("bo@example.com", {
+          source: "scim",
+          userName: "ANA.LOPEZ@contoso.onmicrosoft.com",
+        }),
+      ),
+    ).toBe("conflict");
+    const bo = await newUser("bo@example.com", { source: "scim", userName: "bo" });
+    expect(
+      await code(
+        inTenant((tx) =>
+          updateUser(
+            tx,
+            t.tenantId,
+            bo.id,
+            { userName: "ana.lopez@contoso.onmicrosoft.com" },
+            "scim",
+          ),
+        ),
+      ),
+    ).toBe("conflict");
+    // Only SCIM users have one, and it must be visible text.
+    expect(await code(newUser("cy@example.com", { userName: "cy" }))).toBe("invalid");
+    for (const userName of ["", "  ", `a${String.fromCodePoint(0x200b)}b`, "x".repeat(513), 5]) {
+      expect(await code(newUser("dee@example.com", { source: "scim", userName }))).toBe("invalid");
+    }
+    expect(await code(newUser("dee@example.com", { source: "scim", givenName: " " }))).toBe(
+      "invalid",
+    );
+    expect(await code(newUser("dee@example.com", { source: "scim", familyName: 3 }))).toBe(
+      "invalid",
+    );
+    // Changing and clearing, and the database's own checks.
+    const changed = await inTenant((tx) =>
+      updateUser(
+        tx,
+        t.tenantId,
+        u.id,
+        { userName: emile, givenName: null, familyName: "López" },
+        "scim",
+      ),
+    );
+    expect(changed).toMatchObject({ userName: emile, givenName: null, familyName: "López" });
+    expect((await find("émile"))?.id).toBe(u.id);
+    const raw = (values: Partial<typeof users.$inferInsert>) =>
+      inTenant((tx) => tx.update(users).set(values).where(eq(users.id, t.userId)));
+    await expect(raw({ userName: "local", userNameKey: "local" })).rejects.toThrow();
+    await expect(
+      inTenant((tx) => tx.update(users).set({ userNameKey: null }).where(eq(users.id, u.id))),
+    ).rejects.toThrow();
+    // Retiring frees the userName for someone new.
+    await inTenant((tx) => retireUser(tx, t.tenantId, u.id, "scim:sct_x"));
+    expect(await find(emile)).toBeNull();
+    const again = await newUser("ana@example.com", { source: "scim", userName: emile });
+    expect(again.id).not.toBe(u.id);
+  });
+
   it("finds only SCIM users by external id", async () => {
     const local = await newUser("lo@example.com");
     // A row from before the database checked it (the check dropped for this test's database).
@@ -464,6 +549,83 @@ describe("groups", () => {
         ),
       ),
     ).toBe("conflict");
+  });
+
+  it("changes a group's external id, keeping it unique, as the managing source", async () => {
+    const make = (name: string, externalId: string) =>
+      inTenant((tx) => createGroup(tx, t.tenantId, { name, source: "scim", externalId }));
+    const a = await make("A", "g-a");
+    await make("B", "g-b");
+    const update = (changes: { name?: string; externalId?: string | null }, as: "scim" | "local") =>
+      inTenant((tx) => updateGroup(tx, t.tenantId, a.id, changes, as));
+    expect(await update({ externalId: "g-a2", name: "A2" }, "scim")).toMatchObject({
+      name: "A2",
+      externalId: "g-a2",
+    });
+    expect(await update({}, "scim")).toMatchObject({ name: "A2" });
+    expect(await update({ externalId: null }, "scim")).toMatchObject({ externalId: null });
+    expect(await code(update({ externalId: "g-b" }, "scim"))).toBe("conflict");
+    expect(await code(update({ name: "" }, "scim"))).toBe("invalid");
+    expect(await code(update({ name: "x" }, "local"))).toBe("wrong-source");
+    expect(
+      await code(
+        inTenant((tx) => updateGroup(tx, t.tenantId, t.groupId, { externalId: "x" }, "local")),
+      ),
+    ).toBe("invalid");
+  });
+
+  it("lists users and groups by what SCIM filters on, a page at a time", async () => {
+    const make = (i: number, more: object = {}) =>
+      newUser(`p${i}@example.com`, {
+        source: "scim",
+        userName: `P${i}@Contoso.example`,
+        externalId: `oid-${i}`,
+        displayName: `Person ${i}`,
+        ...more,
+      });
+    const people = [await make(1), await make(2), await make(3)];
+    await inTenant((tx) => setProviderActive(tx, t.tenantId, people[1]?.id ?? "", false, "scim:x"));
+    await inTenant((tx) => retireUser(tx, t.tenantId, people[2]?.id ?? "", "scim:x"));
+    const list = (q: UserQuery, page = {}) => inTenant((tx) => listUsers(tx, t.tenantId, q, page));
+    expect((await list({})).total).toBe(3); // the seeded local user and two current SCIM users
+    expect((await list({ source: "scim" })).users.map((u) => u.id)).toEqual(
+      people.slice(0, 2).map((u) => u.id),
+    );
+    const one = async (q: UserQuery) =>
+      (await list({ source: "scim", ...q })).users.map((u) => u.id);
+    expect(await one({ userName: "p1@contoso.EXAMPLE" })).toEqual([people[0]?.id]);
+    expect(await one({ externalId: "oid-2" })).toEqual([people[1]?.id]);
+    expect(await one({ externalId: "OID-2" })).toEqual([]);
+    expect(await one({ email: "P1@example.com" })).toEqual([people[0]?.id]);
+    expect(await one({ email: "not an address" })).toEqual([]);
+    expect(await one({ id: people[0]?.id ?? "" })).toEqual([people[0]?.id]);
+    expect(await one({ displayName: "Person 2" })).toEqual([people[1]?.id]);
+    expect(await one({ providerActive: false })).toEqual([people[1]?.id]);
+    expect(await one({ providerActive: true })).toEqual([people[0]?.id]);
+    expect(await one({ externalId: "oid-3" })).toEqual([]); // retired
+    const page = await list({}, { offset: 1, limit: 1 });
+    expect(page.total).toBe(3);
+    expect(page.users).toHaveLength(1);
+    expect((await list({}, { limit: 0 })).users).toEqual([]);
+    for (const bad of [{ offset: -1 }, { limit: 1001 }, { limit: 1.5 }]) {
+      expect(await code(list({}, bad))).toBe("invalid");
+    }
+
+    const g = await inTenant((tx) =>
+      createGroup(tx, t.tenantId, { name: "Sales", source: "scim", externalId: "g-s" }),
+    );
+    const groupsBy = async (q: GroupQuery, page = {}) =>
+      (await inTenant((tx) => listGroups(tx, t.tenantId, q, page))).groups.map((x) => x.id);
+    expect(await groupsBy({ source: "scim" })).toEqual([g.id]);
+    expect(await groupsBy({ name: "Sales" })).toEqual([g.id]);
+    expect(await groupsBy({ name: "sales" })).toEqual([]);
+    expect(await groupsBy({ externalId: "g-s", id: g.id })).toEqual([g.id]);
+    expect(await groupsBy({}, { limit: 0 })).toEqual([]);
+    await inTenant((tx) => addMember(tx, t.tenantId, g.id, people[0]?.id ?? "", "scim"));
+    expect(await groupsBy({ memberId: people[0]?.id ?? "" })).toEqual([g.id]);
+    expect(await groupsBy({ memberId: t.userId })).toEqual([t.groupId]);
+    expect(await groupsBy({ memberId: t.userId, source: "scim" })).toEqual([]);
+    expect((await inTenant((tx) => listGroups(tx, t.tenantId, {}))).total).toBe(2);
   });
 
   it("keeps external ids to SCIM groups, and finds only those by it", async () => {
