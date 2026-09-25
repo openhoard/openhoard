@@ -1,8 +1,8 @@
 {
-  "name": "@openhoard/server",
+  "name": "@openhoard/core-jobs",
   "version": "0.0.0",
   "private": true,
-  "description": "OpenHoard gateway: HTTP API and (soon) the MCP server.",
+  "description": "Background jobs on pg-boss: the enrichment pipeline and scheduled maintenance.",
   "type": "module",
   "exports": {
     ".": {
@@ -10,33 +10,26 @@
       "default": "./dist/index.js"
     }
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "dev": "tsx watch src/main.ts --data-dir ../../.openhoard",
-    "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "clean": "rimraf dist coverage"
   },
   "dependencies": {
-    "@hono/node-server": "^2.1.1",
-    "@modelcontextprotocol/sdk": "^1.30.1",
-    "@openhoard/core-audit": "workspace:^",
     "@openhoard/core-catalog": "workspace:^",
     "@openhoard/core-db": "workspace:^",
     "@openhoard/core-identity": "workspace:^",
-    "@openhoard/core-jobs": "workspace:^",
-    "@openhoard/core-policy": "workspace:^",
-    "hono": "^4.8.0",
-    "openid-client": "^6.8.8",
-    "pino": "^10.3.1",
-    "zod": "^4.6.5"
+    "drizzle-orm": "^0.45.3",
+    "pg-boss": "^12.34.0"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*",
-    "@openhoard/testkit": "workspace:*",
-    "drizzle-orm": "^0.45.3"
+    "@openhoard/core-policy": "workspace:*"
   },
   "license": "Apache-2.0"
 }

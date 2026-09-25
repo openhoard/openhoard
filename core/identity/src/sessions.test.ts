@@ -347,9 +347,16 @@ describe("sessions", () => {
     await expect(
       write((tx) => revokeUserSessions(tx, t.tenantId, ana.id, "nobody")),
     ).rejects.toThrow(IdentityError);
-    const pruned = await write((tx) =>
-      pruneSessions(tx, t.tenantId, new Date(Date.now() + 60_000)),
-    );
-    expect(pruned).toBe(2);
+    const later = new Date(Date.now() + 60_000);
+    // In bounded batches: one, then the rest, then nothing.
+    expect(await write((tx) => pruneSessions(tx, t.tenantId, later, 1))).toBe(1);
+    expect(await write((tx) => pruneSessions(tx, t.tenantId, later))).toBe(1);
+    expect(await write((tx) => pruneSessions(tx, t.tenantId, later))).toBe(0);
+    expect((await check(b.token)).ok).toBe(true);
+    for (const bad of [0, 100_001, 1.5]) {
+      await expect(write((tx) => pruneSessions(tx, t.tenantId, later, bad))).rejects.toMatchObject({
+        code: "invalid",
+      });
+    }
   });
 });

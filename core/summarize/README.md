@@ -1,8 +1,9 @@
 # core/summarize
 
 Part of the OpenHoard trusted core. See [../README.md](../README.md) and
-[docs/architecture.md](../../docs/architecture.md). Enrichment orchestration and model routing
-are not implemented yet. Design discussion welcome via RFC issues.
+[docs/architecture.md](../../docs/architecture.md). Model routing is not implemented yet; the
+enrichment pipeline that will run it is in [core/jobs](../jobs/README.md). Design discussion
+welcome via RFC issues.
 
 ## File cards
 

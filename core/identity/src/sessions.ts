@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { isId, newId, sessions, users, type Tx } from "@openhoard/core-db";
 import type { AuthzPrincipal } from "@openhoard/core-policy";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   findUserByExternalId,
   findUserByIdentity,
@@ -379,20 +379,35 @@ export async function revokeUserSessions(
   return rows.length;
 }
 
-/** Removes a tenant's sessions that ended before `before`; returns how many. */
-export async function pruneSessions(tx: Tx, tenantId: string, before: Date): Promise<number> {
+/**
+ * Removes up to `limit` of a tenant's sessions that ended before `before`, those that ended
+ * first first; returns how many went. Call it again until it returns less than the limit (the
+ * scheduled maintenance in core/jobs does).
+ */
+export async function pruneSessions(
+  tx: Tx,
+  tenantId: string,
+  before: Date,
+  limit = 10_000,
+): Promise<number> {
   if (!(before instanceof Date) || Number.isNaN(before.getTime())) {
     throw new IdentityError("invalid", "invalid time");
   }
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100_000) {
+    throw new IdentityError("invalid", "limit is 1 to 100000");
+  }
+  const ended = sql`least(${sessions.expiresAt}, coalesce(${sessions.revokedAt}, ${sessions.expiresAt}))`;
+  const due = tx
+    .select({ id: sessions.id })
+    .from(sessions)
+    .where(
+      and(eq(sessions.tenantId, tenantId), sql`${ended} < ${before.toISOString()}::timestamptz`),
+    )
+    .orderBy(ended)
+    .limit(limit);
   const rows = await tx
     .delete(sessions)
-    .where(
-      and(
-        eq(sessions.tenantId, tenantId),
-        sql`least(${sessions.expiresAt}, coalesce(${sessions.revokedAt}, ${sessions.expiresAt}))
-          < ${before.toISOString()}::timestamptz`,
-      ),
-    )
+    .where(and(eq(sessions.tenantId, tenantId), inArray(sessions.id, due)))
     .returning({ id: sessions.id });
   return rows.length;
 }
