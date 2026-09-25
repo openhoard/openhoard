@@ -163,20 +163,27 @@ const toClient = (r: ClientRow): OAuthClient => ({
   decidedAt: r.decidedAt,
 });
 
-/** Most clients a tenant keeps waiting for an admin; past it, new ones aren't recorded. */
-export const MAX_PENDING_CLIENTS = 200;
+/**
+ * Most clients one person can leave waiting for an admin (a site can send them to try some), and
+ * a tenant in all; pending requests older than PENDING_DAYS lapse. A client an admin already
+ * approved in the config is recorded whatever the counts.
+ */
+export const MAX_PENDING_PER_PERSON = 20;
+export const MAX_PENDING_CLIENTS = 1000;
+export const PENDING_DAYS = 30;
 
 /**
  * Records a client someone of the tenant tried (pending, for an admin), or refreshes what a
  * pending one says about itself; a decided client stays as the admin saw it. Returns it as it
- * stands, or null when the tenant already has MAX_PENDING_CLIENTS waiting (any signed-in person,
- * or a site sending them here, can add some).
+ * stands, or null when `by` or the tenant has too many waiting (see MAX_PENDING_PER_PERSON), unless
+ * `approved` (the config approves it).
  */
 export async function noteClient(
   tx: Tx,
   tenantId: string,
   input: OAuthClientInput,
   by: string,
+  options: { approved?: boolean } = {},
 ): Promise<OAuthClient | null> {
   checkBy(by);
   const clientKey =
@@ -200,11 +207,29 @@ export async function noteClient(
       .returning();
     return row ? toClient(row) : getClient(tx, tenantId, clientKey);
   }
-  const [waiting] = await tx
-    .select({ n: sql<number>`count(*)::int` })
-    .from(oauthClients)
-    .where(and(eq(oauthClients.tenantId, tenantId), eq(oauthClients.status, "pending")));
-  if ((waiting?.n ?? 0) >= MAX_PENDING_CLIENTS) return null;
+  if (options.approved !== true) {
+    // Stale requests lapse first, so old ones don't hold the room.
+    await tx
+      .delete(oauthClients)
+      .where(
+        and(
+          eq(oauthClients.tenantId, tenantId),
+          eq(oauthClients.status, "pending"),
+          lt(oauthClients.requestedAt, sql`now() - make_interval(days => ${PENDING_DAYS})`),
+          sql`not exists (select 1 from oauth_grants g where g.tenant_id = ${oauthClients.tenantId} and g.client_key = ${oauthClients.clientKey})`,
+          sql`not exists (select 1 from oauth_codes c where c.tenant_id = ${oauthClients.tenantId} and c.client_key = ${oauthClients.clientKey})`,
+        ),
+      );
+    const [waiting] = await tx
+      .select({
+        all: sql<number>`count(*)::int`,
+        mine: sql<number>`(count(*) filter (where ${oauthClients.requestedBy} = ${by}))::int`,
+      })
+      .from(oauthClients)
+      .where(and(eq(oauthClients.tenantId, tenantId), eq(oauthClients.status, "pending")));
+    if ((waiting?.mine ?? 0) >= MAX_PENDING_PER_PERSON) return null;
+    if ((waiting?.all ?? 0) >= MAX_PENDING_CLIENTS) return null;
+  }
   const [row] = await tx
     .insert(oauthClients)
     .values({

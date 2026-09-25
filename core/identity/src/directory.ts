@@ -16,6 +16,7 @@ import {
   type Tx,
   sessions,
   oauthGrants,
+  oauthCodes,
 } from "@openhoard/core-db";
 import type { AuthzPrincipal } from "@openhoard/core-policy";
 import { and, asc, eq, gt, isNull, ne, sql } from "drizzle-orm";
@@ -483,6 +484,17 @@ async function endSessions(
           : []),
       ),
     );
+  // Codes not yet redeemed can't be any more (a grant made from one would outlive this).
+  await tx
+    .update(oauthCodes)
+    .set({ usedAt: sql`greatest(now(), ${oauthCodes.createdAt})` })
+    .where(
+      and(
+        eq(oauthCodes.tenantId, tenantId),
+        eq(oauthCodes.userId, userId),
+        isNull(oauthCodes.usedAt),
+      ),
+    );
   // What AI clients hold for them ends too (the grants' tokens with them). A grant doesn't record
   // which identity signed in to consent, so unlinking one ends them all: the person consents again.
   await tx
@@ -660,6 +672,12 @@ export async function unlinkIdentity(
   by: string,
 ): Promise<boolean> {
   checkActor(by, ["user", "system", "scim"]);
+  // The person first (as a redemption takes them): one running now finishes, then its grant ends.
+  await tx
+    .select({ id: users.id })
+    .from(users)
+    .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)))
+    .for("update");
   const removed = await tx
     .delete(userIdentities)
     .where(

@@ -157,7 +157,9 @@ exposure rules check (T-604).
 - Taking a client out of the config stops its tokens.
 - A trust label in the config wins over one given in the app, and a refusal in the app wins over
   the config.
-- At most 200 pending clients are recorded per tenant.
+- Pending clients are capped at 20 per person and 1,000 per tenant, and lapse after 30 days. A
+  client the config approves is recorded whatever the counts.
+- At most two client documents per person are fetched at a time (eight in all).
 - A decided client's record isn't changed by what it later says about itself.
 
 **The flow:**

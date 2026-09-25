@@ -250,7 +250,10 @@ export function mountOAuth(
     }
     let client: ResolvedClient;
     try {
-      client = await clients.resolve(q.client_id);
+      client = await clients.resolve(
+        q.client_id,
+        `${signedIn.tenantId}/${signedIn.principal.userId}`,
+      );
     } catch (err) {
       log?.info({ err }, "oauth: unknown client");
       const message = err instanceof ClientError ? err.message : "the client can't be verified";
@@ -262,6 +265,8 @@ export function mountOAuth(
     }
     const { tenantId } = signedIn;
     const userId = signedIn.principal.userId;
+    // The config's approval is known before anything is recorded: it doesn't wait on the counts.
+    const inConfig = auth.clients.some((a) => approves(a, tenantId, client));
     const { noted, trust, user } = await db.withTenant(tenantId, async (tx) => {
       const n = await noteClient(
         tx,
@@ -273,6 +278,7 @@ export function mountOAuth(
           redirectUris: client.redirectUris,
         },
         userPrincipal(userId),
+        { approved: inConfig },
       );
       const said = n ? configured(tenantId)(n) : undefined;
       // Keep the config's approval in the database too, for the admin's list (T-106).
@@ -596,7 +602,11 @@ export function mountOAuth(
 }
 
 /** Whether an approved-client entry of the config names this client in this tenant. */
-function approves(a: ApprovedClient, tenantId: string, client: OAuthClient): boolean {
+function approves(
+  a: ApprovedClient,
+  tenantId: string,
+  client: Pick<OAuthClient, "kind" | "clientRef" | "redirectUris">,
+): boolean {
   if (a.tenantId !== tenantId) return false;
   if (a.clientId !== undefined) return client.kind === "cimd" && client.clientRef === a.clientId;
   if (client.kind !== "dcr" || !a.redirectUris) return false;

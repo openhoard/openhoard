@@ -4,6 +4,7 @@ import { oauthClients, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { createUser, decideClient, getClient, lockUser, type User } from "@openhoard/core-identity";
 import { generateTenant, startDevOidc, type DevOidc, type FakeUser } from "@openhoard/testkit";
+import { sql } from "drizzle-orm";
 import type { Hono } from "hono";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
@@ -414,6 +415,16 @@ describe("clients need an admin", () => {
     });
   });
 
+  it("lets a client the config approves in however many others wait", async () => {
+    await db.withTenant(t.tenantId, (tx) =>
+      tx.execute(sql`insert into oauth_clients (tenant_id, client_key, kind, client_ref, name, redirect_uris, requested_by)
+        select ${t.tenantId}, md5(i::text) || md5('x' || i::text), 'dcr', 'dcr:x', 'n', array['https://x.example/cb'], ${`user:${ana.id}`}
+          from generate_series(1, 50) i`),
+    );
+    const tokens = await fullFlow();
+    expect((await mcp(tokens.access_token)).status).toBe(501);
+  });
+
   it("sends a refused client away, config or not", async () => {
     await fullFlow();
     const key = (await db.withTenant(t.tenantId, (tx) => tx.select().from(oauthClients)))[0]
@@ -705,6 +716,24 @@ describe("client resolution", () => {
     ]) {
       await expect(fetchMetadata(new URL(url)), url).rejects.toThrow(ClientError);
     }
+  });
+
+  it("lets one person have only two documents in flight", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    const resolver = new ClientResolver(async (url) => {
+      await gate;
+      return {
+        body: JSON.stringify({ client_id: url.href, redirect_uris: ["https://a.example/cb"] }),
+      };
+    });
+    const a = resolver.resolve("https://a.example/1.json", "ana");
+    const b = resolver.resolve("https://a.example/2.json", "ana");
+    await expect(resolver.resolve("https://a.example/3.json", "ana")).rejects.toThrow(/too many/);
+    const other = resolver.resolve("https://a.example/4.json", "bo");
+    release();
+    await Promise.all([a, b, other]);
+    await resolver.resolve("https://a.example/5.json", "ana");
   });
 
   it("knows which addresses aren't public, IPv4 inside IPv6 too", () => {

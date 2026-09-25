@@ -163,6 +163,8 @@ const CACHE_DEFAULT_S = 300;
 const CACHE_MAX_S = 3600;
 const CACHE_ENTRIES = 1000;
 const MAX_IN_FLIGHT = 8;
+/** One person's share of those: slow documents of their choosing can't take every slot. */
+const MAX_IN_FLIGHT_EACH = 2;
 const FAILURE_CACHE_MS = 60_000;
 
 /** Addresses a public client can't be at: private, loopback, link-local, reserved, translated. */
@@ -325,13 +327,17 @@ export class ClientResolver {
   readonly #cache = new Map<string, { client: ResolvedClient; until: number }>();
   readonly #failed = new Map<string, { error: ClientError; until: number }>();
   readonly #inFlight = new Map<string, Promise<ResolvedClient>>();
+  readonly #perRequester = new Map<string, number>();
 
   constructor(fetch: MetadataFetcher = fetchMetadata) {
     this.#fetch = fetch;
   }
 
-  /** The client a client_id names, fetched and checked; throws ClientError when it isn't one. */
-  async resolve(clientId: unknown): Promise<ResolvedClient> {
+  /**
+   * The client a client_id names, fetched and checked; throws ClientError when it isn't one.
+   * `requester` (who asks) bounds one person's fetches in flight.
+   */
+  async resolve(clientId: unknown, requester = ""): Promise<ResolvedClient> {
     if (typeof clientId !== "string" || clientId === "") throw new ClientError("missing client_id");
     if (clientId.startsWith(DCR_PREFIX)) return fromRegistration(clientId);
     if (!isMetadataUrl(clientId)) throw new ClientError("unknown client_id");
@@ -341,9 +347,11 @@ export class ClientResolver {
     if (failed && failed.until > Date.now()) throw failed.error;
     const running = this.#inFlight.get(clientId);
     if (running) return running;
-    if (this.#inFlight.size >= MAX_IN_FLIGHT) {
+    const mine = this.#perRequester.get(requester) ?? 0;
+    if (this.#inFlight.size >= MAX_IN_FLIGHT || mine >= MAX_IN_FLIGHT_EACH) {
       throw new ClientError("too many clients being checked; try again shortly");
     }
+    this.#perRequester.set(requester, mine + 1);
     const work = this.#fetchAndCheck(clientId).catch((err: unknown) => {
       const error =
         err instanceof ClientError ? err : new ClientError("client metadata couldn't be fetched");
@@ -356,6 +364,9 @@ export class ClientResolver {
       return await work;
     } finally {
       this.#inFlight.delete(clientId);
+      const left = (this.#perRequester.get(requester) ?? 1) - 1;
+      if (left > 0) this.#perRequester.set(requester, left);
+      else this.#perRequester.delete(requester);
     }
   }
 

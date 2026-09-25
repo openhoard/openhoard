@@ -22,6 +22,7 @@ import {
   issueCode,
   listClients,
   MAX_PENDING_CLIENTS,
+  MAX_PENDING_PER_PERSON,
   noteClient,
   oauthTokenTenant,
   parseScopes,
@@ -170,25 +171,41 @@ describe("clients", () => {
       ),
     );
     expect(again).toMatchObject({ status: "approved", name: "Claude" });
+    const fill = (by: string, n: number) =>
+      write((tx) =>
+        tx.execute(sql`insert into oauth_clients (tenant_id, client_key, kind, client_ref, name, redirect_uris, requested_by)
+          select ${t.tenantId}, md5(${by} || i::text) || md5(i::text), 'dcr', 'dcr:x', 'n', array['https://x.example/cb'], ${by}
+            from generate_series(1, ${n}) i`),
+      );
+    const tryNew = (by: string, ref: string, approved = false) =>
+      write((tx) =>
+        noteClient(
+          tx,
+          t.tenantId,
+          { kind: "cimd", clientRef: ref, name: "New", redirectUris: [REDIRECT] },
+          by,
+          { approved },
+        ),
+      );
+    await fill(`user:${ana.id}`, MAX_PENDING_PER_PERSON);
+    // Ana's room is full; someone else's isn't; an approved client doesn't count.
+    expect(await tryNew(`user:${ana.id}`, "https://new.example/a.json")).toBeNull();
+    expect(await tryNew("user:bo", "https://new.example/b.json")).toMatchObject({
+      status: "pending",
+    });
+    expect(await tryNew(`user:${ana.id}`, "https://new.example/c.json", true)).toMatchObject({
+      status: "pending",
+    });
+    // Old requests lapse.
     await write((tx) =>
-      tx.execute(sql`insert into oauth_clients (tenant_id, client_key, kind, client_ref, name, redirect_uris, requested_by)
-        select ${t.tenantId}, lpad(to_hex(i), 64, '0'), 'dcr', 'dcr:x', 'n', array['https://x.example/cb'], 'user:x'
-          from generate_series(1, ${MAX_PENDING_CLIENTS}) i`),
-    );
-    const capped = await write((tx) =>
-      noteClient(
-        tx,
-        t.tenantId,
-        {
-          kind: "cimd",
-          clientRef: "https://new.example/c.json",
-          name: "New",
-          redirectUris: [REDIRECT],
-        },
-        `user:${ana.id}`,
+      tx.execute(
+        sql`update oauth_clients set requested_at = now() - interval '31 days' where requested_by = ${`user:${ana.id}`} and client_ref = 'dcr:x'`,
       ),
     );
-    expect(capped).toBeNull();
+    expect(await tryNew(`user:${ana.id}`, "https://new.example/d.json")).toMatchObject({
+      status: "pending",
+    });
+    expect(MAX_PENDING_CLIENTS).toBeGreaterThan(MAX_PENDING_PER_PERSON);
   });
 
   it("are identified by metadata URL, or by redirect URIs with loopback ports ignored", () => {
@@ -300,7 +317,8 @@ describe("authorization codes", () => {
     await approve();
     const a = await code();
     await write((tx) => lockUser(tx, t.tenantId, ana.id, "user:admin"));
-    expect(await redeem(a)).toMatchObject({ ok: false, reason: "person can't sign in" });
+    // Locking used the code up: it can't be redeemed, now or after unlocking.
+    expect(await redeem(a)).toMatchObject({ ok: false, error: "invalid_grant" });
     await write((tx) => unlockUser(tx, t.tenantId, ana.id, "user:admin"));
     const b = await code();
     await write((tx) =>
@@ -372,6 +390,8 @@ describe("access tokens", () => {
     await write((tx) => revokeUserGrants(tx, t.tenantId, ana.id, "system:t-104"));
     expect(await check(c.accessToken)).toMatchObject({ ok: false, refused: "revoked" });
 
+    // A code not yet redeemed when the identity goes can't be redeemed after.
+    const pendingCode = await code();
     const u = await tokens();
     await write((tx) =>
       linkIdentity(tx, t.tenantId, ana.id, { issuer: "https://i.example", subject: "s" }),
@@ -386,6 +406,7 @@ describe("access tokens", () => {
       ),
     );
     expect(await check(u.accessToken)).toMatchObject({ ok: false, refused: "revoked" });
+    expect((await redeem(pendingCode)).ok).toBe(false);
 
     const d = await tokens();
     await write((tx) => retireUser(tx, t.tenantId, ana.id, "user:admin"));
