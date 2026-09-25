@@ -85,7 +85,14 @@ export interface Group {
   createdAt: Date;
 }
 
-export type IdentityErrorCode = "invalid" | "not-found" | "conflict" | "wrong-source" | "retired";
+export type IdentityErrorCode =
+  | "invalid"
+  | "not-found"
+  | "conflict"
+  | "wrong-source"
+  | "retired"
+  /** Too many at once (sign-ins under way). */
+  | "busy";
 
 export class IdentityError extends Error {
   constructor(
@@ -428,8 +435,9 @@ export async function updateUser(
 
 /**
  * An admin's lock (`user:` or `system:`): the user is denied everything from the next
- * resolution (authorize() forbids inactive principals), whatever their source. Returns false if
- * already locked. Revoking sessions and tokens is T-104.
+ * resolution (authorize() forbids inactive principals), whatever their source, and their sessions
+ * end, so unlocking doesn't bring back one from before (a stolen cookie). Returns false if
+ * already locked. Revoking tokens elsewhere (MCP clients) is T-104.
  */
 export async function lockUser(
   tx: Tx,
@@ -445,7 +453,32 @@ export async function lockUser(
     .update(users)
     .set({ lockedAt: sql`now()`, lockedBy: by })
     .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)));
+  // Unlocking must not bring back a session (a stolen cookie) from before the lock.
+  await endSessions(tx, tenantId, userId, by);
   return true;
+}
+
+/** Ends a user's live sessions (a lock, a provider disable, retirement): they don't come back. */
+async function endSessions(
+  tx: Tx,
+  tenantId: string,
+  userId: string,
+  by: string,
+  identity?: { issuer: string; subject: string },
+) {
+  await tx
+    .update(sessions)
+    .set({ revokedAt: sql`greatest(now(), ${sessions.createdAt})`, revokedBy: by })
+    .where(
+      and(
+        eq(sessions.tenantId, tenantId),
+        eq(sessions.userId, userId),
+        isNull(sessions.revokedAt),
+        ...(identity
+          ? [eq(sessions.issuer, identity.issuer), eq(sessions.subject, identity.subject)]
+          : []),
+      ),
+    );
 }
 
 /** Lifts an admin's lock. Any provider disable stays. Returns false if there was no lock. */
@@ -489,6 +522,7 @@ export async function setProviderActive(
         : { providerDisabledAt: sql`now()`, providerDisabledBy: by },
     )
     .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)));
+  if (!active) await endSessions(tx, tenantId, userId, by);
   return true;
 }
 
@@ -539,12 +573,7 @@ export async function retireUser(
     .delete(userIdentities)
     .where(and(eq(userIdentities.tenantId, tenantId), eq(userIdentities.userId, userId)));
   // Their sessions end now (they would fail anyway: the principal is inactive).
-  await tx
-    .update(sessions)
-    .set({ revokedAt: sql`greatest(now(), ${sessions.createdAt})`, revokedBy: by })
-    .where(
-      and(eq(sessions.tenantId, tenantId), eq(sessions.userId, userId), isNull(sessions.revokedAt)),
-    );
+  await endSessions(tx, tenantId, userId, by);
   // A retired service account's keys stop at once (they would anyway: it is inactive).
   await tx
     .update(apiKeys)
@@ -621,6 +650,8 @@ export async function unlinkIdentity(
       ),
     )
     .returning({ userId: userIdentities.userId });
+  // Sessions signed in with that identity end with it.
+  if (removed.length > 0) await endSessions(tx, tenantId, userId, "system:unlink", identity);
   return removed.length > 0;
 }
 

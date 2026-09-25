@@ -1,7 +1,13 @@
 import { exportAudit } from "@openhoard/core-audit";
-import { sessions, type Database } from "@openhoard/core-db";
+import { loginRequests, sessions, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
-import { createUser, lockUser, type User } from "@openhoard/core-identity";
+import {
+  createUser,
+  LOGIN_MAX_PENDING,
+  lockUser,
+  unlockUser,
+  type User,
+} from "@openhoard/core-identity";
 import { generateTenant, startDevOidc, type DevOidc, type FakeUser } from "@openhoard/testkit";
 import type { Hono } from "hono";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -63,7 +69,7 @@ function config(more: Record<string, unknown> = {}): Config {
           clientId: "openhoard-test",
           // The dev provider's subject is the fake tenant's user id, which SCIM sends as the
           // external id.
-          externalIdClaim: "sub",
+          matchExternalId: true,
         },
       ],
       ...more,
@@ -121,6 +127,13 @@ class Browser {
   async signIn(login: string, returnTo?: string): Promise<Response> {
     return this.go(await this.toCallback(login, returnTo));
   }
+}
+
+/** The sign-in-under-way cookie a browser holds (there is one per sign-in). */
+function loginCookieOf(browser: Browser): [string, string] {
+  const found = [...browser.jar].find(([k]) => k.startsWith("oh_login_"));
+  if (!found) throw new Error("no login cookie");
+  return found;
 }
 
 async function auditEvents() {
@@ -221,6 +234,52 @@ describe("sign-in", () => {
     });
   });
 
+  it("replaces the session a browser had when it signs in again", async () => {
+    const browser = new Browser();
+    await browser.signIn(anaFake.upn);
+    const first = browser.jar.get("oh_session") as string;
+    // A fresh browser holding only our session cookie (none of the provider's), as Bo.
+    const again = new Browser();
+    again.jar.set("oh_session", first);
+    await again.signIn(boFake.upn);
+    const old = await app.request(`${PUBLIC}/auth/me`, {
+      headers: { cookie: `oh_session=${first}` },
+    });
+    expect(old.status).toBe(401);
+    expect(await (await again.go(`${PUBLIC}/auth/me`)).json()).toMatchObject({
+      user: { displayName: boFake.displayName },
+    });
+  });
+
+  it("keeps a locked person out after the lock is lifted, until they sign in again", async () => {
+    const browser = new Browser();
+    await browser.signIn(anaFake.upn);
+    const cookie = browser.jar.get("oh_session") as string;
+    await db.withTenant(t.tenantId, (tx) => lockUser(tx, t.tenantId, ana.id, "user:admin"));
+    await db.withTenant(t.tenantId, (tx) => unlockUser(tx, t.tenantId, ana.id, "user:admin"));
+    const stolen = await app.request(`${PUBLIC}/auth/me`, {
+      headers: { cookie: `oh_session=${cookie}` },
+    });
+    expect(stolen.status).toBe(401);
+  });
+
+  it("answers 429 when too many sign-ins are under way", async () => {
+    await db.withTenant(t.tenantId, (tx) =>
+      tx.insert(loginRequests).values(
+        Array.from({ length: LOGIN_MAX_PENDING }, (_, i) => ({
+          tenantId: t.tenantId,
+          stateHash: i.toString(16).padStart(64, "0"),
+          provider: "dev",
+          codeVerifier: "v".repeat(43),
+          nonce: "n".repeat(16),
+          returnTo: "/",
+          expiresAt: new Date(Date.now() + 300_000),
+        })),
+      ),
+    );
+    expect((await new Browser().go(`${PUBLIC}/auth/login/dev`)).status).toBe(429);
+  });
+
   it("ends a session at once when its person is locked", async () => {
     const browser = new Browser();
     await browser.signIn(anaFake.upn);
@@ -240,22 +299,31 @@ describe("the sign-in round trip is bound to its browser", () => {
   it("uses a sign-in once", async () => {
     const browser = new Browser();
     const callback = await browser.toCallback(anaFake.upn);
-    const cookie = browser.jar.get("oh_login") as string;
+    const [name, value] = loginCookieOf(browser);
     expect((await browser.go(callback)).status).toBe(302);
     // Replayed with the same cookie: the request row is gone.
-    const replay = await app.request(callback, { headers: { cookie: `oh_login=${cookie}` } });
+    const replay = await app.request(callback, { headers: { cookie: `${name}=${value}` } });
     expect(replay.status).toBe(400);
   });
 
-  it("refuses a code that doesn't go with the verifier and nonce", async () => {
+  it("refuses another browser's state, even with its own cookie", async () => {
     const a = new Browser();
     const b = new Browser();
     const callbackA = await a.toCallback(anaFake.upn);
     await b.toCallback(boFake.upn);
-    // B's state cookie with A's code and state: the states differ.
-    const stateB = b.jar.get("oh_login") as string;
-    const res = await app.request(callbackA, { headers: { cookie: `oh_login=${stateB}` } });
+    // B's state cookie with A's code and state: named for B's state, so A's isn't there.
+    const [name, value] = loginCookieOf(b);
+    const res = await app.request(callbackA, { headers: { cookie: `${name}=${value}` } });
     expect(res.status).toBe(400);
+  });
+
+  it("lets two tabs sign in at once", async () => {
+    const browser = new Browser();
+    const first = await browser.toCallback(anaFake.upn);
+    const start = await browser.go(`${PUBLIC}/auth/login/dev?return_to=/second`);
+    expect(start.status).toBe(302);
+    // The second tab's cookie didn't replace the first's.
+    expect((await browser.go(first)).status).toBe(302);
   });
 
   it("refuses a provider's error response, and audits it", async () => {
@@ -313,7 +381,7 @@ describe("sessions over https", () => {
     const secureApp = createApp(config({ publicUrl: "https://hoard.example" }), undefined, { db });
     const res = await secureApp.request("https://hoard.example/auth/login/dev");
     const login = res.headers.getSetCookie().join();
-    expect(login).toMatch(/__Secure-oh_login=/);
+    expect(login).toMatch(/__Secure-oh_login_[0-9a-f]{16}=/);
     expect(login).toMatch(/Secure/);
     const me = await secureApp.request("https://hoard.example/auth/me", {
       headers: { cookie: "__Host-oh_session=ohs.nope" },
@@ -362,6 +430,27 @@ describe("auth config", () => {
     expect(parse({ providers: [{ ...generic, issuer: "http://127.0.0.1:5556" }] }).success).toBe(
       true,
     );
+  });
+
+  it("lets one provider per tenant match external ids, never Google", () => {
+    const generic = { ...provider, id: "other", kind: "generic", issuer: "https://idp.example" };
+    // Entra matches by default; a second matching provider in the tenant is refused.
+    expect(parse({ providers: [provider, { ...generic, matchExternalId: true }] }).success).toBe(
+      false,
+    );
+    expect(parse({ providers: [provider, generic] }).success).toBe(true);
+    expect(
+      parse({
+        providers: [
+          { ...provider, matchExternalId: false },
+          { ...generic, matchExternalId: true },
+        ],
+      }).success,
+    ).toBe(true);
+    const google = { ...provider, kind: "google", issuer: "https://accounts.google.com" };
+    expect(parse({ providers: [{ ...google, matchExternalId: true }] }).success).toBe(false);
+    // The claim is fixed by the kind: no configuring email-like claims.
+    expect(parse({ providers: [{ ...generic, externalIdClaim: "email" }] }).success).toBe(false);
   });
 
   it("refuses duplicate providers and an idle limit longer than the session", () => {

@@ -25,7 +25,8 @@ import type { PrincipalCache } from "./principal-cache.js";
  *   finds it, the secret proves it. Only a SHA-256 of the secret is kept.
  * - checkSession() reads the session on every request: a revoked, expired or idle one fails at
  *   once, and so does one whose user is locked, disabled or retired (their principal is
- *   inactive). Retiring a user revokes their sessions.
+ *   inactive). Locking, disabling and retiring a user end their sessions for good, and unlinking
+ *   an identity ends the sessions it signed in.
  * - A sign-in under way (beginLogin/takeLogin) keeps the PKCE verifier and nonce on the server,
  *   found by a hash of the `state`, used once, for a few minutes.
  */
@@ -43,7 +44,7 @@ export const SESSION_LIMITS = {
   defaultMaxSeconds: 7 * 24 * 3600,
   defaultIdleSeconds: 12 * 3600,
   minIdleSeconds: 60,
-  /** A session's last use is written at most this often. */
+  /** A session's last use is written at most this often (or a quarter of its idle limit). */
   touchSeconds: 60,
 } as const;
 
@@ -129,22 +130,37 @@ export interface LoginRequest {
   returnTo: string;
 }
 
+const BASE = "http://openhoard.invalid";
+
 /**
- * Whether `path` is somewhere on this server to return to: an absolute path, not `//host` or
- * `/\\host` (which browsers treat as another site), without control characters.
+ * `path` as a path on this server to return to after signing in, normalized the way a browser
+ * would resolve it (so `/.//evil.example` can't turn into `//evil.example`), or null when it
+ * isn't one: another origin, `//host`, backslashes, control characters, over 2,048 characters.
  */
-export function isLocalPath(path: unknown): path is string {
-  return (
-    typeof path === "string" &&
-    path.length >= 1 &&
-    path.length <= 2048 &&
-    path.startsWith("/") &&
-    !path.startsWith("//") &&
-    !path.includes("\\") &&
-    // eslint-disable-next-line no-control-regex
-    !/[\u0000-\u001f\u007f]/.test(path)
-  );
+export function localPath(path: unknown): string | null {
+  if (typeof path !== "string" || path.length < 1 || path.length > 2048) return null;
+  // eslint-disable-next-line no-control-regex
+  if (!path.startsWith("/") || path.includes("\\") || /[\u0000-\u001f\u007f-\u009f]/.test(path)) {
+    return null;
+  }
+  let url: URL;
+  try {
+    url = new URL(path, BASE);
+  } catch {
+    return null;
+  }
+  const out = url.pathname + url.search + url.hash;
+  if (url.origin !== BASE || out.startsWith("//") || out.length > 2048) return null;
+  return out;
 }
+
+/** Whether localPath() accepts `path` unchanged. */
+export function isLocalPath(path: unknown): path is string {
+  return typeof path === "string" && localPath(path) === path;
+}
+
+/** Most sign-ins a tenant may have under way at once. */
+export const LOGIN_MAX_PENDING = 1000;
 
 /**
  * Records a sign-in about to go to the provider, found later by `state` (from the provider's
@@ -170,6 +186,14 @@ export async function beginLogin(
   await tx
     .delete(loginRequests)
     .where(and(eq(loginRequests.tenantId, tenantId), lt(loginRequests.expiresAt, sql`now()`)));
+  // Anyone can start a sign-in: a bound on the rows that makes.
+  const [pending] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(loginRequests)
+    .where(eq(loginRequests.tenantId, tenantId));
+  if ((pending?.n ?? 0) >= LOGIN_MAX_PENDING) {
+    throw new IdentityError("busy", "too many sign-ins under way");
+  }
   await tx.insert(loginRequests).values({
     tenantId,
     stateHash: sha256(state),
@@ -301,13 +325,20 @@ export function parseSessionToken(token: unknown): { tenantId: string; sessionId
 export type SessionRefusal = "unknown" | "wrong-secret" | "ended" | "account-inactive";
 
 export type SessionCheck =
-  | { ok: true; session: Session; principal: AuthzPrincipal }
-  | { ok: false; refused: SessionRefusal };
+  | {
+      ok: true;
+      session: Session;
+      principal: AuthzPrincipal;
+      /** Its last recorded use is old enough to record this one: call touchSession(). */
+      stale: boolean;
+    }
+  | { ok: false; refused: SessionRefusal; userId?: string };
 
 /**
- * Checks a session token on a request, in its tenant's read-write transaction: the session must
- * exist, match, be neither revoked, expired nor idle too long, and belong to an active person.
- * Records its use (at most once a minute).
+ * Checks a session token on a request: the session must exist, match, be neither revoked,
+ * expired nor idle too long, and belong to an active person. It writes nothing, so it can run in
+ * a read-only snapshot, where the principal cache serves (`{ isolationLevel: "repeatable read",
+ * accessMode: "read only" }`); when it says `stale`, record the use with touchSession().
  */
 export async function checkSession(
   tx: Tx,
@@ -328,7 +359,8 @@ export async function checkSession(
       expiresAt: sessions.expiresAt,
       live: sql<boolean>`${sessions.revokedAt} is null and ${sessions.expiresAt} > statement_timestamp()
         and ${sessions.lastSeenAt} + make_interval(secs => ${sessions.idleSeconds}) > statement_timestamp()`,
-      stale: sql<boolean>`${sessions.lastSeenAt} < statement_timestamp() - make_interval(secs => ${SESSION_LIMITS.touchSeconds})`,
+      stale: sql<boolean>`${sessions.lastSeenAt} < statement_timestamp()
+        - make_interval(secs => least(${SESSION_LIMITS.touchSeconds}, ${sessions.idleSeconds} / 4))`,
     })
     .from(sessions)
     .where(and(eq(sessions.tenantId, tenantId), eq(sessions.id, sessionId)));
@@ -338,7 +370,7 @@ export async function checkSession(
     Buffer.from(row?.secretHash ?? "0".repeat(64), "hex"),
   );
   if (!row) return { ok: false, refused: "unknown" };
-  if (!same) return { ok: false, refused: "wrong-secret" };
+  if (!same) return { ok: false, refused: "wrong-secret", userId: row.userId };
   if (!row.live) return { ok: false, refused: "ended" };
   const principal = options.cache
     ? await options.cache.resolve(tx, tenantId, row.userId)
@@ -346,14 +378,9 @@ export async function checkSession(
   if (!principal || !principal.active || principal.service === true) {
     return { ok: false, refused: "account-inactive" };
   }
-  if (row.stale) {
-    await tx
-      .update(sessions)
-      .set({ lastSeenAt: sql`statement_timestamp()` })
-      .where(and(eq(sessions.tenantId, tenantId), eq(sessions.id, sessionId)));
-  }
   return {
     ok: true,
+    stale: row.stale,
     session: {
       id: sessionId,
       userId: row.userId,
@@ -363,6 +390,27 @@ export async function checkSession(
     },
     principal,
   };
+}
+
+/**
+ * Records a session's use now, which keeps it from going idle. Only a live session is touched.
+ * Returns whether it was.
+ */
+export async function touchSession(tx: Tx, tenantId: string, sessionId: string): Promise<boolean> {
+  const rows = await tx
+    .update(sessions)
+    .set({ lastSeenAt: sql`statement_timestamp()` })
+    .where(
+      and(
+        eq(sessions.tenantId, tenantId),
+        eq(sessions.id, sessionId),
+        isNull(sessions.revokedAt),
+        sql`${sessions.expiresAt} > statement_timestamp()`,
+        sql`${sessions.lastSeenAt} + make_interval(secs => ${sessions.idleSeconds}) > statement_timestamp()`,
+      ),
+    )
+    .returning({ id: sessions.id });
+  return rows.length > 0;
 }
 
 function checkBy(by: string) {

@@ -37,10 +37,12 @@ export const ProviderSchema = z
      */
     clientSecret: z.string().min(1).optional(),
     /**
-     * A claim holding the person's id at the identity provider, matched once to a SCIM user's
-     * external id on their first sign-in. Entra defaults to `oid`; others match nobody new.
+     * Whether a first sign-in may be matched to a SCIM user by the provider's id for the person,
+     * once, before the identity is linked: Entra's `oid` (default on; map SCIM externalId to
+     * the user's objectId), or a generic provider's `sub` (default off). Never for Google, and
+     * for at most one provider per tenant.
      */
-    externalIdClaim: z.string().min(1).max(64).optional(),
+    matchExternalId: z.boolean().optional(),
   })
   .strict()
   .superRefine((p, ctx) => {
@@ -54,12 +56,26 @@ export const ProviderSchema = z
     if (p.kind === "google" && p.issuer !== "https://accounts.google.com") {
       bad("Google's issuer is https://accounts.google.com");
     }
+    if (p.kind === "google" && p.matchExternalId === true) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["matchExternalId"],
+        message: "Google sign-ins are matched through invitations, not external ids",
+      });
+    }
     if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback(url))) {
       bad("an issuer must use https (http only on this machine, for development)");
     }
   });
 
 export type ProviderConfig = z.infer<typeof ProviderSchema>;
+
+/** The claim a provider matches first sign-ins on, if any: Entra's `oid`, a generic `sub`. */
+export function externalIdClaim(p: ProviderConfig): "oid" | "sub" | undefined {
+  if (p.kind === "entra") return p.matchExternalId === false ? undefined : "oid";
+  if (p.kind === "generic") return p.matchExternalId === true ? "sub" : undefined;
+  return undefined;
+}
 
 /** Signing in (T-102): off unless configured. */
 export const AuthSchema = z
@@ -70,7 +86,7 @@ export const AuthSchema = z
      */
     publicUrl: z.url(),
     /** A session ends after this long unused (default 12 hours). */
-    sessionIdleMinutes: z.coerce.number().int().min(1).max(43200).default(720),
+    sessionIdleMinutes: z.coerce.number().int().min(5).max(43200).default(720),
     /** And at the latest after this long (default 7 days, at most 30). */
     sessionMaxHours: z.coerce.number().int().min(1).max(720).default(168),
     providers: z.array(ProviderSchema).default([]),
@@ -99,6 +115,20 @@ export const AuthSchema = z
         message: "the idle limit can't be longer than the session",
       });
     }
+    // Two providers matching into one tenant's SCIM users would let the second claim the
+    // first's people (the same id, from another provider).
+    const matching = new Set<string>();
+    a.providers.forEach((p, i) => {
+      if (externalIdClaim(p) === undefined) return;
+      if (matching.has(p.tenantId)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["providers", i, "matchExternalId"],
+          message: "only one provider per tenant may match external ids",
+        });
+      }
+      matching.add(p.tenantId);
+    });
     const ids = a.providers.map((p) => p.id);
     ids.forEach((id, i) => {
       if (ids.indexOf(id) !== i) {
