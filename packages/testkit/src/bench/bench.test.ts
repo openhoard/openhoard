@@ -65,6 +65,8 @@ describe("runSuite", () => {
     expect(r.peakRssMiB).toBeGreaterThan(0);
   });
 
+  // A smoke test of the cases, not a measurement: CPU-bound, so on a busy CI runner (every
+  // package's tests at once, with coverage) it gets a small tenant and room to finish.
   it("runs the standard cases end to end", async () => {
     const r = await runSuite(standardCases({ items: 300 }), { rounds: 1 });
     const names = r.metrics.map((m) => m.name);
@@ -78,7 +80,7 @@ describe("runSuite", () => {
       expect(names).toContain(n);
     }
     for (const m of r.metrics) expect(Number.isFinite(m.value) && m.value >= 0).toBe(true);
-  }, 60_000);
+  }, 240_000);
 });
 
 describe("compareResults", () => {
