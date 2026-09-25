@@ -52,6 +52,18 @@ describe("loadConfig", () => {
     ).toThrow(/database: Unrecognized key.*ulr/);
   });
 
+  it("works the job queues unless told not to", () => {
+    expect(loadConfig({}, tmp()).jobs).toEqual({ worker: true });
+    const cwd = withConfigFile(JSON.stringify({ jobs: { worker: false } }));
+    expect(loadConfig({}, cwd).jobs).toEqual({ worker: false });
+    expect(loadConfig({ OPENHOARD_JOBS_WORKER: "true" }, cwd).jobs).toEqual({ worker: true });
+    expect(loadConfig({ OPENHOARD_JOBS_WORKER: "false" }, tmp()).jobs).toEqual({ worker: false });
+    expect(() => loadConfig({ OPENHOARD_JOBS_WORKER: "no" }, tmp())).toThrow(/jobs\.worker:/);
+    expect(() => loadConfig({}, withConfigFile(JSON.stringify({ jobs: { workers: 2 } })))).toThrow(
+      /jobs: Unrecognized key.*workers/,
+    );
+  });
+
   it("reports malformed JSON with the file path", () => {
     expect(() => loadConfig({}, withConfigFile("{ not json"))).toThrow(/config\.json:/);
   });

@@ -203,6 +203,18 @@ export const ConfigSchema = z
       })
       .strict()
       .prefault({}),
+    /** Background jobs (core/jobs on pg-boss): enrichment and scheduled maintenance. */
+    jobs: z
+      .object({
+        /**
+         * Work the queues and keep the maintenance schedule in this process. On by default: a
+         * single node does everything. Every node enqueues; turn it off where a node should only
+         * serve requests. OPENHOARD_JOBS_WORKER=false does the same.
+         */
+        worker: z.boolean().default(true),
+      })
+      .strict()
+      .prefault({}),
     auth: AuthSchema.optional(),
   })
   .strict();
@@ -237,6 +249,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     dataDir,
     ...(dbUrl ? { database: { url: dbUrl } } : {}),
   };
+  const worker = env.OPENHOARD_JOBS_WORKER;
+  if (worker !== undefined) {
+    const jobs = typeof merged.jobs === "object" && merged.jobs !== null ? merged.jobs : {};
+    // Anything but true or false stays a string, which the schema refuses.
+    const flag = worker === "true" ? true : worker === "false" ? false : worker;
+    merged.jobs = { ...jobs, worker: flag };
+  }
   withProviderSecrets(merged, env);
   const cookieKey = env.OPENHOARD_AUTH_COOKIE_KEY;
   if (cookieKey && typeof merged.auth === "object" && merged.auth !== null) {

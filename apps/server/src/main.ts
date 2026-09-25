@@ -1,6 +1,7 @@
 import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
 import { openDatabase } from "@openhoard/core-db";
+import { startJobs, type Jobs } from "@openhoard/core-jobs";
 import { createApp } from "./app.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
@@ -23,6 +24,18 @@ try {
 }
 log.info({ database: db.kind }, "database ready");
 
+// Background jobs (core/jobs on pg-boss, in the same database). Every node can enqueue; with
+// jobs.worker (the default) this one also runs enrichment and the maintenance schedule.
+let jobs: Jobs;
+try {
+  jobs = await startJobs(db, { worker: config.jobs.worker, log: log.child({ component: "jobs" }) });
+} catch (err) {
+  log.fatal({ err }, "cannot start the job queue");
+  await db.close().catch(() => {});
+  process.exit(1);
+}
+log.info({ worker: config.jobs.worker }, "job queue ready");
+
 const server = serve(
   { fetch: createApp(config, log, { db }).fetch, hostname: config.host, port: config.port },
   (info) =>
@@ -31,9 +44,13 @@ const server = serve(
 
 /**
  * Graceful shutdown (security review #14): stop accepting connections, close idle keep-alive
- * sockets so close() can finish, and force-exit after 10 s if something still hangs.
+ * sockets so close() can finish, and force-exit after 10 s if something still hangs. The job
+ * queue stops before the database closes: running jobs get a few seconds to finish (any still
+ * running then are failed, and retried by whichever worker runs next), and nothing polls a
+ * closed database.
  */
 const SHUTDOWN_TIMEOUT_MS = 10_000;
+const JOBS_STOP_TIMEOUT_MS = 6_000;
 let stopping = false;
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
@@ -45,13 +62,17 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
       process.exit(1);
     }, SHUTDOWN_TIMEOUT_MS).unref();
     server.close(() => {
-      db.close().then(
-        () => process.exit(0),
-        (err: unknown) => {
-          log.error({ err }, "closing the database failed");
-          process.exit(1);
-        },
-      );
+      jobs
+        .stop({ timeoutMs: JOBS_STOP_TIMEOUT_MS })
+        .catch((err: unknown) => log.error({ err }, "stopping the job queue failed"))
+        .then(() => db.close())
+        .then(
+          () => process.exit(0),
+          (err: unknown) => {
+            log.error({ err }, "closing the database failed");
+            process.exit(1);
+          },
+        );
     });
     if ("closeIdleConnections" in server) server.closeIdleConnections();
   });

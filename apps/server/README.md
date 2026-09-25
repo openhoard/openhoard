@@ -13,6 +13,20 @@ Values are read from, in order: the environment (`OPENHOARD_*`), then
 `<dataDir>/config.json`, then the defaults (`src/config.ts`). The schema is strict, so an unknown
 key is an error.
 
+## Background jobs (T-401)
+
+The server starts [core/jobs](../../core/jobs/README.md) on its database: pg-boss, the enrichment
+pipeline and the hourly maintenance. `jobs.worker` (default `true`, or
+`OPENHOARD_JOBS_WORKER=false`) decides whether this process works the queues and keeps the
+schedule; every process can enqueue. A single node leaves it on.
+
+```json
+{ "jobs": { "worker": false } }
+```
+
+On SIGINT or SIGTERM the server stops listening, then stops the job queue (running jobs get a
+few seconds to finish; any still running are retried later), then closes the database.
+
 ## Signing in (T-102)
 
 People sign in with OpenID Connect, using the authorization code flow with PKCE, through the
