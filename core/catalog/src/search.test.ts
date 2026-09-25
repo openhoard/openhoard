@@ -17,7 +17,7 @@ import {
   type AuthzPrincipal,
   type Visibility,
 } from "@openhoard/core-policy";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import fc from "fast-check";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -74,7 +74,7 @@ beforeEach(async () => {
       .update(tenants)
       .set({ defaultVisibility: "discoverable", defaultExposure: "full" })
       .where(eq(tenants.id, t.tenantId));
-    await tx.update(versions).set({ processedAt: new Date() });
+    await tx.update(versions).set({ processedAt: sql`now()` });
   });
 });
 afterEach(() => db?.close());
@@ -295,7 +295,7 @@ describe("searchObjects", () => {
         seq: 1,
         blobId: t.blobId,
         mime: "text/plain",
-        processedAt: new Date(),
+        processedAt: sql`now()`,
       });
       return id;
     });
@@ -416,7 +416,7 @@ describe("searchObjects", () => {
           seq: 1,
           blobId: t.blobId,
           mime: "text/plain",
-          processedAt: new Date(),
+          processedAt: sql`now()`,
         })),
       );
     });
@@ -529,7 +529,7 @@ describe("facet counts and suggestions (T-505)", () => {
         seq: 1,
         blobId: t.blobId,
         mime: "text/plain",
-        processedAt: new Date(),
+        processedAt: sql`now()`,
       });
       return id;
     });
@@ -650,7 +650,7 @@ describe("facet counts and suggestions (T-505)", () => {
           seq: 1,
           blobId: t.blobId,
           mime: "text/plain",
-          processedAt: new Date(),
+          processedAt: sql`now()`,
         })),
       );
     });

@@ -38,7 +38,8 @@
     "@openhoard/core-db": "workspace:^",
     "@openhoard/core-identity": "workspace:^",
     "@openhoard/core-policy": "workspace:^",
-    "@types/oidc-provider": "^9.12.1"
+    "@types/oidc-provider": "^9.12.1",
+    "drizzle-orm": "^0.45.3"
   },
   "license": "Apache-2.0"
 }

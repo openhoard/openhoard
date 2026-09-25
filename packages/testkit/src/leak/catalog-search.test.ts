@@ -27,6 +27,7 @@ import {
   resolvePrincipal,
 } from "@openhoard/core-identity";
 import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
+import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { generateTenant } from "../tenant/generate.js";
 import type { FakeTenant } from "../tenant/types.js";
@@ -125,7 +126,7 @@ beforeAll(async () => {
         seq: 1,
         blobId,
         mime: item.mime,
-        processedAt: new Date(),
+        processedAt: sql`now()`,
       });
       for (const label of new Set(item.labels)) {
         const [facet, value] = label.split(":") as [string, string];
