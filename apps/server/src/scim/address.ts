@@ -13,6 +13,9 @@ import { isIP } from "node:net";
 
 /** An address in one spelling: IPv4-mapped IPv6 as IPv4, IPv6 expanded, lower case. */
 export function normalizeAddress(address: string): string | null {
+  // No address is longer (an expanded IPv6 with a zone and a port); X-Forwarded-For is the
+  // client's to write.
+  if (address.length > 100) return null;
   // With a port, as Azure Application Gateway, Front Door and IIS ARR write X-Forwarded-For:
   // `1.2.3.4:5678`, `[2001:db8::1]:443`. (A bare IPv6 address has colons but no brackets.)
   const ported = /^(?:\[(.*)\]|(\d{1,3}(?:\.\d{1,3}){3}))(?::(\d{1,5}))?$/.exec(address.trim());
@@ -23,17 +26,20 @@ export function normalizeAddress(address: string): string | null {
   const kind = isIP(trimmed);
   if (kind === 4) return trimmed;
   if (kind !== 6) return null;
-  return expand(trimmed.toLowerCase().replace(/%.*$/, ""));
+  const zone = trimmed.indexOf("%");
+  return expand((zone === -1 ? trimmed : trimmed.slice(0, zone)).toLowerCase());
 }
 
 /** An IPv6 address as eight groups of four hex digits. */
 function expand(v6: string): string {
   let text = v6;
   // A trailing IPv4 part (::ffff:1.2.3.4 other than mapped, 64:ff9b::1.2.3.4) as two groups.
-  const v4 = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text);
-  if (v4) {
-    const [a, b, c, d] = v4.slice(1).map(Number) as [number, number, number, number];
-    text = `${text.slice(0, v4.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  // Split, not a regular expression: an unanchored one backtracks on long runs of digits.
+  const last = text.lastIndexOf(":");
+  const quad = text.slice(last + 1).split(".");
+  if (quad.length === 4) {
+    const [a, b, c, d] = quad.map(Number) as [number, number, number, number];
+    text = `${text.slice(0, last + 1)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
   }
   const [head = "", tail] = text.split("::");
   const left = head === "" ? [] : head.split(":");

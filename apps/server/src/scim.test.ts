@@ -1598,6 +1598,14 @@ describe("SCIM client addresses and counters", () => {
     expect(addressKey("garbage")).toBe("garbage");
   });
 
+  it("refuses over-long forwarded hops, and stays fast on hostile ones", () => {
+    const started = performance.now();
+    expect(normalizeAddress("9".repeat(50_000))).toBeNull();
+    expect(normalizeAddress(`%${"%".repeat(50_000)}`)).toBeNull();
+    expect(normalizeAddress(`::${"9".repeat(90)}`)).toBeNull();
+    expect(performance.now() - started).toBeLessThan(200);
+  });
+
   it("believes X-Forwarded-For only from trusted proxies, from the right", () => {
     const trusted = trustedSet(["127.0.0.1", "10.0.0.1"]);
     expect(clientAddress(undefined, "198.51.100.1", trusted)).toBe("unknown");
