@@ -15,7 +15,6 @@ export {
   type Database,
   type OpenOptions,
   type PostgresOptions,
-  type QueueConnection,
   type Schema,
   type Tx,
 } from "./database.js";

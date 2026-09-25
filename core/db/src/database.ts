@@ -57,28 +57,30 @@ export interface Database {
    */
   tenantIds(options?: { after?: string; limit?: number }): Promise<string[]>;
 
-  /**
-   * The connection for pg-boss (core/jobs, ADR-0008), which keeps its queue in its own `pgboss`
-   * schema, outside row-level security. It is a second door past withTenant(), for pg-boss's
-   * own SQL only: nothing else may use it.
-   *
-   * - On PostgreSQL it is the URL the database was opened with, so pg-boss connects with its
-   *   own small pool as the same ordinary role, which openDatabase() checked (not a superuser,
-   *   no BYPASSRLS). As the database's owner, that role may create the `pgboss` schema.
-   * - On PGlite it runs statements on the same embedded instance, one at a time, between the
-   *   application's transactions. A pg-boss call made while a withTenant() callback runs would
-   *   wait for that transaction to end, which can't happen while the callback awaits the call,
-   *   so it throws {@link NestedWorkError} instead: enqueue after the transaction commits.
-   */
-  queueConnection(): QueueConnection;
-
   /** Closes the connection or pool. */
   close(): Promise<void>;
 }
 
-/** How pg-boss reaches the database; see {@link Database.queueConnection}. */
+/**
+ * How pg-boss (core/jobs, ADR-0008) reaches the database for its queue, which lives in its own
+ * `pgboss` schema, outside row-level security. Not on {@link Database}: only core/jobs gets it,
+ * through the internal entry point `@openhoard/core-db/queue` (queue.ts).
+ *
+ * - On PostgreSQL: the URL the database was opened with, and the same session settings as the
+ *   application's pool (UTC, statement and idle-in-transaction timeouts), so pg-boss connects
+ *   with its own small pool as the same ordinary role, which openDatabase() checked (not a
+ *   superuser, no BYPASSRLS). As the database's owner, that role may create the schema.
+ * - On PGlite: statements on the same embedded instance, one at a time, between the
+ *   application's transactions (pglite.ts queueSql()).
+ */
 export type QueueConnection =
-  | { readonly kind: "postgres"; readonly connectionString: string }
+  | {
+      readonly kind: "postgres";
+      readonly connectionString: string;
+      /** Server settings for each connection (`-c TimeZone=UTC -c statement_timeout=…`). */
+      readonly options: string;
+      readonly connectionTimeoutMillis: number;
+    }
   | {
       readonly kind: "pglite";
       /** pg-boss's `db` adapter (its IDatabase): one statement, or a block without parameters. */
@@ -96,7 +98,7 @@ export interface Driver {
   readonly query: QueryRows;
   /** Applies pending migrations; safe to call from several processes at once. */
   migrate(): Promise<void>;
-  /** See {@link Database.queueConnection}. */
+  /** See {@link QueueConnection}. */
   queue(): QueueConnection;
   close(): Promise<void>;
 }
@@ -180,7 +182,7 @@ export async function openDriver(options: OpenOptions): Promise<Driver> {
 export const MAX_TENANT_PAGE = 10_000;
 
 export function fromDriver(driver: Driver): Database {
-  return {
+  const db: Database = {
     kind: driver.kind,
     async tenantIds(options = {}) {
       const { after, limit = 1_000 } = options;
@@ -208,22 +210,28 @@ export function fromDriver(driver: Driver): Database {
         { accessMode: "read only" },
       );
     },
-    queueConnection: () => driver.queue(),
     withTenant(tenantId, work, config) {
       if (!isId("tenant", tenantId)) {
         return Promise.reject(new TypeError("withTenant: not a tenant id"));
       }
+      // One transaction at a time per unit of work: on PGlite a second one waits for the first
+      // forever, and on PostgreSQL it runs on another connection, outside the first, where it
+      // can wait on a lock the first holds (lockObject) just as forever.
+      if (insideWithTenant()) return Promise.reject(new NestedWorkError("withTenant()"));
       let session: unknown;
       const settled = driver.db.transaction(async (tx) => {
         session = (tx as unknown as { session?: unknown }).session;
         // Transaction-local (the `true`), and parameterized, unlike SET LOCAL.
         await tx.execute(sql`select set_config('app.tenant_id', ${tenantId}, true)`);
         const guarded = guardTransaction(tx as Tx);
+        const inside = { open: true };
         try {
-          return await tenantWork.run(true, () => work(guarded.tx));
+          return await tenantWork.run(inside, () => work(guarded.tx));
         } finally {
-          // Before COMMIT or ROLLBACK is even sent: nothing more may run in this transaction.
+          // Before COMMIT or ROLLBACK is even sent: nothing more may run in this transaction,
+          // and work the callback started that outlives it (a timer) no longer counts as inside.
           guarded.end();
+          inside.open = false;
         }
       }, config);
       // A query builder made inside the callback (tx.select()…, tx.query.…) keeps the raw
@@ -244,26 +252,42 @@ export function fromDriver(driver: Driver): Database {
     },
     close: () => driver.close(),
   };
+  drivers.set(db, driver);
+  return db;
 }
 
-/** Marks the async context of a withTenant() callback; see {@link insideWithTenant}. */
-const tenantWork = new AsyncLocalStorage<true>();
+/** Each Database's driver, for the internal entry points (queue.ts); never exported. */
+const drivers = new WeakMap<Database, Driver>();
+
+/** The driver behind a Database from fromDriver(); undefined for anything else. */
+export function driverOf(db: Database): Driver | undefined {
+  return drivers.get(db);
+}
 
 /**
- * Whether this code runs inside a withTenant() callback, in its async context however deep.
- * The PGlite queue connection uses it to refuse a call that would wait for the transaction the
- * caller holds open, and core/jobs to refuse an enqueue that would not be part of it anyway.
+ * Marks the async context of a withTenant() callback while its transaction is open; see
+ * {@link insideWithTenant}.
+ */
+const tenantWork = new AsyncLocalStorage<{ open: boolean }>();
+
+/**
+ * Whether this code runs inside a withTenant() callback whose transaction is still open, in its
+ * async context however deep. withTenant() and tenantIds() refuse to start a transaction there,
+ * the PGlite queue connection refuses a call that would wait for the one the caller holds open,
+ * and core/jobs refuses an enqueue that would not be part of it anyway. Work the callback
+ * started that runs after the transaction ended (a timer) is outside again.
  */
 export function insideWithTenant(): boolean {
-  return tenantWork.getStore() === true;
+  return tenantWork.getStore()?.open === true;
 }
 
 /** Thrown for work that must not run inside a withTenant() callback. */
 export class NestedWorkError extends Error {
   constructor(what: string) {
     super(
-      `${what} can't run inside a withTenant() callback: on the embedded database it would ` +
-        `wait for the transaction the callback holds open. Call it after that transaction commits.`,
+      `${what} can't run inside a withTenant() callback: it would wait for the transaction the ` +
+        `callback holds open (forever, on the embedded database). Call it after that ` +
+        `transaction commits.`,
     );
     this.name = "NestedWorkError";
   }

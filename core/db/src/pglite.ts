@@ -90,7 +90,7 @@ export async function openPglite(options: {
 }
 
 /**
- * Runs one of pg-boss's statements on the embedded instance (Database.queueConnection()).
+ * Runs one of pg-boss's statements on the embedded instance (core-db/queue queueConnectionOf()).
  *
  * PGlite is one session, shared with the application, and runs each query or transaction whole
  * before the next (its transaction lock, which drizzle's transactions hold too). pg-boss expects
@@ -99,8 +99,14 @@ export async function openPglite(options: {
  * the next application transaction would fall into. So a block without parameters runs inside a
  * PGlite transaction, which rolls back on failure before anyone else runs. pg-boss's own BEGIN
  * and COMMIT in it are harmless (Postgres warns and carries on). A parameterized statement is
- * one statement in autocommit, and an index built or rebuilt CONCURRENTLY can't run in a
- * transaction at all, so both run on their own.
+ * one statement in autocommit, and building, dropping or rebuilding an index CONCURRENTLY can't
+ * run in a transaction at all: both run on their own, followed by a ROLLBACK after a failure, in
+ * case the session was left in one (as pg-boss's own PGlite adapter does).
+ *
+ * The session is the application's, so a statement could change what the application's next
+ * transactions are: a session-level `app.*` setting, or the session's role (PGlite connects as a
+ * superuser and only switches to the owner role, core-db pglite.ts). pg-boss issues neither, so
+ * any statement touching them is refused ({@link UNSAFE_QUEUE_SQL}).
  *
  * Called inside a withTenant() callback it would wait for the transaction lock the callback
  * holds, forever: it throws instead.
@@ -111,11 +117,26 @@ export async function queueSql(
   values?: unknown[],
 ): Promise<{ rows: unknown[] }> {
   if (insideWithTenant()) throw new NestedWorkError("a job queue call (pg-boss)");
-  if (values !== undefined && values.length > 0) {
-    return { rows: (await pglite.query(text, values)).rows };
+  const params = values ?? [];
+  if (
+    UNSAFE_QUEUE_SQL.test(text) ||
+    params.some((v) => typeof v === "string" && /^\s*app\s*\./i.test(v))
+  ) {
+    throw new Error("the job queue connection refuses statements that change session settings");
   }
-  if (/\bconcurrently\b/i.test(text)) {
-    return { rows: (await pglite.exec(text)).flatMap((r) => r.rows) };
+  const alone = async <T>(run: () => Promise<T>) => {
+    try {
+      return await run();
+    } catch (e) {
+      await pglite.query("ROLLBACK").catch(() => {});
+      throw e;
+    }
+  };
+  if (params.length > 0) {
+    return alone(async () => ({ rows: (await pglite.query(text, params)).rows }));
+  }
+  if (CONCURRENT_DDL.test(text)) {
+    return alone(async () => ({ rows: (await pglite.exec(text)).flatMap((r) => r.rows) }));
   }
   // exec() returns one result per statement: keep every row, so a RETURNING before the COMMIT
   // isn't lost (node-postgres returns them all too).
@@ -123,6 +144,18 @@ export async function queueSql(
     rows: (await tx.exec(text)).flatMap((r) => r.rows),
   }));
 }
+
+/** A statement that must run outside a transaction block: index DDL done CONCURRENTLY. */
+const CONCURRENT_DDL =
+  /^\s*(?:create\s+(?:unique\s+)?index|drop\s+index|reindex\s+(?:\(\s*[\w\s,]*\)\s*)?\w+)\s+concurrently\b/i;
+
+/**
+ * What the queue connection refuses: `app.*` settings (the tenant and the tenant directory),
+ * set_config() (which can name them through a parameter), and changes of role or session
+ * authorization, or a reset of every setting.
+ */
+export const UNSAFE_QUEUE_SQL =
+  /\bapp\s*\.|\bset_config\s*\(|\bsession\s+authorization\b|\b(?:set|reset)\s+role\b|\breset\s+all\b|\bset\s+session\b/i;
 
 /**
  * Data directories this module instance has open (lock path → the content of its lock file).

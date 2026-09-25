@@ -380,8 +380,8 @@ importers:
         specifier: ^0.45.3
         version: 0.45.3(@electric-sql/pglite@0.5.8)(@types/pg@8.23.1)(pg@8.23.0)
       pg-boss:
-        specifier: ^12.34.0
-        version: 12.34.0
+        specifier: 12.33.1
+        version: 12.33.1
     devDependencies:
       '@openhoard/config':
         specifier: workspace:*
@@ -2480,8 +2480,8 @@ packages:
   path-to-regexp@8.4.2:
     resolution: {integrity: sha512-qRcuIdP69NPm4qbACK+aDogI5CBDMi1jKe0ry5rSQJz8JVLsC7jV8XpiJjGRLLol3N+R5ihGYcrPLTno6pAdBA==}
 
-  pg-boss@12.34.0:
-    resolution: {integrity: sha512-03boJOWLiiHEQPgXCPgrMv6My5Qv6ieD85AOrm/adi475oo74kn//gHOheYqWiU/2guCJMRpKQpD6F7Oln1aWQ==}
+  pg-boss@12.33.1:
+    resolution: {integrity: sha512-u0DdaO4DsDV2TeuOeie2pXxmoYmO84CRlAX/7AEdzpf3y+NOEjt+As714UmzaCNTgnKdcvLItnN9AZklsjzOLQ==}
     engines: {node: '>=22.12.0'}
     hasBin: true
 
@@ -4727,7 +4727,7 @@ snapshots:
 
   path-to-regexp@8.4.2: {}
 
-  pg-boss@12.34.0:
+  pg-boss@12.33.1:
     dependencies:
       cron-parser: 5.10.1
       pg: 8.23.0

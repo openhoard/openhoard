@@ -5,6 +5,7 @@ export {
   isEnrichPayload,
   needsEnrichment,
   ruleTagStep,
+  StaleTargetError,
   type EnrichContext,
   type EnrichOutcome,
   type EnrichPayload,
@@ -12,6 +13,7 @@ export {
   type EnrichTarget,
 } from "./enrich.js";
 export {
+  deadLetteredVersions,
   DEFAULT_MAINTENANCE_CRON,
   enrichKey,
   QUEUES,

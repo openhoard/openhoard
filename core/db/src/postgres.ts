@@ -32,17 +32,19 @@ export function poolSettings(options: PostgresOptions = {}): Required<PostgresOp
 /** Native PostgreSQL through a node-postgres pool. */
 export function openPostgres(url: string, options: PostgresOptions = {}): Driver {
   const o = poolSettings(options);
+  // Set at connection start, before any query can run: UTC (spike S2), and limits so a stuck
+  // statement or an abandoned transaction can't pin a connection and the locks it holds.
+  // pg-boss's pool gets the same (queue()).
+  const settings = [
+    "-c TimeZone=UTC",
+    `-c statement_timeout=${o.statementTimeoutMillis}`,
+    `-c idle_in_transaction_session_timeout=${o.idleInTransactionTimeoutMillis}`,
+  ].join(" ");
   const pool = new pg.Pool({
     connectionString: url,
     max: o.max,
     connectionTimeoutMillis: o.connectionTimeoutMillis,
-    // Set at connection start, before any query can run: UTC (spike S2), and limits so a stuck
-    // statement or an abandoned transaction can't pin a connection and the locks it holds.
-    options: [
-      "-c TimeZone=UTC",
-      `-c statement_timeout=${o.statementTimeoutMillis}`,
-      `-c idle_in_transaction_session_timeout=${o.idleInTransactionTimeoutMillis}`,
-    ].join(" "),
+    options: settings,
   });
   // A client's error event with no listener would crash the process. The pool's listener covers
   // idle clients (a server restart, the network); a checked-out client (an idle-in-transaction
@@ -77,7 +79,12 @@ export function openPostgres(url: string, options: PostgresOptions = {}): Driver
       }
     },
     // pg-boss opens its own pool on the same URL, so the same role (checked by openDatabase).
-    queue: () => ({ kind: "postgres", connectionString: url }),
+    queue: () => ({
+      kind: "postgres",
+      connectionString: url,
+      options: settings,
+      connectionTimeoutMillis: o.connectionTimeoutMillis,
+    }),
     close: () => pool.end(),
   };
 }

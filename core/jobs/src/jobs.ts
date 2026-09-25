@@ -1,5 +1,6 @@
 import type { IngestResult } from "@openhoard/core-catalog";
 import { insideWithTenant, isId, NestedWorkError, type Database } from "@openhoard/core-db";
+import { queueConnectionOf } from "@openhoard/core-db/queue";
 import { PgBoss, type ConstructorOptions, type Job, type Queue } from "pg-boss";
 import {
   defaultEnrichSteps,
@@ -24,18 +25,29 @@ import {
  *
  * Queues:
  *
- *   enrich              one job per (tenant, version); `stately`, keyed by tenant and version, so
- *                       at most one waits and one runs per version: enqueueing it again while one
- *                       waits changes nothing, and while one runs queues exactly one more (a
- *                       rename needs it). Retries with exponential backoff, then dead-letters.
- *   enrich-failed       the dead letter queue: jobs that ran out of retries, for an operator to
- *                       look at and redrive. Nothing works it. The version stays unprocessed,
- *                       hidden from non-readers: fail-closed.
+ *   enrich              one job per (tenant, version); `stately`, keyed by tenant and version:
+ *                       at most one job per key in each of the states created, retry and active.
+ *                       Enqueueing goes through upsert(): a job that waits for the key, created
+ *                       or waiting out a retry delay, is brought forward to run now instead of
+ *                       getting a second one beside it. (pg-boss 12.33 fails a job whose retry
+ *                       collides with another retry of its key on job_i3, straight to failed and
+ *                       the dead letter queue, retries unused: failJobsBody's ON CONFLICT DO
+ *                       NOTHING.) With none waiting, a new one is queued, also while one runs (a
+ *                       rename needs the run after it). Retries with exponential backoff, then
+ *                       dead-letters.
+ *   enrich-failed       the dead letter queue (its own partition): jobs that ran out of retries,
+ *                       for an operator to look at and redrive. Nothing works it. The version
+ *                       stays unprocessed, hidden from non-readers: fail-closed.
  *   maintenance         the cron job (hourly by default): fans out one job per tenant.
  *   maintenance-tenant  one tenant's maintenance (maintenance.ts); `stately`, keyed by tenant.
  *
  * Every process that ingests enqueues; `worker: true` processes also work the queues and keep
  * the schedule (pg-boss coordinates several such processes through the database).
+ *
+ * One narrow race remains. upsert() finds no waiting job and inserts one, as two statements; a
+ * running job failing into its retry between the two leaves a retry and a new job side by side.
+ * If the new one then fails too, it is dead-lettered with its retries unused, while the retry
+ * still runs: the version is enriched all the same, and the sweep skips it only until it is.
  */
 
 export const QUEUES = {
@@ -96,9 +108,11 @@ export const DEFAULT_MAINTENANCE_CRON = "17 * * * *";
 
 export interface Jobs {
   /**
-   * Enqueues enrichment for one version. Returns the job's id, or null when a job for it already
-   * waits (a running one doesn't count: the version may have changed since it started). Call it
-   * after the transaction that created the version commits, never inside withTenant().
+   * Enqueues enrichment for one version. Returns the new job's id, or null when a job for it
+   * already waited (created, or waiting out a retry delay): that one is brought forward to run
+   * now instead. A running job doesn't count: the version may have changed since it started, so
+   * a new job queues behind it. Call it after the transaction that created the version commits,
+   * never inside withTenant().
    */
   enqueueVersion(tenantId: string, versionId: string): Promise<string | null>;
   /**
@@ -114,11 +128,13 @@ export interface Jobs {
   /** Starts a maintenance run now, as the schedule does. Returns the job's id. */
   runMaintenance(): Promise<string | null>;
   /**
-   * Stops working (waiting up to `timeoutMs`, default 20 s, for running jobs; any still running
-   * then fail and run again later) and closes pg-boss's connections. Call it before closing the
-   * database.
+   * Stops working and closes pg-boss's connections. Running jobs get up to `timeoutMs` (default
+   * 20 s) to finish; any still running then fail, to run again later, and are told to stop
+   * (their signal); stop() then waits up to `graceMs` more (default 2 s) for their handlers to
+   * return, so nothing of theirs touches the database after. Call it before closing the
+   * database; it resolves within `timeoutMs + graceMs` and a little.
    */
-  stop(options?: { timeoutMs?: number }): Promise<void>;
+  stop(options?: { timeoutMs?: number; graceMs?: number }): Promise<void>;
   /** The pg-boss instance, for operators' tools and tests (job states, dead letters). */
   readonly boss: PgBoss;
 }
@@ -153,7 +169,7 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
   }
   const log = options.log ?? {};
 
-  const connection = db.queueConnection();
+  const connection = queueConnectionOf(db);
   const common: ConstructorOptions = {
     schema: "pgboss",
     // Workers and the schedule only where asked; any process may send.
@@ -170,6 +186,9 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
       : {
           ...common,
           connectionString: connection.connectionString,
+          // The application pool's session settings: UTC (spike S2) and its timeouts.
+          options: connection.options,
+          connectionTimeoutMillis: connection.connectionTimeoutMillis,
           max: options.poolSize ?? 4,
           application_name: "openhoard-jobs",
         },
@@ -179,8 +198,23 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
   boss.on("warning", (warning) => log.warn?.({ warning }, "job queue warning"));
 
   await boss.start();
+  // Handlers running now, so stop() can wait for them after pg-boss gave up on them.
+  const running = new Set<Promise<unknown>>();
+  const tracked =
+    <A extends unknown[], R>(handler: (...args: A) => Promise<R>) =>
+    (...args: A): Promise<R> => {
+      const run = handler(...args);
+      const settled = run.then(
+        () => {},
+        () => {},
+      );
+      running.add(settled);
+      void settled.then(() => running.delete(settled));
+      return run;
+    };
   try {
-    await ensureQueue(boss, QUEUES.enrichFailed, { policy: "standard" });
+    // Its own partition: the sweep's per-tenant lookup reads dead letters only.
+    await ensureQueue(boss, QUEUES.enrichFailed, { policy: "standard", partition: true });
     await ensureQueue(boss, QUEUES.enrich, {
       policy: "stately",
       deadLetter: QUEUES.enrichFailed,
@@ -200,31 +234,37 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
         throw new TypeError("enqueueVersion: expects a tenant id and a version id");
       }
       if (insideWithTenant()) throw new NestedWorkError("enqueueVersion()");
-      return boss.send(QUEUES.enrich, payload, { singletonKey: enrichKey(payload) });
+      // A job waiting for the key (created, or in its retry delay) is brought forward rather
+      // than joined by a second one; see the header.
+      const done = await boss.upsert(QUEUES.enrich, payload, {
+        singletonKey: enrichKey(payload),
+        startAfter: 0,
+      });
+      return done.inserted > 0 ? (done.jobs[0] ?? null) : null;
     };
 
     if (worker) {
       await boss.work<unknown>(
         QUEUES.enrich,
         { localConcurrency: enrich.concurrency, pollingIntervalSeconds: polling },
-        async ([job]) => runEnrichJob(db, steps, job as Job<unknown>, enqueueVersion, log),
+        tracked(async ([job]) => runEnrichJob(db, steps, job as Job<unknown>, enqueueVersion, log)),
       );
       if (maintenance) {
         await boss.work<unknown>(
           QUEUES.maintenance,
           { pollingIntervalSeconds: polling },
-          async () => {
+          tracked(async () => {
             const tenants = await fanOut(db, (tenantId) =>
               boss.send(QUEUES.maintenanceTenant, { tenantId }, { singletonKey: tenantId }),
             );
             log.info?.({ tenants }, "maintenance scheduled for every tenant");
             return { tenants };
-          },
+          }),
         );
         await boss.work<unknown>(
           QUEUES.maintenanceTenant,
           { pollingIntervalSeconds: polling },
-          async ([job]) => {
+          tracked(async ([job]) => {
             const tenantId = (job?.data as { tenantId?: unknown } | undefined)?.tenantId;
             if (typeof tenantId !== "string" || !isId("tenant", tenantId)) {
               log.warn?.({ job: job?.id }, "maintenance job without a tenant: skipped");
@@ -232,18 +272,18 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
             }
             const done: TenantMaintenance = await maintainTenant(db, tenantId, maintenance, {
               requeue: (p) => enqueueVersion(p.tenantId, p.versionId),
-              waiting: (p) => enrichmentWaiting(boss, p),
+              deadLettered: (t) => deadLetteredVersions(boss, t),
             });
             log.info?.({ tenantId, ...done }, "tenant maintenance done");
             return done;
-          },
+          }),
         );
         await boss.schedule(QUEUES.maintenance, cron ?? DEFAULT_MAINTENANCE_CRON, null, {
           tz: "UTC",
         });
-      } else {
-        await boss.unschedule(QUEUES.maintenance);
       }
+      // With maintenance off here, the schedule is left as it is: it is the cluster's, and
+      // another node may keep it.
     }
 
     return {
@@ -258,8 +298,21 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
         if (insideWithTenant()) throw new NestedWorkError("runMaintenance()");
         return boss.send(QUEUES.maintenance, {});
       },
-      stop: ({ timeoutMs = 20_000 } = {}) =>
-        boss.stop({ graceful: true, timeout: timeoutMs, close: true }),
+      async stop({ timeoutMs = 20_000, graceMs = 2_000 } = {}) {
+        await boss.stop({ graceful: true, timeout: timeoutMs, close: true });
+        // pg-boss has failed and aborted what outlived the timeout, but not waited for it.
+        if (running.size > 0) {
+          let timer: NodeJS.Timeout | undefined;
+          const grace = new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, graceMs);
+          });
+          await Promise.race([Promise.all(running), grace]);
+          clearTimeout(timer);
+          if (running.size > 0) {
+            log.warn?.({ handlers: running.size }, "job handlers still running after stop");
+          }
+        }
+      },
     };
   } catch (e) {
     await boss.stop({ graceful: false }).catch(() => {});
@@ -294,16 +347,23 @@ async function runEnrichJob(
 }
 
 /**
- * Whether a job for this version waits in the enrichment queue (queued, running or retrying),
- * or ran out of retries and waits in the dead letter queue.
+ * The tenant's versions whose job waits in the dead letter queue: one read of that queue's own
+ * partition per tenant and run, bounded by what pg-boss retains there (14 days by default).
  */
-async function enrichmentWaiting(boss: PgBoss, payload: EnrichPayload): Promise<boolean> {
-  const live = await boss.findJobs(QUEUES.enrich, { key: enrichKey(payload) });
-  if (live.some((j) => j.state === "created" || j.state === "retry" || j.state === "active")) {
-    return true;
+export async function deadLetteredVersions(
+  boss: PgBoss,
+  tenantId: string,
+): Promise<ReadonlySet<string>> {
+  const dead = await boss.findJobs<unknown>(QUEUES.enrichFailed, {
+    data: { tenantId },
+    queued: true,
+  });
+  const ids = new Set<string>();
+  for (const job of dead) {
+    const versionId = (job.data as { versionId?: unknown } | null)?.versionId;
+    if (typeof versionId === "string") ids.add(versionId);
   }
-  const dead = await boss.findJobs(QUEUES.enrichFailed, { data: payload, queued: true });
-  return dead.length > 0;
+  return ids;
 }
 
 /** Sends one job per tenant, a page of ids at a time; returns how many tenants. */

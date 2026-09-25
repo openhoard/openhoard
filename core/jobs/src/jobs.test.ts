@@ -19,13 +19,27 @@ import {
   type Database,
   type Tx,
 } from "@openhoard/core-db";
-import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
+import {
+  openTestDatabase,
+  seedTenant,
+  TEST_POSTGRES_ENV,
+  type SeededTenant,
+} from "@openhoard/core-db/testing";
 import { Authorizer, createCedarEngine, type AuthzPrincipal } from "@openhoard/core-policy";
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { JobWithMetadata } from "pg-boss";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ruleTagStep, type EnrichStep } from "./enrich.js";
-import { enrichKey, QUEUES, startJobs, type Jobs, type JobsOptions } from "./jobs.js";
+import {
+  deadLetteredVersions,
+  DEFAULT_MAINTENANCE_CRON,
+  enrichKey,
+  QUEUES,
+  startJobs,
+  type Jobs,
+  type JobsOptions,
+} from "./jobs.js";
+import { maintainTenant, maintenanceSettings, type MaintenanceOptions } from "./maintenance.js";
 
 /* T-401: "re-running a job never duplicates tags or cards". */
 
@@ -235,6 +249,15 @@ describe("enqueueing", () => {
     await expect(jobs.enqueueVersion("ten_nope", item.versionId)).rejects.toThrow(TypeError);
     await expect(jobs.enqueueVersion(t.tenantId, t.objectId)).rejects.toThrow(TypeError);
     await expect(db.withTenant(t.tenantId, () => startJobs(db))).rejects.toThrow(NestedWorkError);
+    // Work a transaction started that runs after its commit is outside it again.
+    let later: Promise<string | null> | undefined;
+    await db.withTenant(t.tenantId, () => {
+      later = new Promise<void>((r) => setTimeout(r, 20)).then(() =>
+        jobs.enqueueVersion(t.tenantId, item.versionId),
+      );
+      return Promise.resolve();
+    });
+    expect(await later).toEqual(expect.any(String));
   });
 
   it("checks its options before starting anything", async () => {
@@ -311,6 +334,30 @@ describe("the worker", () => {
     expect(await processedAt(item.versionId)).toBeInstanceOf(Date);
   });
 
+  it("brings a job waiting out its retry delay forward instead of queueing a second", async () => {
+    const item = await ingestItem("Budget 2026.xlsx");
+    // Fails once, then waits an hour for its retry.
+    const flaky = flakyStep(1);
+    const jobs = await start({
+      steps: [flaky.step, ruleTagStep],
+      enrich: { retryDelaySeconds: 3_600, retryLimit: 3 },
+    });
+    await jobs.enqueueAfterIngest(t.tenantId, item);
+    const [queued] = await enrichJobs(jobs, item.versionId);
+    await waitFor(async () => {
+      const job = await jobs.boss.getJobById<unknown>(QUEUES.enrich, queued?.id ?? "");
+      return job?.state === "retry" ? job : null;
+    }, "the retry");
+    // A rename, the sweep or a connector enqueues it meanwhile: no second job beside the retry
+    // (pg-boss would dead-letter that one on its first failure, its retries unused).
+    expect(await jobs.enqueueVersion(t.tenantId, item.versionId)).toBeNull();
+    const job = await settled(jobs, QUEUES.enrich, queued?.id ?? null);
+    expect(job).toMatchObject({ state: "completed", retryCount: 1 });
+    expect(await enrichJobs(jobs, item.versionId)).toHaveLength(1);
+    expect(flaky.calls).toEqual([1, 2]);
+    expect(await processedAt(item.versionId)).toBeInstanceOf(Date);
+  });
+
   it("re-runs a completed job without changing anything", async () => {
     const item = await ingestItem("Budget 2026.xlsx");
     const jobs = await start();
@@ -348,7 +395,8 @@ describe("the worker", () => {
         mime: "application/octet-stream",
         blobId: "unused",
       },
-      withTenant: (work, config) => db.withTenant(t.tenantId, work, config),
+      read: (work) => db.withTenant(t.tenantId, work),
+      write: (work) => db.withTenant(t.tenantId, work),
       signal: new AbortController().signal,
     });
     // Another worker's supervisor finds the expired lease and puts the job back for a retry.
@@ -358,17 +406,17 @@ describe("the worker", () => {
     expect(await tagState(item.objectId)).toEqual(SPREADSHEET_TAGS);
   });
 
-  it("enqueues again after a rename during the run, and processes the new title", async () => {
+  it("writes nothing for a title a rename changed, enqueues again, processes the new one", async () => {
     const item = await ingestItem("Budget 2026.xlsx");
     let renamed: IngestResult | undefined;
     const jobs = await start({
       steps: [
-        ruleTagStep,
         {
           name: "rename-once",
           async run() {
             if (renamed) return;
-            // The source renames the file while the job runs; its connector enqueues as usual.
+            // The source renames the file after the job read it; its connector enqueues as
+            // usual. The rule tagger after this step would tag the old title: it must not.
             renamed = await ingestItem("Forecast 2026.xlsx", {
               externalId: item.externalId,
               blob: item.blob,
@@ -376,6 +424,7 @@ describe("the worker", () => {
             await jobs.enqueueAfterIngest(t.tenantId, renamed);
           },
         },
+        ruleTagStep,
       ],
     });
     await jobs.enqueueAfterIngest(t.tenantId, item);
@@ -420,8 +469,69 @@ describe("the worker", () => {
       { outcome: "superseded" },
       { outcome: "processed" },
     ]);
-    expect(await processedAt(v1.versionId)).toBeNull();
+    // The replaced version is done with: it leaves the unprocessed set (and the sweep) for good.
+    expect(await processedAt(v1.versionId)).toBeInstanceOf(Date);
     expect(await processedAt(v2.versionId)).toBeInstanceOf(Date);
+    expect(await enrichJobs(jobs, v1.versionId)).toHaveLength(1);
+  });
+
+  it("never lets a slow job for a replaced version overwrite the newer one's tags", async () => {
+    const v1 = await ingestItem("Budget 2026.xlsx");
+    // v1's job reads its target, then waits in a step until v2 is in and enriched.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered: () => void = () => {};
+    const paused = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const jobs = await start({
+      enrich: { concurrency: 2 },
+      steps: [
+        {
+          name: "pause-v1",
+          async run({ target }) {
+            if (target.versionId !== v1.versionId) return;
+            entered();
+            await gate;
+          },
+        },
+        ruleTagStep,
+      ],
+    });
+    await jobs.enqueueAfterIngest(t.tenantId, v1);
+    await paused;
+    // The source saves new content under a new name and type; its job runs and finishes.
+    const v2 = await ingestItem("Budget 2026.docx", { externalId: v1.externalId });
+    expect(v2).toMatchObject({ renamed: true, created: { version: true } });
+    await jobs.enqueueAfterIngest(t.tenantId, v2);
+    const two = await settled(
+      jobs,
+      QUEUES.enrich,
+      (await enrichJobs(jobs, v2.versionId))[0]?.id ?? null,
+    );
+    expect(output(two)).toEqual({ outcome: "processed" });
+    const newer = await tagState(v1.objectId);
+    expect(newer.tags).toEqual([
+      { facet: "kind", value: "document", source: "rule" },
+      { facet: "topic", value: "budget", source: "rule" },
+    ]);
+    const [shown] = await nonReaderView(v1.objectId);
+    expect(shown).toMatchObject({ title: "Budget 2026.docx", tags: ["kind:document"] });
+    // v1's job goes on: its rule tagger finds v1 replaced and writes nothing.
+    release();
+    const one = await settled(
+      jobs,
+      QUEUES.enrich,
+      (await enrichJobs(jobs, v1.versionId))[0]?.id ?? null,
+    );
+    expect(output(one)).toEqual({ outcome: "superseded" });
+    expect(await tagState(v1.objectId)).toEqual(newer);
+    expect(await nonReaderView(v1.objectId)).toEqual([shown]);
+    // Superseded, so never enqueued again (not "renamed", though the title changed too).
+    expect(await enrichJobs(jobs, v1.versionId)).toHaveLength(1);
+    expect(await processedAt(v1.versionId)).toBeInstanceOf(Date);
   });
 
   it("completes jobs that name nothing, without doing anything", async () => {
@@ -484,6 +594,51 @@ describe("the worker", () => {
     await db.close();
     db = await openTestDatabase();
   });
+
+  it("waits for a handler that outlives the stop timeout before it returns", async () => {
+    const item = await ingestItem("Budget 2026.xlsx");
+    let entered: () => void = () => {};
+    const inStep = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let finished = false;
+    const jobs = await startJobs(db, {
+      pollingIntervalSeconds: 0.5,
+      maintenance: false,
+      steps: [
+        {
+          name: "too-slow",
+          async run() {
+            entered();
+            await new Promise((r) => setTimeout(r, 1_500));
+            finished = true;
+          },
+        },
+      ],
+    });
+    await jobs.enqueueAfterIngest(t.tenantId, item);
+    await inStep;
+    // pg-boss gives up after a second and fails the job (it runs again later); stop() still
+    // waits for the handler, so nothing of it runs once the database is closed.
+    await jobs.stop({ timeoutMs: 1_000, graceMs: 5_000 });
+    expect(finished).toBe(true);
+    // Told to stop (its signal), the job didn't go on to mark the version.
+    expect(await processedAt(item.versionId)).toBeNull();
+  });
+
+  it.runIf(process.env[TEST_POSTGRES_ENV])(
+    "gives pg-boss's own connections the application pool's session settings",
+    async () => {
+      const jobs = await start({ worker: false });
+      const { rows } = await jobs.boss
+        .getDb()
+        .executeSql(
+          "select current_setting('TimeZone') as tz, current_setting('statement_timeout') as st, " +
+            "current_setting('idle_in_transaction_session_timeout') as idle",
+        );
+      expect(rows).toEqual([{ tz: "UTC", st: "1min", idle: "1min" }]);
+    },
+  );
 });
 
 describe("maintenance", () => {
@@ -568,7 +723,7 @@ describe("maintenance", () => {
       const done = await settled(jobs, QUEUES.maintenanceTenant, perTenant?.id ?? null);
       // One batch at a time: the two sessions that ended over 30 days ago, the event from
       // 500 days ago; the recent ones stay.
-      expect(done.output).toEqual({ sessions: 2, activity: 1, swept: 1 });
+      expect(done.output).toEqual({ sessions: 2, activity: 1, swept: 1, deadLettered: 0 });
       expect(await remaining(s.tenantId)).toEqual({ sessions: 1, activity: 1 });
     }
     // The swept versions are enriched now; the fresh one wasn't enqueued by anyone.
@@ -581,39 +736,57 @@ describe("maintenance", () => {
     expect(await enrichJobs(jobs, fresh.versionId)).toEqual([]);
   });
 
-  it("sweeps nothing that waits in a queue or ran out of retries", async () => {
+  it("pages past dead letters to the lost versions behind them, up to its scan cap", async () => {
+    const jobs = await start({ worker: false });
+    // Oldest first: three versions whose job ran out of retries, then two lost ones.
+    const failed = [];
+    for (const [i, title] of ["Failed 1.xlsx", "Failed 2.xlsx", "Failed 3.xlsx"].entries()) {
+      const v = await ingestItem(title);
+      await backdate(t.tenantId, v.versionId, 10 - i);
+      await jobs.boss.send(QUEUES.enrichFailed, { tenantId: t.tenantId, versionId: v.versionId });
+      failed.push(v);
+    }
+    const lost = await ingestItem("Lost.xlsx");
+    await backdate(t.tenantId, lost.versionId, 5);
     const waiting = await ingestItem("Waiting.xlsx");
-    const failed = await ingestItem("Failed.xlsx");
-    for (const v of [waiting, failed]) await backdate(t.tenantId, v.versionId, 2);
-    const flaky = flakyStep(Infinity);
-    const jobs = await start({
-      steps: [flaky.step],
-      enrich: { retryLimit: 0 },
-      maintenance: { sweepAfterMinutes: 60 },
+    await backdate(t.tenantId, waiting.versionId, 4);
+    await jobs.enqueueAfterIngest(t.tenantId, waiting);
+    // Another tenant's dead letters don't count here.
+    await jobs.boss.send(QUEUES.enrichFailed, {
+      tenantId: newId("tenant"),
+      versionId: lost.versionId,
     });
-    await jobs.enqueueAfterIngest(t.tenantId, failed);
-    const [dead] = await enrichJobs(jobs, failed.versionId);
-    expect((await settled(jobs, QUEUES.enrich, dead?.id ?? null)).state).toBe("failed");
-    await jobs.stop({ timeoutMs: 1_000 });
-    // The other one waits in the queue while no worker runs.
-    const sender = await start({ worker: false });
-    await sender.enqueueAfterIngest(t.tenantId, waiting);
-    const worker = await start({ steps: [flaky.step], maintenance: {} });
-    const run = await settled(worker, QUEUES.maintenance, await worker.runMaintenance());
-    expect(run.output).toEqual({ tenants: 1 });
-    const [perTenant] = await worker.boss.findJobs<unknown>(QUEUES.maintenanceTenant, {
-      key: t.tenantId,
+    expect(await deadLetteredVersions(jobs.boss, t.tenantId)).toEqual(
+      new Set(failed.map((v) => v.versionId)),
+    );
+    const sweep = (more: MaintenanceOptions) =>
+      maintainTenant(db, t.tenantId, maintenanceSettings(more), {
+        requeue: (p) => jobs.enqueueVersion(p.tenantId, p.versionId),
+        deadLettered: (tenantId) => deadLetteredVersions(jobs.boss, tenantId),
+      });
+    // A scan cap of three sees only dead letters: nothing enqueued, and nothing wrong.
+    expect(await sweep({ sweepLimit: 1, sweepScanLimit: 3 })).toMatchObject({
+      swept: 0,
+      deadLettered: 3,
     });
-    const done = await settled(worker, QUEUES.maintenanceTenant, perTenant?.id ?? null);
-    expect(done.output).toMatchObject({ swept: 0 });
-    expect(await enrichJobs(worker, failed.versionId)).toHaveLength(1);
+    expect(await enrichJobs(jobs, lost.versionId)).toEqual([]);
+    // With the default cap it reaches the lost one; the limit of one stops it there.
+    expect(await sweep({ sweepLimit: 1 })).toMatchObject({ swept: 1, deadLettered: 3 });
+    expect(await enrichJobs(jobs, lost.versionId)).toHaveLength(1);
+    // The one whose job waits is enqueued too, into that same job: still one each.
+    expect(await sweep({})).toMatchObject({ swept: 2, deadLettered: 3 });
+    expect(await enrichJobs(jobs, lost.versionId)).toHaveLength(1);
+    expect(await enrichJobs(jobs, waiting.versionId)).toHaveLength(1);
+    for (const v of failed) expect(await enrichJobs(jobs, v.versionId)).toEqual([]);
   });
 
-  it("unschedules maintenance that is turned off", async () => {
+  it("leaves the cluster's schedule alone where maintenance is off", async () => {
     const jobs = await start({ maintenance: {} });
     expect(await jobs.boss.getSchedules(QUEUES.maintenance)).toHaveLength(1);
     await jobs.stop({ timeoutMs: 1_000 });
     const off = await start({ maintenance: false });
-    expect(await off.boss.getSchedules(QUEUES.maintenance)).toEqual([]);
+    expect((await off.boss.getSchedules(QUEUES.maintenance)).map((s) => s.cron)).toEqual([
+      DEFAULT_MAINTENANCE_CRON,
+    ]);
   });
 });

@@ -43,25 +43,33 @@ What this protects against, and what it doesn't:
   parameters, never `sql.raw()` with input. A separate runtime role with only DML rights is a
   planned hardening step.
 
+Transactions don't nest. A `withTenant()` (or `tenantIds()`) started inside another's callback
+would wait for it forever: on PGlite, because everything shares one connection, and on
+PostgreSQL because it runs on another connection, outside the first, and can wait on a lock the
+first holds. So it rejects with `NestedWorkError`. `insideWithTenant()` tells whether code runs
+in a callback whose transaction is still open; work the callback started that runs after the
+commit (a timer) is outside again.
+
 Two narrow doors besides `withTenant()`, both for core/jobs:
 
 - **`tenantIds({ after, limit })`** lists every tenant's id, in order and a page at a time, for
   scheduled maintenance that visits each tenant. `tenants` is under forced row-level security
-  like every table; the `tenant_directory` policy (migration 0031) lets a transaction that sets
-  `app.tenant_directory` to `on` select its rows, and nothing else: no insert, update or delete,
-  and every other table stays closed since no tenant is set. Only `tenantIds()` sets it, in a
+  like every table; the `tenant_directory` policy (migration 0031) lets a transaction with no
+  tenant set, that sets `app.tenant_directory` to `on`, select its rows, and nothing else: no
+  insert, update or delete, and every other table stays closed. Inside a tenant's transaction
+  the setting changes nothing, even set for a whole session. Only `tenantIds()` sets it, in a
   read-only transaction of its own that returns ids.
-- **`queueConnection()`** is how pg-boss (ADR-0008) reaches the database for its queue, which
-  lives in its own `pgboss` schema, outside row-level security. On PostgreSQL it is the URL the
-  database was opened with, so pg-boss connects as the same role (the database's owner, which
-  may create the schema). On PGlite it runs statements on the same instance, one at a time,
-  between the application's transactions, and a block of pg-boss's that fails half way rolls
-  back before anything else runs. Nothing but pg-boss uses it.
-
-On PGlite everything shares one connection, so a transaction opened while a `withTenant()`
-callback runs would wait for that callback's transaction forever. `tenantIds()` and the PGlite
-queue connection refuse to run inside a callback (`NestedWorkError`), and core/jobs refuses to
-enqueue in one on either database. `insideWithTenant()` tells whether code runs in one.
+- **`queueConnectionOf(db)`**, from the internal entry point `@openhoard/core-db/queue`, is how
+  pg-boss (ADR-0008) reaches the database for its queue, which lives in its own `pgboss` schema,
+  outside row-level security. It is not on `Database`: only core/jobs imports it.
+  - On PostgreSQL it is the URL the database was opened with and the pool's session settings
+    (UTC, the statement and idle-in-transaction timeouts), so pg-boss connects as the same role
+    (the database's owner, which may create the schema).
+  - On PGlite it runs statements on the same instance, one at a time, between the
+    application's transactions. A block of pg-boss's that fails half way rolls back before
+    anything else runs. Statements that would change the shared session for the application
+    (an `app.*` setting, `set_config()`, the role or session authorization, `RESET ALL`) are
+    refused; pg-boss issues none. It refuses to run inside a `withTenant()` callback too.
 
 ## Grants
 

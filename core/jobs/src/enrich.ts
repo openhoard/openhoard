@@ -1,12 +1,14 @@
 import {
   applyRuleTags,
+  lockCurrentVersion,
   markProcessed,
+  markSuperseded,
   tenantRules,
   type IngestResult,
+  type VersionStanding,
 } from "@openhoard/core-catalog";
 import { isId, objects, versions, type Database, type Tx } from "@openhoard/core-db";
 import { and, eq, max } from "drizzle-orm";
-import type { PgTransactionConfig } from "drizzle-orm/pg-core";
 
 /*
  * The enrichment pipeline (T-401): what happens to a version after ingest records it, until
@@ -21,15 +23,20 @@ import type { PgTransactionConfig } from "drizzle-orm/pg-core";
  *   the sweep. So every step must be idempotent: whatever it writes is keyed (a tag, a card per
  *   version), and a second run changes nothing the first one did. The tests run a completed job
  *   again and a job that failed half way, and count the tags.
- * - A step does its slow work (extracting text, calling a model) outside any transaction and
- *   opens short ones with `withTenant` to write: a transaction held open blocks the embedded
- *   database for everyone, and pins a pooled connection on PostgreSQL.
- * - The job reads the object's title once, before the steps, and marks the version processed
- *   under that title. markProcessed() compares and sets under the object's lock, so a rename that
- *   committed meanwhile makes it refuse: the job enqueues the version again (ingest will have
- *   too) and the next run enriches the new title.
- * - Only the current version is enriched: a job for a version that a newer one replaced ends
- *   without doing anything (the newer one has its own job).
+ * - A step does its slow work (extracting text, calling a model) outside any transaction, and
+ *   writes in short ones through `write`: a transaction held open blocks the embedded database
+ *   for everyone, and pins a pooled connection on PostgreSQL.
+ * - The job reads the version and the object's title once, before the steps. What a step writes
+ *   is for that version and that title only, so `write` takes the object's lock and checks both
+ *   are still current before it runs the step's writes (core/catalog lockCurrentVersion()).
+ *   Ingest adds versions and renames under the same lock, so a job that read a version a newer
+ *   one has replaced, or a title a rename has changed, writes nothing: a slow job for an old
+ *   version can't overwrite what the new version's job wrote after it. markProcessed() makes
+ *   the same check. The job then ends:
+ *   - superseded: the newer version has its own job; the old one is marked done
+ *     (markSuperseded()) so it leaves the unprocessed set;
+ *   - renamed: the version is enqueued again (ingest will have too) for the new title.
+ *   Superseded is checked first, so a replaced version is never enqueued again.
  *
  * Payloads carry the tenant: pg-boss keeps its queue in its own schema, outside row-level
  * security, and the worker does all catalog work inside db.withTenant(tenantId, …).
@@ -49,8 +56,17 @@ export interface EnrichTarget {
 
 export interface EnrichContext {
   readonly target: EnrichTarget;
-  /** A short transaction on the job's tenant: `db.withTenant(target.tenantId, work, config)`. */
-  withTenant<T>(work: (tx: Tx) => Promise<T>, config?: PgTransactionConfig): Promise<T>;
+  /** A short read-only transaction on the job's tenant. */
+  read<T>(work: (tx: Tx) => Promise<T>): Promise<T>;
+  /**
+   * A short transaction on the job's tenant for the step's writes. It first takes the object's
+   * lock and checks that the target is still the object's current version under the title the
+   * job read; while the lock is held, neither can change. If either did, `work` doesn't run and
+   * this throws {@link StaleTargetError}: let it propagate, the job ends without writing. The
+   * object's lock comes first in the transaction, so `work` must not take a source item's or a
+   * tag value's lock (core/catalog locks.ts); tagging and rule tagging don't.
+   */
+  write<T>(work: (tx: Tx) => Promise<T>): Promise<T>;
   /** Aborted when the job's lease expires or the worker stops: stop, and throw. */
   readonly signal: AbortSignal;
 }
@@ -64,7 +80,8 @@ export interface EnrichStep {
   readonly name: string;
   /**
    * Does this step's work for one version. It may run more than once for the same version, so
-   * everything it writes must be keyed: a second run changes nothing.
+   * everything it writes must be keyed: a second run changes nothing. It writes only through
+   * `context.write`.
    */
   run(context: EnrichContext): Promise<void>;
 }
@@ -81,8 +98,8 @@ export interface EnrichStep {
  */
 export const ruleTagStep: EnrichStep = {
   name: "rule-tags",
-  async run({ target, withTenant }) {
-    await withTenant(async (tx) => {
+  async run({ target, write }) {
+    await write(async (tx) => {
       const rules = await tenantRules(tx, target.tenantId);
       await applyRuleTags(tx, target.tenantId, target.objectId, rules, {
         title: target.title,
@@ -112,14 +129,25 @@ export type EnrichOutcome =
   | "processed"
   /** The steps ran again; the version was processed already (a re-run). */
   | "already-processed"
-  /** The object was renamed while the steps ran: the version was enqueued again. */
+  /** The object was renamed after the job read it: the version was enqueued again. */
   | "renamed"
-  /** A newer version replaced this one: nothing to do. */
+  /** A newer version replaced this one: nothing written; the old one is marked done. */
   | "superseded"
   /** The version no longer exists (its object was purged), or the tenant doesn't. */
   | "gone"
   /** The payload doesn't name a tenant and a version: nothing to do. */
   | "invalid";
+
+/**
+ * Thrown by `context.write` when the job's target is no longer current: a newer version
+ * replaced it, the object was renamed, or it is gone. The job ends with that outcome.
+ */
+export class StaleTargetError extends Error {
+  constructor(readonly standing: Exclude<VersionStanding, "current">) {
+    super(`the version this enrichment job read is ${standing}: nothing was written`);
+    this.name = "StaleTargetError";
+  }
+}
 
 /** Whether `data` is an {@link EnrichPayload}: ids of the right kinds, nothing else needed. */
 export function isEnrichPayload(data: unknown): data is EnrichPayload {
@@ -157,11 +185,31 @@ export async function enrichVersion(
   const target = await db.withTenant(tenantId, (tx) => readTarget(tx, tenantId, versionId), {
     accessMode: "read only",
   });
-  if (target === "gone" || target === "superseded") return target;
+  if (target === "gone") return "gone";
+  if (target === "superseded") return finish(db, payload, "superseded", options.requeue);
 
+  // Set by write() when the target went stale, whether or not the step lets the error through.
+  let stale: Exclude<VersionStanding, "current"> | undefined;
   const context: EnrichContext = {
     target,
-    withTenant: (work, config) => db.withTenant(tenantId, work, config),
+    read: (work) => db.withTenant(tenantId, work, { accessMode: "read only" }),
+    async write(work) {
+      if (stale) throw new StaleTargetError(stale);
+      const done = await db.withTenant(tenantId, async (tx) => {
+        const standing = await lockCurrentVersion(tx, tenantId, {
+          versionId,
+          title: target.title,
+        });
+        return standing === "current"
+          ? { standing, value: await work(tx) }
+          : { standing, value: undefined };
+      });
+      if (done.standing !== "current") {
+        stale = done.standing;
+        throw new StaleTargetError(stale);
+      }
+      return done.value as Awaited<ReturnType<typeof work>>;
+    },
     signal: options.signal,
   };
   for (const step of steps) {
@@ -169,8 +217,9 @@ export async function enrichVersion(
     try {
       await step.run(context);
     } catch (e) {
-      throw new EnrichStepError(step.name, e);
+      if (!stale) throw new EnrichStepError(step.name, e);
     }
+    if (stale) return finish(db, payload, stale, options.requeue);
   }
   options.signal.throwIfAborted();
 
@@ -178,26 +227,28 @@ export async function enrichVersion(
     markProcessed(tx, tenantId, { versionId, title: target.title }),
   );
   if (marked) return "processed";
-  // markProcessed() says no for an unknown version, one marked already, or a rename.
-  const [now] = await db.withTenant(
-    tenantId,
-    (tx) =>
-      tx
-        .select({ title: objects.title })
-        .from(versions)
-        .innerJoin(
-          objects,
-          and(eq(objects.tenantId, versions.tenantId), eq(objects.id, versions.objectId)),
-        )
-        .where(and(eq(versions.tenantId, tenantId), eq(versions.id, versionId))),
-    { accessMode: "read only" },
+  // markProcessed() says no for a version that is gone, replaced, renamed, or marked already.
+  const standing = await db.withTenant(tenantId, (tx) =>
+    lockCurrentVersion(tx, tenantId, { versionId, title: target.title }),
   );
-  if (!now) return "gone";
-  if (now.title !== target.title) {
-    await options.requeue({ tenantId, versionId });
-    return "renamed";
+  return standing === "current"
+    ? "already-processed"
+    : finish(db, payload, standing, options.requeue);
+}
+
+/** Ends a job whose target went stale: superseded before renamed, so it never re-enqueues. */
+async function finish(
+  db: Database,
+  payload: EnrichPayload,
+  standing: Exclude<VersionStanding, "current">,
+  requeue: (payload: EnrichPayload) => Promise<unknown>,
+): Promise<EnrichOutcome> {
+  const { tenantId, versionId } = payload;
+  if (standing === "superseded") {
+    await db.withTenant(tenantId, (tx) => markSuperseded(tx, tenantId, versionId));
   }
-  return "already-processed";
+  if (standing === "renamed") await requeue(payload);
+  return standing;
 }
 
 async function readTarget(

@@ -14,6 +14,7 @@ import {
   type Tx,
 } from "./database.js";
 import { newId } from "./ids.js";
+import { queueConnectionOf } from "./queue.js";
 import {
   auditEvents,
   blobs,
@@ -105,7 +106,9 @@ describe("catalog", () => {
         cmd: "r",
         permissive: true,
         roles: "{0}",
-        using: "(current_setting('app.tenant_directory'::text, true) = 'on'::text)",
+        using:
+          "((current_setting('app.tenant_directory'::text, true) = 'on'::text) AND " +
+          "(COALESCE(current_setting('app.tenant_id'::text, true), ''::text) = ''::text))",
         check: null,
       };
       expect(r, String(r.table)).toEqual({
@@ -374,15 +377,41 @@ describe("withTenant", () => {
     );
   });
 
-  it("marks its callback's async context, and only that", async () => {
+  it("marks its callback's async context while the transaction is open, and only then", async () => {
     expect(insideWithTenant()).toBe(false);
+    let later: Promise<boolean> | undefined;
     const seen = await db.withTenant(a.tenantId, async (tx) => {
       await tx.select().from(objects);
       const nested = await new Promise<boolean>((r) => setTimeout(() => r(insideWithTenant()), 1));
+      // Started inside, run after the commit: outside by then.
+      later = new Promise<boolean>((r) => setTimeout(() => r(insideWithTenant()), 20));
       return [insideWithTenant(), nested];
     });
     expect(seen).toEqual([true, true]);
     expect(insideWithTenant()).toBe(false);
+    expect(await later).toBe(false);
+  });
+
+  it("refuses a transaction inside another one, which would wait for it forever", async () => {
+    const nested = db.withTenant(a.tenantId, () =>
+      db.withTenant(b.tenantId, (tx) => tx.select().from(objects)),
+    );
+    await expect(nested).rejects.toThrow(NestedWorkError);
+    // Even deep in the callback's async work, and for its own tenant.
+    const deep = db.withTenant(a.tenantId, async () => {
+      await new Promise((r) => setTimeout(r, 1));
+      return db.withTenant(a.tenantId, () => Promise.resolve(1));
+    });
+    await expect(deep).rejects.toThrow(NestedWorkError);
+    // After the commit, a timer the callback started opens its own transaction normally.
+    let after: Promise<number> | undefined;
+    await db.withTenant(a.tenantId, () => {
+      after = new Promise<void>((r) => setTimeout(r, 10)).then(() =>
+        db.withTenant(a.tenantId, async (tx) => (await tx.select().from(objects)).length),
+      );
+      return Promise.resolve();
+    });
+    expect(await after).toBe(1);
   });
 });
 
@@ -429,6 +458,26 @@ describe("tenant directory", () => {
     expect(await driver.query("select count(*)::int as n from tenants")).toEqual([{ n: 0 }]);
   });
 
+  it("changes nothing inside a tenant's transaction, even set for the whole session", async () => {
+    const inTenant = await db.withTenant(a.tenantId, async (tx) => {
+      await tx.execute(sql`select set_config('app.tenant_directory', 'on', true)`);
+      return (await tx.select({ id: tenants.id }).from(tenants)).map((r) => r.id);
+    });
+    expect(inTenant).toEqual([a.tenantId]);
+    // Session-level (only raw SQL could do this): a tenant's transactions still see one tenant.
+    const single = await openSingleConnection();
+    try {
+      await single.query("select set_config('app.tenant_directory', 'on', false)");
+      const pinned = fromDriver(single);
+      const seen = await pinned.withTenant(b.tenantId, async (tx) =>
+        (await tx.select({ id: tenants.id }).from(tenants)).map((r) => r.id),
+      );
+      expect(seen).toEqual([b.tenantId]);
+    } finally {
+      if (single !== driver) await single.close();
+    }
+  });
+
   it("refuses a bad page, and a call from inside a tenant's transaction", async () => {
     await expect(db.tenantIds({ limit: 0 })).rejects.toThrow(RangeError);
     await expect(db.tenantIds({ limit: MAX_TENANT_PAGE + 1 })).rejects.toThrow(RangeError);
@@ -437,19 +486,35 @@ describe("tenant directory", () => {
   });
 });
 
+/** A driver on one connection: the test's own on PGlite, a one-connection pool on PostgreSQL. */
+async function openSingleConnection(): Promise<Driver> {
+  const url = (driver as Driver & { url?: string }).url;
+  if (url === undefined) return driver;
+  return openDriver({ url, postgres: { max: 1 } });
+}
+
 describe("queue connection", () => {
   const pglite = !process.env[TEST_POSTGRES_ENV];
 
-  it.skipIf(pglite)("hands pg-boss the URL on PostgreSQL, to connect as the same role", () => {
-    const queue = db.queueConnection();
-    expect(queue.kind).toBe("postgres");
-    expect(queue.kind === "postgres" && new URL(queue.connectionString).pathname).toMatch(
-      /^\/openhoard_test_/,
+  it("is not on the Database, only behind the internal entry point", () => {
+    expect("queueConnection" in db).toBe(false);
+    expect(() =>
+      queueConnectionOf({ ...db, withTenant: db.withTenant.bind(db) } as Database),
+    ).toThrow(TypeError);
+  });
+
+  it.skipIf(pglite)("hands pg-boss the URL and the pool's session settings on PostgreSQL", () => {
+    const queue = queueConnectionOf(db);
+    if (queue.kind !== "postgres") throw new Error("expected PostgreSQL");
+    expect(new URL(queue.connectionString).pathname).toMatch(/^\/openhoard_test_/);
+    expect(queue.options).toBe(
+      "-c TimeZone=UTC -c statement_timeout=60000 -c idle_in_transaction_session_timeout=60000",
     );
+    expect(queue.connectionTimeoutMillis).toBe(10_000);
   });
 
   it.runIf(pglite)("runs pg-boss's statements on the embedded database, as its owner", async () => {
-    const queue = db.queueConnection();
+    const queue = queueConnectionOf(db);
     if (queue.kind !== "pglite") throw new Error("expected PGlite");
     const run = queue.executeSql;
     expect((await run("select current_user as who, $1::int as n", [7])).rows).toEqual([
@@ -466,8 +531,29 @@ describe("queue connection", () => {
     expect((await run("begin; insert into qtest.t values (2) returning n; commit")).rows).toEqual([
       { n: 2 },
     ]);
-    // Concurrent index builds can't run in a transaction block: they run on their own.
+    // Concurrent index DDL can't run in a transaction block: it runs on its own; a failure
+    // leaves no transaction behind.
     await run("create index concurrently qtest_n on qtest.t (n)");
+    await run("reindex index concurrently qtest.qtest_n");
+    await expect(run("create index concurrently qtest_n on qtest.t (n)")).rejects.toThrow();
+    await run("drop index concurrently qtest.qtest_n");
+    expect(await counts(a.tenantId)).toMatchObject({ objects: 1 });
+    // Only statements that start with such DDL: this one merely mentions the word.
+    expect((await run("select 'concurrently' as w")).rows).toEqual([{ w: "concurrently" }]);
+    // Nothing that changes the shared session's settings or role.
+    for (const [text, values] of [
+      ["select set_config('app.tenant_directory', 'on', false)", undefined],
+      ["select set_config($1, 'on', false)", ["app.tenant_directory"]],
+      ["select current_setting($1, true)", [" app.tenant_id"]],
+      ["reset session authorization", undefined],
+      ["set role postgres", undefined],
+      ["reset all", undefined],
+    ] as const) {
+      await expect(run(text, values ? [...values] : undefined)).rejects.toThrow(
+        /refuses statements that change session settings/,
+      );
+    }
+    expect((await run("select current_user as who")).rows).toEqual([{ who: "openhoard" }]);
     // Inside a tenant's transaction it would wait forever for it: it throws instead.
     await expect(db.withTenant(a.tenantId, () => run("select 1"))).rejects.toThrow(NestedWorkError);
   });

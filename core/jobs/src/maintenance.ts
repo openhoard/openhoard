@@ -15,10 +15,13 @@ import type { EnrichPayload } from "./enrich.js";
  * - Activity events (core/catalog) older than `activityRetentionDays` go.
  * - The sweep finds current versions left unprocessed for longer than `sweepAfterMinutes` and
  *   enqueues them again. Enqueueing happens after ingest commits, so a crash in between loses the
- *   job, and the file would stay hidden for good; the sweep brings it back. Versions whose job
- *   ran out of retries wait in the dead-letter queue instead: the sweep leaves them alone until
- *   an operator redrives them or pg-boss's retention drops them (14 days by default), and then
- *   tries once more.
+ *   job, and the file would stay hidden for good; the sweep brings it back. Enqueueing a version
+ *   whose job still waits changes nothing (jobs.ts), and one whose job runs costs an idempotent
+ *   re-run. Versions whose job ran out of retries wait in the dead letter queue instead: the
+ *   sweep skips them until an operator redrives them or pg-boss's retention drops them (14 days
+ *   by default), and then tries once more. It pages past the ones it skips, oldest first, until
+ *   it has enqueued `sweepLimit` or looked at `sweepScanLimit`, so a pile of dead letters can't
+ *   hide the lost versions behind them.
  */
 
 export interface MaintenanceOptions {
@@ -34,6 +37,8 @@ export interface MaintenanceOptions {
   sweepAfterMinutes?: number;
   /** Versions one run of the sweep enqueues per tenant. Default 100. */
   sweepLimit?: number;
+  /** Versions one run of the sweep looks at per tenant, skipped ones included. Default 1,000. */
+  sweepScanLimit?: number;
 }
 
 export const MAINTENANCE_DEFAULTS: Readonly<Required<MaintenanceOptions>> = {
@@ -43,6 +48,7 @@ export const MAINTENANCE_DEFAULTS: Readonly<Required<MaintenanceOptions>> = {
   maxBatches: 10,
   sweepAfterMinutes: 60,
   sweepLimit: 100,
+  sweepScanLimit: 1_000,
 };
 
 const LIMITS: Record<keyof MaintenanceOptions, [number, number]> = {
@@ -52,6 +58,7 @@ const LIMITS: Record<keyof MaintenanceOptions, [number, number]> = {
   maxBatches: [1, 1_000],
   sweepAfterMinutes: [1, 7 * 24 * 60],
   sweepLimit: [0, 10_000],
+  sweepScanLimit: [0, 100_000],
 };
 
 /** The settings for `options`: the defaults, overridden by what it sets, each checked. */
@@ -76,13 +83,16 @@ export function maintenanceSettings(
 export interface TenantMaintenance {
   sessions: number;
   activity: number;
-  /** Versions the sweep enqueued again (or found queued already). */
+  /** Versions the sweep enqueued (a new job, or one already waiting). */
   swept: number;
+  /** Versions the sweep skipped because their job is in the dead letter queue. */
+  deadLettered: number;
 }
 
 /**
- * Runs one tenant's maintenance. `requeue` enqueues a version for enrichment, and `waiting`
- * says whether one already waits (queued, running, or dead-lettered), so the sweep skips it.
+ * Runs one tenant's maintenance. `requeue` enqueues a version for enrichment, and
+ * `deadLettered` returns the tenant's versions whose job waits in the dead letter queue (read
+ * once per run), which the sweep skips.
  */
 export async function maintainTenant(
   db: Database,
@@ -90,7 +100,7 @@ export async function maintainTenant(
   options: Required<MaintenanceOptions>,
   queue: {
     requeue: (payload: EnrichPayload) => Promise<unknown>;
-    waiting: (payload: EnrichPayload) => Promise<boolean>;
+    deadLettered: (tenantId: string) => Promise<ReadonlySet<string>>;
   },
 ): Promise<TenantMaintenance> {
   const day = 24 * 60 * 60 * 1000;
@@ -102,14 +112,8 @@ export async function maintainTenant(
   const activity = await inBatches(options, () =>
     db.withTenant(tenantId, (tx) => pruneActivity(tx, tenantId, activityBefore, options.batchSize)),
   );
-  let swept = 0;
-  for (const versionId of await unprocessedVersions(db, tenantId, options)) {
-    const payload = { tenantId, versionId };
-    if (await queue.waiting(payload)) continue;
-    await queue.requeue(payload);
-    swept++;
-  }
-  return { sessions, activity, swept };
+  const { swept, deadLettered } = await sweep(db, tenantId, options, queue);
+  return { sessions, activity, swept, deadLettered };
 }
 
 /** Runs `batch` until it removes less than a batch, or `maxBatches` times; returns the total. */
@@ -126,23 +130,66 @@ async function inBatches(
   return total;
 }
 
+/** Enqueues lost versions, paging past dead-lettered ones; see the header. */
+async function sweep(
+  db: Database,
+  tenantId: string,
+  options: Required<MaintenanceOptions>,
+  queue: Parameters<typeof maintainTenant>[3],
+) {
+  let swept = 0;
+  let deadLettered = 0;
+  if (options.sweepLimit === 0 || options.sweepScanLimit === 0) return { swept, deadLettered };
+  const dead = await queue.deadLettered(tenantId);
+  const page = Math.min(Math.max(options.sweepLimit, 100), options.sweepScanLimit);
+  let scanned = 0;
+  let after: VersionCursor | undefined;
+  while (swept < options.sweepLimit && scanned < options.sweepScanLimit) {
+    const limit = Math.min(page, options.sweepScanLimit - scanned);
+    const rows = await unprocessedVersions(db, tenantId, { ...options, limit, after });
+    for (const row of rows) {
+      scanned++;
+      if (dead.has(row.id)) {
+        deadLettered++;
+        continue;
+      }
+      await queue.requeue({ tenantId, versionId: row.id });
+      if (++swept === options.sweepLimit) break;
+    }
+    if (rows.length < limit) break;
+    after = rows[rows.length - 1];
+  }
+  return { swept, deadLettered };
+}
+
+/**
+ * Where a page of {@link unprocessedVersions} ended: the last version's creation time, as the
+ * database's own text (a JavaScript Date would drop PostgreSQL's microseconds, and the next page
+ * would start inside the last one), and its id.
+ */
+export interface VersionCursor {
+  id: string;
+  createdAt: string;
+}
+
 /**
  * Current versions (no later version of their object) still unprocessed, created more than
- * `sweepAfterMinutes` ago, oldest first; at most `sweepLimit`. A renamed version counts from its
- * creation, so it may be enqueued while its job waits: the queue collapses that.
+ * `sweepAfterMinutes` ago, oldest first, after `after`; at most `limit`. A renamed version
+ * counts from its creation, so it may be enqueued while its job waits: the queue collapses that.
  */
 export async function unprocessedVersions(
   db: Database,
   tenantId: string,
-  options: Pick<Required<MaintenanceOptions>, "sweepAfterMinutes" | "sweepLimit">,
-): Promise<string[]> {
-  if (options.sweepLimit === 0) return [];
+  options: { sweepAfterMinutes: number; limit: number; after?: VersionCursor | undefined },
+): Promise<VersionCursor[]> {
+  if (options.limit === 0) return [];
   const later = alias(versions, "later");
-  const rows = await db.withTenant(
+  const { after } = options;
+  return db.withTenant(
     tenantId,
     (tx) =>
       tx
-        .select({ id: versions.id })
+        .select({ id: versions.id, createdAt: sql<string>`${versions.createdAt}::text` })
         .from(versions)
         .where(
           and(
@@ -152,6 +199,9 @@ export async function unprocessedVersions(
               versions.createdAt,
               sql`now() - make_interval(mins => ${options.sweepAfterMinutes})`,
             ),
+            after === undefined
+              ? undefined
+              : sql`(${versions.createdAt}, ${versions.id}) > (${after.createdAt}::timestamptz, ${after.id})`,
             sql`not exists (${tx
               .select({ one: sql`1` })
               .from(later)
@@ -165,8 +215,7 @@ export async function unprocessedVersions(
           ),
         )
         .orderBy(asc(versions.createdAt), asc(versions.id))
-        .limit(options.sweepLimit),
+        .limit(options.limit),
     { accessMode: "read only" },
   );
-  return rows.map((r) => r.id);
 }

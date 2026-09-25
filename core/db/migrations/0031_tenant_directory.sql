@@ -7,8 +7,13 @@
 -- other table stays closed in that transaction, since no tenant is set. Only core/db's
 -- Database.tenantIds() sets it, in a read-only transaction of its own that selects ids.
 --
--- As with app.tenant_id, raw SQL could set it too: this guards against query mistakes, not
--- arbitrary SQL (see core/db README).
+-- It applies only where no tenant is set: inside a tenant's transaction the directory setting
+-- changes nothing, so even a session-level `on` (which only raw SQL could set) can't widen a
+-- tenant's view. As with app.tenant_id, raw SQL could set it: this guards against query
+-- mistakes, not arbitrary SQL (see core/db README).
 CREATE POLICY tenant_directory ON tenants
   FOR SELECT
-  USING (current_setting('app.tenant_directory', true) = 'on');
+  USING (
+    current_setting('app.tenant_directory', true) = 'on'
+    AND coalesce(current_setting('app.tenant_id', true), '') = ''
+  );
