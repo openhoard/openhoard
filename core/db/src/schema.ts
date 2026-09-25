@@ -71,6 +71,9 @@ export const tenants = pgTable(
   ],
 );
 
+/** What a zone is (Dev Plan zones): what `resource.zone` is to authorize(). */
+export const ZONE_KINDS = ["managed", "indexed", "local-only", "code"] as const;
+
 /** Where objects live and which rules apply to them (ADR and PRD: Managed, Indexed, Local-only, Code). */
 export const zones = pgTable(
   "zones",
@@ -79,7 +82,7 @@ export const zones = pgTable(
       .notNull()
       .references(() => tenants.id),
     id: text("id").notNull(),
-    kind: text("kind", { enum: ["managed", "indexed", "local-only", "code"] }).notNull(),
+    kind: text("kind", { enum: ZONE_KINDS }).notNull(),
     name: text("name").notNull(),
     createdAt: createdAt(),
   },
@@ -424,7 +427,8 @@ export const objectTags = pgTable(
  *   the email for someone new. Rows are never deleted: users own objects and appear in audit.
  */
 export const IDENTITY_SOURCES = ["scim", "local"] as const;
-export const USER_KINDS = ["member", "guest"] as const;
+/** `service`: a service account (T-111), a machine that authenticates with API keys only. */
+export const USER_KINDS = ["member", "guest", "service"] as const;
 
 export const users = pgTable(
   "users",
@@ -433,9 +437,10 @@ export const users = pgTable(
       .notNull()
       .references(() => tenants.id),
     id: text("id").notNull(),
-    email: text("email").notNull(),
+    /** A person's address; a service account has none. */
+    email: text("email"),
     /** The email normalized for matching (core/identity emailKey()). */
-    emailKey: text("email_key").notNull(),
+    emailKey: text("email_key"),
     displayName: text("display_name").notNull(),
     /** Guests are people outside the organization: they never discover files (T-603). */
     kind: text("kind", { enum: USER_KINDS }).notNull().default("member"),
@@ -464,6 +469,14 @@ export const users = pgTable(
     check("users_email_key_length", sql`char_length(email_key) between 3 and 320`),
     check("users_display_name_length", sql`char_length(display_name) between 1 and 256`),
     check("users_kind_valid", sql.raw(`kind in (${quoted(USER_KINDS)})`)),
+    // People have an email and service accounts don't; service accounts are OpenHoard's own.
+    check(
+      "users_service_email",
+      sql`(kind = 'service') = (email is null) and (email is null) = (email_key is null)`,
+    ),
+    check("users_service_local", sql`kind <> 'service' or source = 'local'`),
+    // For keys to name a service account in their foreign key (api_keys).
+    unique("users_kind_unique").on(t.tenantId, t.id, t.kind),
     check("users_source_valid", sql.raw(`source in (${quoted(IDENTITY_SOURCES)})`)),
     check(
       "users_external_id_length",
@@ -544,6 +557,82 @@ export const userIdentities = pgTable(
     index("user_identities_user_idx").on(t.tenantId, t.userId),
     check("user_identities_issuer_length", sql`char_length(issuer) between 1 and 1024`),
     check("user_identities_subject_length", sql`char_length(subject) between 1 and 512`),
+  ],
+);
+
+/** What an API key may be scoped to: core/policy ACTIONS, and zone kinds. */
+export const KEY_ACTIONS = ["search", "read", "open", "tag"] as const;
+const sqlArray = (values: readonly string[]) =>
+  `array[${values.map((v) => `'${v}'`).join(", ")}]::text[]`;
+
+/**
+ * API keys (T-111): how a service account authenticates. Only a hash of the secret is kept
+ * (the secret is shown once, when the key is issued), and every key is scoped to some actions
+ * and zone kinds, expires within a year, and can be revoked. core/identity issues and checks
+ * them; a key belongs to a service account, never to a person.
+ */
+export const apiKeys = pgTable(
+  "api_keys",
+  {
+    tenantId: text("tenant_id").notNull(),
+    id: text("id").notNull(),
+    userId: text("user_id").notNull(),
+    /** Always `service`: with the foreign key, a key can only belong to a service account. */
+    userKind: text("user_kind").notNull().default("service"),
+    /** Zone ids, when the key is for some zones only (null: every zone of `zones`' kinds). */
+    zoneIds: text("zone_ids").array(),
+    /** What it is for, as an admin wrote it: "nightly export", "CI". */
+    name: text("name").notNull(),
+    /** SHA-256 of the secret, hex. The secret is 32 random bytes, so a fast hash is enough. */
+    secretHash: text("secret_hash").notNull(),
+    actions: text("actions").array().notNull(),
+    zones: text("zones").array().notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: text("revoked_by"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    foreignKey({
+      name: "api_keys_user_fk",
+      columns: [t.tenantId, t.userId, t.userKind],
+      foreignColumns: [users.tenantId, users.id, users.kind],
+    }),
+    check("api_keys_service_only", sql`user_kind = 'service'`),
+    check(
+      "api_keys_zone_ids_valid",
+      sql.raw(`zone_ids is null or (cardinality(zone_ids) between 1 and 100
+        and array_position(zone_ids, null) is null
+        and array_to_string(zone_ids, ',') ~ '^(${idPattern("zone").slice(1, -1)})(,${idPattern("zone").slice(1, -1)})*$')`),
+    ),
+    // A service account's keys (listing, revoking all at retirement).
+    index("api_keys_user_idx").on(t.tenantId, t.userId),
+    idCheck("api_keys_id_format", "id", "apiKey"),
+    check("api_keys_name_length", sql`char_length(name) between 1 and 200`),
+    check("api_keys_secret_hash_format", sql`secret_hash ~ '^[0-9a-f]{64}$'`),
+    check(
+      "api_keys_actions_valid",
+      sql.raw(`cardinality(actions) > 0 and actions <@ ${sqlArray(KEY_ACTIONS)}`),
+    ),
+    check(
+      "api_keys_zones_valid",
+      sql.raw(`cardinality(zones) > 0 and zones <@ ${sqlArray(ZONE_KINDS)}`),
+    ),
+    check(
+      "api_keys_expiry",
+      sql`expires_at > created_at and expires_at <= created_at + interval '366 days'`,
+    ),
+    check("api_keys_created_by_principal", sql`created_by ~ '^(user|system):.+$'`),
+    check(
+      "api_keys_revocation_complete",
+      sql`(revoked_at is null) = (revoked_by is null) and (revoked_at is null or revoked_at >= created_at)`,
+    ),
+    check(
+      "api_keys_revoked_by_principal",
+      sql`revoked_by is null or revoked_by ~ '^(user|system):.+$'`,
+    ),
   ],
 );
 
@@ -846,4 +935,5 @@ export const tables = {
   groupMembers,
   tenantPacks,
   principalEpochs,
+  apiKeys,
 } as const;

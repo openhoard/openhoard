@@ -9,6 +9,7 @@ ask here, never the `users`, `groups` and `group_members` tables in core/db.
 - [`directory.ts`](src/directory.ts): users, groups, membership, `resolvePrincipal()` (T-101).
 - [`principal-cache.ts`](src/principal-cache.ts): `PrincipalCache`, `resolvePrincipal()` with a
   cache in front (T-107).
+- [`api-keys.ts`](src/api-keys.ts): service accounts' API keys (T-111).
 
 ## Sources
 
@@ -93,3 +94,34 @@ letters), and domains that aren't plain host names (percent-escapes, IP addresse
 dots).
 
 Group membership is direct for now. Nested groups come with SCIM.
+
+## Service accounts and API keys
+
+A service account (`createServiceAccount()`, kind `service`) is a machine: CI, a connector, a
+script. It has no email, never signs in, never becomes a person and never joins a group the
+identity provider manages; the database holds all of it (triggers, and a foreign key tying keys
+to the `service` kind). It holds grants like anyone, and like a guest it never discovers what it
+can't read. It acts only through API keys, which are never issued to people: a service
+account's principal without a key's scope is refused everything (`core/scope`).
+
+- `issueApiKey()` returns `ohk.<key id>.<secret>` once. Only a SHA-256 of the secret is kept.
+- Every key is scoped to some actions and zone kinds (and, optionally, zone ids), carried on the
+  principal into `authorize()`, where `core/scope` forbids the rest. A key that searches must
+  also read, since listings decide by `read`. It expires within a year and can be revoked
+  (`revokeApiKey()`); retiring the service account revokes its keys, and locking it stops them.
+- `authenticateApiKey()` reads the key on every request, so a revocation counts from the next
+  one, and answers null alike for anything but a valid key, comparing the secret in constant
+  time. `checkApiKey()` gives the same answer and, for a refused attempt on a real key id, why
+  (wrong secret, revoked or expired, inactive account), for the server's audit.
+
+What the server must do with them (T-111's "every use is audited" is the server's to meet):
+
+1. Choose the tenant before authenticating: the key doesn't carry it.
+2. Authenticate every request, and never keep a `KeyUse` longer than the request.
+3. Append `keyUseRecord()` (core/audit `appendAudit()`) for every use, allowed or denied, and
+   fail the request if the append fails; audit the refusals `checkApiKey()` reports, issuing,
+   revoking and new service accounts the same way.
+4. Never rebuild a service account's principal from its id (it would have no scope, and be
+   refused everything); pass the `KeyUse` principal on.
+5. Apply the scope, and the no-discovery rule for service accounts, in search's SQL filter.
+6. Rate-limit authentication attempts.

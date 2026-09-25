@@ -1,6 +1,12 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { ACTIONS, Authorizer, type Action, type AuthzRequest } from "./authorize.js";
+import {
+  ACTIONS,
+  Authorizer,
+  type Action,
+  type AuthzRequest,
+  type CredentialScope,
+} from "./authorize.js";
 import {
   allTagsMisuse,
   CORE_POLICIES,
@@ -380,6 +386,7 @@ describe("request-time failures", () => {
       ...r,
       principal: { ...r.principal, groupIds: [undefined as unknown as string] },
       readGranted: true,
+      inScope: true,
       writeGranted: true,
       owner: true,
     });
@@ -565,7 +572,12 @@ describe("groups sent to Cedar", () => {
   });
 
   it("sends only the caller's groups that the policies name", () => {
-    const r = { ...inGroups(["g-a", "g-hr", "g-b"]), readGranted: false, writeGranted: false };
+    const r = {
+      ...inGroups(["g-a", "g-hr", "g-b"]),
+      readGranted: false,
+      writeGranted: false,
+      inScope: true,
+    };
     const uidOf = (e: { uid: unknown }) => e.uid as { type: string; id: string };
     const sent = toCedar({ ...r, owner: false }, new Set(["g-hr", "g-other"]));
     const groups = sent.entities.filter((e) => uidOf(e).type === "OpenHoard::Group");
@@ -685,4 +697,122 @@ describe("Cedar engine against a reference evaluator (property)", () => {
     );
     // 2,000 Cedar evaluations take a few seconds under coverage on a CI runner.
   }, 60_000);
+});
+
+describe("credential scope (T-111)", () => {
+  const authz = new Authorizer(createCedarEngine());
+  const scoped = (scope: CredentialScope, patch: Partial<AuthzRequest> = {}): AuthzRequest => {
+    const r = withGrants(["client:acme"], patch, ["client:acme"]);
+    return { ...r, principal: { ...r.principal, service: true, scope } };
+  };
+
+  it("allows only the actions and zone kinds a scope names, whatever the grants say", () => {
+    const scope = { actions: ["search", "read"] as Action[], zones: ["indexed"] };
+    expect(authz.authorize(scoped(scope))).toMatchObject({ allow: true });
+    expect(authz.authorize(scoped(scope, { action: "tag" }))).toMatchObject({
+      allow: false,
+      kind: "forbid",
+      policies: ["core/scope"],
+    });
+    const managed = scoped(scope);
+    expect(
+      authz.authorize({ ...managed, resource: { ...managed.resource, zone: "managed" } }),
+    ).toMatchObject({ allow: false, policies: ["core/scope"] });
+    // A scope never grants: no grant, no access, in scope or not.
+    const bare = scoped(scope);
+    expect(
+      authz.authorize({
+        ...bare,
+        principal: { ...bare.principal, tagGrants: [], tagWriteGrants: [] },
+      }),
+    ).toMatchObject({ allow: false, kind: "no-permit" });
+  });
+
+  it("forbids an owner outside the scope too", () => {
+    const r = scoped({ actions: ["read"], zones: ["indexed"] }, { action: "open" });
+    expect(
+      authz.authorize({ ...r, resource: { ...r.resource, ownerId: `user:${r.principal.userId}` } }),
+    ).toMatchObject({ allow: false, policies: ["core/scope"] });
+  });
+
+  it("refuses a malformed scope or service flag", () => {
+    const bad: unknown[] = [
+      { actions: [], zones: ["indexed"] },
+      { actions: ["delete"], zones: ["indexed"] },
+      { actions: ["read"], zones: [] },
+      { actions: "read", zones: ["indexed"] },
+      null,
+    ];
+    for (const scope of bad) {
+      expect(authz.authorize(scoped(scope as never))).toMatchObject({
+        allow: false,
+        kind: "error",
+      });
+    }
+    const r = request();
+    expect(
+      authz.authorize({ ...r, principal: { ...r.principal, service: "yes" as never } }),
+    ).toMatchObject({ allow: false, kind: "error" });
+  });
+
+  it("gives a service account without a scope nothing: it acts only through a key", () => {
+    const r = withGrants(["client:acme"], {}, ["client:acme"]);
+    const bare = { ...r, principal: { ...r.principal, service: true } };
+    expect(authz.authorize(bare)).toMatchObject({ allow: false, policies: ["core/scope"] });
+    // A person without a scope is unaffected.
+    expect(authz.authorize(r)).toMatchObject({ allow: true });
+  });
+
+  it("limits to zone ids when the scope names them", () => {
+    const scope = { actions: ["read"] as Action[], zones: ["indexed"], zoneIds: ["zon_a"] };
+    const r = scoped(scope);
+    const at = (zoneId?: string) =>
+      authz.authorize({
+        ...r,
+        resource: { ...r.resource, ...(zoneId === undefined ? {} : { zoneId }) },
+      });
+    expect(at("zon_a")).toMatchObject({ allow: true });
+    expect(at("zon_b")).toMatchObject({ allow: false, policies: ["core/scope"] });
+    // A request that doesn't say which zone is out of scope.
+    expect(at()).toMatchObject({ allow: false, policies: ["core/scope"] });
+  });
+
+  it("never allows outside the scope, whatever else holds (property)", () => {
+    fc.assert(
+      fc.property(
+        fc.subarray([...ACTIONS], { minLength: 1 }),
+        fc.subarray(["managed", "indexed", "local-only", "code"], { minLength: 1 }),
+        fc.constantFrom(...ACTIONS),
+        fc.constantFrom("managed", "indexed", "local-only", "code"),
+        fc.boolean(),
+        (actions, zones, action, zone, owner) => {
+          const r = scoped({ actions, zones }, { action });
+          const decision = authz.authorize({
+            ...r,
+            resource: {
+              ...r.resource,
+              zone,
+              ownerId: owner ? `user:${r.principal.userId}` : "user:else",
+            },
+          });
+          if (decision.allow) {
+            expect(actions).toContain(action);
+            expect(zones).toContain(zone);
+          }
+        },
+      ),
+    );
+  });
+
+  it("lets packs tell service accounts apart", () => {
+    const engine = createCedarEngine({
+      "pack/no-bots": "forbid (principal, action, resource) when { principal.service };",
+    });
+    const bots = new Authorizer(engine);
+    expect(bots.authorize(scoped({ actions: ["read"], zones: ["indexed"] }))).toMatchObject({
+      allow: false,
+      policies: ["pack/no-bots"],
+    });
+    expect(bots.authorize(withGrants(["client:acme"]))).toMatchObject({ allow: true });
+  });
 });

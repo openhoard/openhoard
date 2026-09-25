@@ -8,7 +8,12 @@ import {
   type Tx,
 } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
-import { createUser, lockUser, userPrincipal } from "@openhoard/core-identity";
+import {
+  createServiceAccount,
+  createUser,
+  lockUser,
+  userPrincipal,
+} from "@openhoard/core-identity";
 import {
   Authorizer,
   createCedarEngine,
@@ -340,5 +345,31 @@ describe("explainAccess", () => {
         explainAccess(tx, t.tenantId, authz, { userId: t.userId, objectId: t.objectId }),
       ),
     ).rejects.toThrow("repeatable read");
+  });
+
+  it("explains a service account through its key's scope, and refuses it without one", async () => {
+    const bot = await inTenant((tx) =>
+      createServiceAccount(tx, t.tenantId, { displayName: "Export", by: "user:admin" }),
+    );
+    await grant({ principal: userPrincipal(bot.id) });
+    await inTenant((tx) =>
+      markProcessed(tx, t.tenantId, { versionId: t.versionId, title: "Report 1.docx" }),
+    );
+    const bare = await explain({ userId: bot.id });
+    expect(bare).toMatchObject({
+      allowed: false,
+      user: { service: true },
+      blockers: [{ kind: "forbidden", policies: ["core/scope"] }],
+    });
+    const scoped = await explain({
+      userId: bot.id,
+      scope: { actions: ["read"], zones: ["indexed"] },
+    });
+    expect(scoped).toMatchObject({ allowed: true });
+    const elsewhere = await explain({
+      userId: bot.id,
+      scope: { actions: ["read"], zones: ["indexed"], zoneIds: ["zon_00000000000000000000000000"] },
+    });
+    expect(elsewhere).toMatchObject({ allowed: false });
   });
 });

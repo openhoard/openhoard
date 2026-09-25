@@ -108,7 +108,7 @@ export class PrincipalCache {
       this.#entries.delete(key);
       return null;
     }
-    const principal = freeze(resolved.principal);
+    const principal = freezePrincipal(resolved.principal);
     const expires = resolved.expiresAt?.getTime() ?? Infinity;
     const validUntil = Math.min(now + this.#ttl, expires);
     // An older snapshot never replaces what a newer one resolved, nor a longer-lived entry of
@@ -137,10 +137,22 @@ export class PrincipalCache {
   }
 }
 
-/** A principal nobody can change in the cache: its lists are frozen too. */
-function freeze(p: AuthzPrincipal): AuthzPrincipal {
+/** A principal nobody can change: its lists (and its scope's) are frozen too. */
+export function freezePrincipal(p: AuthzPrincipal): AuthzPrincipal {
   return Object.freeze({
     ...p,
+    ...(p.scope === undefined
+      ? {}
+      : {
+          scope: Object.freeze({
+            ...p.scope,
+            actions: Object.freeze([...p.scope.actions]),
+            zones: Object.freeze([...p.scope.zones]),
+            ...(p.scope.zoneIds === undefined
+              ? {}
+              : { zoneIds: Object.freeze([...p.scope.zoneIds]) }),
+          }),
+        }),
     groupIds: Object.freeze([...p.groupIds]),
     tagGrants: Object.freeze([...p.tagGrants]),
     tagWriteGrants: Object.freeze([...p.tagWriteGrants]),

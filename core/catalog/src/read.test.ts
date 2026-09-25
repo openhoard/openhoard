@@ -176,8 +176,12 @@ describe("the catalog read API", () => {
     expect(all.versions).toBeNull();
   });
 
-  it("tells guests, and inactive people, nothing about what they can't read", async () => {
-    for (const who of [person({ guest: true }), person({ active: false })]) {
+  it("tells guests, inactive people and service accounts nothing about what they can't read", async () => {
+    for (const who of [
+      person({ guest: true }),
+      person({ active: false }),
+      person({ service: true }),
+    ]) {
       expect(await readAll(who)).toEqual(NOTHING);
     }
   });

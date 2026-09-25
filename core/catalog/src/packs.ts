@@ -79,6 +79,8 @@ export interface PolicyTest {
   principal?: {
     guest?: boolean;
     active?: boolean;
+    /** A service account (T-111), acting through a key that allows every action and zone. */
+    service?: boolean;
     /** Tags the caller holds read grants on. */
     readGrants?: string[];
     writeGrants?: string[];
@@ -318,11 +320,12 @@ export function validatePack(input: unknown): string[] {
             only(c.principal, `${at} principal`, [
               "guest",
               "active",
+              "service",
               "readGrants",
               "writeGrants",
               "owner",
             ]);
-            for (const k of ["guest", "active", "owner"]) {
+            for (const k of ["guest", "active", "service", "owner"]) {
               if (c.principal[k] !== undefined && typeof c.principal[k] !== "boolean") {
                 bad(`${at}: principal.${k} must be true or false`);
               }
@@ -541,6 +544,10 @@ function runSuite(
         objectWriteGrants: [],
         guest: p.guest ?? false,
         active: p.active ?? true,
+        // A key as wide as can be, so the test sees the pack's rules, not a key's scope.
+        ...(p.service === true
+          ? { service: true, scope: { actions: ACTIONS as Action[], zones: ZONE_KINDS } }
+          : {}),
       },
       action: t.action,
       resource: {

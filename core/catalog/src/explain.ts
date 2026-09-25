@@ -12,6 +12,7 @@ import {
   type Action,
   type Authorizer,
   type AuthzClient,
+  type CredentialScope,
   type AuthzDecision,
   type ResultShape,
 } from "@openhoard/core-policy";
@@ -43,6 +44,11 @@ export interface ExplainRequest {
   action?: Action;
   /** Defaults to OpenHoard's own web app. Pack rules can depend on the client's trust. */
   client?: AuthzClient;
+  /**
+   * The credential's scope, to explain a request made with it (a service account's API key,
+   * T-111). A service account acts only through a key: without one, it is refused everything.
+   */
+  scope?: CredentialScope;
 }
 
 /** A live grant that covers the action, and how the user holds it. */
@@ -87,7 +93,7 @@ export interface AccessExplanation {
   owner: boolean;
   /** Everything that stops the action; empty for an allow. */
   blockers: Blocker[];
-  user: { displayName: string; active: boolean; guest: boolean };
+  user: { displayName: string; active: boolean; guest: boolean; service: boolean };
   object: {
     title: string;
     ownerId: string;
@@ -102,6 +108,7 @@ export interface AccessExplanation {
   /** What the user gets in a listing: a card, a title-only card, or nothing. */
   view: ResultShape;
   /** Why the listing shows nothing, when it doesn't. */
+  /** Why the listing shows nothing, when it doesn't; `not-a-member` covers service accounts. */
   hiddenBecause: "deleted" | "not-a-member" | "unprocessed" | "hidden" | null;
   /** One to three sentences for people. */
   summary: string;
@@ -135,6 +142,7 @@ export async function explainAccess(
       ownerId: objects.ownerId,
       deletedAt: objects.deletedAt,
       zone: zones.kind,
+      zoneId: zones.id,
     })
     .from(objects)
     .innerJoin(zones, and(eq(zones.tenantId, objects.tenantId), eq(zones.id, objects.zoneId)))
@@ -143,8 +151,9 @@ export async function explainAccess(
   // Grant expiry by the database's clock, as enforcement reads it: now() is the transaction's
   // start, one moment for every check here, as the snapshot is one for the data.
   const user = await getUser(tx, tenantId, request.userId);
-  const principal = await resolvePrincipal(tx, tenantId, request.userId);
-  if (!user || !principal) throw new ExplainError("unknown-user", `no user ${request.userId}`);
+  const resolved = await resolvePrincipal(tx, tenantId, request.userId);
+  if (!user || !resolved) throw new ExplainError("unknown-user", `no user ${request.userId}`);
+  const principal = request.scope === undefined ? resolved : { ...resolved, scope: request.scope };
   const levels = await explainLevels(tx, tenantId, request.objectId);
   if (!levels) throw new ExplainError("unknown-object", `no levels for ${request.objectId}`);
 
@@ -159,6 +168,7 @@ export async function explainAccess(
     tags: [...grantable].sort(),
     allTags: tags.levels,
     zone: object.zone,
+    zoneId: object.zoneId,
   };
   const decision = authz.authorize({ principal, action, resource, client });
   const read =
@@ -208,7 +218,8 @@ export async function explainAccess(
         readable: read.allow && action === "tag",
       });
 
-  const member = principal.active && !principal.guest;
+  // Service accounts, like guests, see only what they can read.
+  const member = principal.active && !principal.guest && principal.service !== true;
   let view: ResultShape;
   let hiddenBecause: AccessExplanation["hiddenBecause"] = null;
   if (deleted) {
@@ -239,7 +250,12 @@ export async function explainAccess(
     unreviewedTagGrants,
     owner,
     blockers,
-    user: { displayName: user.displayName, active: user.active, guest: user.kind === "guest" },
+    user: {
+      displayName: user.displayName,
+      active: user.active,
+      guest: user.kind === "guest",
+      service: user.kind === "service",
+    },
     object: {
       title: object.title,
       ownerId: object.ownerId,

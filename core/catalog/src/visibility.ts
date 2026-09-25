@@ -408,6 +408,7 @@ export async function viewObjects(
       ownerId: objects.ownerId,
       updatedAt: objects.updatedAt,
       zone: zones.kind,
+      zoneId: zones.id,
     })
     .from(objects)
     .innerJoin(zones, and(eq(zones.tenantId, objects.tenantId), eq(zones.id, objects.zoneId)))
@@ -461,7 +462,8 @@ export async function viewObjects(
     processed: new Map([...current].map(([id, v]) => [id, v.processed])),
   });
   const { principal } = request;
-  const member = principal.active && !principal.guest;
+  // Service accounts, like guests, see only what they can read.
+  const member = principal.active && !principal.guest && principal.service !== true;
 
   const views = new Map<string, ObjectView>();
   for (const row of rows) {
@@ -477,6 +479,7 @@ export async function viewObjects(
         tags: tags.grantable,
         allTags: tags.all,
         zone: row.zone,
+        zoneId: row.zoneId,
       },
       client: request.client,
     }).allow;

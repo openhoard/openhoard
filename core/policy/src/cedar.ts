@@ -21,7 +21,7 @@ import { deny, type AuthzDecision, type EngineRequest, type PolicyEngine } from 
 export const CEDAR_SCHEMA = `
 namespace OpenHoard {
   entity Group;
-  entity User in [Group] { guest: Bool, active: Bool };
+  entity User in [Group] { guest: Bool, active: Bool, service: Bool };
   entity Tag;
   entity Client { trust: String };
   entity Object in [Tag] { zone: String, allTags: Set<String> };
@@ -30,6 +30,7 @@ namespace OpenHoard {
     readGranted: Bool,
     writeGranted: Bool,
     owner: Bool,
+    inScope: Bool,
   };
   action search, read, open, tag
     appliesTo { principal: User, resource: Object, context: RequestContext };
@@ -51,6 +52,9 @@ export const CORE_POLICIES: Readonly<Record<string, string>> = {
   "core/owner": `permit (principal, action, resource) when { context.owner };`,
   // Deprovisioned users are cut off before their sessions and tokens expire (T-104).
   "core/inactive": `forbid (principal, action, resource) unless { principal.active };`,
+  // A credential limited to some actions and zone kinds (a service account's API key, T-111)
+  // can't reach past them, whatever the grants say.
+  "core/scope": `forbid (principal, action, resource) unless { context.inScope };`,
 };
 
 export class PolicyError extends Error {
@@ -213,7 +217,11 @@ export function toCedar(r: EngineRequest, named: ReadonlySet<string>) {
   const entities: cedar.EntityJson[] = [
     {
       uid: uid("User", r.principal.userId),
-      attrs: { guest: r.principal.guest, active: r.principal.active },
+      attrs: {
+        guest: r.principal.guest,
+        active: r.principal.active,
+        service: r.principal.service ?? false,
+      },
       parents: groups.map((g) => uid("Group", g)),
     },
     ...groups.map((g) => ({ uid: uid("Group", g), attrs: {}, parents: [] })),
@@ -237,6 +245,7 @@ export function toCedar(r: EngineRequest, named: ReadonlySet<string>) {
       readGranted: r.readGranted,
       writeGranted: r.writeGranted,
       owner: r.owner,
+      inScope: r.inScope,
     },
     entities,
   };

@@ -43,6 +43,10 @@ Following spike S3, **grants are data and rules are Cedar**:
 - Cedar applies the rules. The core rules permit search, read and open with a read grant,
   tagging with a write grant, anything to the owner, and forbid deprovisioned users. Packs
   (T-607) add their own. A `forbid` always wins.
+- A credential can be narrower than its principal: `principal.scope` (a service account's API
+  key, T-111) names the actions and zone kinds it may reach, and the core rule `core/scope`
+  forbids anything outside them (`context.inScope`), owner or not. A scope never grants. Rules
+  can tell service accounts apart with `principal.service`.
 - The Cedar schema ([`cedar.ts`](src/cedar.ts)) has users in groups, objects in tags, and the
   client with its trust label (`context.client.trust`). Rules see only the caller, the object
   and the client; there is no owner entity to reach through, by design.

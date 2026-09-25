@@ -36,6 +36,29 @@ export interface AuthzPrincipal {
   guest: boolean;
   /** False once deprovisioned. */
   active: boolean;
+  /**
+   * A service account (T-111): a machine, not a person. Like a guest, it never discovers what it
+   * can't read. Absent: false.
+   */
+  service?: boolean;
+  /**
+   * What the credential the request came with allows (a service account's API key, T-111): only
+   * these actions, on objects in these zones. Absent: everything the principal may do, for a
+   * person; nothing at all for a service account, which acts only through a key. A request
+   * outside it is forbidden by the core rule `core/scope`, whatever grants allow.
+   */
+  scope?: CredentialScope;
+}
+
+export interface CredentialScope {
+  actions: readonly Action[];
+  /** Zone kinds: `managed`, `indexed`, `local-only`, `code`. */
+  zones: readonly string[];
+  /**
+   * When set, only these zones (ids) too: a connector's key for one SharePoint site, say. An
+   * object whose zone id the request doesn't carry is then out of scope.
+   */
+  zoneIds?: readonly string[];
 }
 
 /**
@@ -62,7 +85,10 @@ export interface AuthzResource {
    * restricts it at once. Required: a caller that left it out would silently lose that.
    */
   allTags: readonly string[];
+  /** The zone's kind: `managed`, `indexed`, `local-only`, `code`. */
   zone: string;
+  /** The zone's id, for credentials scoped to zones (CredentialScope.zoneIds). */
+  zoneId?: string;
 }
 
 export interface AuthzRequest {
@@ -93,6 +119,8 @@ export interface EngineRequest extends AuthzRequest {
   writeGranted: boolean;
   /** The object's owner is the caller. */
   owner: boolean;
+  /** The request is within the credential's scope (always, for a principal with none). */
+  inScope: boolean;
 }
 
 /** A rules engine. Cedar is the one we ship ({@link createCedarEngine}); tests may swap it. */
@@ -124,6 +152,7 @@ export class Authorizer {
       readGranted: objectRead || resource.tags.some((t) => read.has(t)),
       writeGranted: objectWrite || resource.tags.some((t) => write.has(t)),
       owner: resource.ownerId === `user:${principal.userId}`,
+      inScope: withinScope(principal, request.action, resource),
     };
     try {
       return this.engine.evaluate({ ...request, ...facts });
@@ -137,6 +166,19 @@ export class Authorizer {
       return deny("policy engine error");
     }
   }
+}
+
+/**
+ * Whether the request is within the credential's scope. A service account without one is out of
+ * scope for everything: it acts through a key, and a principal rebuilt from its id alone (a job,
+ * a session) must not get what the key never allowed.
+ */
+function withinScope(p: AuthzPrincipal, action: Action, resource: AuthzResource): boolean {
+  const { scope } = p;
+  if (scope === undefined) return p.service !== true;
+  if (!scope.actions.includes(action) || !scope.zones.includes(resource.zone)) return false;
+  if (scope.zoneIds === undefined) return true;
+  return resource.zoneId !== undefined && scope.zoneIds.includes(resource.zoneId);
 }
 
 /** A deny; `kind` defaults to `error`, the fail-closed case. */
@@ -167,12 +209,26 @@ function malformed(r: AuthzRequest): string | undefined {
   if (!isStrings(p.objectWriteGrants)) return "principal.objectWriteGrants";
   if (typeof p.guest !== "boolean") return "principal.guest";
   if (typeof p.active !== "boolean") return "principal.active";
+  if (p.service !== undefined && typeof p.service !== "boolean") return "principal.service";
+  if (p.scope !== undefined) {
+    const s = p.scope as Partial<CredentialScope> | null;
+    const actions = s?.actions;
+    if (!isStrings(actions) || actions.length === 0) return "principal.scope.actions";
+    if (!actions.every((a) => (ACTIONS as readonly string[]).includes(a))) {
+      return "principal.scope.actions";
+    }
+    if (!isStrings(s?.zones) || s.zones.length === 0) return "principal.scope.zones";
+    if (s.zoneIds !== undefined && (!isStrings(s.zoneIds) || s.zoneIds.length === 0)) {
+      return "principal.scope.zoneIds";
+    }
+  }
   if (!(ACTIONS as readonly unknown[]).includes(r.action)) return "action";
   if (!res || !isId(res.id)) return "resource.id";
   if (typeof res.ownerId !== "string") return "resource.ownerId";
   if (!isStrings(res.tags) || !res.tags.every(isId)) return "resource.tags";
   if (!isStrings(res.allTags) || !res.allTags.every(isId)) return "resource.allTags";
   if (typeof res.zone !== "string") return "resource.zone";
+  if (res.zoneId !== undefined && typeof res.zoneId !== "string") return "resource.zoneId";
   if (!c || !isId(c.id)) return "client.id";
   if (!["first-party", "local", "commercial", "consumer"].includes(c.trust as string)) {
     return "client.trust";

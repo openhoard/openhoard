@@ -334,6 +334,9 @@ importers:
       '@openhoard/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@openhoard/core-audit':
+        specifier: workspace:*
+        version: link:../audit
 
   core/policy:
     dependencies:

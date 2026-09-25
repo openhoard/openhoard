@@ -1079,6 +1079,34 @@ describe("compareVersions", () => {
   });
 });
 
+describe("pack tests with service accounts", () => {
+  it("can say what a rule does to a service account", () => {
+    const pack = small({
+      policies: { bots: "forbid (principal, action, resource) when { principal.service };" },
+      tests: {
+        policies: [
+          {
+            name: "no bots",
+            action: "read",
+            principal: { service: true, readGrants: ["sensitivity:secret"] },
+            resource: { tags: ["sensitivity:secret"] },
+            expect: "forbid",
+          },
+          {
+            name: "people fine",
+            action: "read",
+            principal: { readGrants: ["sensitivity:secret"] },
+            resource: { tags: ["sensitivity:secret"] },
+            expect: "allow",
+          },
+        ],
+      },
+    });
+    expect(validatePack(pack)).toEqual([]);
+    expect(runPackTests(pack).every((r) => r.passed)).toBe(true);
+  });
+});
+
 describe("validatePack", () => {
   it.each<[string, unknown, string]>([
     [

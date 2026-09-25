@@ -1,5 +1,6 @@
 import { domainToASCII } from "node:url";
 import {
+  apiKeys,
   grants,
   groupMembers,
   grantSetOf,
@@ -15,7 +16,7 @@ import {
   type Tx,
 } from "@openhoard/core-db";
 import type { AuthzPrincipal } from "@openhoard/core-policy";
-import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, ne, sql } from "drizzle-orm";
 
 /*
  * The directory (T-101): the tenant's people and groups, and what a signed-in person is to the
@@ -61,7 +62,8 @@ export interface Stop {
 
 export interface User {
   id: string;
-  email: string;
+  /** A person's address; null for a service account. */
+  email: string | null;
   displayName: string;
   kind: UserKind;
   /** No lock, no provider disable, not retired. */
@@ -194,11 +196,17 @@ function checkSource(source: unknown): IdentitySource {
   return source as IdentitySource;
 }
 
-function checkKind(kind: unknown): UserKind {
+/** What a person can be. A service account is made as one and stays one. */
+export type PersonKind = Exclude<UserKind, "service">;
+
+function checkKind(kind: unknown): PersonKind {
+  if (kind === "service") {
+    throw new IdentityError("invalid", "a service account is made with createServiceAccount()");
+  }
   if (!(USER_KINDS as readonly unknown[]).includes(kind)) {
     throw new IdentityError("invalid", `not a user kind: ${String(kind)}`);
   }
-  return kind as UserKind;
+  return kind as PersonKind;
 }
 
 /** Who may act on users: `user:` and `system:` are admins, `scim:` the identity provider. */
@@ -240,8 +248,8 @@ const toGroup = (r: GroupRow): Group => ({
 export interface NewUser {
   email: string;
   displayName: string;
-  /** Defaults to `member`. */
-  kind?: UserKind;
+  /** Defaults to `member`. A service account is made with createServiceAccount(). */
+  kind?: PersonKind;
   source: IdentitySource;
   /** The identity provider's id: SCIM users should have one, local users can't. */
   externalId?: string;
@@ -266,6 +274,33 @@ export async function createUser(tx: Tx, tenantId: string, input: NewUser): Prom
   const [created] = await tx.insert(users).values(row).onConflictDoNothing().returning();
   if (!created) throw new IdentityError("conflict", "a user with that email or external id exists");
   return toUser(created);
+}
+
+/**
+ * Adds a service account (T-111): a machine (CI, a connector, a script) that authenticates with
+ * API keys only, never signs in and has no email. OpenHoard's own (source `local`); it holds
+ * grants and joins groups like anyone, and like a guest it never discovers what it can't read.
+ * Made by an admin (`user:` or `system:`), who is recorded in the audit, not here.
+ */
+export async function createServiceAccount(
+  tx: Tx,
+  tenantId: string,
+  input: { displayName: string; by: string },
+): Promise<User> {
+  checkActor(input.by, ["user", "system"]);
+  const [created] = await tx
+    .insert(users)
+    .values({
+      tenantId,
+      id: newId("user"),
+      email: null,
+      emailKey: null,
+      displayName: checkName("displayName", input.displayName),
+      kind: "service",
+      source: "local",
+    })
+    .returning();
+  return toUser(created as UserRow);
 }
 
 /** A user by id, retired ones included (they still own objects and appear in audit). */
@@ -337,7 +372,7 @@ async function ownedUser(tx: Tx, tenantId: string, userId: string, as: IdentityS
 export interface UserChanges {
   email?: string;
   displayName?: string;
-  kind?: UserKind;
+  kind?: PersonKind;
   externalId?: string | null;
 }
 
@@ -354,6 +389,9 @@ export async function updateUser(
 ): Promise<User> {
   await lockPrincipals(tx, tenantId);
   const current = await ownedUser(tx, tenantId, userId, as);
+  if (current.kind === "service" && (changes.email !== undefined || changes.kind !== undefined)) {
+    throw new IdentityError("invalid", "a service account has no email and stays one");
+  }
   const set: Partial<typeof users.$inferInsert> = {};
   if (changes.email !== undefined) {
     const { email, key } = checkEmail(changes.email);
@@ -499,6 +537,13 @@ export async function retireUser(
   await tx
     .delete(userIdentities)
     .where(and(eq(userIdentities.tenantId, tenantId), eq(userIdentities.userId, userId)));
+  // A retired service account's keys stop at once (they would anyway: it is inactive).
+  await tx
+    .update(apiKeys)
+    .set({ revokedAt: sql`greatest(now(), ${apiKeys.createdAt})`, revokedBy: by })
+    .where(
+      and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.userId, userId), isNull(apiKeys.revokedAt)),
+    );
   await tx
     .update(users)
     .set({ retiredAt: sql`now()`, retiredBy: by })
@@ -524,7 +569,10 @@ export async function linkIdentity(
       "issuer and subject must be 1 to 1024 and 1 to 512 characters",
     );
   }
-  await lockUserRow(tx, tenantId, userId);
+  const row = await lockUserRow(tx, tenantId, userId);
+  if (row.kind === "service") {
+    throw new IdentityError("invalid", "a service account never signs in: it uses API keys");
+  }
   const added = await tx
     .insert(userIdentities)
     .values({ tenantId, issuer, subject, userId })
@@ -591,6 +639,8 @@ export async function findUserByIdentity(
         eq(userIdentities.issuer, identity.issuer),
         eq(userIdentities.subject, identity.subject),
         isNull(users.retiredAt),
+        // A service account never signs in (the database refuses its identities too).
+        ne(users.kind, "service"),
       ),
     );
   return row ? toUser(row.user) : null;
@@ -717,12 +767,16 @@ export async function addMember(
   await ownedGroup(tx, tenantId, groupId, as);
   // Key-share: a retirement (FOR UPDATE) can't run between this check and the insert.
   const [user] = await tx
-    .select({ retiredAt: users.retiredAt })
+    .select({ retiredAt: users.retiredAt, kind: users.kind })
     .from(users)
     .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)))
     .for("key share");
   if (!user) throw new IdentityError("not-found", `no user ${userId}`);
   if (user.retiredAt !== null) throw new IdentityError("retired", `user ${userId} is retired`);
+  // What a service account holds is decided in OpenHoard, not by the identity provider.
+  if (user.kind === "service" && as === "scim") {
+    throw new IdentityError("invalid", "a service account joins only OpenHoard's own groups");
+  }
   const added = await tx
     .insert(groupMembers)
     .values({ tenantId, groupId, userId })
@@ -854,6 +908,7 @@ export async function resolveWithExpiry(
       ...grantSetOf(live),
       guest: user.kind === "guest",
       active: user.active,
+      ...(user.kind === "service" ? { service: true } : {}),
     },
     expiresAt: expiries.length === 0 ? null : new Date(Math.min(...expiries)),
   };
