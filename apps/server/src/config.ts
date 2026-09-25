@@ -90,6 +90,15 @@ export const AuthSchema = z
     /** And at the latest after this long (default 7 days, at most 30). */
     sessionMaxHours: z.coerce.number().int().min(1).max(720).default(168),
     providers: z.array(ProviderSchema).default([]),
+    /**
+     * Seals sign-ins under way in their cookie: 32 random bytes, base64url. Set it (or
+     * OPENHOARD_AUTH_COOKIE_KEY) when several servers share one address; otherwise each process
+     * makes its own, and a restart only fails sign-ins in progress.
+     */
+    cookieKey: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{43}$/, "32 bytes, base64url (43 characters)")
+      .optional(),
   })
   .strict()
   .superRefine((a, ctx) => {
@@ -191,6 +200,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
     ...(dbUrl ? { database: { url: dbUrl } } : {}),
   };
   withProviderSecrets(merged, env);
+  const cookieKey = env.OPENHOARD_AUTH_COOKIE_KEY;
+  if (cookieKey && typeof merged.auth === "object" && merged.auth !== null) {
+    merged.auth = { ...(merged.auth as object), cookieKey };
+  }
   const parsed = ConfigSchema.safeParse(merged);
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`);

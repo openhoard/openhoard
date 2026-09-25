@@ -18,18 +18,15 @@ import {
 } from "./directory.js";
 import { PrincipalCache } from "./principal-cache.js";
 import {
-  beginLogin,
   checkSession,
   isLocalPath,
   localPath,
-  LOGIN_MAX_PENDING,
   parseSessionToken,
   pruneSessions,
   revokeSession,
   revokeUserSessions,
   signIn,
   startSession,
-  takeLogin,
   touchSession,
 } from "./sessions.js";
 
@@ -147,59 +144,7 @@ describe("signIn", () => {
   });
 });
 
-describe("login requests", () => {
-  const state = "s".repeat(43);
-  const request = {
-    provider: "acme-entra",
-    codeVerifier: "v".repeat(43),
-    nonce: "n".repeat(22),
-    returnTo: "/files?x=1",
-  };
-
-  it("are taken once, for their provider only", async () => {
-    await write((tx) => beginLogin(tx, t.tenantId, state, request));
-    expect(await write((tx) => takeLogin(tx, t.tenantId, "other", state))).toBeNull();
-    // A wrong provider used it up: it can't be retried.
-    expect(await write((tx) => takeLogin(tx, t.tenantId, "acme-entra", state))).toBeNull();
-    await write((tx) => beginLogin(tx, t.tenantId, state, request));
-    expect(await write((tx) => takeLogin(tx, t.tenantId, "acme-entra", state))).toEqual(request);
-    expect(await write((tx) => takeLogin(tx, t.tenantId, "acme-entra", state))).toBeNull();
-  });
-
-  it("expire, and another tenant can't see them", async () => {
-    const other = await seedTenant(db, 2);
-    await write((tx) => beginLogin(tx, t.tenantId, state, request));
-    expect(
-      await write((tx) => takeLogin(tx, other.tenantId, "acme-entra", state), other.tenantId),
-    ).toBeNull();
-    await write((tx) =>
-      tx.execute(
-        sql`update login_requests set created_at = created_at - interval '11 minutes',
-              expires_at = expires_at - interval '11 minutes'`,
-      ),
-    );
-    expect(await write((tx) => takeLogin(tx, t.tenantId, "acme-entra", state))).toBeNull();
-  });
-
-  it("refuse what they can't hold", async () => {
-    for (const bad of [
-      { ...request, returnTo: "//evil.example" },
-      { ...request, returnTo: "/\\evil.example" },
-      { ...request, returnTo: "https://evil.example" },
-      { ...request, provider: "Acme" },
-      { ...request, codeVerifier: "short" },
-      { ...request, nonce: "short" },
-    ]) {
-      await expect(write((tx) => beginLogin(tx, t.tenantId, state, bad))).rejects.toThrow(
-        IdentityError,
-      );
-    }
-    await expect(write((tx) => beginLogin(tx, t.tenantId, "short", request))).rejects.toThrow(
-      IdentityError,
-    );
-    expect(await write((tx) => takeLogin(tx, t.tenantId, "acme-entra", "short"))).toBeNull();
-  });
-
+describe("return paths", () => {
   it("isLocalPath accepts only this server's paths", () => {
     for (const ok of ["/", "/files", "/a?b=//c", "/a#b"]) expect(isLocalPath(ok), ok).toBe(true);
     const bad = [
@@ -220,24 +165,6 @@ describe("login requests", () => {
     expect(localPath("/a/../b?x")).toBe("/b?x");
     expect(localPath("/.//evil.example")).toBeNull();
     expect(localPath("/%2F%2Fevil.example")).toBe("/%2F%2Fevil.example");
-  });
-
-  it("are bounded per tenant: anyone can start one", async () => {
-    await write((tx) =>
-      tx.execute(sql`insert into login_requests (tenant_id, state_hash, provider, code_verifier, nonce, return_to, expires_at)
-        select ${t.tenantId}, lpad(to_hex(i), 64, '0'), 'p', repeat('v', 43), repeat('n', 16), '/', now() + interval '5 minutes'
-          from generate_series(1, ${LOGIN_MAX_PENDING}) i`),
-    );
-    await expect(write((tx) => beginLogin(tx, t.tenantId, state, request))).rejects.toMatchObject({
-      code: "busy",
-    });
-    // Expired ones don't count, and go.
-    await write((tx) =>
-      tx.execute(
-        sql`update login_requests set created_at = created_at - interval '1 hour', expires_at = now() - interval '1 second'`,
-      ),
-    );
-    await write((tx) => beginLogin(tx, t.tenantId, state, request));
   });
 });
 
@@ -363,7 +290,13 @@ describe("sessions", () => {
       }),
     );
     await write((tx) =>
-      unlinkIdentity(tx, t.tenantId, bo.id, { issuer: ISSUER, subject: `sub-${bo.id}` }),
+      unlinkIdentity(
+        tx,
+        t.tenantId,
+        bo.id,
+        { issuer: ISSUER, subject: `sub-${bo.id}` },
+        "user:admin",
+      ),
     );
     expect(await check(s.token)).toEqual({ ok: false, refused: "ended" });
     expect((await check(kept.token)).ok).toBe(true);
@@ -374,6 +307,15 @@ describe("sessions", () => {
     await write((tx) => updateUser(tx, t.tenantId, bo.id, { kind: "guest" }, "local"));
     const r = await check(s.token);
     expect(r.ok && r.principal.guest).toBe(true);
+  });
+
+  it("aren't started for a person locked or disabled since they were found", async () => {
+    // signIn() found Ana active; a lock commits before startSession() runs.
+    await write((tx) => lockUser(tx, t.tenantId, ana.id, "user:admin"));
+    await expect(start(ana.id)).rejects.toMatchObject({ code: "inactive" });
+    await write((tx) => unlockUser(tx, t.tenantId, ana.id, "user:admin"));
+    await write((tx) => setProviderActive(tx, t.tenantId, ana.id, false, "scim:entra"));
+    await expect(start(ana.id)).rejects.toMatchObject({ code: "inactive" });
   });
 
   it("are for people: never a service account, a retired or unknown user", async () => {

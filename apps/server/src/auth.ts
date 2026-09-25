@@ -1,8 +1,7 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 import { appendAudit, type AuditRecord } from "@openhoard/core-audit";
 import type { Database, Tx } from "@openhoard/core-db";
 import {
-  beginLogin,
   checkSession,
   getUser,
   IdentityError,
@@ -12,7 +11,6 @@ import {
   revokeSession,
   signIn,
   startSession,
-  takeLogin,
   touchSession,
   userPrincipal,
   type SessionCheck,
@@ -23,6 +21,7 @@ import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as oidc from "openid-client";
 import type { Logger } from "pino";
 import { externalIdClaim, type AuthConfig, type ProviderConfig } from "./config.js";
+import { loginCookieName, loginKey, openLogin, sealLogin } from "./login-state.js";
 
 /*
  * Signing in (T-102): OpenID Connect, authorization code with PKCE, as a relying party of the
@@ -35,10 +34,10 @@ import { externalIdClaim, type AuthConfig, type ProviderConfig } from "./config.
  *   GET  /auth/me                  who is signed in
  *   POST /auth/logout              ends the session
  *
- * - The state is in a cookie bound to this browser and in the request row (core/identity
- *   beginLogin) holding the verifier and nonce; the row is used once, and only by the provider
- *   it was for. openid-client checks the issuer, audience, signature, nonce and expiry of the ID
- *   token.
+ * - A sign-in under way lives in an encrypted cookie of its own (login-state.ts): the state, the
+ *   PKCE verifier, the nonce, the provider and where to return. Starting one writes nothing. The
+ *   callback needs this browser's cookie for that exact state and provider, within 10 minutes.
+ *   openid-client checks the issuer, audience, signature, nonce and expiry of the ID token.
  * - Sign-in never creates anyone and never matches on email (core/identity signIn()).
  * - The session cookie is HttpOnly, SameSite=Lax, and `__Host-` and Secure over https. A
  *   state-changing request carrying it must come from this origin (the Origin header).
@@ -72,8 +71,9 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
   const secure = new URL(auth.publicUrl).protocol === "https:";
   const SESSION_COOKIE = secure ? "__Host-oh_session" : "oh_session";
   // One cookie per sign-in under way, named by its state, so two tabs don't undo each other.
-  const loginCookie = (state: string) =>
-    `${secure ? "__Secure-" : ""}oh_login_${createHash("sha256").update(state).digest("hex").slice(0, 16)}`;
+  const loginCookie = (state: string) => loginCookieName(state, secure);
+  // Without a configured key, sign-ins under way don't survive a restart (or reach another node).
+  const key = loginKey(auth.cookieKey);
   const providers = new Map(auth.providers.map((p) => [p.id, p]));
   const cache = new PrincipalCache();
   const discovered = new Map<string, Promise<oidc.Configuration>>();
@@ -166,22 +166,6 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
     const codeVerifier = oidc.randomPKCECodeVerifier();
     const state = oidc.randomState();
     const nonce = oidc.randomNonce();
-    try {
-      await db.withTenant(p.tenantId, (tx) =>
-        beginLogin(tx, p.tenantId, state, {
-          provider: p.id,
-          codeVerifier,
-          nonce,
-          returnTo: localPath(returnTo) ?? "/",
-        }),
-      );
-    } catch (err) {
-      if (err instanceof IdentityError && err.code === "busy") {
-        log?.warn({ provider: p.id }, "sign-in: too many under way");
-        return c.json({ error: "too many sign-ins; try again shortly" }, 429);
-      }
-      throw err;
-    }
     const url = oidc.buildAuthorizationUrl(config, {
       redirect_uri: redirectUri(p),
       scope: SCOPE,
@@ -190,7 +174,15 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
       state,
       nonce,
     });
-    setCookie(c, loginCookie(state), state, {
+    const sealed = sealLogin(key, {
+      provider: p.id,
+      state,
+      codeVerifier,
+      nonce,
+      returnTo: localPath(returnTo) ?? "/",
+      expiresAt: Date.now() + LOGIN_TTL * 1000,
+    });
+    setCookie(c, loginCookie(state), sealed, {
       path: `/auth/callback/${p.id}`,
       httpOnly: true,
       secure,
@@ -205,12 +197,19 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
     if (!p) return c.json({ error: "not found" }, 404);
     const state = c.req.query("state");
     if (state === undefined || state.length > 512) return c.json(FAILED, 400);
-    const bound = getCookie(c, loginCookie(state));
+    const sealed = getCookie(c, loginCookie(state));
     deleteCookie(c, loginCookie(state), { path: `/auth/callback/${p.id}`, secure });
-    // The state must be the one this browser was sent with: no one else's sign-in lands here.
-    if (bound === undefined || !sameText(state, bound)) return c.json(FAILED, 400);
-    const login = await db.withTenant(p.tenantId, (tx) => takeLogin(tx, p.tenantId, p.id, state));
-    if (!login) return c.json(FAILED, 400);
+    // The sign-in this browser started, for this state and provider, not yet expired: no one
+    // else's sign-in lands here.
+    const login = sealed === undefined ? null : openLogin(key, sealed);
+    if (
+      !login ||
+      login.provider !== p.id ||
+      !sameText(state, login.state) ||
+      login.expiresAt <= Date.now()
+    ) {
+      return c.json(FAILED, 400);
+    }
     const refuse = async (reason: string, subject?: string, userId?: string | null) => {
       await db.withTenant(p.tenantId, (tx) =>
         audit(tx, p.tenantId, {
@@ -275,22 +274,35 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
         return { ok: true as const, session };
       });
     } catch (err) {
-      // Claims OpenHoard can't hold (an over-long subject), or the person retired just now.
+      // Claims OpenHoard can't hold (an over-long subject), or the person was locked or retired
+      // since signIn() found them.
       if (!(err instanceof IdentityError)) throw err;
-      log?.warn({ err, provider: p.id }, "sign-in: refused claims");
-      return refuse("invalid-claims");
+      log?.warn({ err, provider: p.id }, "sign-in: refused");
+      const inactive = err.code === "inactive" || err.code === "retired";
+      return refuse(inactive ? "inactive" : "invalid-claims");
     }
     if (!result.ok) return refuse(result.refused, claims.sub, result.userId);
     // The session this browser had (if any) is replaced, not left alive beside the new one.
     if (previous) {
-      await db.withTenant(previous.tenantId, (tx) =>
-        revokeSession(
-          tx,
-          previous.tenantId,
-          previous.sessionId,
-          userPrincipal(previous.principal.userId),
-        ),
-      );
+      const by = userPrincipal(previous.principal.userId);
+      try {
+        await db.withTenant(previous.tenantId, async (tx) => {
+          if (await revokeSession(tx, previous.tenantId, previous.sessionId, by)) {
+            await audit(tx, previous.tenantId, {
+              actor: by,
+              action: "auth.sign-out",
+              decision: "allow",
+              detail: { session: previous.sessionId, replaced: true },
+            });
+          }
+        });
+      } catch (err) {
+        // The new session stands; the old one still ends by itself.
+        log?.error(
+          { err, session: previous.sessionId },
+          "sign-in: ending the previous session failed",
+        );
+      }
     }
     setCookie(c, SESSION_COOKIE, result.session.token, {
       path: "/",

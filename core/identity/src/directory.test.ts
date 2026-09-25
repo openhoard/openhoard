@@ -408,7 +408,8 @@ describe("sign-in identities", () => {
 
   it("unlinks, and retiring a user frees their identities for someone new", async () => {
     await link(t.userId);
-    const unlink = () => inTenant((tx) => unlinkIdentity(tx, t.tenantId, t.userId, ms));
+    const unlink = () =>
+      inTenant((tx) => unlinkIdentity(tx, t.tenantId, t.userId, ms, "user:admin"));
     expect(await unlink()).toBe(true);
     expect(await unlink()).toBe(false);
     await link(t.userId);

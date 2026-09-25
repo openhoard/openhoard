@@ -91,8 +91,8 @@ export type IdentityErrorCode =
   | "conflict"
   | "wrong-source"
   | "retired"
-  /** Too many at once (sign-ins under way). */
-  | "busy";
+  /** Locked or disabled by the identity provider. */
+  | "inactive";
 
 export class IdentityError extends Error {
   constructor(
@@ -632,13 +632,18 @@ export async function linkIdentity(
   return false;
 }
 
-/** Unlinks a sign-in identity. Returns false if it wasn't linked to this user. */
+/**
+ * Unlinks a sign-in identity, and ends the sessions it signed in; `by` is who did it (`user:`,
+ * `system:` or `scim:`). Returns false if it wasn't linked to this user.
+ */
 export async function unlinkIdentity(
   tx: Tx,
   tenantId: string,
   userId: string,
   identity: { issuer: string; subject: string },
+  by: string,
 ): Promise<boolean> {
+  checkActor(by, ["user", "system", "scim"]);
   const removed = await tx
     .delete(userIdentities)
     .where(
@@ -651,7 +656,7 @@ export async function unlinkIdentity(
     )
     .returning({ userId: userIdentities.userId });
   // Sessions signed in with that identity end with it.
-  if (removed.length > 0) await endSessions(tx, tenantId, userId, "system:unlink", identity);
+  if (removed.length > 0) await endSessions(tx, tenantId, userId, by, identity);
   return removed.length > 0;
 }
 

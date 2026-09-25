@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { isId, loginRequests, newId, sessions, users, type Tx } from "@openhoard/core-db";
+import { isId, newId, sessions, users, type Tx } from "@openhoard/core-db";
 import type { AuthzPrincipal } from "@openhoard/core-policy";
-import { and, eq, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import {
   findUserByExternalId,
   findUserByIdentity,
@@ -27,8 +27,8 @@ import type { PrincipalCache } from "./principal-cache.js";
  *   once, and so does one whose user is locked, disabled or retired (their principal is
  *   inactive). Locking, disabling and retiring a user end their sessions for good, and unlinking
  *   an identity ends the sessions it signed in.
- * - A sign-in under way (beginLogin/takeLogin) keeps the PKCE verifier and nonce on the server,
- *   found by a hash of the `state`, used once, for a few minutes.
+ * - A sign-in under way (its PKCE verifier, nonce and return path) is the server's to keep; see
+ *   apps/server (an encrypted cookie, so starting a sign-in writes nothing).
  */
 
 const SECRET_BYTES = 32;
@@ -36,7 +36,6 @@ const TOKEN =
   /^ohs\.(ten_[0-9a-hjkmnp-tv-z]{26})\.(ses_[0-9a-hjkmnp-tv-z]{26})\.([A-Za-z0-9_-]{43})$/;
 const PROVIDER = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const PRINCIPAL = /^(user|system|scim):[^\0]{1,1000}$/;
-const VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
 
 /** Longest a session may live, and the default limits. */
 export const SESSION_LIMITS = {
@@ -47,9 +46,6 @@ export const SESSION_LIMITS = {
   /** A session's last use is written at most this often (or a quarter of its idle limit). */
   touchSeconds: 60,
 } as const;
-
-/** How long a sign-in may take at the provider. */
-export const LOGIN_TTL_SECONDS = 600;
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 const chars = (s: string) => [...s].length;
@@ -121,14 +117,7 @@ export async function signIn(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Sign-ins under way
-
-export interface LoginRequest {
-  provider: string;
-  codeVerifier: string;
-  nonce: string;
-  returnTo: string;
-}
+// Return paths
 
 const BASE = "http://openhoard.invalid";
 
@@ -157,82 +146,6 @@ export function localPath(path: unknown): string | null {
 /** Whether localPath() accepts `path` unchanged. */
 export function isLocalPath(path: unknown): path is string {
   return typeof path === "string" && localPath(path) === path;
-}
-
-/** Most sign-ins a tenant may have under way at once. */
-export const LOGIN_MAX_PENDING = 1000;
-
-/**
- * Records a sign-in about to go to the provider, found later by `state` (from the provider's
- * redirect back). Also drops the tenant's expired ones.
- */
-export async function beginLogin(
-  tx: Tx,
-  tenantId: string,
-  state: string,
-  request: LoginRequest,
-): Promise<void> {
-  if (typeof state !== "string" || state.length < 32) {
-    throw new IdentityError("invalid", "state must be at least 32 characters");
-  }
-  if (!PROVIDER.test(request.provider)) throw new IdentityError("invalid", "invalid provider id");
-  if (!VERIFIER.test(request.codeVerifier)) {
-    throw new IdentityError("invalid", "invalid PKCE code verifier");
-  }
-  if (chars(request.nonce) < 16 || chars(request.nonce) > 256) {
-    throw new IdentityError("invalid", "invalid nonce");
-  }
-  if (!isLocalPath(request.returnTo)) throw new IdentityError("invalid", "invalid return path");
-  await tx
-    .delete(loginRequests)
-    .where(and(eq(loginRequests.tenantId, tenantId), lt(loginRequests.expiresAt, sql`now()`)));
-  // Anyone can start a sign-in: a bound on the rows that makes.
-  const [pending] = await tx
-    .select({ n: sql<number>`count(*)::int` })
-    .from(loginRequests)
-    .where(eq(loginRequests.tenantId, tenantId));
-  if ((pending?.n ?? 0) >= LOGIN_MAX_PENDING) {
-    throw new IdentityError("busy", "too many sign-ins under way");
-  }
-  await tx.insert(loginRequests).values({
-    tenantId,
-    stateHash: sha256(state),
-    provider: request.provider,
-    codeVerifier: request.codeVerifier,
-    nonce: request.nonce,
-    returnTo: request.returnTo,
-    expiresAt: sql`now() + make_interval(secs => ${LOGIN_TTL_SECONDS})`,
-  });
-}
-
-/**
- * The sign-in `state` names, for `provider`, removed so it can't be used again; null if there is
- * none, it expired, or it was for another provider.
- */
-export async function takeLogin(
-  tx: Tx,
-  tenantId: string,
-  provider: string,
-  state: string,
-): Promise<LoginRequest | null> {
-  if (typeof state !== "string" || state.length < 32 || state.length > 512) return null;
-  const [row] = await tx
-    .delete(loginRequests)
-    .where(and(eq(loginRequests.tenantId, tenantId), eq(loginRequests.stateHash, sha256(state))))
-    .returning({
-      provider: loginRequests.provider,
-      codeVerifier: loginRequests.codeVerifier,
-      nonce: loginRequests.nonce,
-      returnTo: loginRequests.returnTo,
-      live: sql<boolean>`${loginRequests.expiresAt} > now()`,
-    });
-  if (!row || !row.live || row.provider !== provider) return null;
-  return {
-    provider: row.provider,
-    codeVerifier: row.codeVerifier,
-    nonce: row.nonce,
-    returnTo: row.returnTo,
-  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -276,15 +189,26 @@ export async function startSession(
   }
   if (!PROVIDER.test(input.provider)) throw new IdentityError("invalid", "invalid provider id");
   if (!isId("user", input.userId)) throw new IdentityError("invalid", "invalid user id");
-  // FOR KEY SHARE, as addMember does: a retirement running now finishes first, and is seen.
+  // FOR KEY SHARE, as addMember does: a retirement, lock or disable running now finishes first,
+  // and is seen.
   const [user] = await tx
-    .select({ kind: users.kind, retiredAt: users.retiredAt })
+    .select({
+      kind: users.kind,
+      retiredAt: users.retiredAt,
+      lockedAt: users.lockedAt,
+      providerDisabledAt: users.providerDisabledAt,
+    })
     .from(users)
     .where(and(eq(users.tenantId, tenantId), eq(users.id, input.userId)))
     .for("key share");
   if (!user) throw new IdentityError("not-found", `no user ${input.userId}`);
-  if (user.retiredAt !== null)
+  if (user.retiredAt !== null) {
     throw new IdentityError("retired", `user ${input.userId} is retired`);
+  }
+  // A sign-in racing a lock gets no session, which unlocking would otherwise bring back.
+  if (user.lockedAt !== null || user.providerDisabledAt !== null) {
+    throw new IdentityError("inactive", `user ${input.userId} is locked or disabled`);
+  }
   if (user.kind === "service") {
     throw new IdentityError("invalid", "a service account never signs in: it uses API keys");
   }

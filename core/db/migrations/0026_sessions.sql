@@ -1,21 +1,3 @@
-CREATE TABLE "login_requests" (
-	"tenant_id" text NOT NULL,
-	"state_hash" text NOT NULL,
-	"provider" text NOT NULL,
-	"code_verifier" text NOT NULL,
-	"nonce" text NOT NULL,
-	"return_to" text NOT NULL,
-	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"expires_at" timestamp with time zone NOT NULL,
-	CONSTRAINT "login_requests_tenant_id_state_hash_pk" PRIMARY KEY("tenant_id","state_hash"),
-	CONSTRAINT "login_requests_state_hash_format" CHECK (state_hash ~ '^[0-9a-f]{64}$'),
-	CONSTRAINT "login_requests_provider_format" CHECK (provider ~ '^[a-z0-9][a-z0-9-]{0,62}$'),
-	CONSTRAINT "login_requests_verifier_format" CHECK (code_verifier ~ '^[A-Za-z0-9._~-]{43,128}$'),
-	CONSTRAINT "login_requests_nonce_length" CHECK (char_length(nonce) between 16 and 256),
-	CONSTRAINT "login_requests_return_to_path" CHECK (char_length(return_to) between 1 and 2048 and return_to like '/%' and return_to not like '//%' and strpos(return_to, chr(92)) = 0),
-	CONSTRAINT "login_requests_expiry" CHECK (expires_at > created_at and expires_at <= created_at + interval '1 hour')
-);
---> statement-breakpoint
 CREATE TABLE "sessions" (
 	"tenant_id" text NOT NULL,
 	"id" text NOT NULL,
@@ -45,6 +27,5 @@ CREATE TABLE "sessions" (
 );
 --> statement-breakpoint
 ALTER TABLE "sessions" ADD CONSTRAINT "sessions_user_fk" FOREIGN KEY ("tenant_id","user_id","user_kind") REFERENCES "public"."users"("tenant_id","id","kind") ON DELETE no action ON UPDATE cascade;--> statement-breakpoint
-CREATE INDEX "login_requests_expires_idx" ON "login_requests" USING btree ("tenant_id","expires_at");--> statement-breakpoint
 CREATE INDEX "sessions_user_idx" ON "sessions" USING btree ("tenant_id","user_id");--> statement-breakpoint
 CREATE INDEX "sessions_expires_idx" ON "sessions" USING btree ("tenant_id","expires_at");

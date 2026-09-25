@@ -1,19 +1,14 @@
 import { exportAudit } from "@openhoard/core-audit";
-import { loginRequests, sessions, type Database } from "@openhoard/core-db";
+import { sessions, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
-import {
-  createUser,
-  LOGIN_MAX_PENDING,
-  lockUser,
-  unlockUser,
-  type User,
-} from "@openhoard/core-identity";
+import { createUser, lockUser, unlockUser, type User } from "@openhoard/core-identity";
 import { generateTenant, startDevOidc, type DevOidc, type FakeUser } from "@openhoard/testkit";
 import type { Hono } from "hono";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import type { AuthEnv } from "./auth.js";
 import { ConfigSchema, loadConfig, type Config } from "./config.js";
+import { loginKey, openLogin, sealLogin, type LoginState } from "./login-state.js";
 
 /* T-102: signing in through OpenID Connect against the dev provider (testkit). */
 
@@ -263,23 +258,6 @@ describe("sign-in", () => {
     expect(stolen.status).toBe(401);
   });
 
-  it("answers 429 when too many sign-ins are under way", async () => {
-    await db.withTenant(t.tenantId, (tx) =>
-      tx.insert(loginRequests).values(
-        Array.from({ length: LOGIN_MAX_PENDING }, (_, i) => ({
-          tenantId: t.tenantId,
-          stateHash: i.toString(16).padStart(64, "0"),
-          provider: "dev",
-          codeVerifier: "v".repeat(43),
-          nonce: "n".repeat(16),
-          returnTo: "/",
-          expiresAt: new Date(Date.now() + 300_000),
-        })),
-      ),
-    );
-    expect((await new Browser().go(`${PUBLIC}/auth/login/dev`)).status).toBe(429);
-  });
-
   it("ends a session at once when its person is locked", async () => {
     const browser = new Browser();
     await browser.signIn(anaFake.upn);
@@ -301,9 +279,14 @@ describe("the sign-in round trip is bound to its browser", () => {
     const callback = await browser.toCallback(anaFake.upn);
     const [name, value] = loginCookieOf(browser);
     expect((await browser.go(callback)).status).toBe(302);
-    // Replayed with the same cookie: the request row is gone.
+    // Replayed with the same cookie: the provider refuses a code used twice.
     const replay = await app.request(callback, { headers: { cookie: `${name}=${value}` } });
-    expect(replay.status).toBe(400);
+    expect(replay.status).toBe(401);
+    const events = (await auditEvents()).filter((e) => e.action === "auth.sign-in");
+    expect(events.at(-1)).toMatchObject({
+      decision: "deny",
+      detail: { reason: "provider:invalid_grant" },
+    });
   });
 
   it("refuses another browser's state, even with its own cookie", async () => {
@@ -315,6 +298,32 @@ describe("the sign-in round trip is bound to its browser", () => {
     const [name, value] = loginCookieOf(b);
     const res = await app.request(callbackA, { headers: { cookie: `${name}=${value}` } });
     expect(res.status).toBe(400);
+  });
+
+  it("keeps the sign-in under way sealed, and refuses a cookie changed, expired or for another provider", async () => {
+    const key = "k".repeat(43);
+    app = createApp(config({ cookieKey: key }), undefined, { db });
+    const browser = new Browser();
+    const callback = await browser.toCallback(anaFake.upn);
+    const [name, value] = loginCookieOf(browser);
+    const state = new URL(callback).searchParams.get("state") ?? "";
+    // The state and verifier aren't readable in the cookie.
+    expect(value).not.toContain(state);
+    const opened = openLogin(loginKey(key), value);
+    expect(opened).toMatchObject({ provider: "dev", state, returnTo: "/files" });
+    expect(value).not.toContain(opened?.codeVerifier);
+    const tries = {
+      tampered: value.slice(0, -2) + (value.endsWith("AA") ? "BB" : "AA"),
+      expired: sealLogin(loginKey(key), { ...(opened as LoginState), expiresAt: Date.now() - 1 }),
+      otherProvider: sealLogin(loginKey(key), { ...(opened as LoginState), provider: "other" }),
+      otherKey: sealLogin(loginKey(), opened as LoginState),
+    };
+    for (const [why, cookie] of Object.entries(tries)) {
+      const res = await app.request(callback, { headers: { cookie: `${name}=${cookie}` } });
+      expect(res.status, why).toBe(400);
+    }
+    // The genuine one still works.
+    expect((await browser.go(callback)).status).toBe(302);
   });
 
   it("lets two tabs sign in at once", async () => {
@@ -477,6 +486,9 @@ describe("auth config", () => {
     const c = loadConfig({ OPENHOARD_AUTH_ACME_ENTRA_CLIENT_SECRET: "s3cret" }, cwd);
     expect(c.auth?.providers[0]?.clientSecret).toBe("s3cret");
     expect(c.auth?.sessionIdleMinutes).toBe(720);
+    const keyed = loadConfig({ OPENHOARD_AUTH_COOKIE_KEY: "a".repeat(43) }, cwd);
+    expect(keyed.auth?.cookieKey).toBe("a".repeat(43));
+    expect(() => loadConfig({ OPENHOARD_AUTH_COOKIE_KEY: "short" }, cwd)).toThrow(/cookieKey/);
   });
 
   it("needs the database when sign-in is on", () => {

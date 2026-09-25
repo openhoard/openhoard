@@ -71,13 +71,15 @@ Sessions:
   the secret is stored, with an idle limit and an absolute expiry (at most 30 days). A service
   account never gets a session.
 - `checkSession()` reads the session on every request. It fails a revoked, expired or idle one,
-  and one whose person is inactive, so a lock takes effect on the next request. It records use at
-  most once a minute, so it needs a read-write transaction.
+  and one whose person is inactive, so a lock takes effect on the next request.
 - `revokeSession()` is sign-out. `revokeUserSessions()` ends all of a person's sessions (for
-  T-104). `retireUser()` ends them too.
-- `beginLogin()` / `takeLogin()` hold a sign-in in progress: the PKCE verifier, nonce and return
-  path, found by a hash of `state`, usable once, for 10 minutes, and only by the provider they
-  were for.
+  T-104). Locking, disabling and retiring a person end their sessions for good, so unlocking
+  doesn't bring one back. `unlinkIdentity()` ends the sessions that identity signed in, and
+  `startSession()` refuses a person locked since `signIn()` found them.
+- `checkSession()` writes nothing. Run it in a read-only snapshot, where the principal cache
+  serves it, and call `touchSession()` when it says `stale`.
+- `localPath()` normalizes a return path the way a browser would, and refuses anything that
+  would leave this server.
 
 `resolvePrincipal()` returns what `authorize()` needs: groups, every grant held directly or
 through a group, guest status, and whether the user is active. A disabled user comes back

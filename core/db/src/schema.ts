@@ -621,43 +621,6 @@ export const sessions = pgTable(
   ],
 );
 
-/**
- * Sign-ins under way (T-102): between sending the browser to the provider and its return. The
- * row is found by a hash of the `state` the browser brings back (the same value is in a cookie
- * bound to that browser), used once, and holds the PKCE verifier and nonce, which never leave
- * the server. Expires in minutes.
- */
-export const loginRequests = pgTable(
-  "login_requests",
-  {
-    tenantId: text("tenant_id").notNull(),
-    stateHash: text("state_hash").notNull(),
-    provider: text("provider").notNull(),
-    codeVerifier: text("code_verifier").notNull(),
-    nonce: text("nonce").notNull(),
-    /** Where to go after signing in: a path on this server. */
-    returnTo: text("return_to").notNull(),
-    createdAt: createdAt(),
-    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-  },
-  (t) => [
-    primaryKey({ columns: [t.tenantId, t.stateHash] }),
-    index("login_requests_expires_idx").on(t.tenantId, t.expiresAt),
-    check("login_requests_state_hash_format", sql`state_hash ~ '^[0-9a-f]{64}$'`),
-    check("login_requests_provider_format", sql`provider ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
-    check("login_requests_verifier_format", sql`code_verifier ~ '^[A-Za-z0-9._~-]{43,128}$'`),
-    check("login_requests_nonce_length", sql`char_length(nonce) between 16 and 256`),
-    check(
-      "login_requests_return_to_path",
-      sql`char_length(return_to) between 1 and 2048 and return_to like '/%' and return_to not like '//%' and strpos(return_to, chr(92)) = 0`,
-    ),
-    check(
-      "login_requests_expiry",
-      sql`expires_at > created_at and expires_at <= created_at + interval '1 hour'`,
-    ),
-  ],
-);
-
 /** What an API key may be scoped to: core/policy ACTIONS, and zone kinds. */
 export const KEY_ACTIONS = ["search", "read", "open", "tag"] as const;
 const sqlArray = (values: readonly string[]) =>
@@ -1122,5 +1085,4 @@ export const tables = {
   apiKeys,
   activityEvents,
   sessions,
-  loginRequests,
 } as const;

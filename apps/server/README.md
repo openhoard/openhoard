@@ -60,6 +60,13 @@ works too.
   to `externalId` in the provisioning app's attribute mappings instead, or people won't be
   matched on their first sign-in.
 
+**Sign-ins under way.** The PKCE verifier, nonce, state and return path go in an AES-256-GCM
+sealed cookie of their own, one per sign-in. It is HttpOnly, limited to the callback path, and
+lasts 10 minutes. Starting a sign-in writes nothing on the server. Each process makes its own
+key. When several servers share one address, give them the same key: `auth.cookieKey` or
+`OPENHOARD_AUTH_COOKIE_KEY`, 32 random bytes in base64url
+(`node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"`).
+
 **Sessions.** A session is a row in `sessions`, and the cookie holds an opaque token of which
 only a hash is stored.
 
