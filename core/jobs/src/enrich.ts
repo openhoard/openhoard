@@ -33,8 +33,8 @@ import { and, eq, max } from "drizzle-orm";
  *   one has replaced, or a title a rename has changed, writes nothing: a slow job for an old
  *   version can't overwrite what the new version's job wrote after it. markProcessed() makes
  *   the same check. The job then ends:
- *   - superseded: the newer version has its own job; the old one is marked done
- *     (markSuperseded()) so it leaves the unprocessed set;
+ *   - superseded: the newer version has its own job; the old one is marked given up on
+ *     (markSuperseded(): superseded_at, still unprocessed) so it leaves the sweep for good;
  *   - renamed: the version is enqueued again (ingest will have too) for the new title.
  *   Superseded is checked first, so a replaced version is never enqueued again.
  *
@@ -131,7 +131,7 @@ export type EnrichOutcome =
   | "already-processed"
   /** The object was renamed after the job read it: the version was enqueued again. */
   | "renamed"
-  /** A newer version replaced this one: nothing written; the old one is marked done. */
+  /** A newer version replaced this one: nothing written; the old one is marked superseded. */
   | "superseded"
   /** The version no longer exists (its object was purged), or the tenant doesn't. */
   | "gone"

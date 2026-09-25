@@ -81,9 +81,10 @@ What someone who can't read a file learns about it:
   starts it over. `markProcessed()` marks only the object's current version, under the title
   the enrichment job saw: a job for a replaced version, or an old title, changes nothing.
   `lockCurrentVersion()` makes the same check for an enrichment step about to write, and holds
-  the object's lock while it writes (core/jobs). `markSuperseded()` marks a replaced version
-  done without enriching it; only the current version's flag counts for levels, and a replaced
-  version never becomes current again.
+  the object's lock while it writes (core/jobs). `markSuperseded()` records that enrichment gave
+  up on a replaced version (`superseded_at`); it stays unprocessed, and `listVersions()` says so.
+  Only the current version counts for levels, and a replaced version never becomes current
+  again.
 
 `viewObjects()` returns what a caller may see of a list of objects, in order, leaving out
 hidden, deleted and unknown ones alike. Only active tenant members discover files. Guests and

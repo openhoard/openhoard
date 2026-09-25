@@ -186,7 +186,14 @@ describe("levelsFor", () => {
     expect(await superseded(v2)).toBe(false);
     expect(await superseded(t.versionId)).toBe(true);
     expect(await superseded(t.versionId)).toBe(false);
-    // Marking the old one done changes nothing about what the current one allows.
+    // Given up on, not processed: it says so, and changes nothing the current one allows.
+    const [old] = await inTenant((tx) =>
+      tx
+        .select({ processedAt: versions.processedAt, supersededAt: versions.supersededAt })
+        .from(versions)
+        .where(eq(versions.id, t.versionId)),
+    );
+    expect(old).toEqual({ processedAt: null, supersededAt: expect.any(Date) });
     expect(await levels()).toMatchObject({ processed: false, visibility: "hidden" });
     expect(
       await inTenant((tx) => markProcessed(tx, t.tenantId, { versionId: v2, title: SEEDED_TITLE })),

@@ -28,8 +28,8 @@ import {
  *   enrich              one job per (tenant, version); `stately`, keyed by tenant and version:
  *                       at most one job per key in each of the states created, retry and active.
  *                       Enqueueing goes through upsert(): a job that waits for the key, created
- *                       or waiting out a retry delay, is brought forward to run now instead of
- *                       getting a second one beside it. (pg-boss 12.33 fails a job whose retry
+ *                       or waiting out a retry delay, is reused instead of getting a second one
+ *                       beside it (and brought forward to run now, except by the sweep). (pg-boss 12.33 fails a job whose retry
  *                       collides with another retry of its key on job_i3, straight to failed and
  *                       the dead letter queue, retries unused: failJobsBody's ON CONFLICT DO
  *                       NOTHING.) With none waiting, a new one is queued, also while one runs (a
@@ -228,20 +228,27 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
       expireInSeconds: 3600,
     });
 
-    const enqueueVersion = async (tenantId: string, versionId: string) => {
+    /**
+     * A job waiting for the key (created, or in its retry delay) is reused rather than joined
+     * by a second one; see the header. `pullForward` also moves its start to now: right for a
+     * new version or a rename, which may have changed what failed, and wrong for the sweep,
+     * which would otherwise cut every backoff short and spend a retry each run.
+     */
+    const enqueue = async (tenantId: string, versionId: string, pullForward: boolean) => {
       const payload = { tenantId, versionId };
       if (!isId("tenant", tenantId) || !isId("version", versionId)) {
         throw new TypeError("enqueueVersion: expects a tenant id and a version id");
       }
       if (insideWithTenant()) throw new NestedWorkError("enqueueVersion()");
-      // A job waiting for the key (created, or in its retry delay) is brought forward rather
-      // than joined by a second one; see the header.
       const done = await boss.upsert(QUEUES.enrich, payload, {
         singletonKey: enrichKey(payload),
-        startAfter: 0,
+        // Without startAfter, pg-boss's update keeps the waiting job's start_after.
+        ...(pullForward ? { startAfter: 0 } : {}),
       });
       return done.inserted > 0 ? (done.jobs[0] ?? null) : null;
     };
+    const enqueueVersion = (tenantId: string, versionId: string) =>
+      enqueue(tenantId, versionId, true);
 
     if (worker) {
       await boss.work<unknown>(
@@ -271,7 +278,8 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
               return { skipped: true };
             }
             const done: TenantMaintenance = await maintainTenant(db, tenantId, maintenance, {
-              requeue: (p) => enqueueVersion(p.tenantId, p.versionId),
+              // Joins a waiting job without moving it: its backoff stands.
+              requeue: (p) => enqueue(p.tenantId, p.versionId, false),
               deadLettered: (t) => deadLetteredVersions(boss, t),
             });
             log.info?.({ tenantId, ...done }, "tenant maintenance done");

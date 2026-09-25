@@ -19,8 +19,24 @@ await jobs.stop(); // before db.close()
 - [`maintenance.ts`](src/maintenance.ts): pruning and the sweep, per tenant, in bounded batches.
 - [`jobs.ts`](src/jobs.ts): pg-boss, the queues, the workers and the schedule.
 
-pg-boss is pinned to an exact release (12.33.1). jobs.ts relies on how it handles singleton keys,
-retries and dead letters; read those parts of its source again before moving to another one.
+**pg-boss is pinned to exactly 12.33.1.** It was the newest release more than a week old when
+this was written (2026-09-17), and jobs.ts depends on internals that aren't covered by pg-boss's
+semver promises, only read from its source (`dist/plans.js`, `dist/manager.js`). Before moving to
+another release, read these again and rerun this package's tests on PGlite and PostgreSQL:
+
+- **`job_i3`**, the `stately` unique index on (name, state, singleton key) for created, retry and
+  active: one job per key and state is what collapses duplicate enqueues.
+- **`failJobsBody`**, the fail path: a failing job is deleted and re-inserted as `retry` with
+  `ON CONFLICT DO NOTHING`, and falls through to `failed` and the dead letter queue (`dlq_jobs`,
+  which copies the payload and singleton key) when that insert conflicts. That is why no second
+  job may wait beside a retry, and why dead letters can be found by payload.
+- **`upsert()` / `updateJob`**: it updates a created or retry job with the singleton key (keeping
+  `start_after` unless `startAfter` is given) and inserts one only when none matched, retrying the
+  update after a conflicting insert. Enqueueing is built on that.
+- **The `pglite` backend** (`attorney.js`: embedded, no compatibility flags), and which
+  statements pg-boss sends without parameters (blocks with their own BEGIN/COMMIT, index DDL done
+  CONCURRENTLY), which core-db's PGlite adapter relies on. Also that it sends no `set_config`,
+  role or `app.*` statement, which the adapter refuses.
 
 ## Where the queue lives
 
@@ -35,8 +51,10 @@ package imports; the `Database` every caller holds has no such door.
   (`poolSize`, default 4) as the same role.
 - **PGlite:** the same embedded instance. Its statements run one at a time, between the
   application's transactions; a block of pg-boss's that fails half way rolls back before
-  anyone else runs, and statements that would change the shared session (`app.*` settings, the
-  role) are refused. A call made inside a `withTenant()` callback would wait for that
+  anyone else runs. Statements that obviously change the shared session (`app.*` settings,
+  `set_config`, the role) trip an error: a check against mistakes, not a boundary (quoting gets
+  past it). What holds is core/db's: `withTenant()` refuses to run unless the session is still
+  the application's role. A call made inside a `withTenant()` callback would wait for that
   transaction forever, so it throws `NestedWorkError`.
 
 That schema is outside row-level security. So every job carries its tenant id, and every
@@ -61,11 +79,15 @@ enqueues one version.
 **One job per version.** The `enrich` queue is `stately`, keyed by tenant and version: at most
 one job per key in each of the states created, retry and active. Enqueueing goes through
 pg-boss's `upsert()`: a job that waits for the key, queued or waiting out a retry delay, is
-brought forward to run now (and `enqueueVersion` returns null); otherwise a new one is queued,
-also while one runs, since the version may have changed since that one started. Never a second
-job beside a retry: pg-boss would fail that one straight to the dead letter queue the first
-time it failed (its retry collides with the other on the key), its retries unused. One narrow
-race is left (see jobs.ts): if it happens, the version is still enriched by the retry.
+reused (and `enqueueVersion` returns null); otherwise a new one is queued, also while one runs,
+since the version may have changed since that one started. Never a second job beside a retry:
+pg-boss would fail that one straight to the dead letter queue the first time it failed (its
+retry collides with the other on the key), its retries unused. One narrow race is left (see
+jobs.ts): if it happens, the version is still enriched by the retry.
+
+A new version or a rename (`enqueueAfterIngest`, `enqueueVersion`) brings a waiting job forward
+to run now: the content may have changed what failed. The sweep only joins it, leaving its
+start alone, so a failing version keeps its backoff and doesn't spend a retry every sweep.
 
 **Steps.** An `EnrichStep` has a `name` and `run({ target, read, write, signal })`. Steps run in
 order, each after the one before succeeded. `target` is the version as the job read it when it
@@ -97,23 +119,23 @@ inside another's callback.
 with the title it read at the start. That makes the same check under the object's lock: it marks
 only the current version, under that title.
 
-| When the job ends                                | Outcome             | What happens                                      |
-| ------------------------------------------------ | ------------------- | ------------------------------------------------- |
-| the version is marked now                        | `processed`         | non-readers see what the levels allow             |
-| it was marked already (a re-run)                 | `already-processed` | nothing more                                      |
-| a newer version replaced it (at start, or later) | `superseded`        | the old version is marked done; never re-enqueued |
-| the object was renamed after the job read it     | `renamed`           | the version is enqueued again for the new title   |
-| the version or the tenant doesn't exist any more | `gone`              | nothing                                           |
-| the payload doesn't name a tenant and a version  | `invalid`           | nothing, and a warning in the log                 |
+| When the job ends                                | Outcome             | What happens                                            |
+| ------------------------------------------------ | ------------------- | ------------------------------------------------------- |
+| the version is marked now                        | `processed`         | non-readers see what the levels allow                   |
+| it was marked already (a re-run)                 | `already-processed` | nothing more                                            |
+| a newer version replaced it (at start, or later) | `superseded`        | the old version is marked superseded; never re-enqueued |
+| the object was renamed after the job read it     | `renamed`           | the version is enqueued again for the new title         |
+| the version or the tenant doesn't exist any more | `gone`              | nothing                                                 |
+| the payload doesn't name a tenant and a version  | `invalid`           | nothing, and a warning in the log                       |
 
 Superseded is checked before renamed, so a replaced version is never enqueued again. The outcome
 is stored as the job's output.
 
-**Superseded versions are marked done** (core/catalog `markSuperseded()`), so they leave the
-unprocessed set, its partial index and the sweep for good. That loosens nothing: levels,
-listings and search read only the current version's flag, and a version that was replaced
-never becomes current again. The other option, keeping them unprocessed and filtering them out
-of the sweep, would leave them in the index forever.
+**Superseded versions are given up on** (core/catalog `markSuperseded()` sets `superseded_at`),
+so they leave the pending set, its partial index (unprocessed and not superseded) and the sweep
+for good. They stay unprocessed: `processed` in `listVersions()` and `openContent()` means
+enriched. Nothing about access changes: levels, listings and search read only the current
+version, and a version that was replaced never becomes current again.
 
 **Retries and dead letters.** A step that throws fails the job (`EnrichStepError`, naming the
 step). It runs again after `retryDelaySeconds` (default 30), doubling each time up to

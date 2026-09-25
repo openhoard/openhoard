@@ -96,6 +96,12 @@ export interface Driver {
   readonly db: PgDatabase<PgQueryResultHKT, Schema>;
   /** Raw query as the owner (checks, tests). */
   readonly query: QueryRows;
+  /**
+   * The role every transaction must run as, checked as each starts (PGlite: the owner role it
+   * switched to). The embedded session starts as a superuser, and a statement that switched it
+   * back would turn row-level security off for everyone after; the check fails closed instead.
+   */
+  readonly sessionUser?: string;
   /** Applies pending migrations; safe to call from several processes at once. */
   migrate(): Promise<void>;
   /** See {@link QueueConnection}. */
@@ -198,7 +204,11 @@ export function fromDriver(driver: Driver): Database {
         async (tx) => {
           // Transaction-local, like app.tenant_id: the policy opens `tenants` to SELECT here and
           // nowhere else, and no tenant is set, so every other table shows nothing.
-          await tx.execute(sql`select set_config('app.tenant_directory', 'on', true)`);
+          await startAs(
+            driver,
+            tx as Tx,
+            sql`select set_config('app.tenant_directory', 'on', true), current_user as who`,
+          );
           const rows = await tx
             .select({ id: tenants.id })
             .from(tenants)
@@ -222,7 +232,12 @@ export function fromDriver(driver: Driver): Database {
       const settled = driver.db.transaction(async (tx) => {
         session = (tx as unknown as { session?: unknown }).session;
         // Transaction-local (the `true`), and parameterized, unlike SET LOCAL.
-        await tx.execute(sql`select set_config('app.tenant_id', ${tenantId}, true)`);
+        // …and in the same statement, who is running it (no extra round trip).
+        await startAs(
+          driver,
+          tx as Tx,
+          sql`select set_config('app.tenant_id', ${tenantId}, true), current_user as who`,
+        );
         const guarded = guardTransaction(tx as Tx);
         const inside = { open: true };
         try {
@@ -254,6 +269,33 @@ export function fromDriver(driver: Driver): Database {
   };
   drivers.set(db, driver);
   return db;
+}
+
+/**
+ * Runs a transaction's first statement, which sets its context and returns `who`, the role
+ * running it, and throws {@link SessionRoleError} unless that is the driver's `sessionUser`, so
+ * the transaction rolls back before anything else runs in it.
+ */
+async function startAs(driver: Driver, tx: Tx, first: SQL): Promise<void> {
+  const [row] = await queryRows<{ who: string }>(tx, first);
+  if (driver.sessionUser !== undefined && row?.who !== driver.sessionUser) {
+    throw new SessionRoleError(String(row?.who));
+  }
+}
+
+/**
+ * The embedded database's session no longer runs as the application's role: something switched
+ * it (raw SQL). Row-level security wouldn't apply to its superuser, so nothing runs; reopen the
+ * database.
+ */
+export class SessionRoleError extends Error {
+  constructor(who: string) {
+    super(
+      `the database session runs as ${who}, not the application's role: refusing to run ` +
+        `(row-level security would not apply). Reopen the database.`,
+    );
+    this.name = "SessionRoleError";
+  }
 }
 
 /** Each Database's driver, for the internal entry points (queue.ts); never exported. */

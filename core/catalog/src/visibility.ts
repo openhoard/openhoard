@@ -749,15 +749,14 @@ export async function markProcessed(
 }
 
 /**
- * Enrichment is done with a version a newer one replaced before it was processed: marks it
- * processed without enriching it, so it leaves the unprocessed set (the sweep's index) for good.
- * Returns false, changing nothing, unless the version exists, is unprocessed and isn't its
- * object's current version.
+ * Enrichment gives up on a version a newer one replaced before it was processed: records when
+ * (`superseded_at`), so it leaves the pending set (the sweep's index) for good. It stays
+ * unprocessed, and listVersions() and openContent() go on saying so: `processed` means enriched.
+ * Returns false, changing nothing, unless the version exists, is unprocessed, not marked yet,
+ * and isn't its object's current version.
  *
- * This loosens nothing. Levels, listings and search read only the current version's flag, and a
- * version that was replaced never becomes current again (versions only ever get a higher seq).
- * An earlier version opens only for its owner (read.ts), and its `processed` in listVersions()
- * then means what it means for every other version: enrichment has nothing more to do with it.
+ * A replaced version never becomes current again (versions only ever get a higher seq), and
+ * levels, listings and search read only the current version, so this changes nobody's access.
  */
 export async function markSuperseded(
   tx: Tx,
@@ -769,12 +768,13 @@ export async function markSuperseded(
   if (standing !== "superseded") return false;
   const updated = await tx
     .update(versions)
-    .set({ processedAt: sql`greatest(now(), ${versions.createdAt})` })
+    .set({ supersededAt: sql`greatest(now(), ${versions.createdAt})` })
     .where(
       and(
         eq(versions.tenantId, tenantId),
         eq(versions.id, versionId),
         isNull(versions.processedAt),
+        isNull(versions.supersededAt),
       ),
     )
     .returning({ id: versions.id });

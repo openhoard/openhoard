@@ -11,6 +11,7 @@ export {
   NestedWorkError,
   openDatabase,
   queryRows,
+  SessionRoleError,
   TransactionEndedError,
   type Database,
   type OpenOptions,

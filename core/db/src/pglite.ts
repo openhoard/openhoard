@@ -74,6 +74,7 @@ export async function openPglite(options: {
   return {
     kind: "pglite",
     db,
+    sessionUser: PGLITE_OWNER,
     query: async (text) => (await pglite.query<Record<string, unknown>>(text)).rows,
     // PGlite is one connection in one process, and the lock keeps other processes out.
     migrate: () => migrate(db, { migrationsFolder }),
@@ -105,8 +106,12 @@ export async function openPglite(options: {
  *
  * The session is the application's, so a statement could change what the application's next
  * transactions are: a session-level `app.*` setting, or the session's role (PGlite connects as a
- * superuser and only switches to the owner role, core-db pglite.ts). pg-boss issues neither, so
- * any statement touching them is refused ({@link UNSAFE_QUEUE_SQL}).
+ * superuser and only switches to the owner role, above). pg-boss issues neither. Statements that
+ * plainly touch them trip an error ({@link UNSAFE_QUEUE_SQL}), to catch a mistake early; it is not
+ * a boundary, and quoting (`"set_config"(…)`, `SET "app".x`) gets past it. What holds: the
+ * tenant_directory policy ignores the setting in a tenant's transactions (migration 0031), and
+ * every transaction checks, in its first statement, that it runs as the owner role
+ * (Driver.sessionUser), refusing to run otherwise.
  *
  * Called inside a withTenant() callback it would wait for the transaction lock the callback
  * holds, forever: it throws instead.
@@ -150,9 +155,9 @@ const CONCURRENT_DDL =
   /^\s*(?:create\s+(?:unique\s+)?index|drop\s+index|reindex\s+(?:\(\s*[\w\s,]*\)\s*)?\w+)\s+concurrently\b/i;
 
 /**
- * What the queue connection refuses: `app.*` settings (the tenant and the tenant directory),
- * set_config() (which can name them through a parameter), and changes of role or session
- * authorization, or a reset of every setting.
+ * What the queue connection refuses, as a tripwire for mistakes (see queueSql()): `app.*`
+ * settings (the tenant and the tenant directory), set_config() (which can name them through a
+ * parameter), and changes of role or session authorization, or a reset of every setting.
  */
 export const UNSAFE_QUEUE_SQL =
   /\bapp\s*\.|\bset_config\s*\(|\bsession\s+authorization\b|\b(?:set|reset)\s+role\b|\breset\s+all\b|\bset\s+session\b/i;

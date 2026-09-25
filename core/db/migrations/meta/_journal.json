@@ -225,6 +225,13 @@
       "when": 1790372249585,
       "tag": "0031_tenant_directory",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1790372293835,
+      "tag": "0032_versions_superseded",
+      "breakpoints": true
     }
   ]
 }

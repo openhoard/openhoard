@@ -8,6 +8,7 @@ import {
   NestedWorkError,
   openDriver,
   queryRows,
+  SessionRoleError,
   TransactionEndedError,
   type Database,
   type Driver,
@@ -557,4 +558,27 @@ describe("queue connection", () => {
     // Inside a tenant's transaction it would wait forever for it: it throws instead.
     await expect(db.withTenant(a.tenantId, () => run("select 1"))).rejects.toThrow(NestedWorkError);
   });
+
+  it.runIf(pglite)(
+    "is a tripwire, not a boundary: what gets past it still can't widen a tenant's view",
+    async () => {
+      // This test's own database (beforeEach), closed after it: the session it breaks is its own.
+      const queue = queueConnectionOf(db);
+      if (queue.kind !== "pglite") throw new Error("expected PGlite");
+      const run = queue.executeSql;
+      // Quoting gets past the refusal list, as the comments say.
+      await run(`SET "app".tenant_directory TO 'on'`);
+      const own = await db.withTenant(a.tenantId, async (tx) =>
+        (await tx.select({ id: tenants.id }).from(tenants)).map((r) => r.id),
+      );
+      expect(own).toEqual([a.tenantId]);
+      await run(`select "set_config"('session_' || 'authorization', 'postgres', false)`);
+      expect((await run("select current_user as who")).rows).toEqual([{ who: "postgres" }]);
+      // A superuser skips row-level security: every transaction refuses to run from now on.
+      await expect(db.withTenant(a.tenantId, (tx) => tx.select().from(objects))).rejects.toThrow(
+        SessionRoleError,
+      );
+      await expect(db.tenantIds()).rejects.toThrow(SessionRoleError);
+    },
+  );
 });

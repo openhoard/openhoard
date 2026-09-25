@@ -67,9 +67,17 @@ Two narrow doors besides `withTenant()`, both for core/jobs:
     (the database's owner, which may create the schema).
   - On PGlite it runs statements on the same instance, one at a time, between the
     application's transactions. A block of pg-boss's that fails half way rolls back before
-    anything else runs. Statements that would change the shared session for the application
-    (an `app.*` setting, `set_config()`, the role or session authorization, `RESET ALL`) are
-    refused; pg-boss issues none. It refuses to run inside a `withTenant()` callback too.
+    anything else runs. Statements that plainly change the shared session (an `app.*` setting,
+    `set_config()`, the role or session authorization, `RESET ALL`) trip an error, since pg-boss
+    issues none: a check against mistakes, not a boundary (quoting gets past it). What holds is
+    below. It refuses to run inside a `withTenant()` callback too.
+
+PGlite's session starts as a superuser and switches to the `openhoard` role, and a superuser
+skips row-level security. So on PGlite every `withTenant()` and `tenantIds()` checks, in the same
+statement that sets its context, that it runs as `openhoard`, and throws `SessionRoleError`
+otherwise, before anything else runs: if anything ever switched the session back, every
+transaction after fails closed. A session-level `app.tenant_directory` can't widen a tenant's
+transaction either (migration 0031).
 
 ## Grants
 

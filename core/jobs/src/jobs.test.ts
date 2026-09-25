@@ -196,6 +196,16 @@ async function processedAt(versionId: string, tenantId = t.tenantId) {
   return row?.processedAt ?? null;
 }
 
+async function supersededAt(versionId: string, tenantId = t.tenantId) {
+  const [row] = await db.withTenant(tenantId, (tx) =>
+    tx
+      .select({ supersededAt: versions.supersededAt })
+      .from(versions)
+      .where(eq(versions.id, versionId)),
+  );
+  return row?.supersededAt ?? null;
+}
+
 /** A step that runs `effect` and fails the first `failures` times. */
 function flakyStep(failures: number, effect?: () => Promise<void>) {
   const calls: number[] = [];
@@ -469,9 +479,11 @@ describe("the worker", () => {
       { outcome: "superseded" },
       { outcome: "processed" },
     ]);
-    // The replaced version is done with: it leaves the unprocessed set (and the sweep) for good.
-    expect(await processedAt(v1.versionId)).toBeInstanceOf(Date);
+    // The replaced version is given up on, not processed: it leaves the sweep for good.
+    expect(await processedAt(v1.versionId)).toBeNull();
+    expect(await supersededAt(v1.versionId)).toBeInstanceOf(Date);
     expect(await processedAt(v2.versionId)).toBeInstanceOf(Date);
+    expect(await supersededAt(v2.versionId)).toBeNull();
     expect(await enrichJobs(jobs, v1.versionId)).toHaveLength(1);
   });
 
@@ -531,7 +543,8 @@ describe("the worker", () => {
     expect(await nonReaderView(v1.objectId)).toEqual([shown]);
     // Superseded, so never enqueued again (not "renamed", though the title changed too).
     expect(await enrichJobs(jobs, v1.versionId)).toHaveLength(1);
-    expect(await processedAt(v1.versionId)).toBeInstanceOf(Date);
+    expect(await processedAt(v1.versionId)).toBeNull();
+    expect(await supersededAt(v1.versionId)).toBeInstanceOf(Date);
   });
 
   it("completes jobs that name nothing, without doing anything", async () => {
@@ -734,6 +747,40 @@ describe("maintenance", () => {
     );
     expect(await tagState(lostToo.objectId, u.tenantId)).toEqual(SPREADSHEET_TAGS);
     expect(await enrichJobs(jobs, fresh.versionId)).toEqual([]);
+  });
+
+  it("joins a job waiting out its retry delay without moving it, run after run", async () => {
+    const item = await ingestItem("Budget 2026.xlsx");
+    await backdate(t.tenantId, item.versionId, 2);
+    const flaky = flakyStep(Infinity);
+    const jobs = await start({
+      steps: [flaky.step],
+      enrich: { retryDelaySeconds: 3_600, retryLimit: 5 },
+      maintenance: {},
+    });
+    await jobs.enqueueAfterIngest(t.tenantId, item);
+    const [queued] = await enrichJobs(jobs, item.versionId);
+    const waiting = await waitFor(async () => {
+      const job = await jobs.boss.getJobById<unknown>(QUEUES.enrich, queued?.id ?? "");
+      return job?.state === "retry" ? job : null;
+    }, "the retry");
+    // Three sweeps: the version is unprocessed and old enough each time.
+    for (let run = 1; run <= 3; run++) {
+      await settled(jobs, QUEUES.maintenance, await jobs.runMaintenance());
+      await waitFor(async () => {
+        const done = await jobs.boss.findJobs<unknown>(QUEUES.maintenanceTenant, {
+          key: t.tenantId,
+        });
+        return done.filter((j) => j.state === "completed").length === run ? true : null;
+      }, `sweep ${run}`);
+    }
+    const after = await jobs.boss.getJobById<unknown>(QUEUES.enrich, queued?.id ?? "");
+    // Still the one job, still in its first retry delay, which no sweep cut short: no retry
+    // spent (pg-boss counts one when a retry starts).
+    expect(after).toMatchObject({ state: "retry", retryCount: 0 });
+    expect(after?.startAfter).toEqual(waiting.startAfter);
+    expect(await enrichJobs(jobs, item.versionId)).toHaveLength(1);
+    expect(flaky.calls).toEqual([1]);
   });
 
   it("pages past dead letters to the lost versions behind them, up to its scan cap", async () => {

@@ -202,6 +202,12 @@ export const versions = pgTable(
      * unprocessed (core/policy UNPROCESSED: hidden, metadata-only), whatever its tags say.
      */
     processedAt: timestamp("processed_at", { withTimezone: true }),
+    /**
+     * When enrichment gave up on this content, unprocessed, because a newer version replaced it
+     * (core/catalog markSuperseded()). It never becomes current again, so nothing will enrich
+     * it; `processed_at` stays null, since it never was.
+     */
+    supersededAt: timestamp("superseded_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
   (t) => [
@@ -220,10 +226,10 @@ export const versions = pgTable(
       foreignColumns: [blobs.tenantId, blobs.id],
     }),
     index("versions_blob_idx").on(t.tenantId, t.blobId),
-    // Versions enrichment hasn't finished, for core/jobs' sweep (usually few).
-    index("versions_unprocessed_idx")
+    // Versions enrichment hasn't finished and still may, for core/jobs' sweep (usually few).
+    index("versions_pending_idx")
       .on(t.tenantId, t.objectId, t.seq)
-      .where(sql`processed_at is null`),
+      .where(sql`processed_at is null and superseded_at is null`),
     idCheck("versions_id_format", "id", "version"),
     check("versions_seq_positive", sql`seq > 0`),
     check(
@@ -234,6 +240,10 @@ export const versions = pgTable(
     check(
       "versions_processed_after_creation",
       sql`processed_at is null or processed_at >= created_at`,
+    ),
+    check(
+      "versions_superseded_unprocessed",
+      sql`superseded_at is null or (processed_at is null and superseded_at >= created_at)`,
     ),
   ],
 );

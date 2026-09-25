@@ -195,6 +195,7 @@ export async function unprocessedVersions(
           and(
             eq(versions.tenantId, tenantId),
             isNull(versions.processedAt),
+            isNull(versions.supersededAt),
             lt(
               versions.createdAt,
               sql`now() - make_interval(mins => ${options.sweepAfterMinutes})`,
