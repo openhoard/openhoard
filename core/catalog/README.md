@@ -102,6 +102,26 @@ A rename lets models propose again, even over the owner's earlier decision. `mar
 `proposeDisplayTitle()` and `setDisplayTitle()` take the object's lock before comparing the title,
 so a decision about a title never lands on a rename that committed meanwhile.
 
+## Reading, behind policy
+
+What a caller may know goes through one gate, `viewObjects()`, which authorizes `read` and
+applies the file's levels (T-206). The read API is built on it, in a snapshot (`VIEW_TRANSACTION`):
+
+- `viewObject(id)` and `viewBySource({ source, externalId })`: the caller's view (card or
+  title-only), or null, alike for an unknown, deleted, hidden or other tenant's file.
+- `listVersions(id)`: newest first, metadata only (id, seq, media type, size, author, created,
+  processed, current); null unless the caller can read the file. A restored file keeps its
+  history.
+- Each checks for a snapshot before it reads anything, and treats input that can't name
+  anything (a malformed id, a NUL byte) as unknown.
+
+Views carry `primaryTag`, the file's home, when the caller is shown that tag. The other reading
+functions (`levelsFor`, `explainAccess`, `primaryTagOf`, `sourceItemState`, `listOpenReviews`…)
+answer without a caller's policy, for enrichment, connectors, admins and the API's own checks.
+`read-surface.test.ts` classifies every export as gated, write, trusted, pure or value, and fails
+on a new export until it is classified; it also checks each gated read reaches the gate before
+reading anything but source refs, and answers nothing for a caller `authorize()` refuses.
+
 ## Why can X see this?
 
 `explainAccess()` replays one decision the way the product makes it, using the same principal

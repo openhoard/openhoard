@@ -309,8 +309,33 @@ describe("viewObjects", () => {
         tags: [t.tag, "kind:report", "sensitivity:restricted"],
         readable: true,
         updatedAt: expect.any(Date),
+        primaryTag: null,
       },
     ]);
+  });
+
+  it("shows the home to a reader, and to others only when it is a tag they see", async () => {
+    await inTenant((tx) =>
+      tx
+        .update(objectTags)
+        .set({ primaryBy: "user:owner-1" })
+        .where(eq(objectTags.value, "report")),
+    );
+    await tag("sensitivity:internal");
+    expect(await view(reader())).toMatchObject([{ primaryTag: "kind:report" }]);
+    expect(await view(person())).toMatchObject([
+      { shape: "title-only", primaryTag: "kind:report" },
+    ]);
+    // A home that isn't a public tag stays with readers.
+    await inTenant(async (tx) => {
+      await tx.update(objectTags).set({ primaryBy: null });
+      await tx
+        .update(objectTags)
+        .set({ primaryBy: "user:owner-1" })
+        .where(eq(objectTags.value, t.tag.split(":")[1] ?? ""));
+    });
+    expect(await view(reader())).toMatchObject([{ primaryTag: t.tag }]);
+    expect(await view(person())).toMatchObject([{ primaryTag: null }]);
   });
 
   it("gives a non-reader a title-only card for a discoverable file: public tags only", async () => {
@@ -324,6 +349,7 @@ describe("viewObjects", () => {
         ownerId: "user:owner-1",
         tags: ["kind:report"],
         requestAccess: true,
+        primaryTag: null,
       },
     ]);
   });

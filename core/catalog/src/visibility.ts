@@ -1,6 +1,7 @@
 import {
   facets,
   facetValues,
+  isId,
   objects,
   objectTags,
   queryRows,
@@ -101,7 +102,15 @@ export interface LevelsExplanation extends ObjectLevels {
 export const MAX_OBJECT_IDS = 10_000;
 
 function distinctIds(objectIds: readonly string[], what: string): string[] {
-  const ids = [...new Set(objectIds)];
+  // Checked before any work: a list far past the cap is refused however many repeat.
+  if (objectIds.length > MAX_OBJECT_IDS * 4) {
+    throw new RangeError(
+      `${what} takes at most ${MAX_OBJECT_IDS} distinct object ids: page your ids`,
+    );
+  }
+  // Anything that isn't an object id is an unknown id, left out like one (a NUL byte would
+  // otherwise fail the query, telling a caller something an unknown id doesn't).
+  const ids = [...new Set(objectIds)].filter((id) => typeof id === "string" && isId("object", id));
   if (ids.length > MAX_OBJECT_IDS) {
     throw new RangeError(
       `${what} takes at most ${MAX_OBJECT_IDS} distinct object ids, not ${ids.length}: page your ids`,
@@ -340,6 +349,11 @@ interface ViewBase {
   /** Media type of the current version. */
   mime: string;
   ownerId: string;
+  /**
+   * The file's primary tag, its home (T-409), for breadcrumbs and grouping: shown to a reader,
+   * and to anyone else only when it is one of the tags they are shown.
+   */
+  primaryTag: string | null;
 }
 
 /** What a non-reader sees of a discoverable file. */
@@ -410,6 +424,7 @@ export async function viewObjects(
       value: objectTags.value,
       source: objectTags.source,
       reviewed: objectTags.reviewed,
+      primaryBy: objectTags.primaryBy,
       public: facets.public,
     })
     .from(objectTags)
@@ -418,11 +433,20 @@ export async function viewObjects(
       and(eq(facets.tenantId, objectTags.tenantId), eq(facets.key, objectTags.facet)),
     )
     .where(and(eq(objectTags.tenantId, tenantId), inArray(objectTags.objectId, found)));
-  const tagsOf = new Map<string, { all: string[]; grantable: string[]; public: string[] }>();
+  interface Tags {
+    all: string[];
+    grantable: string[];
+    public: string[];
+    primary: string | null;
+  }
+  const none = (): Tags => ({ all: [], grantable: [], public: [], primary: null });
+  const tagsOf = new Map<string, Tags>();
   for (const r of tagRows) {
-    const entry = tagsOf.get(r.objectId) ?? { all: [], grantable: [], public: [] };
+    const entry = tagsOf.get(r.objectId) ?? none();
     const tag = tagOf(r.facet, r.value);
     const trusted = r.source !== "model" || r.reviewed;
+    // The database never lets an untrusted tag be the home; this doesn't rely on it.
+    if (r.primaryBy !== null && trusted) entry.primary = tag;
     entry.all.push(tag);
     if (trusted) entry.grantable.push(tag);
     // Model output never reaches non-readers unconfirmed: public tags shown to them are trusted.
@@ -441,7 +465,7 @@ export async function viewObjects(
 
   const views = new Map<string, ObjectView>();
   for (const row of rows) {
-    const tags = tagsOf.get(row.id) ?? { all: [], grantable: [], public: [] };
+    const tags = tagsOf.get(row.id) ?? none();
     const level = levels.get(row.id);
     if (!level) continue;
     const canRead = authz.authorize({
@@ -464,10 +488,12 @@ export async function viewObjects(
       clientTrust: request.client.trust,
       wantsContent: false,
     });
+    const shown = canRead ? tags.all : tags.public;
     const base = {
       id: row.id,
       mime: current.get(row.id)?.mime ?? "application/octet-stream",
       ownerId: row.ownerId,
+      primaryTag: tags.primary !== null && shown.includes(tags.primary) ? tags.primary : null,
     };
     const sorted = (list: string[]) => [...list].sort();
     if (decision.shape === "title-only") {
@@ -483,7 +509,7 @@ export async function viewObjects(
         ...base,
         shape: "card",
         title: canRead ? row.title : nonReaderTitle(row),
-        tags: sorted(canRead ? tags.all : tags.public),
+        tags: sorted(shown),
         readable: canRead,
         updatedAt: row.updatedAt,
       });

@@ -66,6 +66,13 @@ export {
   type ViewRequest,
 } from "./visibility.js";
 export {
+  listVersions,
+  viewBySource,
+  viewObject,
+  type SourceItem,
+  type VersionView,
+} from "./read.js";
+export {
   explainAccess,
   ExplainError,
   type AccessExplanation,
