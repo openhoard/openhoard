@@ -62,6 +62,7 @@ export {
   type LevelsExplanation,
   type ObjectLevels,
   type ObjectView,
+  type RecordedRequest,
   type TitleOnlyView,
   type ViewOptions,
   type ViewRequest,

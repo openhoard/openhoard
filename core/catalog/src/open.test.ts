@@ -20,7 +20,13 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ActivityBuffer } from "./activity.js";
 import { blobIdOf, ingest } from "./ingest.js";
 import { openContent } from "./read.js";
-import { markProcessed, VIEW_TRANSACTION, viewObjects, type ViewRequest } from "./visibility.js";
+import {
+  markProcessed,
+  VIEW_TRANSACTION,
+  viewObjects,
+  type RecordedRequest,
+  type ViewRequest,
+} from "./visibility.js";
 
 /* T-205: openContent(), the one way to the bytes, behind `read`, `open` and exposure. */
 
@@ -72,7 +78,7 @@ const open = (
   options: { trust?: Trust; versionId?: string; gate?: Authorizer; objectId?: string } = {},
 ) => {
   const activity = new ActivityBuffer();
-  const request: ViewRequest = {
+  const request: RecordedRequest = {
     principal,
     client: { id: "a-client", trust: options.trust ?? "first-party" },
     activity,
@@ -136,6 +142,23 @@ describe("openContent", () => {
     expect(first.opened?.version).toMatchObject({ id: t.versionId, seq: 1, current: false });
     expect(first.opened?.blobId).toBe(t.blobId);
     expect(first.events.map((e) => e.versionId)).toEqual([t.versionId]);
+  });
+
+  it("opens an earlier version only through a first-party client", async () => {
+    const saved = await saveVersion(2);
+    await db.withTenant(t.tenantId, (tx) =>
+      markProcessed(tx, t.tenantId, { versionId: saved.versionId, title: "Report 1.docx" }),
+    );
+    for (const trust of ["local", "commercial", "consumer"] as const) {
+      const old = await open(reader(), { trust, versionId: t.versionId });
+      expect(old.opened, trust).toBeNull();
+      expect(old.events, trust).toEqual([]);
+    }
+    // The current version, named by id, is the current one: the levels describe it.
+    const v2 = await open(reader(), { trust: "local" });
+    expect(v2.opened).not.toBeNull();
+    const byId = await open(reader(), { trust: "local", versionId: saved.versionId });
+    expect(byId.opened?.version.current).toBe(true);
   });
 
   it("gives location for a managed zone's bytes", async () => {
@@ -210,7 +233,11 @@ describe("openContent", () => {
   });
 
   it("needs a snapshot, and doesn't take content with search", async () => {
-    const request: ViewRequest = { principal: reader(), client: { id: "c", trust: "first-party" } };
+    const request: RecordedRequest = {
+      principal: reader(),
+      client: { id: "c", trust: "first-party" },
+      activity: new ActivityBuffer(),
+    };
     await expect(
       db.withTenant(t.tenantId, (tx) => openContent(tx, t.tenantId, authz, request, t.objectId)),
     ).rejects.toThrow(/repeatable read/);

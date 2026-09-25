@@ -116,7 +116,9 @@ applies the file's levels (T-206). The read API is built on it, in a snapshot (`
 - `openContent(id, { versionId? })`: which bytes to serve (blob id, and location for a managed
   zone), never the bytes; the caller reads them from core/storage. It takes a reader, `open`
   authorized, and levels that let the client have content (an AI client's trust against the
-  file's exposure: `viewObjects(…, { content: true })`). Null otherwise, alike for every reason.
+  file's exposure: `viewObjects(…, { content: true })`). An earlier version opens only through
+  a first-party client, since the levels describe the current content. Null otherwise, alike for
+  every reason.
 - Each checks for a snapshot before it reads anything, and treats input that can't name
   anything (a malformed id, a NUL byte) as unknown.
 
@@ -131,28 +133,34 @@ reading anything but source refs, and answers nothing for a caller `authorize()`
 
 `activity_events` records who viewed, opened, edited or shared which file, when, and through
 which client (T-205), for `recent` (T-506), ranking and the Health Report. It is not the audit
-log: no hash chain, no lock, repeat views merge, and `pruneActivity()` drops old events.
+log: no hash chain, no advisory lock, repeat views merge, and `pruneActivity()` drops old
+events in bounded batches.
 
-- `viewObject`, `viewBySource`, `listVersions` record a `view`; `openContent` an `open` of the
-  version it served. Listings (`viewObjects`) and search record nothing. Only an answer is
-  recorded: a refused or unknown file leaves no event.
-- They run in a read-only snapshot, so they record into the request's `activity`
-  (an `ActivityBuffer`), and the caller writes it with `writeActivity()` in its own transaction
-  after the snapshot, never nested in it. **The API must pass a buffer on every request and
-  write it**, as it must audit every read.
-- `ingest` records an `edit` by the version's author, when the source names one, with the
-  source as `origin` (when the crawl saw it, not when it was saved).
+- `viewObject`, `viewBySource` and `listVersions` record a `view` when a reader looked at the
+  file (a non-reader's card or title isn't one); `openContent` an `open` of the version it
+  served. Listings (`viewObjects`) and search record nothing, and a refused or unknown file
+  leaves no event.
+- They run in a read-only snapshot, so they record into `request.activity` (an
+  `ActivityBuffer`), which their request type (`RecordedRequest`) requires: without one they
+  throw before reading. The caller writes it with `writeActivity()` in its own transaction after
+  the snapshot, never nested in it.
+- `ingest` records an `edit` by the version's author when the source names the author as a
+  user (`user:usr_…`) and when they saved it (`modifiedAt`), with the source as `origin`.
+  Without both, nothing: a first crawl isn't today's work.
 - An AI read is a view or open through a client that isn't first-party: events keep the
-  client's id and trust.
-- A view or open repeating one (same person, file, version, client) within
-  `REPEAT_WINDOW_MS` (15 minutes) merges into it. Imported events (the M365 feed, T-307) carry
-  their origin's event id, so a re-import adds nothing.
+  client's id and trust, and `listActivity({ clientTrusts })` filters on it.
+- A view or open repeating one (same person, file, version, client) less than
+  `REPEAT_WINDOW_MS` (15 minutes) after it merges into it. Imported events (the M365 feed,
+  T-307) carry their origin's event id, so a re-import adds nothing.
 - `listActivity()` is trusted: it names files the caller may not know about. `recent` passes
-  them through the gate before showing any.
+  them through the gate before showing any. It pages newest first with `after` (the last
+  event's time and id).
+- An insert takes FOR KEY SHARE on its object row (the foreign key). In a transaction that also
+  appends audit, write activity first: audit's lock is last.
 - `share` is a type waiting for the share feature; nothing records it yet.
 
-`read-surface.test.ts` checks every gated read of one file records exactly its event, a
-refused one nothing, and listings nothing.
+`read-surface.test.ts` sorts every gated read into recording or listing, and checks each
+recording read requires a recorder, records exactly its event, and nothing for a refusal.
 
 ## Search
 

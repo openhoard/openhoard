@@ -28,8 +28,10 @@ import { and, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
  * Never nest the write inside the snapshot (on PGlite, one connection, that waits forever), and
  * write even when the read returned nothing: the buffer is then empty.
  *
- * This is not the audit log (core/audit): no hash chain and no lock, repeat views merge, and old
- * events can be pruned. An AI read is a view or open made through a client that isn't
+ * This is not the audit log (core/audit): no hash chain and no advisory lock, repeat views merge,
+ * and old events can be pruned. Each insert does take FOR KEY SHARE on its object's row (the
+ * foreign key), so it waits for an ingest holding that row; in a transaction that also appends
+ * audit, write activity first (audit's lock is last, see core/audit). An AI read is a view or open made through a client that isn't
  * first-party; the event keeps the client's id and trust.
  */
 
@@ -80,7 +82,8 @@ export class ActivityBuffer implements ActivityRecorder {
 
 /**
  * A view or open repeating one by the same actor, of the same file and version, through the same
- * client, within this window merges into it: reading a file for an hour is one event, not 300.
+ * client, less than this long after it merges into it (and doesn't move its time): an hour spent
+ * in a file is about four events, not 300.
  */
 export const REPEAT_WINDOW_MS = 15 * 60 * 1000;
 
@@ -214,6 +217,10 @@ export interface ActivityFilter {
   from?: Date;
   /** Before this time. */
   to?: Date;
+  /** Through these kinds of client only: `["local", "commercial", "consumer"]` is AI reads. */
+  clientTrusts?: readonly AuthzClient["trust"][];
+  /** The page after this event (the last one of the previous page), for paging. */
+  after?: { at: Date; id: string };
   /** At most this many, newest first (default and maximum ACTIVITY_PAGE). */
   limit?: number;
 }
@@ -255,6 +262,18 @@ export async function listActivity(
   if (filter.objectId !== undefined) where.push(eq(t.objectId, filter.objectId));
   if (filter.from !== undefined) where.push(gte(t.at, filter.from));
   if (filter.to !== undefined) where.push(lt(t.at, filter.to));
+  if (filter.clientTrusts !== undefined) {
+    if (filter.clientTrusts.length === 0) return [];
+    where.push(inArray(t.clientTrust, [...filter.clientTrusts]));
+  }
+  if (filter.after !== undefined) {
+    // Newest first: older than the last event seen, or as old with a smaller id.
+    const { at, id } = filter.after;
+    if (!(at instanceof Date) || Number.isNaN(at.getTime()) || !isId("activity", id)) {
+      throw new RangeError("activity: invalid after");
+    }
+    where.push(sql`(${t.at}, ${t.id}) < (${at.toISOString()}::timestamptz, ${id})`);
+  }
   const rows = await tx
     .select()
     .from(t)
@@ -275,14 +294,30 @@ export async function listActivity(
   }));
 }
 
-/** Removes a tenant's activity from before `before` (retention); returns how many went. */
-export async function pruneActivity(tx: Tx, tenantId: string, before: Date): Promise<number> {
+/**
+ * Removes up to `limit` of a tenant's events from before `before` (retention), oldest first;
+ * returns how many went. Call it again until it returns less than the limit.
+ */
+export async function pruneActivity(
+  tx: Tx,
+  tenantId: string,
+  before: Date,
+  limit = 10_000,
+): Promise<number> {
   if (!(before instanceof Date) || Number.isNaN(before.getTime())) {
     throw new RangeError("activity: invalid time");
   }
-  const rows = await tx
-    .delete(activityEvents)
-    .where(and(eq(activityEvents.tenantId, tenantId), lt(activityEvents.at, before)))
-    .returning({ id: activityEvents.id });
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100_000) {
+    throw new RangeError("activity: limit is 1 to 100000");
+  }
+  const rows = await queryRows<{ id: string }>(
+    tx,
+    sql`delete from activity_events
+         where tenant_id = ${tenantId} and id in (
+           select id from activity_events
+            where tenant_id = ${tenantId} and at < ${before.toISOString()}::timestamptz
+            order by at limit ${limit})
+        returning id`,
+  );
   return rows.length;
 }

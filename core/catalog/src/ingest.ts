@@ -76,6 +76,12 @@ export interface IngestInput {
   mime?: string;
   /** Principal that saved this content, when the source says. */
   authorId?: string;
+  /**
+   * When the source says this content was saved. With an author who is a user (`user:usr_…`),
+   * a new version records their `edit` at this time (T-205); without both, no edit is recorded,
+   * so a first crawl doesn't make a tenant's whole history look like today's work.
+   */
+  modifiedAt?: Date;
   /** The source's marker for this content (e.g. a SharePoint cTag), kept on the version. */
   sourceVersion?: string;
   /** The source's change marker for the item (e.g. an eTag), for delta sync. */
@@ -323,6 +329,12 @@ function validate(input: IngestInput) {
     bad("authorId", "must be a principal such as user:…");
   }
   text("principal", "authorId", input.authorId);
+  if (input.modifiedAt !== undefined) {
+    const t = input.modifiedAt instanceof Date ? input.modifiedAt.getTime() : NaN;
+    if (!(t >= Date.UTC(1970, 0, 1) && t < Date.UTC(10000, 0, 1))) {
+      bad("modifiedAt", "must be a time from 1970 to 9999");
+    }
+  }
   const { blobId, size, location } = input.content;
   if (!BLOB_ID.test(blobId)) bad("content.blobId", "must be a b3t: blob id");
   if (!Number.isSafeInteger(size) || size < 0) {
@@ -493,8 +505,9 @@ async function ensureBlob(tx: Tx, tenantId: string, content: IngestInput["conten
 }
 
 /**
- * A new version is an edit by its author (T-205), when the source names one, as observed by
- * this source's crawl: `at` is when ingest saw it, not when it was saved.
+ * A new version is an edit by its author (T-205), as this source saw it, when the source names
+ * both the author, as a user, and when they saved it. A connector maps its own ids to users
+ * first; an author it can't map records nothing.
  */
 async function noteEdit(
   tx: Tx,
@@ -503,9 +516,13 @@ async function noteEdit(
   objectId: string,
   versionId: string,
 ) {
-  if (input.authorId === undefined) return;
+  const { authorId, modifiedAt } = input;
+  if (authorId === undefined || modifiedAt === undefined) return;
+  if (!authorId.startsWith(USER_PREFIX) || !isId("user", authorId.slice(USER_PREFIX.length))) {
+    return;
+  }
   await writeActivity(tx, tenantId, [
-    { type: "edit", actor: input.authorId, objectId, versionId, origin: input.source },
+    { type: "edit", actor: authorId, objectId, versionId, origin: input.source, at: modifiedAt },
   ]);
 }
 

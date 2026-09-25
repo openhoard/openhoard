@@ -8,7 +8,7 @@ import {
   viewObjects,
   type CardView,
   type ObjectView,
-  type ViewRequest,
+  type RecordedRequest,
 } from "./visibility.js";
 
 /*
@@ -18,8 +18,9 @@ import {
  * may not know about is left out exactly as an unknown id is. None of them returns content:
  * openContent() says which blob to read, and the caller reads it from core/storage.
  *
- * Each one records the caller's activity (T-205) in the request's recorder: a `view` for a
- * file it answered about, an `open` for openContent(). See activity.ts.
+ * Each one records the caller's activity (T-205) in the request's recorder, which it must
+ * have: a `view` when a reader looked at the file (not a non-reader's card or title), an `open`
+ * for openContent(). See activity.ts.
  *
  * The other catalog exports that read (levelsFor, sourceItemState, primaryTagOf, explainAccess,
  * listOpenReviews…) answer without a caller's policy: they are for enrichment, connectors,
@@ -37,14 +38,15 @@ export async function viewObject(
   tx: Tx,
   tenantId: string,
   authz: Authorizer,
-  request: ViewRequest,
+  request: RecordedRequest,
   objectId: string,
 ): Promise<ObjectView | null> {
   await requireSnapshot(tx, "viewObject");
+  requireRecorder(request);
   if (typeof objectId !== "string" || !isId("object", objectId)) return null;
   const [view] = await viewObjects(tx, tenantId, authz, request, [objectId]);
   if (!view) return null;
-  noteActivity(request, "view", view.id, null);
+  noteView(request, view);
   return view;
 }
 
@@ -62,10 +64,11 @@ export async function viewBySource(
   tx: Tx,
   tenantId: string,
   authz: Authorizer,
-  request: ViewRequest,
+  request: RecordedRequest,
   item: SourceItem,
 ): Promise<ObjectView | null> {
   await requireSnapshot(tx, "viewBySource");
+  requireRecorder(request);
   const named = (s: unknown) => typeof s === "string" && s.length > 0 && !s.includes("\0");
   if (
     !named(item.source) ||
@@ -87,7 +90,7 @@ export async function viewBySource(
   if (!ref) return null;
   const [view] = await viewObjects(tx, tenantId, authz, request, [ref.objectId]);
   if (!view) return null;
-  noteActivity(request, "view", view.id, null);
+  noteView(request, view);
   return view;
 }
 
@@ -118,10 +121,11 @@ export async function listVersions(
   tx: Tx,
   tenantId: string,
   authz: Authorizer,
-  request: ViewRequest,
+  request: RecordedRequest,
   objectId: string,
 ): Promise<VersionView[] | null> {
   await requireSnapshot(tx, "listVersions");
+  requireRecorder(request);
   if (typeof objectId !== "string" || !isId("object", objectId)) return null;
   const [view] = await viewObjects(tx, tenantId, authz, request, [objectId]);
   if (view?.shape !== "card" || !view.readable) return null;
@@ -149,7 +153,7 @@ export async function listVersions(
       ),
     )
     .orderBy(desc(versions.seq));
-  noteActivity(request, "view", view.id, null);
+  noteView(request, view);
   return rows.map((r, i) => ({
     id: r.id,
     seq: r.seq,
@@ -178,19 +182,22 @@ export interface OpenedContent {
 /**
  * Opening a file (T-205): which content the caller may have, the current version's or, with
  * `versionId`, an earlier one's. It takes a reader, `open` authorized for them, and levels that
- * let their client have the content (an AI client's trust against the file's exposure). Null
- * when any of that fails, or there is no such file or version, indistinguishably; viewObject()
- * tells a reader whether they can read the file at all. Records an `open` of that version.
+ * let their client have the content (an AI client's trust against the file's exposure); an
+ * earlier version, only through a first-party client, since the levels are the current
+ * content's. Null when any of that fails, or there is no such file or version,
+ * indistinguishably; viewObject() tells a reader whether they can read the file at all.
+ * Records an `open` of that version.
  */
 export async function openContent(
   tx: Tx,
   tenantId: string,
   authz: Authorizer,
-  request: ViewRequest,
+  request: RecordedRequest,
   objectId: string,
   options: { versionId?: string } = {},
 ): Promise<OpenedContent | null> {
   await requireSnapshot(tx, "openContent");
+  requireRecorder(request);
   if (typeof objectId !== "string" || !isId("object", objectId)) return null;
   const wanted = options.versionId;
   if (wanted !== undefined && (typeof wanted !== "string" || !isId("version", wanted))) {
@@ -227,6 +234,10 @@ export async function openContent(
   const i = wanted === undefined ? 0 : rows.findIndex((r) => r.id === wanted);
   const row = rows[i];
   if (!row) return null;
+  // Levels and rules describe the current content: an earlier version may have been tagged
+  // stricter, or never processed. Until levels are kept per version, only a person, through
+  // OpenHoard, opens one.
+  if (i !== 0 && request.client.trust !== "first-party") return null;
   noteActivity(request, "open", view.id, row.id);
   return {
     view,
@@ -250,14 +261,26 @@ function newestSeq(tenantId: string, objectId: string) {
   return sql`(select max(v.seq) from versions v where v.tenant_id = ${tenantId} and v.object_id = ${objectId})`;
 }
 
-/** Records the caller's activity, when the request carries a recorder. */
+/** A recording read refuses a request without a recorder, before it reads anything. */
+function requireRecorder(request: RecordedRequest): void {
+  if (typeof request.activity?.record !== "function") {
+    throw new TypeError("a read of one file needs request.activity (an ActivityRecorder)");
+  }
+}
+
+/** A reader's look at the file is a view; a non-reader's card or title isn't. */
+function noteView(request: RecordedRequest, view: ObjectView): void {
+  if (view.shape === "card" && view.readable) noteActivity(request, "view", view.id, null);
+}
+
+/** Records the caller's activity. */
 function noteActivity(
-  request: ViewRequest,
+  request: RecordedRequest,
   type: ActivityType,
   objectId: string,
   versionId: string | null,
 ): void {
-  request.activity?.record({
+  request.activity.record({
     type,
     actor: `user:${request.principal.userId}`,
     objectId,

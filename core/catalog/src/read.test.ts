@@ -23,7 +23,13 @@ import fc from "fast-check";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { blobIdOf, ingest, removeFromSource } from "./ingest.js";
 import { listVersions, viewBySource, viewObject } from "./read.js";
-import { markProcessed, VIEW_TRANSACTION, type ViewRequest } from "./visibility.js";
+import { ActivityBuffer } from "./activity.js";
+import {
+  markProcessed,
+  VIEW_TRANSACTION,
+  type RecordedRequest,
+  type ViewRequest,
+} from "./visibility.js";
 
 /* T-206: the catalog read API, behind policy. */
 
@@ -77,9 +83,10 @@ const person = (more: Partial<AuthzPrincipal> = {}): AuthzPrincipal => ({
   ...more,
 });
 const reader = () => person({ userId: "ana", tagGrants: [t.tag] });
-const request = (principal: AuthzPrincipal, trust: Trust = "first-party"): ViewRequest => ({
+const request = (principal: AuthzPrincipal, trust: Trust = "first-party"): RecordedRequest => ({
   principal,
   client: { id: "a-client", trust },
+  activity: new ActivityBuffer(),
 });
 const snapshot = <T>(work: (tx: Tx) => Promise<T>, tenantId = t.tenantId) =>
   db.withTenant(tenantId, work, VIEW_TRANSACTION);

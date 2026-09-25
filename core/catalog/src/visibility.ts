@@ -383,12 +383,17 @@ export type ObjectView = TitleOnlyView | CardView;
 export interface ViewRequest {
   principal: AuthzPrincipal;
   client: AuthzClient;
-  /**
-   * Where reads that serve one file record the caller's view or open (activity.ts). The API
-   * always passes one and writes what it holds after the snapshot; without one, nothing is
-   * recorded. Listings (viewObjects) and search never record.
-   */
+  /** Ignored here; see RecordedRequest. */
   activity?: ActivityRecorder;
+}
+
+/**
+ * A request to a read that serves one file (viewObject, viewBySource, listVersions,
+ * openContent): it records the caller's view or open in `activity` (T-205), which the caller
+ * writes with writeActivity() once the snapshot ends. Required, so a route can't forget it.
+ */
+export interface RecordedRequest extends ViewRequest {
+  activity: ActivityRecorder;
 }
 
 export interface ViewOptions {

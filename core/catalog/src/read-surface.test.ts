@@ -3,7 +3,7 @@ import type { Tx } from "@openhoard/core-db";
 import type { Authorizer } from "@openhoard/core-policy";
 import { describe, expect, it } from "vitest";
 import * as catalog from "./index.js";
-import type { ViewRequest } from "./visibility.js";
+import type { RecordedRequest } from "./visibility.js";
 
 /*
  * T-206: no read path bypasses policy. Every runtime export of @openhoard/core-catalog is in
@@ -99,13 +99,17 @@ const SURFACE = {
   ],
 } as const;
 
-/** The gated reads that record activity (a view, or an open), and what each records. */
+/**
+ * T-205: every gated read either serves one file, and records the caller's view or open, or
+ * lists files (listings, search), and records nothing. Each is in exactly one of the two.
+ */
 const RECORDING = {
   listVersions: "view",
   openContent: "open",
   viewBySource: "view",
   viewObject: "view",
 } as const;
+const LISTING = ["searchObjects", "suggestTitles", "viewObjects"] as const;
 
 /** The gated reads in search.ts, which reach viewObjects() through gatedMatches(). */
 const SEARCH: readonly string[] = ["searchObjects", "suggestTitles"];
@@ -200,7 +204,7 @@ describe("the catalog's export surface", () => {
       const deny = {
         authorize: () => ({ allow: false, kind: "no-permit", reason: "deny", policies: [] }),
       } as unknown as Authorizer;
-      const request: ViewRequest = {
+      const request: RecordedRequest = {
         principal: {
           userId: "bo",
           groupIds: [],
@@ -212,6 +216,7 @@ describe("the catalog's export surface", () => {
           active: true,
         },
         client: { id: "openhoard-web", trust: "first-party" },
+        activity: new catalog.ActivityBuffer(),
       };
       // One call per gated export: a new one fails here until it has a case.
       const CALLS: Record<(typeof SURFACE.gated)[number], (tx: Tx) => Promise<unknown>> = {
@@ -240,6 +245,23 @@ describe("the catalog's export surface", () => {
     }
   });
 
+  it("sorts every gated read into recording or listing, and records through the request", () => {
+    expect([...Object.keys(RECORDING), ...LISTING].sort()).toEqual([...SURFACE.gated].sort());
+    const text = source("./read.ts");
+    for (const name of Object.keys(RECORDING)) {
+      const from = text.indexOf(`export async function ${name}(`);
+      const next = text.indexOf("\nexport ", from + 1);
+      const body = text.slice(from, next === -1 ? undefined : next);
+      // The recorder is checked before anything is read, and something records.
+      const check = body.indexOf("requireRecorder(");
+      expect(check, name).toBeGreaterThan(-1);
+      for (const read of [body.search(/\btx\s*\./), body.search(/\bviewObjects\(/)]) {
+        if (read > -1) expect(check, name).toBeLessThan(read);
+      }
+      expect(body, name).toMatch(/\bnote(View|Activity)\(/);
+    }
+  });
+
   it("records one view or open for every gated read of one file, and nothing for listings", async () => {
     const { openTestDatabase, seedTenant } = await import("@openhoard/core-db/testing");
     const db = await openTestDatabase();
@@ -265,7 +287,7 @@ describe("the catalog's export surface", () => {
       };
       const run = async (authz: Authorizer, name: (typeof SURFACE.gated)[number]) => {
         const activity = new catalog.ActivityBuffer();
-        const request: ViewRequest = { principal, client, activity };
+        const request: RecordedRequest = { principal, client, activity };
         const calls: Record<(typeof SURFACE.gated)[number], (tx: Tx) => Promise<unknown>> = {
           viewObjects: (tx) => catalog.viewObjects(tx, t.tenantId, authz, request, [t.objectId]),
           viewObject: (tx) => catalog.viewObject(tx, t.tenantId, authz, request, t.objectId),
@@ -288,6 +310,7 @@ describe("the catalog's export surface", () => {
         const { got, events } = await run(allow, name);
         const type = (RECORDING as Record<string, string>)[name];
         if (type === undefined) {
+          expect(LISTING as readonly string[], name).toContain(name);
           expect(events, `${name} is a listing: it records nothing`).toEqual([]);
           continue;
         }
@@ -304,9 +327,23 @@ describe("the catalog's export surface", () => {
         // What the caller may not know about leaves no trace either.
         expect((await run(deny, name)).events, `${name} refused`).toEqual([]);
       }
-      // Every recording read is gated.
-      for (const name of Object.keys(RECORDING)) {
-        expect(SURFACE.gated as readonly string[], name).toContain(name);
+      // A read of one file without a recorder is refused, before it reads anything.
+      const bare = { principal, client } as unknown as RecordedRequest;
+      const unrecorded: Record<keyof typeof RECORDING, (tx: Tx) => Promise<unknown>> = {
+        viewObject: (tx) => catalog.viewObject(tx, t.tenantId, allow, bare, t.objectId),
+        viewBySource: (tx) =>
+          catalog.viewBySource(tx, t.tenantId, allow, bare, {
+            source: "sharepoint",
+            externalId: t.externalId,
+          }),
+        listVersions: (tx) => catalog.listVersions(tx, t.tenantId, allow, bare, t.objectId),
+        openContent: (tx) => catalog.openContent(tx, t.tenantId, allow, bare, t.objectId),
+      };
+      for (const [name, call] of Object.entries(unrecorded)) {
+        await expect(
+          db.withTenant(t.tenantId, call, catalog.VIEW_TRANSACTION),
+          name,
+        ).rejects.toThrow(/request\.activity/);
       }
       // What they record, the caller can write once the snapshot ends.
       const { events } = await run(allow, "openContent");
