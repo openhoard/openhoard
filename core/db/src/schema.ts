@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { EXPOSURE, VISIBILITY } from "@openhoard/core-policy";
+import { EXPOSURE, VISIBILITY, type ClientTrust } from "@openhoard/core-policy";
 import {
   bigint,
   boolean,
@@ -207,6 +207,8 @@ export const versions = pgTable(
   (t) => [
     primaryKey({ columns: [t.tenantId, t.id] }),
     unique("versions_seq_unique").on(t.tenantId, t.objectId, t.seq),
+    // For foreign keys that name a version of a given object (activity_events).
+    unique("versions_object_id_unique").on(t.tenantId, t.objectId, t.id),
     foreignKey({
       name: "versions_object_fk",
       columns: [t.tenantId, t.objectId],
@@ -873,6 +875,88 @@ export const tenantPacks = pgTable(
   ],
 );
 
+export const ACTIVITY_TYPES = ["view", "open", "edit", "share"] as const;
+export const CLIENT_TRUSTS = [
+  "first-party",
+  "local",
+  "commercial",
+  "consumer",
+] as const satisfies readonly ("first-party" | ClientTrust)[];
+
+/**
+ * Activity (T-205): who viewed, opened, edited or shared which file, when, and through which
+ * client, for `recent` ("CSV files I opened yesterday", T-506), ranking and the Health Report.
+ *
+ * It is not the audit log. Audit is the tamper-evident record of every access decision; this is
+ * a working index of what people did, so it is prunable (retention), repeat views are merged,
+ * and it takes no lock. `origin` says who observed the event: `openhoard` for what OpenHoard
+ * served, a connector's source for an edit a crawl found, a feed for imported events (the M365
+ * audit feed, T-307), whose own event id goes in `external_id` so a re-import adds nothing.
+ *
+ * An AI read is a view or open whose client isn't first-party: `client_trust` says which.
+ */
+export const activityEvents = pgTable(
+  "activity_events",
+  {
+    tenantId: text("tenant_id").notNull(),
+    id: text("id").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+    /** The principal who acted, e.g. `user:usr_…`. */
+    actor: text("actor").notNull(),
+    type: text("type").notNull(),
+    objectId: text("object_id").notNull(),
+    /** The version opened or saved; null for a view, or when the source doesn't say. */
+    versionId: text("version_id"),
+    /** The client the request came through (an OAuth client id); null when not through one. */
+    clientId: text("client_id"),
+    clientTrust: text("client_trust"),
+    origin: text("origin").notNull().default("openhoard"),
+    /** The event's id at its origin, for imported events. */
+    externalId: text("external_id"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    // Activity is about files, and goes with them: purging an object removes its activity.
+    foreignKey({
+      name: "activity_events_object_fk",
+      columns: [t.tenantId, t.objectId],
+      foreignColumns: [objects.tenantId, objects.id],
+    }).onDelete("cascade"),
+    // A version of that object (with no version, nothing to check).
+    foreignKey({
+      name: "activity_events_version_fk",
+      columns: [t.tenantId, t.objectId, t.versionId],
+      foreignColumns: [versions.tenantId, versions.objectId, versions.id],
+    }).onDelete("cascade"),
+    // recent(): one person's activity, newest first.
+    index("activity_events_actor_idx").on(t.tenantId, t.actor, t.at),
+    // An object's activity, and the check for a repeat view.
+    index("activity_events_object_idx").on(t.tenantId, t.objectId, t.at),
+    // Retention prunes by time.
+    index("activity_events_at_idx").on(t.tenantId, t.at),
+    uniqueIndex("activity_events_external_unique")
+      .on(t.tenantId, t.origin, t.externalId)
+      .where(sql`external_id is not null`),
+    idCheck("activity_events_id_format", "id", "activity"),
+    check("activity_events_actor_principal", sql`actor ~ '^[a-z]+:.+$'`),
+    check("activity_events_type_valid", sql.raw(`type in (${quoted(ACTIVITY_TYPES)})`)),
+    check("activity_events_client_complete", sql`(client_id is null) = (client_trust is null)`),
+    check(
+      "activity_events_client_trust_valid",
+      sql.raw(`client_trust is null or client_trust in (${quoted(CLIENT_TRUSTS)})`),
+    ),
+    check(
+      "activity_events_client_id_length",
+      sql`client_id is null or char_length(client_id) between 1 and 256`,
+    ),
+    check("activity_events_origin_format", sql`origin ~ '^[a-z0-9][a-z0-9._-]{0,63}$'`),
+    check(
+      "activity_events_external_id_length",
+      sql`external_id is null or char_length(external_id) between 1 and 512`,
+    ),
+  ],
+);
+
 /*
  * Audit (T-701): one append-only, hash-chained log per tenant, in its own schema. core/audit
  * appends and verifies; the chain rules are in core/audit/src/chain.ts.
@@ -936,4 +1020,5 @@ export const tables = {
   tenantPacks,
   principalEpochs,
   apiKeys,
+  activityEvents,
 } as const;

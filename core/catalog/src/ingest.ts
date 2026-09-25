@@ -11,6 +11,7 @@ import {
   type Tx,
 } from "@openhoard/core-db";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { writeActivity } from "./activity.js";
 import { contentHasher, scopedBlobId } from "./hash.js";
 import { lockObject, lockSourceItem } from "./locks.js";
 
@@ -182,6 +183,7 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
     });
     const version = await addVersion(tx, tenantId, objectId, 1, input, normalizeMime(input.mime));
     await tx.insert(sourceRefs).values({ tenantId, source, externalId, objectId, ...refFields });
+    await noteEdit(tx, tenantId, input, objectId, version.versionId);
     return {
       objectId,
       ...version,
@@ -242,6 +244,7 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
     }
   } else {
     version = await addVersion(tx, tenantId, objectId, (latest?.seq ?? 0) + 1, input, mime);
+    await noteEdit(tx, tenantId, input, objectId, version.versionId);
   }
 
   const restored = object.deletedAt !== null;
@@ -487,6 +490,23 @@ async function ensureBlob(tx: Tx, tenantId: string, content: IngestInput["conten
       );
   }
   return false;
+}
+
+/**
+ * A new version is an edit by its author (T-205), when the source names one, as observed by
+ * this source's crawl: `at` is when ingest saw it, not when it was saved.
+ */
+async function noteEdit(
+  tx: Tx,
+  tenantId: string,
+  input: IngestInput,
+  objectId: string,
+  versionId: string,
+) {
+  if (input.authorId === undefined) return;
+  await writeActivity(tx, tenantId, [
+    { type: "edit", actor: input.authorId, objectId, versionId, origin: input.source },
+  ]);
 }
 
 async function addVersion(

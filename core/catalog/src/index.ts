@@ -76,11 +76,26 @@ export {
 } from "./search.js";
 export {
   listVersions,
+  openContent,
   viewBySource,
   viewObject,
+  type OpenedContent,
   type SourceItem,
   type VersionView,
 } from "./read.js";
+export {
+  ACTIVITY_PAGE,
+  ActivityBuffer,
+  listActivity,
+  pruneActivity,
+  REPEAT_WINDOW_MS,
+  writeActivity,
+  type ActivityEvent,
+  type ActivityFilter,
+  type ActivityInput,
+  type ActivityRecorder,
+  type ActivityType,
+} from "./activity.js";
 export {
   explainAccess,
   ExplainError,

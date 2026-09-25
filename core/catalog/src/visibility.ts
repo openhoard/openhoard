@@ -24,6 +24,7 @@ import {
   type Visibility,
 } from "@openhoard/core-policy";
 import { and, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import type { ActivityRecorder } from "./activity.js";
 import { lockObject } from "./locks.js";
 
 /*
@@ -382,6 +383,12 @@ export type ObjectView = TitleOnlyView | CardView;
 export interface ViewRequest {
   principal: AuthzPrincipal;
   client: AuthzClient;
+  /**
+   * Where reads that serve one file record the caller's view or open (activity.ts). The API
+   * always passes one and writes what it holds after the snapshot; without one, nothing is
+   * recorded. Listings (viewObjects) and search never record.
+   */
+  activity?: ActivityRecorder;
 }
 
 export interface ViewOptions {
@@ -391,6 +398,12 @@ export interface ViewOptions {
    * whose rules fail to evaluate (fail closed).
    */
   search?: boolean;
+  /**
+   * The caller wants the files' content (openContent): only views of files they may have it of
+   * are kept. That takes a reader, `open` authorized, and levels that let this client have the
+   * content (exposure, for an AI client). Not with `search`.
+   */
+  content?: boolean;
 }
 
 /**
@@ -407,6 +420,10 @@ export async function viewObjects(
   options: ViewOptions = {},
 ): Promise<ObjectView[]> {
   const ids = distinctIds(objectIds, "viewObjects");
+  const wantsContent = options.content === true;
+  if (wantsContent && options.search === true) {
+    throw new TypeError("viewObjects: search and content don't go together");
+  }
   if (ids.length === 0) return [];
   await requireSnapshot(tx);
   const rows = await tx
@@ -505,13 +522,20 @@ export async function viewObjects(
       });
       if (kind === "forbid" || kind === "error") continue;
     }
+    if (wantsContent) {
+      if (!canRead) continue;
+      const open = authz.authorize({ principal, action: "open", resource, client: request.client });
+      if (!open.allow) continue;
+    }
     const decision = decideRead({
       canRead,
       visibility: level.visibility,
       exposure: level.exposure,
       clientTrust: request.client.trust,
-      wantsContent: false,
+      wantsContent,
     });
+    // Asked for content: a file this client may only see the card of is left out.
+    if (wantsContent && decision.shape !== "content") continue;
     const shown = canRead ? tags.all : tags.public;
     const base = {
       id: row.id,
@@ -528,7 +552,7 @@ export async function viewObjects(
         tags: sorted(tags.public),
         requestAccess: true,
       });
-    } else if (decision.shape === "card") {
+    } else if (decision.shape === "card" || decision.shape === "content") {
       views.set(row.id, {
         ...base,
         shape: "card",

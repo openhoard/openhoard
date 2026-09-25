@@ -15,6 +15,7 @@ Part of the OpenHoard trusted core. See [../README.md](../README.md) and
   their tests pass (T-607); see [packs/](../../packs/README.md).
 - [`rules.ts`](src/rules.ts): the rule tagger (T-403), deterministic tags from path, site,
   file type and a client dictionary, applied before any model sees a file.
+- [`activity.ts`](src/activity.ts): who viewed, opened, edited or shared which file (T-205).
 
 ## Ingest
 
@@ -112,6 +113,10 @@ applies the file's levels (T-206). The read API is built on it, in a snapshot (`
 - `listVersions(id)`: newest first, metadata only (id, seq, media type, size, author, created,
   processed, current); null unless the caller can read the file. A restored file keeps its
   history.
+- `openContent(id, { versionId? })`: which bytes to serve (blob id, and location for a managed
+  zone), never the bytes; the caller reads them from core/storage. It takes a reader, `open`
+  authorized, and levels that let the client have content (an AI client's trust against the
+  file's exposure: `viewObjects(…, { content: true })`). Null otherwise, alike for every reason.
 - Each checks for a snapshot before it reads anything, and treats input that can't name
   anything (a malformed id, a NUL byte) as unknown.
 
@@ -121,6 +126,33 @@ answer without a caller's policy, for enrichment, connectors, admins and the API
 `read-surface.test.ts` classifies every export as gated, write, trusted, pure or value, and fails
 on a new export until it is classified; it also checks each gated read reaches the gate before
 reading anything but source refs, and answers nothing for a caller `authorize()` refuses.
+
+## Activity
+
+`activity_events` records who viewed, opened, edited or shared which file, when, and through
+which client (T-205), for `recent` (T-506), ranking and the Health Report. It is not the audit
+log: no hash chain, no lock, repeat views merge, and `pruneActivity()` drops old events.
+
+- `viewObject`, `viewBySource`, `listVersions` record a `view`; `openContent` an `open` of the
+  version it served. Listings (`viewObjects`) and search record nothing. Only an answer is
+  recorded: a refused or unknown file leaves no event.
+- They run in a read-only snapshot, so they record into the request's `activity`
+  (an `ActivityBuffer`), and the caller writes it with `writeActivity()` in its own transaction
+  after the snapshot, never nested in it. **The API must pass a buffer on every request and
+  write it**, as it must audit every read.
+- `ingest` records an `edit` by the version's author, when the source names one, with the
+  source as `origin` (when the crawl saw it, not when it was saved).
+- An AI read is a view or open through a client that isn't first-party: events keep the
+  client's id and trust.
+- A view or open repeating one (same person, file, version, client) within
+  `REPEAT_WINDOW_MS` (15 minutes) merges into it. Imported events (the M365 feed, T-307) carry
+  their origin's event id, so a re-import adds nothing.
+- `listActivity()` is trusted: it names files the caller may not know about. `recent` passes
+  them through the gate before showing any.
+- `share` is a type waiting for the share feature; nothing records it yet.
+
+`read-surface.test.ts` checks every gated read of one file records exactly its event, a
+refused one nothing, and listings nothing.
 
 ## Search
 

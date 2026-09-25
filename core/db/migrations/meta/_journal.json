@@ -169,6 +169,20 @@
       "when": 1790304861320,
       "tag": "0023_api_keys_guards",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1790315067196,
+      "tag": "0024_activity_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1790315068086,
+      "tag": "0025_activity_events_rls",
+      "breakpoints": true
     }
   ]
 }

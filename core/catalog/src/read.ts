@@ -1,14 +1,25 @@
 import { blobs, isId, objects, sourceRefs, versions, type Tx } from "@openhoard/core-db";
 import type { Authorizer } from "@openhoard/core-policy";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import { INGEST_LIMITS } from "./ingest.js";
-import { requireSnapshot, viewObjects, type ObjectView, type ViewRequest } from "./visibility.js";
+import type { ActivityType } from "./activity.js";
+import {
+  requireSnapshot,
+  viewObjects,
+  type CardView,
+  type ObjectView,
+  type ViewRequest,
+} from "./visibility.js";
 
 /*
  * The catalog read API (T-206): what a caller may know about objects, by id, by where they came
  * from, and their versions. Every function here decides through viewObjects(), the one gate:
  * it authorizes `read` for the caller and applies the object's levels, so a file the caller
- * may not know about is left out exactly as an unknown id is. Nothing here returns content.
+ * may not know about is left out exactly as an unknown id is. None of them returns content:
+ * openContent() says which blob to read, and the caller reads it from core/storage.
+ *
+ * Each one records the caller's activity (T-205) in the request's recorder: a `view` for a
+ * file it answered about, an `open` for openContent(). See activity.ts.
  *
  * The other catalog exports that read (levelsFor, sourceItemState, primaryTagOf, explainAccess,
  * listOpenReviews…) answer without a caller's policy: they are for enrichment, connectors,
@@ -32,7 +43,9 @@ export async function viewObject(
   await requireSnapshot(tx, "viewObject");
   if (typeof objectId !== "string" || !isId("object", objectId)) return null;
   const [view] = await viewObjects(tx, tenantId, authz, request, [objectId]);
-  return view ?? null;
+  if (!view) return null;
+  noteActivity(request, "view", view.id, null);
+  return view;
 }
 
 /** Where an item came from: a connector's source and the item's id there. */
@@ -72,7 +85,10 @@ export async function viewBySource(
       ),
     );
   if (!ref) return null;
-  return viewObject(tx, tenantId, authz, request, ref.objectId);
+  const [view] = await viewObjects(tx, tenantId, authz, request, [ref.objectId]);
+  if (!view) return null;
+  noteActivity(request, "view", view.id, null);
+  return view;
 }
 
 /** One version of an object, as its readers see it: metadata, never content or the blob. */
@@ -106,7 +122,8 @@ export async function listVersions(
   objectId: string,
 ): Promise<VersionView[] | null> {
   await requireSnapshot(tx, "listVersions");
-  const view = await viewObject(tx, tenantId, authz, request, objectId);
+  if (typeof objectId !== "string" || !isId("object", objectId)) return null;
+  const [view] = await viewObjects(tx, tenantId, authz, request, [objectId]);
   if (view?.shape !== "card" || !view.readable) return null;
   const rows = await tx
     .select({
@@ -132,6 +149,7 @@ export async function listVersions(
       ),
     )
     .orderBy(desc(versions.seq));
+  noteActivity(request, "view", view.id, null);
   return rows.map((r, i) => ({
     id: r.id,
     seq: r.seq,
@@ -142,4 +160,108 @@ export async function listVersions(
     processed: r.processedAt !== null,
     current: i === 0,
   }));
+}
+
+/** What openContent() hands the caller: which bytes to serve, never the bytes. */
+export interface OpenedContent {
+  view: CardView;
+  version: VersionView;
+  /** The content's blob: read it from core/storage (`BlobStore.read(tenantId, blobId)`). */
+  blobId: string;
+  /**
+   * Where OpenHoard holds the bytes (a managed zone), or null when the source holds them (an
+   * indexed zone): the source's connector fetches them.
+   */
+  location: string | null;
+}
+
+/**
+ * Opening a file (T-205): which content the caller may have, the current version's or, with
+ * `versionId`, an earlier one's. It takes a reader, `open` authorized for them, and levels that
+ * let their client have the content (an AI client's trust against the file's exposure). Null
+ * when any of that fails, or there is no such file or version, indistinguishably; viewObject()
+ * tells a reader whether they can read the file at all. Records an `open` of that version.
+ */
+export async function openContent(
+  tx: Tx,
+  tenantId: string,
+  authz: Authorizer,
+  request: ViewRequest,
+  objectId: string,
+  options: { versionId?: string } = {},
+): Promise<OpenedContent | null> {
+  await requireSnapshot(tx, "openContent");
+  if (typeof objectId !== "string" || !isId("object", objectId)) return null;
+  const wanted = options.versionId;
+  if (wanted !== undefined && (typeof wanted !== "string" || !isId("version", wanted))) {
+    return null;
+  }
+  const [view] = await viewObjects(tx, tenantId, authz, request, [objectId], { content: true });
+  if (view?.shape !== "card" || !view.readable) return null;
+  // The newest version, and the one asked for when that is another.
+  const rows = await tx
+    .select({
+      id: versions.id,
+      seq: versions.seq,
+      mime: versions.mime,
+      size: blobs.size,
+      authorId: versions.authorId,
+      createdAt: versions.createdAt,
+      processedAt: versions.processedAt,
+      blobId: blobs.id,
+      location: blobs.location,
+    })
+    .from(versions)
+    .innerJoin(blobs, and(eq(blobs.tenantId, versions.tenantId), eq(blobs.id, versions.blobId)))
+    .where(
+      and(
+        eq(versions.tenantId, tenantId),
+        eq(versions.objectId, objectId),
+        wanted === undefined
+          ? undefined
+          : or(eq(versions.id, wanted), eq(versions.seq, newestSeq(tenantId, objectId))),
+      ),
+    )
+    .orderBy(desc(versions.seq))
+    .limit(2);
+  const i = wanted === undefined ? 0 : rows.findIndex((r) => r.id === wanted);
+  const row = rows[i];
+  if (!row) return null;
+  noteActivity(request, "open", view.id, row.id);
+  return {
+    view,
+    version: {
+      id: row.id,
+      seq: row.seq,
+      mime: row.mime,
+      size: row.size,
+      authorId: row.authorId,
+      createdAt: row.createdAt,
+      processed: row.processedAt !== null,
+      current: i === 0,
+    },
+    blobId: row.blobId,
+    location: row.location,
+  };
+}
+
+/** The newest version's seq of an object, as a subquery. */
+function newestSeq(tenantId: string, objectId: string) {
+  return sql`(select max(v.seq) from versions v where v.tenant_id = ${tenantId} and v.object_id = ${objectId})`;
+}
+
+/** Records the caller's activity, when the request carries a recorder. */
+function noteActivity(
+  request: ViewRequest,
+  type: ActivityType,
+  objectId: string,
+  versionId: string | null,
+): void {
+  request.activity?.record({
+    type,
+    actor: `user:${request.principal.userId}`,
+    objectId,
+    versionId,
+    client: request.client,
+  });
 }

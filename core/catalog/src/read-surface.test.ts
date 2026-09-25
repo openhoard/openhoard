@@ -17,11 +17,15 @@ import type { ViewRequest } from "./visibility.js";
  *   own checks; never exposed to a caller without a check of its own (listOpenReviews is the
  *   tenant's whole inbox: for its reviewers only);
  * - pure: no database at all;
- * - value: constants and error classes.
+ * - value: constants, classes that hold no database handle (error classes, ActivityBuffer).
+ *
+ * T-205: gated reads that serve one file record the caller's activity; listings and search
+ * don't (RECORDING below).
  */
 const SURFACE = {
   gated: [
     "listVersions",
+    "openContent",
     "searchObjects",
     "suggestTitles",
     "viewBySource",
@@ -39,16 +43,19 @@ const SURFACE = {
     "proposeDisplayTitle",
     "proposePrimaryTag",
     "proposeTag",
+    "pruneActivity",
     "rejectReview",
     "removeFromSource",
     "removePack",
     "setDisplayTitle",
     "setPrimaryTag",
+    "writeActivity",
   ],
   trusted: [
     "explainAccess",
     "explainLevels",
     "levelsFor",
+    "listActivity",
     "listOpenReviews",
     "planPack",
     "planPackRemoval",
@@ -75,6 +82,8 @@ const SURFACE = {
     "validateRules",
   ],
   value: [
+    "ACTIVITY_PAGE",
+    "ActivityBuffer",
     "APPLY_TRANSACTION",
     "DEFAULT_MIN_CONFIDENCE",
     "ExplainError",
@@ -83,10 +92,19 @@ const SURFACE = {
     "IngestError",
     "MAX_OBJECT_IDS",
     "PackError",
+    "REPEAT_WINDOW_MS",
     "SEARCH_CANDIDATES",
     "TagError",
     "VIEW_TRANSACTION",
   ],
+} as const;
+
+/** The gated reads that record activity (a view, or an open), and what each records. */
+const RECORDING = {
+  listVersions: "view",
+  openContent: "open",
+  viewBySource: "view",
+  viewObject: "view",
 } as const;
 
 /** The gated reads in search.ts, which reach viewObjects() through gatedMatches(). */
@@ -205,6 +223,7 @@ describe("the catalog's export surface", () => {
             externalId: t.externalId,
           }),
         listVersions: (tx) => catalog.listVersions(tx, t.tenantId, deny, request, t.objectId),
+        openContent: (tx) => catalog.openContent(tx, t.tenantId, deny, request, t.objectId),
         searchObjects: async (tx) =>
           (await catalog.searchObjects(tx, t.tenantId, deny, request, { query: "" })).hits,
         suggestTitles: (tx) =>
@@ -216,6 +235,85 @@ describe("the catalog's export surface", () => {
         const got = await db.withTenant(t.tenantId, call, catalog.VIEW_TRANSACTION);
         expect(got === null || (Array.isArray(got) && got.length === 0), name).toBe(true);
       }
+    } finally {
+      await db.close();
+    }
+  });
+
+  it("records one view or open for every gated read of one file, and nothing for listings", async () => {
+    const { openTestDatabase, seedTenant } = await import("@openhoard/core-db/testing");
+    const db = await openTestDatabase();
+    try {
+      const t = await seedTenant(db, 1);
+      const allow = {
+        authorize: () => ({ allow: true, kind: "allow", reason: "allow", policies: [] }),
+      } as unknown as Authorizer;
+      const deny = {
+        authorize: () => ({ allow: false, kind: "no-permit", reason: "deny", policies: [] }),
+      } as unknown as Authorizer;
+      // First-party: the seeded file is unprocessed, so metadata-only to an AI client.
+      const client = { id: "openhoard-web", trust: "first-party" } as const;
+      const principal = {
+        userId: "usr_01k5xr3c8v0q6m2d4n7p9s1t3w",
+        groupIds: [],
+        tagGrants: [],
+        tagWriteGrants: [],
+        objectGrants: [t.objectId],
+        objectWriteGrants: [],
+        guest: false,
+        active: true,
+      };
+      const run = async (authz: Authorizer, name: (typeof SURFACE.gated)[number]) => {
+        const activity = new catalog.ActivityBuffer();
+        const request: ViewRequest = { principal, client, activity };
+        const calls: Record<(typeof SURFACE.gated)[number], (tx: Tx) => Promise<unknown>> = {
+          viewObjects: (tx) => catalog.viewObjects(tx, t.tenantId, authz, request, [t.objectId]),
+          viewObject: (tx) => catalog.viewObject(tx, t.tenantId, authz, request, t.objectId),
+          viewBySource: (tx) =>
+            catalog.viewBySource(tx, t.tenantId, authz, request, {
+              source: "sharepoint",
+              externalId: t.externalId,
+            }),
+          listVersions: (tx) => catalog.listVersions(tx, t.tenantId, authz, request, t.objectId),
+          openContent: (tx) => catalog.openContent(tx, t.tenantId, authz, request, t.objectId),
+          searchObjects: (tx) =>
+            catalog.searchObjects(tx, t.tenantId, authz, request, { query: "report" }),
+          suggestTitles: (tx) =>
+            catalog.suggestTitles(tx, t.tenantId, authz, request, { prefix: "report" }),
+        };
+        const got = await db.withTenant(t.tenantId, calls[name], catalog.VIEW_TRANSACTION);
+        return { got, events: activity.take() };
+      };
+      for (const name of SURFACE.gated) {
+        const { got, events } = await run(allow, name);
+        const type = (RECORDING as Record<string, string>)[name];
+        if (type === undefined) {
+          expect(events, `${name} is a listing: it records nothing`).toEqual([]);
+          continue;
+        }
+        expect(got, name).not.toBeNull();
+        expect(events, name).toEqual([
+          {
+            type,
+            actor: `user:${principal.userId}`,
+            objectId: t.objectId,
+            versionId: type === "open" ? t.versionId : null,
+            client,
+          },
+        ]);
+        // What the caller may not know about leaves no trace either.
+        expect((await run(deny, name)).events, `${name} refused`).toEqual([]);
+      }
+      // Every recording read is gated.
+      for (const name of Object.keys(RECORDING)) {
+        expect(SURFACE.gated as readonly string[], name).toContain(name);
+      }
+      // What they record, the caller can write once the snapshot ends.
+      const { events } = await run(allow, "openContent");
+      const written = await db.withTenant(t.tenantId, (tx) =>
+        catalog.writeActivity(tx, t.tenantId, events),
+      );
+      expect(written).toBe(1);
     } finally {
       await db.close();
     }
