@@ -20,7 +20,13 @@ import {
 import { and, eq } from "drizzle-orm";
 import fc from "fast-check";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { SEARCH_CANDIDATES, searchObjects, type SearchQuery } from "./search.js";
+import {
+  SEARCH_CANDIDATES,
+  searchObjects,
+  suggestTitles,
+  type SearchQuery,
+  type SuggestQuery,
+} from "./search.js";
 import {
   proposeDisplayTitle,
   setDisplayTitle,
@@ -227,6 +233,7 @@ describe("searchObjects", () => {
       hits: [],
       total: 0,
       totalIsLowerBound: false,
+      facets: {},
     });
     // A forbid on read makes the caller a non-reader: a discoverable file still lists, title only.
     await setDefault("discoverable");
@@ -487,5 +494,225 @@ describe("searchObjects", () => {
       ),
       { numRuns: 60 },
     );
+  });
+});
+
+describe("facet counts and suggestions (T-505)", () => {
+  const suggest = (principal: AuthzPrincipal, query: string | SuggestQuery, gate = authz) =>
+    db.withTenant(
+      t.tenantId,
+      (tx) =>
+        suggestTitles(
+          tx,
+          t.tenantId,
+          gate,
+          request(principal),
+          typeof query === "string" ? { prefix: query } : query,
+        ),
+      VIEW_TRANSACTION,
+    );
+  const addFile = (title: string, more: Partial<typeof objects.$inferInsert> = {}) =>
+    write(async (tx) => {
+      const id = newId("object");
+      await tx.insert(objects).values({
+        tenantId: t.tenantId,
+        id,
+        zoneId: t.zoneId,
+        title,
+        ownerId: "user:someone",
+        ...more,
+      });
+      await tx.insert(versions).values({
+        tenantId: t.tenantId,
+        id: newId("version"),
+        objectId: id,
+        seq: 1,
+        blobId: t.blobId,
+        mime: "text/plain",
+        processedAt: new Date(),
+      });
+      return id;
+    });
+
+  it("counts facets over every match, from the tags each shows the caller", async () => {
+    await tag("kind:report");
+    await tag("sensitivity:internal");
+    await write((tx) =>
+      tx.insert(facetValues).values({
+        tenantId: t.tenantId,
+        facet: "kind",
+        value: "memo",
+        label: "Memo",
+        approved: true,
+      }),
+    );
+    await tag("kind:memo", { source: "model", appliedBy: "model:m", confidence: 0.9 });
+    const reader = person({ tagGrants: [t.tag] });
+    expect((await search(reader, "")).facets).toEqual({
+      client: { "acme-1": 1 },
+      kind: { memo: 1, report: 1 },
+      sensitivity: { internal: 1 },
+    });
+    // A non-reader of a discoverable file: trusted tags of public facets only.
+    expect((await search(person(), "")).facets).toEqual({ kind: { report: 1 } });
+    // Over every match, not only the hits.
+    const other = await addFile("Second report.txt");
+    await write((tx) =>
+      tx.insert(objectTags).values({
+        tenantId: t.tenantId,
+        objectId: other,
+        facet: "kind",
+        value: "report",
+        source: "rule",
+        appliedBy: "rule:x",
+        confidence: 1,
+      }),
+    );
+    const two = await search(person(), { query: "", limit: 1 });
+    expect(two.hits).toHaveLength(1);
+    expect(two.facets).toEqual({ kind: { report: 2 } });
+    // Hidden (the second file, by the default; the first is discoverable by its level tag), or
+    // taken out by a forbid: counted nowhere.
+    await setDefault("hidden");
+    expect(await search(person(), "")).toMatchObject({ total: 1, facets: { kind: { report: 1 } } });
+    const noSearch = new Authorizer(
+      createCedarEngine({
+        "pack/no-acme": `forbid (principal, action == OpenHoard::Action::"search", resource) when { resource.allTags.contains("${t.tag}") };`,
+      }),
+    );
+    expect(await search(reader, "", noSearch)).toMatchObject({ total: 0, facets: {} });
+  });
+
+  it("suggests titles as the caller is shown them, by the start of a word", async () => {
+    const reader = person({ tagGrants: [t.tag] });
+    expect(await suggest(reader, "rep")).toEqual(["Report 1.docx"]);
+    expect(await suggest(reader, "REP")).toEqual(["Report 1.docx"]);
+    expect(await suggest(reader, "1.do")).toEqual(["Report 1.docx"]);
+    expect(await suggest(reader, "docx")).toEqual(["Report 1.docx"]);
+    expect(await suggest(reader, "port")).toEqual([]);
+    // A non-reader is shown the display title, and suggested only that.
+    await write((tx) =>
+      setDisplayTitle(tx, t.tenantId, {
+        objectId: t.objectId,
+        title: "Quarterly figures",
+        by: "user:owner-1",
+        forTitle: "Report 1.docx",
+      }),
+    );
+    expect(await suggest(person(), "rep")).toEqual([]);
+    expect(await suggest(person(), "quar")).toEqual(["Quarterly figures"]);
+    expect(await suggest(reader, "quar")).toEqual([]);
+    // Hidden files, and those a forbid on search takes out, are never suggested.
+    await setDefault("hidden");
+    expect(await suggest(person(), "quar")).toEqual([]);
+    const noSearch = new Authorizer(
+      createCedarEngine({
+        "pack/no-acme": `forbid (principal, action == OpenHoard::Action::"search", resource) when { resource.allTags.contains("${t.tag}") };`,
+      }),
+    );
+    expect(await suggest(reader, "rep", noSearch)).toEqual([]);
+  });
+
+  it("counts facets and values named like Object's own properties as plain names", async () => {
+    await write(async (tx) => {
+      await tx.insert(facets).values({ tenantId: t.tenantId, key: "constructor", label: "C" });
+      await tx.insert(facetValues).values([
+        { tenantId: t.tenantId, facet: "constructor", value: "keys", label: "K", approved: true },
+        { tenantId: t.tenantId, facet: "kind", value: "constructor", label: "C", approved: true },
+      ]);
+    });
+    await tag("constructor:keys");
+    await tag("kind:constructor");
+    const result = await search(person({ tagGrants: [t.tag] }), "");
+    expect(JSON.parse(JSON.stringify(result.facets))).toEqual({
+      client: { "acme-1": 1 },
+      constructor: { keys: 1 },
+      kind: { constructor: 1 },
+    });
+    expect(typeof Object.keys).toBe("function");
+  });
+
+  it("suggests word starts past a crowd of other matches, with punctuation taken literally", async () => {
+    await write(async (tx) => {
+      const rows = Array.from({ length: SEARCH_CANDIDATES + 1 }, (_, i) => ({
+        tenantId: t.tenantId,
+        id: newId("object"),
+        zoneId: t.zoneId,
+        title: `Banana abc ${i}.txt`,
+        ownerId: "user:someone",
+      }));
+      await tx.insert(objects).values(rows);
+      await tx.insert(versions).values(
+        rows.map((r) => ({
+          tenantId: t.tenantId,
+          id: newId("version"),
+          objectId: r.id,
+          seq: 1,
+          blobId: t.blobId,
+          mime: "text/plain",
+          processedAt: new Date(),
+        })),
+      );
+    });
+    // Added last, so last by id: only a word-start filter in SQL keeps it among the candidates.
+    await addFile("Anchor.txt");
+    await addFile("A.c notes.txt");
+    expect(await suggest(person(), "an")).toEqual(["Anchor.txt"]);
+    // Unescaped, "a.c" would match every "abc" and crowd this out.
+    expect(await suggest(person(), "a.c")).toEqual(["A.c notes.txt"]);
+    expect(await suggest(person(), "A.C  NO")).toEqual(["A.c notes.txt"]);
+  });
+
+  it("never suggests the generic title a model's pending display title shows", async () => {
+    const id = await addFile("Termination letter.docx");
+    await write((tx) =>
+      proposeDisplayTitle(tx, t.tenantId, {
+        objectId: id,
+        title: "HR letter",
+        by: "model:m",
+        forTitle: "Termination letter.docx",
+      }),
+    );
+    // "Document" isn't suggested; the seeded file's real title is.
+    expect(await suggest(person(), "doc")).toEqual(["Report 1.docx"]);
+    expect(await suggest(person(), "ter")).toEqual([]);
+    expect(await suggest(person(), "hr")).toEqual([]);
+    // It still lists, as search shows it.
+    expect(await ids(person(), "document")).toEqual([id]);
+    // Its owner is suggested the real title.
+    expect(await suggest(person({ userId: "someone" }), "ter")).toEqual([
+      "Termination letter.docx",
+    ]);
+  });
+
+  it("suggests distinct titles up to the limit, and treats punctuation as text", async () => {
+    await addFile("Plan 100% done.txt");
+    await addFile("Plan 100% done.txt");
+    await addFile("Plan_b.txt");
+    await addFile("Planning.txt");
+    const me = person();
+    expect((await suggest(me, "plan")).sort()).toEqual([
+      "Plan 100% done.txt",
+      "Plan_b.txt",
+      "Planning.txt",
+    ]);
+    expect(await suggest(me, { prefix: "plan", limit: 2 })).toHaveLength(2);
+    expect(await suggest(me, "100%")).toEqual(["Plan 100% done.txt"]);
+    expect(await suggest(me, "%")).toEqual([]);
+    expect(await suggest(me, "_b")).toEqual([]);
+    expect(await suggest(me, "b.t")).toEqual(["Plan_b.txt"]);
+    for (const prefix of ["", "   ", "\0", "x".repeat(101), "(", "\\"]) {
+      await expect(suggest(me, prefix), prefix).resolves.toEqual([]);
+    }
+    await expect(suggest(me, { prefix: "plan", limit: 0 })).rejects.toThrow(RangeError);
+    await expect(suggest(me, { prefix: "plan", limit: 51 })).rejects.toThrow(RangeError);
+    await expect(
+      db.withTenant(t.tenantId, (tx) =>
+        suggestTitles(tx, t.tenantId, authz, request(me), { prefix: "plan" }),
+      ),
+    ).rejects.toThrow("repeatable read");
+    // Nothing for those search refuses outright.
+    expect(await suggest(person({ active: false, objectGrants: [t.objectId] }), "rep")).toEqual([]);
+    expect(await suggest(person({ guest: true }), "plan")).toEqual([]);
   });
 });

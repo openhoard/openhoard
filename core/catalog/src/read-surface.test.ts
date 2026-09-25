@@ -20,7 +20,14 @@ import type { ViewRequest } from "./visibility.js";
  * - value: constants and error classes.
  */
 const SURFACE = {
-  gated: ["listVersions", "searchObjects", "viewBySource", "viewObject", "viewObjects"],
+  gated: [
+    "listVersions",
+    "searchObjects",
+    "suggestTitles",
+    "viewBySource",
+    "viewObject",
+    "viewObjects",
+  ],
   write: [
     "applyPack",
     "applyRuleTags",
@@ -82,6 +89,9 @@ const SURFACE = {
   ],
 } as const;
 
+/** The gated reads in search.ts, which reach viewObjects() through gatedMatches(). */
+const SEARCH: readonly string[] = ["searchObjects", "suggestTitles"];
+
 const exported = catalog as unknown as Record<string, unknown>;
 const source = (file: string) => readFileSync(new URL(file, import.meta.url), "utf8");
 
@@ -97,7 +107,13 @@ describe("the catalog's export surface", () => {
       expect(typeof exported[name], name).toBe("function");
       const text = String(exported[name]);
       // An imported call may be rewritten as `(0, module.viewObjects)(`.
-      const gate = name === "viewObjects" ? /\.authorize\(/ : /\bviewObjects?\)?\(/;
+      // search.ts reaches it through gatedMatches(), checked below.
+      const gate =
+        name === "viewObjects"
+          ? /\.authorize\(/
+          : SEARCH.includes(name)
+            ? /\bgatedMatches\(/
+            : /\bviewObjects?\)?\(/;
       expect(text, `${name} doesn't decide through the gate`).toMatch(gate);
     }
     // The gate reads decisions before it builds any view: canRead feeds decideRead.
@@ -109,7 +125,7 @@ describe("the catalog's export surface", () => {
     const starts = [...text.matchAll(/^export async function (\w+)/gm)];
     const names = starts.map((m) => m[1]).sort();
     expect(names).toEqual(
-      SURFACE.gated.filter((n) => n !== "viewObjects" && n !== "searchObjects").sort(),
+      SURFACE.gated.filter((n) => n !== "viewObjects" && !SEARCH.includes(n)).sort(),
     );
     for (const [i, m] of starts.entries()) {
       const whole = text.slice(m.index, starts[i + 1]?.index ?? text.length);
@@ -132,15 +148,30 @@ describe("the catalog's export surface", () => {
     }
   });
 
-  it("lets search show and count only what the gate returns", () => {
+  it("lets search show, count and suggest only what the gate returns", () => {
     const text = source("./search.ts");
-    const body = text.slice(text.indexOf("export async function searchObjects"));
-    // The snapshot first; every hit and the total come from viewObjects' answer.
-    expect(body.indexOf("requireSnapshot(")).toBeGreaterThan(-1);
-    expect(body.indexOf("requireSnapshot(")).toBeLessThan(body.indexOf("queryRows"));
-    expect(body).toMatch(/const views = [^;]*viewObjects\(/);
-    expect(body).toMatch(/hits: views\.slice\(/);
-    expect(body).toMatch(/total: views\.length/);
+    const fn = (name: string) => {
+      const from = text.indexOf(`async function ${name}(`);
+      expect(from, name).toBeGreaterThan(-1);
+      const next = text.slice(from + 1).search(/\n(export )?(async )?function /);
+      return text.slice(from, next === -1 ? undefined : from + 1 + next);
+    };
+    // Each export checks the snapshot before anything reaches the database.
+    for (const name of SEARCH) {
+      const body = fn(name);
+      expect(body.indexOf("requireSnapshot("), name).toBeGreaterThan(-1);
+      expect(body.indexOf("requireSnapshot("), name).toBeLessThan(body.indexOf("gatedMatches("));
+      expect(body, name).not.toMatch(/queryRows|\btx\s*\./);
+    }
+    // Hits, total, facets and suggestions come only from the gate's views.
+    const search = fn("searchObjects");
+    expect(search).toMatch(/hits: found\.views\.slice\(/);
+    expect(search).toMatch(/total: found\.views\.length/);
+    expect(search).toMatch(/for \(const view of found\.views\)[\s\S]*view\.tags/);
+    expect(fn("suggestTitles")).toMatch(/for \(const view of found\.views\)[\s\S]*view\.title/);
+    const gated = fn("gatedMatches");
+    expect(gated).toMatch(/const views = [^;]*viewObjects\(/);
+    expect(gated).toMatch(/views: views\.map\(/);
   });
 
   it("answers every gated read with nothing for a hidden file and a caller authorize() refuses", async () => {
@@ -176,6 +207,8 @@ describe("the catalog's export surface", () => {
         listVersions: (tx) => catalog.listVersions(tx, t.tenantId, deny, request, t.objectId),
         searchObjects: async (tx) =>
           (await catalog.searchObjects(tx, t.tenantId, deny, request, { query: "" })).hits,
+        suggestTitles: (tx) =>
+          catalog.suggestTitles(tx, t.tenantId, deny, request, { prefix: "report" }),
       };
       expect(Object.keys(CALLS).sort()).toEqual([...SURFACE.gated].sort());
       // The seeded file is unprocessed, so hidden to anyone authorize() refuses.

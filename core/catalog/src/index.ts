@@ -66,7 +66,14 @@ export {
   type ViewOptions,
   type ViewRequest,
 } from "./visibility.js";
-export { SEARCH_CANDIDATES, searchObjects, type SearchQuery, type SearchResult } from "./search.js";
+export {
+  SEARCH_CANDIDATES,
+  searchObjects,
+  suggestTitles,
+  type SearchQuery,
+  type SearchResult,
+  type SuggestQuery,
+} from "./search.js";
 export {
   listVersions,
   viewBySource,

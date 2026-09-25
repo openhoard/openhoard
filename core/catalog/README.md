@@ -138,6 +138,13 @@ reading anything but source refs, and answers nothing for a caller `authorize()`
    the title-only card. Hits and `total` come only from what passes. Title-only views are
    ordered without their update time, which they don't show.
 
+**Facets and suggestions (T-505).** `facets` counts, per facet and value, every match in `total`
+(not only the hits), from the tags each match shows the caller: a hidden file, or a tag the
+caller isn't shown, adds nothing. `suggestTitles({ prefix, limit })` returns distinct titles as
+the caller is shown them, with a word starting with `prefix`, from the same candidates and gate
+as search. The leak harness (packages/testkit) probes results, totals, facets, suggestions and
+card text against a fake tenant imported into the database.
+
 Titles and queries are split on `.`, `_`, `/` and `\` first: Postgres reads `Forecast.xlsx` as
 one token.
 

@@ -53,12 +53,20 @@ export interface SearchResult {
   hits: ObjectView[];
   /** Matches the caller may see: exact unless `totalIsLowerBound`. */
   total: number;
-  /** More than {@link SEARCH_CANDIDATES} candidates: `total` counts only those checked. */
+  /** More than {@link SEARCH_CANDIDATES} candidates: `total` and `facets` count only those checked. */
   totalIsLowerBound: boolean;
+  /**
+   * Facet key → value → matches, over every match counted in `total` (not only the hits), from
+   * the tags each match shows the caller: a reader's every tag, anyone else's public ones.
+   */
+  facets: Record<string, Record<string, number>>;
 }
 
 const TAG = /^[a-z][a-z0-9-]{0,63}:[a-z0-9][a-z0-9._-]{0,127}$/;
 const QUERY_MAX = 1_000;
+const PREFIX_MAX = 100;
+/** Escaped with a backslash in a Postgres regular expression, where each is then literal. */
+const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/g;
 /**
  * Split on these before the text parser, in titles and queries alike: Postgres reads
  * `Forecast.xlsx` or `q3_forecast` as one token, so "forecast" would never match either.
@@ -79,21 +87,106 @@ export async function searchObjects(
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
     throw new RangeError("limit must be 1 to 100");
   }
-  const none: SearchResult = { hits: [], total: 0, totalIsLowerBound: false };
+  const none: SearchResult = { hits: [], total: 0, totalIsLowerBound: false, facets: {} };
   const text = typeof search.query === "string" ? search.query : "";
   if ([...text].length > QUERY_MAX || text.includes("\0")) return none;
   const terms = text.split(/\s+/).filter((t) => t !== "");
   const tags = [...new Set(terms.filter((t) => TAG.test(t)))];
   const words = separate(terms.filter((t) => !TAG.test(t)).join(" "));
+  const found = await gatedMatches(tx, tenantId, authz, request, { words, tags });
+  if (!found) return none;
+  // Counted over what passed, from the tags each view shows: a hidden file or a hidden tag adds
+  // nothing (T-505).
+  // Prototype-free objects: a facet or value named `constructor` is just a name here.
+  const facets: Record<string, Record<string, number>> = Object.create(null);
+  for (const view of found.views) {
+    for (const tag of view.tags) {
+      const at = tag.indexOf(":");
+      const key = tag.slice(0, at);
+      const bucket: Record<string, number> = (facets[key] ??= Object.create(null));
+      const value = tag.slice(at + 1);
+      bucket[value] = (bucket[value] ?? 0) + 1;
+    }
+  }
+  return {
+    hits: found.views.slice(0, limit),
+    total: found.views.length,
+    totalIsLowerBound: found.lowerBound,
+    facets,
+  };
+}
 
+export interface SuggestQuery {
+  /** The start of a word in the title, 1 to 100 characters; case doesn't matter. */
+  prefix: string;
+  /** Titles to return, 1 to 50. Default 10. */
+  limit?: number;
+}
+
+/**
+ * Title suggestions for a search box (T-505): distinct titles, as the caller is shown them, with
+ * a word starting with `prefix`. Drawn from what searchObjects() would return (the same
+ * candidates and the same gate), so a suggestion never names a file, or a title, the caller
+ * couldn't find. Runs in a snapshot (VIEW_TRANSACTION).
+ */
+export async function suggestTitles(
+  tx: Tx,
+  tenantId: string,
+  authz: Authorizer,
+  request: ViewRequest,
+  suggest: SuggestQuery,
+): Promise<string[]> {
+  await requireSnapshot(tx, "suggestTitles");
+  const limit = suggest.limit ?? 10;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) {
+    throw new RangeError("limit must be 1 to 50");
+  }
+  const prefix = (typeof suggest.prefix === "string" ? suggest.prefix : "").trim();
+  const n = [...prefix].length;
+  if (n < 1 || n > PREFIX_MAX || prefix.includes("\0")) return [];
+  const found = await gatedMatches(tx, tenantId, authz, request, {
+    words: "",
+    tags: [],
+    prefix: prefix.replace(/\s+/g, " "),
+  });
+  if (!found) return [];
+  const titles = new Set<string>();
+  for (const view of found.views) {
+    if (titles.size === limit) break;
+    titles.add(view.title);
+  }
+  return [...titles];
+}
+
+interface Match {
+  /** Words for the text search; "" matches every title. */
+  words: string;
+  /** `facet:value` terms, all of which must match. */
+  tags: readonly string[];
+  /** Instead of words: a word in the title starts with this, in any case. */
+  prefix?: string;
+}
+
+/**
+ * The views that pass the gate for a match, best first, or null when the caller can't search at
+ * all. `lowerBound`: more candidates than {@link SEARCH_CANDIDATES} matched.
+ */
+async function gatedMatches(
+  tx: Tx,
+  tenantId: string,
+  authz: Authorizer,
+  request: ViewRequest,
+  match: Match,
+): Promise<{ views: ObjectView[]; lowerBound: boolean } | null> {
+  const { words, tags, prefix } = match;
   const { principal } = request;
   // What authorize() forbids outright, before any query: the inactive, and a service account
   // without a key's scope, or with one that doesn't allow searching and reading.
-  if (!principal.active) return none;
+  if (!principal.active) return null;
   const { scope } = principal;
-  if (principal.service === true && scope === undefined) return none;
+  if (principal.service === true && scope === undefined) return null;
   if (scope !== undefined && !(scope.actions.includes("search") && scope.actions.includes("read")))
-    return none;
+    return null;
   const member = !principal.guest && principal.service !== true;
 
   const readTags = [...new Set([...principal.tagGrants, ...principal.tagWriteGrants])];
@@ -118,8 +211,21 @@ export async function searchObjects(
   const vector = (title: SQL) =>
     sql`to_tsvector('simple', regexp_replace(${title}, ${SEPARATORS}, ' ', 'g'))`;
   const tsQuery = sql`plainto_tsquery('simple', ${words})`;
+  // A prefix: a word of the title starts with it (a regular expression, ASCII punctuation
+  // escaped), in SQL so other matches don't crowd the candidates; checked again after the gate
+  // on the title shown. A model's pending display title shows as the generic one, never worth
+  // suggesting.
+  const startsAt =
+    prefix === undefined ? "" : `(^|[^[:alnum:]])${prefix.replace(ASCII_PUNCTUATION, "\\$&")}`;
   const textMatch = (title: SQL) =>
-    words === "" ? sql`true` : sql`${vector(title)} @@ ${tsQuery}`;
+    prefix !== undefined
+      ? sql`coalesce(${title} ~* ${startsAt}, false)`
+      : words === ""
+        ? sql`true`
+        : sql`${vector(title)} @@ ${tsQuery}`;
+  const suggestedOther = sql`case when a.display_title_by is null then a.title
+      when a.display_title_by not like 'user:%' then null
+      else coalesce(a.display_title, a.title) end`;
   const rank = (title: SQL) =>
     words === "" ? sql`0::real` : sql`ts_rank(${vector(title)}, ${tsQuery})`;
   const tagMatch = (shown: SQL) =>
@@ -159,7 +265,7 @@ export async function searchObjects(
         ), matched as (
           select a.id, a.readable, a.updated_at,
                  (${textMatch(sql`a.title`)} and ${tagMatch(sql`true`)}) as as_reader,
-                 (${textMatch(otherTitle)}
+                 (${textMatch(prefix === undefined ? otherTitle : suggestedOther)}
                    and ${tagMatch(sql`f.public and (ot.source <> 'model' or ot.reviewed)`)}) as as_other,
                  ${rank(sql`a.title`)} as reader_rank,
                  ${rank(otherTitle)} as other_rank
@@ -173,6 +279,10 @@ export async function searchObjects(
          limit ${SEARCH_CANDIDATES + 1}`,
   );
   const checked = rows.slice(0, SEARCH_CANDIDATES);
+  const startsWord =
+    prefix === undefined
+      ? undefined
+      : new RegExp(`(?:^|[^\\p{L}\\p{N}])${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "iu");
   const byId = new Map(checked.map((r) => [r.id, r]));
   // The gate: authorize() with every rule, `search` included, and the levels. Only what passes,
   // and matched as what the caller is shown, is returned or counted.
@@ -187,6 +297,7 @@ export async function searchObjects(
     // still counts, since what anyone may be shown tells a reader nothing new.
     const asReader = row.as_reader && row.readable;
     if (reader ? !(asReader || row.as_other) : !row.as_other) return [];
+    if (startsWord !== undefined && !startsWord.test(view.title)) return [];
     return [{ view, rank: Number(reader && asReader ? row.reader_rank : row.other_rank) }];
   });
   // Best match first; then cards newest first (a card shows its date), then title-only views by
@@ -197,11 +308,7 @@ export async function searchObjects(
       updated(y.view) - updated(x.view) ||
       (x.view.id < y.view.id ? -1 : x.view.id > y.view.id ? 1 : 0),
   );
-  return {
-    hits: views.slice(0, limit).map((v) => v.view),
-    total: views.length,
-    totalIsLowerBound: rows.length > SEARCH_CANDIDATES,
-  };
+  return { views: views.map((v) => v.view), lowerBound: rows.length > SEARCH_CANDIDATES };
 }
 
 interface Candidate {

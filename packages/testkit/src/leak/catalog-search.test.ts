@@ -10,9 +10,15 @@ import {
   versions,
   zones,
   type Database,
+  type Tx,
 } from "@openhoard/core-db";
 import { openTestDatabase } from "@openhoard/core-db/testing";
-import { searchObjects, VIEW_TRANSACTION } from "@openhoard/core-catalog";
+import {
+  searchObjects,
+  suggestTitles,
+  VIEW_TRANSACTION,
+  type ViewRequest,
+} from "@openhoard/core-catalog";
 import {
   addMember,
   createGroup,
@@ -177,30 +183,31 @@ afterAll(() => db?.close());
 const authz = new Authorizer(createCedarEngine());
 
 /**
- * searchObjects() as the harness drives it: the caller's principal comes from the database.
- * `widen` adds grants the caller doesn't hold, to show the harness catches a leak.
+ * searchObjects() and suggestTitles() as the harness drives them: the caller's principal comes
+ * from the database. `widen` adds grants the caller doesn't hold, to show the harness catches a
+ * leak.
  */
-const searchAs = (widen: readonly string[] = []): SearchUnderTest => ({
-  search: (request) =>
+const searchAs = (widen: readonly string[] = []): SearchUnderTest => {
+  const as = <T>(userId: string, work: (tx: Tx, request: ViewRequest) => Promise<T>) =>
     db.withTenant(
       tenantId,
       async (tx) => {
-        const principal = await resolvePrincipal(
-          tx,
-          tenantId,
-          userIds.get(request.userId) as string,
-        );
-        if (!principal) throw new Error(`no principal for ${request.userId}`);
-        const result = await searchObjects(
-          tx,
-          tenantId,
-          authz,
-          {
-            principal: { ...principal, objectGrants: [...principal.objectGrants, ...widen] },
-            client: { id: "openhoard-web", trust: "first-party" },
-          },
-          { query: request.query, limit: Math.min(request.limit ?? 20, 100) },
-        );
+        const principal = await resolvePrincipal(tx, tenantId, userIds.get(userId) as string);
+        if (!principal) throw new Error(`no principal for ${userId}`);
+        return work(tx, {
+          principal: { ...principal, objectGrants: [...principal.objectGrants, ...widen] },
+          client: { id: "openhoard-web", trust: "first-party" },
+        });
+      },
+      VIEW_TRANSACTION,
+    );
+  return {
+    search: (r) =>
+      as(r.userId, async (tx, request) => {
+        const result = await searchObjects(tx, tenantId, authz, request, {
+          query: r.query,
+          limit: Math.min(r.limit ?? 20, 100),
+        });
         return {
           hits: result.hits.map((view) => ({
             id: itemIds.get(view.id) ?? view.id,
@@ -208,14 +215,21 @@ const searchAs = (widen: readonly string[] = []): SearchUnderTest => ({
             card: { ...view },
           })),
           total: result.total,
+          facets: result.facets,
         };
-      },
-      VIEW_TRANSACTION,
-    ),
-});
+      }),
+    autocomplete: (r) =>
+      as(r.userId, (tx, request) =>
+        suggestTitles(tx, tenantId, authz, request, {
+          prefix: r.prefix,
+          limit: Math.min(r.limit ?? 10, 50),
+        }),
+      ),
+  };
+};
 
-describe("searchObjects under the leak harness (T-504)", () => {
-  it("leaks nothing through results, totals or card text, and finds what callers may read", async () => {
+describe("searchObjects and suggestTitles under the leak harness (T-504, T-505)", () => {
+  it("leaks nothing through results, totals, facets, suggestions or card text, and finds what callers may read", async () => {
     const report = await runLeakHarness({ tenant, target: searchAs(), sampleUsers: 8 });
     assertNoLeaks(report);
     expect(report.canaries).toBeGreaterThan(0);
@@ -230,7 +244,9 @@ describe("searchObjects under the leak harness (T-504)", () => {
       target: searchAs([...itemIds.keys()]),
       sampleUsers: 2,
     });
-    expect(report.leaks.some((l) => l.surface === "results")).toBe(true);
+    const surfaces = new Set(report.leaks.map((l) => l.surface));
+    for (const surface of ["results", "total", "facets", "autocomplete", "text"] as const)
+      expect(surfaces).toContain(surface);
     expect(() => assertNoLeaks(report)).toThrow(/permission leak/);
   }, 240_000);
 });

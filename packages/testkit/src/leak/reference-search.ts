@@ -46,12 +46,12 @@ export class InMemorySearch implements SearchUnderTest {
 
   search(request: SearchRequest): Promise<SearchResponse> {
     const matches = this.visibleMatches(request.principals, tokenize(request.query));
-    const facets: Record<string, Record<string, number>> = {};
+    const facets: Record<string, Record<string, number>> = Object.create(null);
     for (const n of matches) {
       for (const label of (this.items[n] as FakeItem).labels) {
         const [key, value] = splitLabel(label);
         if (!value || !(FACETS as readonly string[]).includes(key)) continue;
-        const bucket = (facets[key] ??= {});
+        const bucket: Record<string, number> = (facets[key] ??= Object.create(null));
         bucket[value] = (bucket[value] ?? 0) + 1;
       }
     }
