@@ -3,6 +3,9 @@ import { getTableConfig } from "drizzle-orm/pg-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   fromDriver,
+  insideWithTenant,
+  MAX_TENANT_PAGE,
+  NestedWorkError,
   openDriver,
   queryRows,
   TransactionEndedError,
@@ -85,7 +88,8 @@ describe("catalog", () => {
                        'name', p.polname, 'cmd', p.polcmd, 'permissive', p.polpermissive,
                        'roles', p.polroles::oid[]::text,
                        'using', pg_get_expr(p.polqual, p.polrelid),
-                       'check', pg_get_expr(p.polwithcheck, p.polrelid)))
+                       'check', pg_get_expr(p.polwithcheck, p.polrelid))
+                  order by p.polname)
                 from pg_policy p where p.polrelid = c.oid) as policies
         from pg_class c join pg_namespace n on n.oid = c.relnamespace
        where n.nspname = 'public' and c.relkind in ('r', 'p')
@@ -95,6 +99,15 @@ describe("catalog", () => {
     for (const r of rows) {
       const column = r.table === "tenants" ? "id" : "tenant_id";
       const predicate = `(${column} = current_setting('app.tenant_id'::text, true))`;
+      // The tenant directory (0031): tenants rows, SELECT only, in a transaction that asked.
+      const directory = {
+        name: "tenant_directory",
+        cmd: "r",
+        permissive: true,
+        roles: "{0}",
+        using: "(current_setting('app.tenant_directory'::text, true) = 'on'::text)",
+        check: null,
+      };
       expect(r, String(r.table)).toEqual({
         table: r.table,
         enabled: true,
@@ -103,6 +116,7 @@ describe("catalog", () => {
         owner_only: true,
         // One permissive policy for every command and every role, and nothing looser.
         policies: [
+          ...(r.table === "tenants" ? [directory] : []),
           {
             name: "tenant_isolation",
             cmd: "*",
@@ -358,5 +372,103 @@ describe("withTenant", () => {
     await expect(db.withTenant(id, () => Promise.resolve())).rejects.toThrow(
       "withTenant: not a tenant id",
     );
+  });
+
+  it("marks its callback's async context, and only that", async () => {
+    expect(insideWithTenant()).toBe(false);
+    const seen = await db.withTenant(a.tenantId, async (tx) => {
+      await tx.select().from(objects);
+      const nested = await new Promise<boolean>((r) => setTimeout(() => r(insideWithTenant()), 1));
+      return [insideWithTenant(), nested];
+    });
+    expect(seen).toEqual([true, true]);
+    expect(insideWithTenant()).toBe(false);
+  });
+});
+
+describe("tenant directory", () => {
+  it("lists every tenant's id in order, a page at a time", async () => {
+    const [first, second] = [a.tenantId, b.tenantId].sort() as [string, string];
+    expect(await db.tenantIds()).toEqual([first, second]);
+    expect(await db.tenantIds({ limit: 1 })).toEqual([first]);
+    expect(await db.tenantIds({ after: first, limit: 1 })).toEqual([second]);
+    expect(await db.tenantIds({ after: second })).toEqual([]);
+  });
+
+  it("opens tenants to SELECT only, and nothing else, in the transaction that asks", async () => {
+    const seen = await driver.db.transaction(async (tx) => {
+      await tx.execute(sql`select set_config('app.tenant_directory', 'on', true)`);
+      return {
+        tenants: (await tx.select({ id: tenants.id }).from(tenants)).length,
+        objects: (await tx.select().from(objects)).length,
+        audit: (await queryRows(tx as Tx, sql`select 1 from audit.events`)).length,
+      };
+    });
+    expect(seen).toEqual({ tenants: 2, objects: 0, audit: 0 });
+    const writes = [
+      (tx: Tx) => tx.insert(tenants).values({ id: newId("tenant"), name: "Directory" }),
+      (tx: Tx) => tx.update(tenants).set({ name: "renamed" }).returning({ id: tenants.id }),
+      (tx: Tx) => tx.delete(tenants).returning({ id: tenants.id }),
+    ];
+    const outcomes = [];
+    for (const write of writes) {
+      const attempt = driver.db.transaction(async (tx) => {
+        await tx.execute(sql`select set_config('app.tenant_directory', 'on', true)`);
+        return write(tx as Tx);
+      });
+      outcomes.push(
+        await attempt.then(
+          (rows) => rows,
+          (e: unknown) => sqlState(Promise.reject(e)),
+        ),
+      );
+    }
+    // The insert fails the policy check; the update and delete see no row to change.
+    expect(outcomes).toEqual([INSUFFICIENT_PRIVILEGE, [], []]);
+    // And the setting is transaction-local: the next transaction sees nothing again.
+    expect(await driver.query("select count(*)::int as n from tenants")).toEqual([{ n: 0 }]);
+  });
+
+  it("refuses a bad page, and a call from inside a tenant's transaction", async () => {
+    await expect(db.tenantIds({ limit: 0 })).rejects.toThrow(RangeError);
+    await expect(db.tenantIds({ limit: MAX_TENANT_PAGE + 1 })).rejects.toThrow(RangeError);
+    await expect(db.tenantIds({ after: "ten_x' or '1'='1" })).rejects.toThrow(TypeError);
+    await expect(db.withTenant(a.tenantId, () => db.tenantIds())).rejects.toThrow(NestedWorkError);
+  });
+});
+
+describe("queue connection", () => {
+  const pglite = !process.env[TEST_POSTGRES_ENV];
+
+  it.skipIf(pglite)("hands pg-boss the URL on PostgreSQL, to connect as the same role", () => {
+    const queue = db.queueConnection();
+    expect(queue.kind).toBe("postgres");
+    expect(queue.kind === "postgres" && new URL(queue.connectionString).pathname).toMatch(
+      /^\/openhoard_test_/,
+    );
+  });
+
+  it.runIf(pglite)("runs pg-boss's statements on the embedded database, as its owner", async () => {
+    const queue = db.queueConnection();
+    if (queue.kind !== "pglite") throw new Error("expected PGlite");
+    const run = queue.executeSql;
+    expect((await run("select current_user as who, $1::int as n", [7])).rows).toEqual([
+      { who: "openhoard", n: 7 },
+    ]);
+    await run("create schema qtest; create table qtest.t (n int primary key)");
+    // A block that fails half way leaves no aborted transaction behind for the application.
+    await expect(
+      run("begin; insert into qtest.t values (1); insert into qtest.t values (1); commit"),
+    ).rejects.toThrow();
+    expect((await run("select count(*)::int as n from qtest.t")).rows).toEqual([{ n: 0 }]);
+    expect(await counts(a.tenantId)).toMatchObject({ objects: 1 });
+    // RETURNING rows before a COMMIT come back.
+    expect((await run("begin; insert into qtest.t values (2) returning n; commit")).rows).toEqual([
+      { n: 2 },
+    ]);
+    // Concurrent index builds can't run in a transaction block: they run on their own.
+    await run("create index concurrently qtest_n on qtest.t (n)");
+    // Inside a tenant's transaction it would wait forever for it: it throws instead.
+    await expect(db.withTenant(a.tenantId, () => run("select 1"))).rejects.toThrow(NestedWorkError);
   });
 });

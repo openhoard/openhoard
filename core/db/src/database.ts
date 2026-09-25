@@ -1,5 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { join } from "node:path";
-import { sql, type ExtractTablesWithRelations, type SQL } from "drizzle-orm";
+import { asc, gt, sql, type ExtractTablesWithRelations, type SQL } from "drizzle-orm";
 import type {
   PgDatabase,
   PgQueryResultHKT,
@@ -9,6 +10,7 @@ import type {
 import { checkServer, DatabaseCheckError, type QueryRows } from "./checks.js";
 import { isId } from "./ids.js";
 import * as schema from "./schema.js";
+import { tenants } from "./schema.js";
 
 export type Schema = typeof schema;
 
@@ -43,9 +45,45 @@ export interface Database {
     config?: PgTransactionConfig,
   ): Promise<T>;
 
+  /**
+   * Every tenant's id, in order, at most `limit` (1 to 10,000, default 1,000) after `after`:
+   * page with the last id returned until a page comes back short.
+   *
+   * The only read across tenants, for scheduled maintenance (core/jobs) that must visit each
+   * one. It names tenants and nothing else: it runs in a read-only transaction of its own, in
+   * which the `tenant_directory` policy (migration 0031) lets `tenants` rows be selected, and
+   * every other table stays closed because no tenant is set. Work on what it returns goes
+   * through withTenant(), one tenant at a time.
+   */
+  tenantIds(options?: { after?: string; limit?: number }): Promise<string[]>;
+
+  /**
+   * The connection for pg-boss (core/jobs, ADR-0008), which keeps its queue in its own `pgboss`
+   * schema, outside row-level security. It is a second door past withTenant(), for pg-boss's
+   * own SQL only: nothing else may use it.
+   *
+   * - On PostgreSQL it is the URL the database was opened with, so pg-boss connects with its
+   *   own small pool as the same ordinary role, which openDatabase() checked (not a superuser,
+   *   no BYPASSRLS). As the database's owner, that role may create the `pgboss` schema.
+   * - On PGlite it runs statements on the same embedded instance, one at a time, between the
+   *   application's transactions. A pg-boss call made while a withTenant() callback runs would
+   *   wait for that transaction to end, which can't happen while the callback awaits the call,
+   *   so it throws {@link NestedWorkError} instead: enqueue after the transaction commits.
+   */
+  queueConnection(): QueueConnection;
+
   /** Closes the connection or pool. */
   close(): Promise<void>;
 }
+
+/** How pg-boss reaches the database; see {@link Database.queueConnection}. */
+export type QueueConnection =
+  | { readonly kind: "postgres"; readonly connectionString: string }
+  | {
+      readonly kind: "pglite";
+      /** pg-boss's `db` adapter (its IDatabase): one statement, or a block without parameters. */
+      executeSql(text: string, values?: unknown[]): Promise<{ rows: unknown[] }>;
+    };
 
 /**
  * What a driver provides: a Drizzle handle bound to the connection, plus migrations.
@@ -58,6 +96,8 @@ export interface Driver {
   readonly query: QueryRows;
   /** Applies pending migrations; safe to call from several processes at once. */
   migrate(): Promise<void>;
+  /** See {@link Database.queueConnection}. */
+  queue(): QueueConnection;
   close(): Promise<void>;
 }
 
@@ -136,9 +176,39 @@ export async function openDriver(options: OpenOptions): Promise<Driver> {
   );
 }
 
+/** The most tenant ids one {@link Database.tenantIds} call returns. */
+export const MAX_TENANT_PAGE = 10_000;
+
 export function fromDriver(driver: Driver): Database {
   return {
     kind: driver.kind,
+    async tenantIds(options = {}) {
+      const { after, limit = 1_000 } = options;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_TENANT_PAGE) {
+        throw new RangeError(`tenantIds: limit is 1 to ${MAX_TENANT_PAGE}`);
+      }
+      if (after !== undefined && !isId("tenant", after)) {
+        throw new TypeError("tenantIds: after is not a tenant id");
+      }
+      // A transaction of its own: called from a tenant's on PGlite, it would wait for it forever.
+      if (insideWithTenant()) throw new NestedWorkError("tenantIds()");
+      return driver.db.transaction(
+        async (tx) => {
+          // Transaction-local, like app.tenant_id: the policy opens `tenants` to SELECT here and
+          // nowhere else, and no tenant is set, so every other table shows nothing.
+          await tx.execute(sql`select set_config('app.tenant_directory', 'on', true)`);
+          const rows = await tx
+            .select({ id: tenants.id })
+            .from(tenants)
+            .where(after === undefined ? undefined : gt(tenants.id, after))
+            .orderBy(asc(tenants.id))
+            .limit(limit);
+          return rows.map((r) => r.id);
+        },
+        { accessMode: "read only" },
+      );
+    },
+    queueConnection: () => driver.queue(),
     withTenant(tenantId, work, config) {
       if (!isId("tenant", tenantId)) {
         return Promise.reject(new TypeError("withTenant: not a tenant id"));
@@ -150,7 +220,7 @@ export function fromDriver(driver: Driver): Database {
         await tx.execute(sql`select set_config('app.tenant_id', ${tenantId}, true)`);
         const guarded = guardTransaction(tx as Tx);
         try {
-          return await work(guarded.tx);
+          return await tenantWork.run(true, () => work(guarded.tx));
         } finally {
           // Before COMMIT or ROLLBACK is even sent: nothing more may run in this transaction.
           guarded.end();
@@ -174,6 +244,29 @@ export function fromDriver(driver: Driver): Database {
     },
     close: () => driver.close(),
   };
+}
+
+/** Marks the async context of a withTenant() callback; see {@link insideWithTenant}. */
+const tenantWork = new AsyncLocalStorage<true>();
+
+/**
+ * Whether this code runs inside a withTenant() callback, in its async context however deep.
+ * The PGlite queue connection uses it to refuse a call that would wait for the transaction the
+ * caller holds open, and core/jobs to refuse an enqueue that would not be part of it anyway.
+ */
+export function insideWithTenant(): boolean {
+  return tenantWork.getStore() === true;
+}
+
+/** Thrown for work that must not run inside a withTenant() callback. */
+export class NestedWorkError extends Error {
+  constructor(what: string) {
+    super(
+      `${what} can't run inside a withTenant() callback: on the embedded database it would ` +
+        `wait for the transaction the callback holds open. Call it after that transaction commits.`,
+    );
+    this.name = "NestedWorkError";
+  }
 }
 
 /** Makes every later use of a drizzle session's connection throw {@link TransactionEndedError}. */

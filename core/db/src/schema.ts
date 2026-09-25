@@ -220,6 +220,10 @@ export const versions = pgTable(
       foreignColumns: [blobs.tenantId, blobs.id],
     }),
     index("versions_blob_idx").on(t.tenantId, t.blobId),
+    // Versions enrichment hasn't finished, for core/jobs' sweep (usually few).
+    index("versions_unprocessed_idx")
+      .on(t.tenantId, t.objectId, t.seq)
+      .where(sql`processed_at is null`),
     idCheck("versions_id_format", "id", "version"),
     check("versions_seq_positive", sql`seq > 0`),
     check(

@@ -1,0 +1,1 @@
+CREATE INDEX "versions_unprocessed_idx" ON "versions" USING btree ("tenant_id","object_id","seq") WHERE processed_at is null;

@@ -76,6 +76,8 @@ export function openPostgres(url: string, options: PostgresOptions = {}): Driver
         client.release(failure);
       }
     },
+    // pg-boss opens its own pool on the same URL, so the same role (checked by openDatabase).
+    queue: () => ({ kind: "postgres", connectionString: url }),
     close: () => pool.end(),
   };
 }

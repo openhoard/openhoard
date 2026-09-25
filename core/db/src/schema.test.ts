@@ -457,6 +457,7 @@ describe("openDatabase", () => {
       db: undefined as never,
       query: () => Promise.resolve([{ num: 160013, version: "16.13", tz: "UTC" }]),
       migrate: () => Promise.reject(new Error("must not migrate")),
+      queue: () => ({ kind: "postgres", connectionString: "postgres://unused" }),
       close: () => {
         closed = true;
         return Promise.resolve();

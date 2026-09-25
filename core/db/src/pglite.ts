@@ -15,7 +15,7 @@ import { PGlite, types } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
-import type { Driver } from "./database.js";
+import { insideWithTenant, NestedWorkError, type Driver } from "./database.js";
 import { migrationsFolder } from "./migrations.js";
 import * as schema from "./schema.js";
 
@@ -77,6 +77,7 @@ export async function openPglite(options: {
     query: async (text) => (await pglite.query<Record<string, unknown>>(text)).rows,
     // PGlite is one connection in one process, and the lock keeps other processes out.
     migrate: () => migrate(db, { migrationsFolder }),
+    queue: () => ({ kind: "pglite", executeSql: (text, values) => queueSql(pglite, text, values) }),
     dump: async () => (await pglite.dumpDataDir("none")) as Blob,
     async close() {
       try {
@@ -86,6 +87,41 @@ export async function openPglite(options: {
       }
     },
   };
+}
+
+/**
+ * Runs one of pg-boss's statements on the embedded instance (Database.queueConnection()).
+ *
+ * PGlite is one session, shared with the application, and runs each query or transaction whole
+ * before the next (its transaction lock, which drizzle's transactions hold too). pg-boss expects
+ * a pool, where a failed statement can't touch anyone else's. Here it could: a block of its own
+ * (`BEGIN; …; COMMIT`) failing half way would leave the session in an aborted transaction that
+ * the next application transaction would fall into. So a block without parameters runs inside a
+ * PGlite transaction, which rolls back on failure before anyone else runs. pg-boss's own BEGIN
+ * and COMMIT in it are harmless (Postgres warns and carries on). A parameterized statement is
+ * one statement in autocommit, and an index built or rebuilt CONCURRENTLY can't run in a
+ * transaction at all, so both run on their own.
+ *
+ * Called inside a withTenant() callback it would wait for the transaction lock the callback
+ * holds, forever: it throws instead.
+ */
+export async function queueSql(
+  pglite: PGlite,
+  text: string,
+  values?: unknown[],
+): Promise<{ rows: unknown[] }> {
+  if (insideWithTenant()) throw new NestedWorkError("a job queue call (pg-boss)");
+  if (values !== undefined && values.length > 0) {
+    return { rows: (await pglite.query(text, values)).rows };
+  }
+  if (/\bconcurrently\b/i.test(text)) {
+    return { rows: (await pglite.exec(text)).flatMap((r) => r.rows) };
+  }
+  // exec() returns one result per statement: keep every row, so a RETURNING before the COMMIT
+  // isn't lost (node-postgres returns them all too).
+  return pglite.transaction(async (tx) => ({
+    rows: (await tx.exec(text)).flatMap((r) => r.rows),
+  }));
 }
 
 /**

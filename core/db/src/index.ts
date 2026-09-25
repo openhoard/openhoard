@@ -6,12 +6,16 @@ export {
   MIN_SERVER_VERSION_NUM,
 } from "./checks.js";
 export {
+  insideWithTenant,
+  MAX_TENANT_PAGE,
+  NestedWorkError,
   openDatabase,
   queryRows,
   TransactionEndedError,
   type Database,
   type OpenOptions,
   type PostgresOptions,
+  type QueueConnection,
   type Schema,
   type Tx,
 } from "./database.js";
