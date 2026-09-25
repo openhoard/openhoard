@@ -1,16 +1,23 @@
 import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { secureHeaders } from "hono/secure-headers";
+import type { Database } from "@openhoard/core-db";
 import type { Logger } from "pino";
+import { mountAuth, type AuthEnv } from "./auth.js";
 import type { Config } from "./config.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   version: string;
 };
 
+export interface AppDeps {
+  /** The database; needed when sign-in is configured. */
+  db?: Database;
+}
+
 /** Builds the HTTP app. Kept free of listeners so tests can call it directly. */
-export function createApp(_config: Config, log?: Logger): Hono {
-  const app = new Hono();
+export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hono<AuthEnv> {
+  const app = new Hono<AuthEnv>();
 
   // Baseline security headers on every response (nosniff, frame-deny, strict referrer, etc.).
   app.use(secureHeaders());
@@ -29,6 +36,11 @@ export function createApp(_config: Config, log?: Logger): Hono {
         "request",
       );
     });
+  }
+
+  if (config.auth) {
+    if (!deps.db) throw new Error("sign-in (auth) needs the database");
+    mountAuth(app, { auth: config.auth, db: deps.db, ...(log ? { log } : {}) });
   }
 
   app.get("/healthz", (c) => c.json({ status: "ok" }));

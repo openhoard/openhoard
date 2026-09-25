@@ -183,6 +183,20 @@
       "when": 1790316775782,
       "tag": "0025_activity_events_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1790348777070,
+      "tag": "0026_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1790348777931,
+      "tag": "0027_sessions_rls",
+      "breakpoints": true
     }
   ]
 }

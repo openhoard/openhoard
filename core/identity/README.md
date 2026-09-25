@@ -56,6 +56,29 @@ Sign-in matches an (issuer, subject) pair: `linkIdentity()` and `findUserByIdent
 never matches on email, because an email is a label a person can change, and it never returns
 a retired user.
 
+`signIn()` (in [`sessions.ts`](src/sessions.ts), T-102) is what the server calls with the claims
+of a checked ID token:
+
+- A linked (issuer, subject) finds its user.
+- The first time, a provider may pass `externalId` (Entra's `oid`). It is matched once to a SCIM
+  user's external id, and the pair is then linked, so from then on only the pair counts.
+- Anyone else is refused (`unknown`), as is a locked, disabled or retired person (`inactive`).
+  Signing in creates nobody: people come from SCIM (T-103) or invitations (T-108).
+
+Sessions:
+
+- `startSession()` returns `ohs.<tenant id>.<session id>.<secret>`, shown once. Only a SHA-256 of
+  the secret is stored, with an idle limit and an absolute expiry (at most 30 days). A service
+  account never gets a session.
+- `checkSession()` reads the session on every request. It fails a revoked, expired or idle one,
+  and one whose person is inactive, so a lock takes effect on the next request. It records use at
+  most once a minute, so it needs a read-write transaction.
+- `revokeSession()` is sign-out. `revokeUserSessions()` ends all of a person's sessions (for
+  T-104). `retireUser()` ends them too.
+- `beginLogin()` / `takeLogin()` hold a sign-in in progress: the PKCE verifier, nonce and return
+  path, found by a hash of `state`, usable once, for 10 minutes, and only by the provider they
+  were for.
+
 `resolvePrincipal()` returns what `authorize()` needs: groups, every grant held directly or
 through a group, guest status, and whether the user is active. A disabled user comes back
 inactive, and `authorize()` denies them. Its `at` applies to grants only (which were live

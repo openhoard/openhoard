@@ -25,6 +25,7 @@ export const ID_PREFIXES = {
   group: "grp",
   apiKey: "key",
   activity: "act",
+  session: "ses",
 } as const;
 export type IdKind = keyof typeof ID_PREFIXES;
 

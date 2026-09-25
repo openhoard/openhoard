@@ -562,6 +562,102 @@ export const userIdentities = pgTable(
   ],
 );
 
+/**
+ * Sign-in sessions (T-102): a person signed in through a provider, holding an opaque cookie
+ * `ohs.<tenant>.<session id>.<secret>`. Only a SHA-256 of the secret is kept. A session ends at
+ * `expires_at`, after `idle` without use, or when revoked (sign-out, retirement, T-104).
+ * Never a service account's: the foreign key names the user's kind, which can't be `service`.
+ */
+export const sessions = pgTable(
+  "sessions",
+  {
+    tenantId: text("tenant_id").notNull(),
+    id: text("id").notNull(),
+    userId: text("user_id").notNull(),
+    userKind: text("user_kind").notNull(),
+    secretHash: text("secret_hash").notNull(),
+    /** The configured provider signed in through, and the identity it gave. */
+    provider: text("provider").notNull(),
+    issuer: text("issuer").notNull(),
+    subject: text("subject").notNull(),
+    createdAt: createdAt(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    /** How long it may go unused. */
+    idleSeconds: integer("idle_seconds").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: text("revoked_by"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    foreignKey({
+      name: "sessions_user_fk",
+      columns: [t.tenantId, t.userId, t.userKind],
+      foreignColumns: [users.tenantId, users.id, users.kind],
+    }).onUpdate("cascade"),
+    // A user's sessions, to end them all.
+    index("sessions_user_idx").on(t.tenantId, t.userId),
+    // Pruning ended sessions.
+    index("sessions_expires_idx").on(t.tenantId, t.expiresAt),
+    idCheck("sessions_id_format", "id", "session"),
+    check("sessions_person_only", sql`user_kind in ('member', 'guest')`),
+    check("sessions_secret_hash_format", sql`secret_hash ~ '^[0-9a-f]{64}$'`),
+    check("sessions_provider_format", sql`provider ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
+    check("sessions_issuer_length", sql`char_length(issuer) between 1 and 1024`),
+    check("sessions_subject_length", sql`char_length(subject) between 1 and 512`),
+    check("sessions_idle_range", sql`idle_seconds between 60 and 2592000`),
+    check(
+      "sessions_expiry",
+      sql`expires_at > created_at and expires_at <= created_at + interval '30 days'`,
+    ),
+    check(
+      "sessions_revocation_complete",
+      sql`(revoked_at is null) = (revoked_by is null) and (revoked_at is null or revoked_at >= created_at)`,
+    ),
+    check(
+      "sessions_revoked_by_principal",
+      sql`revoked_by is null or revoked_by ~ '^(user|system|scim):.+$'`,
+    ),
+  ],
+);
+
+/**
+ * Sign-ins under way (T-102): between sending the browser to the provider and its return. The
+ * row is found by a hash of the `state` the browser brings back (the same value is in a cookie
+ * bound to that browser), used once, and holds the PKCE verifier and nonce, which never leave
+ * the server. Expires in minutes.
+ */
+export const loginRequests = pgTable(
+  "login_requests",
+  {
+    tenantId: text("tenant_id").notNull(),
+    stateHash: text("state_hash").notNull(),
+    provider: text("provider").notNull(),
+    codeVerifier: text("code_verifier").notNull(),
+    nonce: text("nonce").notNull(),
+    /** Where to go after signing in: a path on this server. */
+    returnTo: text("return_to").notNull(),
+    createdAt: createdAt(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.stateHash] }),
+    index("login_requests_expires_idx").on(t.tenantId, t.expiresAt),
+    check("login_requests_state_hash_format", sql`state_hash ~ '^[0-9a-f]{64}$'`),
+    check("login_requests_provider_format", sql`provider ~ '^[a-z0-9][a-z0-9-]{0,62}$'`),
+    check("login_requests_verifier_format", sql`code_verifier ~ '^[A-Za-z0-9._~-]{43,128}$'`),
+    check("login_requests_nonce_length", sql`char_length(nonce) between 16 and 256`),
+    check(
+      "login_requests_return_to_path",
+      sql`char_length(return_to) between 1 and 2048 and return_to like '/%' and return_to not like '//%' and strpos(return_to, chr(92)) = 0`,
+    ),
+    check(
+      "login_requests_expiry",
+      sql`expires_at > created_at and expires_at <= created_at + interval '1 hour'`,
+    ),
+  ],
+);
+
 /** What an API key may be scoped to: core/policy ACTIONS, and zone kinds. */
 export const KEY_ACTIONS = ["search", "read", "open", "tag"] as const;
 const sqlArray = (values: readonly string[]) =>
@@ -1025,4 +1121,6 @@ export const tables = {
   principalEpochs,
   apiKeys,
   activityEvents,
+  sessions,
+  loginRequests,
 } as const;

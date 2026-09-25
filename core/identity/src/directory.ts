@@ -14,6 +14,7 @@ import {
   userIdentities,
   users,
   type Tx,
+  sessions,
 } from "@openhoard/core-db";
 import type { AuthzPrincipal } from "@openhoard/core-policy";
 import { and, asc, eq, gt, isNull, ne, sql } from "drizzle-orm";
@@ -493,7 +494,7 @@ export async function setProviderActive(
 
 /**
  * Retires a user for good: they left, or the identity provider deleted them. They leave every
- * group, their grants are revoked, their sign-in identities are unlinked, and their email and
+ * group, their grants are revoked, their sign-in identities are unlinked and sessions ended, and their email and
  * external id become free for someone new (who gets a new id, so inherits nothing). The row
  * stays: they own objects and appear in audit. SCIM retires SCIM users and admins local ones.
  * Returns false if already retired.
@@ -537,6 +538,13 @@ export async function retireUser(
   await tx
     .delete(userIdentities)
     .where(and(eq(userIdentities.tenantId, tenantId), eq(userIdentities.userId, userId)));
+  // Their sessions end now (they would fail anyway: the principal is inactive).
+  await tx
+    .update(sessions)
+    .set({ revokedAt: sql`greatest(now(), ${sessions.createdAt})`, revokedBy: by })
+    .where(
+      and(eq(sessions.tenantId, tenantId), eq(sessions.userId, userId), isNull(sessions.revokedAt)),
+    );
   // A retired service account's keys stop at once (they would anyway: it is inactive).
   await tx
     .update(apiKeys)

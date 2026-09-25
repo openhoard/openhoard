@@ -24,7 +24,7 @@ try {
 log.info({ database: db.kind }, "database ready");
 
 const server = serve(
-  { fetch: createApp(config, log).fetch, hostname: config.host, port: config.port },
+  { fetch: createApp(config, log, { db }).fetch, hostname: config.host, port: config.port },
   (info) =>
     log.info({ address: info.address, port: info.port, dataDir: config.dataDir }, "listening"),
 );

@@ -21,13 +21,18 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
+    "@openhoard/core-audit": "workspace:^",
     "@openhoard/core-db": "workspace:^",
+    "@openhoard/core-identity": "workspace:^",
+    "@openhoard/core-policy": "workspace:^",
     "hono": "^4.8.0",
+    "openid-client": "^6.8.8",
     "pino": "^10.3.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@openhoard/config": "workspace:*"
+    "@openhoard/config": "workspace:*",
+    "@openhoard/testkit": "workspace:*"
   },
   "license": "Apache-2.0"
 }
