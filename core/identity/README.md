@@ -7,6 +7,8 @@ The tenant's people and groups, and who a signed-in person is to `authorize()`. 
 ask here, never the `users`, `groups` and `group_members` tables in core/db.
 
 - [`directory.ts`](src/directory.ts): users, groups, membership, `resolvePrincipal()` (T-101).
+- [`principal-cache.ts`](src/principal-cache.ts): `PrincipalCache`, `resolvePrincipal()` with a
+  cache in front (T-107).
 
 ## Sources
 
@@ -56,7 +58,30 @@ a retired user.
 `resolvePrincipal()` returns what `authorize()` needs: groups, every grant held directly or
 through a group, guest status, and whether the user is active. A disabled user comes back
 inactive, and `authorize()` denies them. Its `at` applies to grants only (which were live
-then); memberships, kind and stops are always the current ones. Caching arrives with T-107.
+then); memberships, kind and stops are always the current ones.
+
+## The principal cache
+
+Every request needs its caller's principal, so `PrincipalCache.resolve()` keeps them. It is
+invalidated by the database, so it holds across processes: every change `resolvePrincipal()`
+reads (grants, memberships, a user's kind, lock, provider disable or retirement) bumps the
+tenant's principal epoch in the writing transaction, by trigger. An entry is used only by a
+snapshot that sees the epoch it was resolved at, so a change reaches every process as soon as a
+snapshot shows it committed. Grants are resolved as of the moment the epoch is read, not the
+transaction's start, so a revocation the snapshot shows is never counted. An entry also ends
+when its soonest grant expires, and after `ttlMillis` (60 s) at most; the least recently used go
+past `maxEntries` (10,000).
+
+Only read-only snapshot transactions (`VIEW_TRANSACTION`: REPEATABLE READ or SERIALIZABLE) use
+or fill it. A transaction that writes may see its own uncommitted changes and roll back, and a
+READ COMMITTED one reads the epoch and the rows in different snapshots; either resolves afresh
+and keeps nothing. Invalidation is tenant-wide: any grant or membership change, even a
+one-object share, drops the tenant's entries.
+
+Every function here that changes a principal takes the tenant's epoch lock first (core/db
+`lockPrincipals()`), before its row locks, so two such transactions can't deadlock on the
+triggers' bump. A new column `resolvePrincipal()` reads needs its trigger too (core/db
+migration 0021).
 
 Emails are still unique among current users, keyed by `emailKey()`:
 

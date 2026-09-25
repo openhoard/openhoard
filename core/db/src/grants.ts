@@ -1,5 +1,6 @@
 import { and, eq, gt, inArray, isNull, lte, or, sql, type SQL } from "drizzle-orm";
 import type { Tx } from "./database.js";
+import { lockPrincipals } from "./principals.js";
 import { newId } from "./ids.js";
 import { facetValues, grants, groups, users, type GRANT_ROLES } from "./schema.js";
 
@@ -76,6 +77,7 @@ export async function addGrant(
   if ("tag" in target === "objectId" in target) {
     throw new GrantError("invalid", "a grant targets a tag or an object, not both or neither");
   }
+  await lockPrincipals(tx, tenantId);
   await lockPrincipal(tx, tenantId, input.principal);
   const id = newId("grant");
   const created: Date | SQL = now ?? sql`now()`;
@@ -158,6 +160,7 @@ export async function revokeGrant(
   revokedBy: string,
   now?: Date,
 ): Promise<boolean> {
+  await lockPrincipals(tx, tenantId);
   const rows = await tx
     .update(grants)
     .set({ revokedAt: now ?? sql`greatest(now(), ${grants.createdAt})`, revokedBy })
@@ -245,11 +248,16 @@ export async function loadGrants(
   principals: readonly string[],
   at?: Date,
 ): Promise<GrantSet> {
+  return grantSetOf(await liveGrants(tx, tenantId, principals, at));
+}
+
+/** Live grants in the shape AuthzPrincipal takes (what loadGrants() returns). */
+export function grantSetOf(live: readonly LiveGrant[]): GrantSet {
   const tagGrants = new Set<string>();
   const tagWriteGrants = new Set<string>();
   const objectGrants = new Set<string>();
   const objectWriteGrants = new Set<string>();
-  for (const g of await liveGrants(tx, tenantId, principals, at)) {
+  for (const g of live) {
     const write = g.role === "write";
     if (g.objectId !== null) (write ? objectWriteGrants : objectGrants).add(g.objectId);
     else if (g.tag !== null) (write ? tagWriteGrants : tagGrants).add(g.tag);

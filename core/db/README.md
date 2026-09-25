@@ -57,6 +57,13 @@ default expiry, revocation (never before creation) and "live now". core/identity
 the same clock, so a skewed application clock can't date a revocation before its grant. The
 functions still take an explicit `now` or `at`, for tests and for asking about another moment.
 
+Every change to what a principal holds (a grant, a group membership, a user's kind or stops)
+bumps the tenant's row in `principal_epochs`, by trigger, in the same transaction (once per
+statement for grants and memberships): core/identity's principal cache is invalidated by it.
+That row lock queues concurrent principal changes in one tenant behind each other until commit;
+take it first with `lockPrincipals()`, as `addGrant()` and `revokeGrant()` do, before any other
+row lock, and before the audit append. Never delete a tenant's row while the tenant lives.
+
 ## Server requirements
 
 `openDatabase()` refuses to start unless:

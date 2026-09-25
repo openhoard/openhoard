@@ -547,6 +547,18 @@ export const userIdentities = pgTable(
   ],
 );
 
+/**
+ * A counter per tenant, bumped by a trigger (migration 0021) on every change resolvePrincipal()
+ * reads: grants, group memberships, and a user's kind or stops. core/identity's principal cache
+ * keys entries by it, so a change anywhere in the tenant invalidates them, in every process.
+ */
+export const principalEpochs = pgTable("principal_epochs", {
+  tenantId: text("tenant_id")
+    .primaryKey()
+    .references(() => tenants.id),
+  epoch: bigint("epoch", { mode: "number" }).notNull().default(0),
+});
+
 /** Who is in which group. Direct membership only; nested groups arrive with SCIM (T-103). */
 export const groupMembers = pgTable(
   "group_members",
@@ -833,4 +845,5 @@ export const tables = {
   groups,
   groupMembers,
   tenantPacks,
+  principalEpochs,
 } as const;

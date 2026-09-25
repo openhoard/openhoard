@@ -19,7 +19,8 @@ import { chainEnd, chainPages } from "./pages.js";
  * Advisory lock order. Every package takes its transaction-scoped advisory locks in one order,
  * so two transactions can never each hold one the other waits for:
  *
- *   source item (7423, core/catalog) → vocabulary value (7425, core/catalog)
+ *   principal epoch (a row lock, core/db lockPrincipals(), for principal changes)
+ *     → source item (7423, core/catalog) → vocabulary value (7425, core/catalog)
  *     → object (7422, core/catalog) → audit append (7421, here)
  *
  * The audit lock comes last: append the audit record at the end of the transaction, after the

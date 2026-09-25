@@ -28,6 +28,7 @@ import {
   groups,
   objects,
   sourceRefs,
+  principalEpochs,
   tenantPacks,
   tenants,
   userIdentities,
@@ -242,6 +243,8 @@ describe("schema", () => {
       await tx.delete(userIdentities);
       await tx.delete(users);
       await tx.delete(tenantPacks);
+      // Last of the children: deleting grants and memberships above bumped it.
+      await tx.delete(principalEpochs);
       await tx.delete(tenants);
     });
     // The policies match on tenant_id alone, so orphans would still be visible here.
@@ -255,7 +258,8 @@ describe("schema", () => {
                    (select count(*) from object_tags) + (select count(*) from grants) +
                    (select count(*) from users) + (select count(*) from user_identities) +
                    (select count(*) from groups) +
-                   (select count(*) from group_members) + (select count(*) from tenant_packs) as n`,
+                   (select count(*) from group_members) + (select count(*) from tenant_packs) +
+                   (select count(*) from principal_epochs) as n`,
       ),
     );
     expect(left).toEqual([{ n: "0" }]); // raw int8 is a string (see above)

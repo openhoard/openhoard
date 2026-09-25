@@ -2,9 +2,11 @@ import { domainToASCII } from "node:url";
 import {
   grants,
   groupMembers,
+  grantSetOf,
   groups,
   IDENTITY_SOURCES,
-  loadGrants,
+  liveGrants,
+  lockPrincipals,
   newId,
   sqlState,
   USER_KINDS,
@@ -350,6 +352,7 @@ export async function updateUser(
   changes: UserChanges,
   as: IdentitySource,
 ): Promise<User> {
+  await lockPrincipals(tx, tenantId);
   const current = await ownedUser(tx, tenantId, userId, as);
   const set: Partial<typeof users.$inferInsert> = {};
   if (changes.email !== undefined) {
@@ -395,6 +398,7 @@ export async function lockUser(
   userId: string,
   by: string,
 ): Promise<boolean> {
+  await lockPrincipals(tx, tenantId);
   checkActor(by, ["user", "system"]);
   const row = await lockUserRow(tx, tenantId, userId);
   if (row.lockedAt !== null) return false;
@@ -412,6 +416,7 @@ export async function unlockUser(
   userId: string,
   by: string,
 ): Promise<boolean> {
+  await lockPrincipals(tx, tenantId);
   checkActor(by, ["user", "system"]);
   const row = await lockUserRow(tx, tenantId, userId);
   if (row.lockedAt === null) return false;
@@ -433,6 +438,7 @@ export async function setProviderActive(
   active: boolean,
   by: string,
 ): Promise<boolean> {
+  await lockPrincipals(tx, tenantId);
   checkActor(by, ["scim"]);
   const row = await ownedUser(tx, tenantId, userId, "scim");
   if ((row.providerDisabledAt === null) === active) return false;
@@ -460,6 +466,7 @@ export async function retireUser(
   userId: string,
   by: string,
 ): Promise<boolean> {
+  await lockPrincipals(tx, tenantId);
   const actor = checkActor(by, ["user", "system", "scim"]);
   const [row] = await tx
     .select()
@@ -682,6 +689,7 @@ export async function deleteGroup(
   as: IdentitySource,
   by: string,
 ): Promise<void> {
+  await lockPrincipals(tx, tenantId);
   checkActor(by, ["user", "system", "scim"]);
   await ownedGroup(tx, tenantId, groupId, as);
   await tx
@@ -705,6 +713,7 @@ export async function addMember(
   userId: string,
   as: IdentitySource,
 ): Promise<boolean> {
+  await lockPrincipals(tx, tenantId);
   await ownedGroup(tx, tenantId, groupId, as);
   // Key-share: a retirement (FOR UPDATE) can't run between this check and the insert.
   const [user] = await tx
@@ -730,6 +739,7 @@ export async function removeMember(
   userId: string,
   as: IdentitySource,
 ): Promise<boolean> {
+  await lockPrincipals(tx, tenantId);
   await ownedGroup(tx, tenantId, groupId, as);
   const removed = await tx
     .delete(groupMembers)
@@ -801,8 +811,9 @@ export async function membersOf(
  * history isn't kept. So a past `at` answers "what would this person, as they are now, have
  * held then?", not "what could they see then?".
  *
- * Uncached. T-107's cache must be invalidated, in the same transaction, by every change this
- * reads: memberships, grants, the user's stops (lock, provider disable, retirement) and kind.
+ * Uncached; principal-cache.ts caches it. Every change this reads (memberships, grants, the
+ * user's stops and kind) bumps the tenant's principal epoch, by trigger (core/db migration 0021),
+ * which is what invalidates the cache: a new column read here needs its trigger too.
  */
 export async function resolvePrincipal(
   tx: Tx,
@@ -810,6 +821,16 @@ export async function resolvePrincipal(
   userId: string,
   at?: Date,
 ): Promise<AuthzPrincipal | null> {
+  return (await resolveWithExpiry(tx, tenantId, userId, at))?.principal ?? null;
+}
+
+/** resolvePrincipal(), and when the soonest of the grants it counted expires (null: none do). */
+export async function resolveWithExpiry(
+  tx: Tx,
+  tenantId: string,
+  userId: string,
+  at?: Date,
+): Promise<{ principal: AuthzPrincipal; expiresAt: Date | null } | null> {
   const user = await getUser(tx, tenantId, userId);
   if (!user) return null;
   // Just the ids, in id order: groupsOf() loads whole groups and sorts them by name.
@@ -819,17 +840,21 @@ export async function resolvePrincipal(
     .where(and(eq(groupMembers.tenantId, tenantId), eq(groupMembers.userId, userId)))
     .orderBy(asc(groupMembers.groupId));
   const groupIds = memberships.map((m) => m.groupId);
-  const held = await loadGrants(
+  const live = await liveGrants(
     tx,
     tenantId,
     [userPrincipal(userId), ...groupIds.map(groupPrincipal)],
     at,
   );
+  const expiries = live.flatMap((g) => (g.expiresAt === null ? [] : [g.expiresAt.getTime()]));
   return {
-    userId,
-    groupIds,
-    ...held,
-    guest: user.kind === "guest",
-    active: user.active,
+    principal: {
+      userId,
+      groupIds,
+      ...grantSetOf(live),
+      guest: user.kind === "guest",
+      active: user.active,
+    },
+    expiresAt: expiries.length === 0 ? null : new Date(Math.min(...expiries)),
   };
 }

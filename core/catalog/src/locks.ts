@@ -8,6 +8,8 @@ import { sql } from "drizzle-orm";
  * Lock order. Every catalog function takes what it needs in this order, and never the other way
  * round, so two of them can wait on each other only in a line, never in a cycle:
  *
+ *   0. the tenant's principal epoch (core/db lockPrincipals()): anything that changes grants,
+ *      memberships or a user's kind or stops takes it first (none of these functions do);
  *   1. source item (7423): ingest, removeFromSource;
  *   2. tag value (7425): deciding review items (approve, reject, merge);
  *   3. object (7422): anything that versions, tags, titles or marks one object;

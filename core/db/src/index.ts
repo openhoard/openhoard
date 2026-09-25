@@ -22,6 +22,7 @@ export {
   addGrant,
   DEFAULT_GRANT_DAYS,
   GrantError,
+  grantSetOf,
   liveGrants,
   loadGrants,
   revokeGrant,
@@ -31,3 +32,4 @@ export {
   type GrantSet,
   type LiveGrant,
 } from "./grants.js";
+export { lockPrincipals } from "./principals.js";
