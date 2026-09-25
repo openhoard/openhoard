@@ -267,7 +267,9 @@ describe("the review inbox", () => {
     const outcome = await propose({ tag: "client:initech", label: "Initech" });
     if (outcome.applied) throw new Error("expected a review");
     const now = new Date();
-    await inTenant((tx) => approveReview(tx, t.tenantId, outcome.reviewId, "user:reviewer", now));
+    await inTenant((tx) =>
+      approveReview(tx, t.tenantId, outcome.reviewId, "user:reviewer", { now }),
+    );
     expect(await tagsOn()).toEqual(["client:acme-1", "client:initech (reviewed)"]);
     expect(await value("client", "initech")).toMatchObject({ approved: true });
     expect(await reviews()).toEqual([]);

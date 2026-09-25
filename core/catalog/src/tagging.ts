@@ -5,13 +5,17 @@ import {
   newId,
   objects,
   objectTags,
+  queryRows,
   tagOf,
   tagReviews,
   type TAG_SOURCES,
   type Tx,
 } from "@openhoard/core-db";
 import { and, asc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { EXPOSURE, VISIBILITY } from "@openhoard/core-policy";
 import { lockObject, lockTagValue } from "./locks.js";
+import { makePrimary } from "./primary.js";
+import { TagError } from "./tag-error.js";
 
 /*
  * Applying tags, and the review inbox (T-406). The one rule: nothing creates vocabulary, and
@@ -25,6 +29,10 @@ import { lockObject, lockTagValue } from "./locks.js";
  * | approved, with visibility/exposure or a live grant | applied            | review: sensitive      |
  * | approved, below the confidence threshold          | applied            | review: low-confidence |
  * | approved otherwise                                | applied            | applied                |
+ *
+ * On a single-value facet (T-409) the object already has another value of, a person's value
+ * replaces it; anyone else's waits in review (`conflict`, unless another reason came first), and
+ * approving it replaces the other value. The home moves to the value that replaced it.
  *
  * A tag with an open review item waits for that item, whoever proposes it again, with one
  * exception: a trusted source (rule, pack, person) proposing an approved value that waits only
@@ -65,33 +73,13 @@ export interface TagProposal {
   label?: string;
 }
 
-export type ReviewReason = "new-value" | "low-confidence" | "sensitive";
+/** Why a tag waits for a person. (`primary` items are proposals of a home: primary.ts.) */
+export type ReviewReason = "new-value" | "low-confidence" | "sensitive" | "conflict";
 
 export type TagOutcome =
   { applied: true; tag: string } | { applied: false; reviewId: string; reason: ReviewReason };
 
-export type TagErrorCode =
-  /** A malformed input: the tag, a label, a confidence, the applier. The message names it. */
-  | "invalid"
-  | "unknown-facet"
-  | "unknown-object"
-  | "unknown-review"
-  /** The review item was decided already, perhaps by another reviewer a moment ago. */
-  | "already-resolved";
-
-/**
- * A refused proposal or decision. Inputs are checked before anything is written, so the
- * transaction can go on: model output can't abort it with a constraint violation.
- */
-export class TagError extends Error {
-  constructor(
-    readonly code: TagErrorCode,
-    message: string,
-  ) {
-    super(message);
-    this.name = "TagError";
-  }
-}
+export { TagError, type TagErrorCode } from "./tag-error.js";
 
 /** Model tags below this confidence go to review. */
 export const DEFAULT_MIN_CONFIDENCE = 0.75;
@@ -122,7 +110,7 @@ export async function proposeTag(
     .where(and(eq(objects.tenantId, tenantId), eq(objects.id, proposal.objectId)));
   if (!objectRow) throw new TagError("unknown-object", `no object ${proposal.objectId}`);
   const [facetRow] = await tx
-    .select({ key: facets.key })
+    .select({ key: facets.key, single: facets.single })
     .from(facets)
     .where(and(eq(facets.tenantId, tenantId), eq(facets.key, facet)));
   // Facets come from packs and admins; a tag can't invent one.
@@ -145,6 +133,24 @@ export async function proposeTag(
     .where(tagKey);
   if (already) {
     const person = proposal.source === "user";
+    // A person picking one of several values of a single-value facet (it became single while
+    // the object had several): the others go, if that loosens nothing.
+    const crowded =
+      person && facetRow.single
+        ? await otherValues(tx, tenantId, proposal.objectId, facet, value)
+        : [];
+    let home = false;
+    if (crowded.length > 0) {
+      if (await loosens(tx, tenantId, facet, value, crowded)) {
+        const [open] = await openItemFor(tx, tenantId, proposal.objectId, facet, value);
+        if (open) return { applied: false, reviewId: open.id, reason: open.reason };
+        return fileItem(tx, tenantId, proposal, facet, value, "conflict");
+      }
+      home = await replaceValues(tx, tenantId, proposal.objectId, facet, crowded);
+    }
+    // The home moves in the same statement that makes the tag the person's: a home is never an
+    // unreviewed model guess, even for an instant.
+    const homeBy = home ? { primaryBy: appliedBy ?? "user:unknown" } : {};
     if (person && already.source !== "user") {
       // A person decides this object carries the tag: it is theirs from now on, whatever gave
       // it first, and no rule change takes it off. A model's item for it is settled too.
@@ -156,9 +162,12 @@ export async function proposeTag(
           confidence: 1,
           modelAppliedBy: null,
           modelConfidence: null,
+          ...homeBy,
         })
         .where(tagKey);
       await settleModelItem(tx, tenantId, proposal, facet, value);
+    } else if (home) {
+      await tx.update(objectTags).set(homeBy).where(tagKey);
     } else if (trusted && already.source === "model" && !already.reviewed) {
       // A rule or pack vouches for a model's unreviewed guess: grants match the tag from now
       // on, and the model's guess is kept, for when the rule stops giving it.
@@ -181,13 +190,22 @@ export async function proposeTag(
   // An open item for this tag decides it; proposing again changes nothing. Except: a model's
   // item on an approved value waits only because a model can't be trusted with it, and a
   // trusted source can. It applies the tag and closes the item as approved by the proposer.
-  const [open] = await openItemFor(tx, tenantId, proposal.objectId, facet, value);
+  // A single-value facet the object already has another value of: only a person replaces it
+  // straight away, and only when that loosens nothing; anything else waits for a person.
+  const others = facetRow.single
+    ? await otherValues(tx, tenantId, proposal.objectId, facet, value)
+    : [];
+  let [open] = await openItemFor(tx, tenantId, proposal.objectId, facet, value);
+  if (open?.reason === "conflict" && others.length === 0) {
+    // What it waited on is gone (the other value was taken off): nothing is left to decide.
+    await withdraw(tx, tenantId, [open.id]);
+    open = undefined;
+  }
   if (open) {
     const settles =
       trusted && open.source === "model" && open.reason !== "new-value" && known?.approved;
     if (!settles) return { applied: false, reviewId: open.id, reason: open.reason };
   }
-
   let reason: ReviewReason | undefined;
   if (!known?.approved) reason = "new-value";
   else if (proposal.source === "model") {
@@ -196,8 +214,23 @@ export async function proposeTag(
       reason = "sensitive";
     } else if (proposal.confidence < minConfidence) reason = "low-confidence";
   }
+  if (
+    reason === undefined &&
+    others.length > 0 &&
+    (proposal.source !== "user" || (await loosens(tx, tenantId, facet, value, others)))
+  ) {
+    reason = "conflict";
+  }
+  // The model's item waits on this tag already, and there can be only one open item for it.
+  if (reason !== undefined && open) {
+    return { applied: false, reviewId: open.id, reason: open.reason };
+  }
 
   if (reason === undefined) {
+    // The home moves to the person's value, as theirs.
+    const primaryBy = (await replaceValues(tx, tenantId, proposal.objectId, facet, others))
+      ? (appliedBy ?? "user:unknown")
+      : null;
     await tx.insert(objectTags).values({
       tenantId,
       objectId: proposal.objectId,
@@ -206,6 +239,7 @@ export async function proposeTag(
       source: proposal.source,
       appliedBy,
       confidence: proposal.confidence,
+      primaryBy,
     });
     // Only a person settles the model's item; a rule's or pack's tag leaves it for a person
     // (see above). Nothing automated records a sensitive tag as approved.
@@ -226,6 +260,18 @@ export async function proposeTag(
       .values({ tenantId, facet, value, label: proposal.label ?? value, approved: false })
       .onConflictDoNothing();
   }
+  return fileItem(tx, tenantId, proposal, facet, value, reason);
+}
+
+/** Files a review item for the proposal. */
+async function fileItem(
+  tx: Tx,
+  tenantId: string,
+  proposal: TagProposal,
+  facet: string,
+  value: string,
+  reason: ReviewReason,
+): Promise<TagOutcome> {
   const reviewId = newId("review");
   await tx.insert(tagReviews).values({
     tenantId,
@@ -235,10 +281,154 @@ export async function proposeTag(
     value,
     reason,
     source: proposal.source,
-    appliedBy,
+    appliedBy: proposal.appliedBy ?? null,
     confidence: proposal.confidence,
   });
   return { applied: false, reviewId, reason };
+}
+
+/**
+ * Whether `value` in place of `others` would loosen a level: some other value sets a visibility
+ * or exposure that `value` doesn't set as tightly. (Taking off a value's grants only narrows who
+ * can see the object.)
+ */
+async function loosens(
+  tx: Tx,
+  tenantId: string,
+  facet: string,
+  value: string,
+  others: readonly { value: string }[],
+): Promise<boolean> {
+  const rows = await tx
+    .select({
+      value: facetValues.value,
+      visibility: facetValues.visibility,
+      exposure: facetValues.exposure,
+    })
+    .from(facetValues)
+    .where(
+      and(
+        eq(facetValues.tenantId, tenantId),
+        eq(facetValues.facet, facet),
+        inArray(facetValues.value, [value, ...others.map((o) => o.value)]),
+      ),
+    );
+  // A value a pack's policies name (a forbid, most likely) may guard more than levels show:
+  // taking it off counts as loosening, to be safe.
+  const named = await queryRows<{ n: number }>(
+    tx,
+    sql`select count(*)::int as n from tenant_packs
+        where tenant_id = ${tenantId}
+          and (${sql.join(
+            others.map(
+              (o) =>
+                sql`position(${tagOf(facet, o.value)} in coalesce(content->'policies', '{}')::text) > 0`,
+            ),
+            sql` or `,
+          )})`,
+  );
+  if ((named[0]?.n ?? 0) > 0) return true;
+  const mine = rows.find((r) => r.value === value);
+  const looser = <T extends string>(
+    order: readonly T[],
+    to: T | null | undefined,
+    from: T | null,
+  ) =>
+    from !== null && (to === null || to === undefined || order.indexOf(to) > order.indexOf(from));
+  return rows
+    .filter((r) => r.value !== value)
+    .some(
+      (r) =>
+        looser(VISIBILITY, mine?.visibility, r.visibility) ||
+        looser(EXPOSURE, mine?.exposure, r.exposure),
+    );
+}
+
+/** The object's values of `facet` other than `value`. */
+async function otherValues(
+  tx: Tx,
+  tenantId: string,
+  objectId: string,
+  facet: string,
+  value: string,
+): Promise<{ value: string; primaryBy: string | null }[]> {
+  return tx
+    .select({ value: objectTags.value, primaryBy: objectTags.primaryBy })
+    .from(objectTags)
+    .where(
+      and(
+        eq(objectTags.tenantId, tenantId),
+        eq(objectTags.objectId, objectId),
+        eq(objectTags.facet, facet),
+        ne(objectTags.value, value),
+      ),
+    );
+}
+
+/**
+ * Takes `others` (values of a single-value facet) off the object, for the value a person chose.
+ * Returns whether one of them was the home, so the new value becomes the home in its place.
+ */
+async function replaceValues(
+  tx: Tx,
+  tenantId: string,
+  objectId: string,
+  facet: string,
+  others: readonly { value: string; primaryBy: string | null }[],
+): Promise<boolean> {
+  if (others.length === 0) return false;
+  // Items waiting to apply one of these values, or to make one the home, decide nothing now.
+  const stale = await tx
+    .select({ id: tagReviews.id })
+    .from(tagReviews)
+    .where(
+      and(
+        eq(tagReviews.tenantId, tenantId),
+        eq(tagReviews.objectId, objectId),
+        eq(tagReviews.facet, facet),
+        inArray(
+          tagReviews.value,
+          others.map((o) => o.value),
+        ),
+        isNull(tagReviews.resolvedAt),
+      ),
+    );
+  await withdraw(
+    tx,
+    tenantId,
+    stale.map((r) => r.id),
+  );
+  await tx.delete(objectTags).where(
+    and(
+      eq(objectTags.tenantId, tenantId),
+      eq(objectTags.objectId, objectId),
+      eq(objectTags.facet, facet),
+      inArray(
+        objectTags.value,
+        others.map((o) => o.value),
+      ),
+    ),
+  );
+  return others.some((o) => o.primaryBy !== null);
+}
+
+/** Closes items nobody needs to decide any more, as withdrawn by whoever proposed them. */
+async function withdraw(tx: Tx, tenantId: string, reviewIds: readonly string[]) {
+  if (reviewIds.length === 0) return;
+  await tx
+    .update(tagReviews)
+    .set({
+      decision: "withdrawn",
+      resolvedBy: sql`coalesce(${tagReviews.appliedBy}, ${tagReviews.source} || ':unknown')`,
+      resolvedAt: sql`greatest(now(), ${tagReviews.createdAt})`,
+    })
+    .where(
+      and(
+        eq(tagReviews.tenantId, tenantId),
+        inArray(tagReviews.id, [...reviewIds]),
+        isNull(tagReviews.resolvedAt),
+      ),
+    );
 }
 
 /** Closes a model's open item for this tag (not a new value) as approved by a person. */
@@ -336,9 +526,18 @@ export async function approveReview(
   tenantId: string,
   reviewId: string,
   reviewer: string,
-  now?: Date,
+  options: DecisionOptions = {},
 ): Promise<void> {
+  const { now } = options;
   const item = await openItem(tx, tenantId, reviewId);
+  if (item.reason === "primary") {
+    // Not a tag to apply: the model's pick of the object's home, which the person confirms.
+    checkPerson(reviewer, "confirms a primary tag");
+    await makePrimary(tx, tenantId, item.objectId, tagOf(item.facet, item.value), reviewer);
+    await resolve(tx, tenantId, [reviewId], { decision: "approved", resolvedBy: reviewer }, now);
+    return;
+  }
+  const others = await replacing(tx, tenantId, item, item.value, reviewer, options);
   await tx
     .update(facetValues)
     .set({ approved: true })
@@ -349,8 +548,59 @@ export async function approveReview(
         eq(facetValues.value, item.value),
       ),
     );
-  await applyReviewed(tx, tenantId, item, item.value);
+  await applyReviewed(tx, tenantId, item, item.value, others, reviewer);
   await resolve(tx, tenantId, [reviewId], { decision: "approved", resolvedBy: reviewer }, now);
+}
+
+export interface DecisionOptions {
+  /** When the decision was made; the database's clock by default. */
+  now?: Date;
+  /**
+   * On a single-value facet the object carries another value of: the reviewer confirms that
+   * this value replaces it. Without it such a decision is refused (`conflict`), so a reviewer
+   * never takes a value off without seeing it.
+   */
+  replace?: boolean;
+}
+
+function checkPerson(reviewer: string, what: string) {
+  if (
+    !reviewer.startsWith("user:") ||
+    !PRINCIPAL.test(reviewer) ||
+    reviewer.length > PRINCIPAL_MAX
+  ) {
+    throw new TagError("invalid", `a person (user:…) ${what}`);
+  }
+}
+
+/**
+ * The values of a single-value facet that deciding `item` as `value` takes off the object:
+ * refused (`conflict`) unless the reviewer, a person, confirmed it with `replace`.
+ */
+async function replacing(
+  tx: Tx,
+  tenantId: string,
+  item: ReviewRow,
+  value: string,
+  reviewer: string,
+  options: DecisionOptions,
+): Promise<{ value: string; primaryBy: string | null }[]> {
+  const [facet] = await tx
+    .select({ single: facets.single })
+    .from(facets)
+    .where(and(eq(facets.tenantId, tenantId), eq(facets.key, item.facet)));
+  if (!facet?.single) return [];
+  const others = await otherValues(tx, tenantId, item.objectId, item.facet, value);
+  if (others.length === 0) return others;
+  const names = others.map((o) => tagOf(item.facet, o.value)).join(", ");
+  if (!options.replace) {
+    throw new TagError(
+      "conflict",
+      `${tagOf(item.facet, value)} would replace ${names}: decide again with replace`,
+    );
+  }
+  checkPerson(reviewer, `replaces ${names}`);
+  return others;
 }
 
 /**
@@ -363,9 +613,15 @@ export async function rejectReview(
   tenantId: string,
   reviewId: string,
   reviewer: string,
-  now?: Date,
+  options: Pick<DecisionOptions, "now"> = {},
 ): Promise<void> {
+  const { now } = options;
   const item = await openItem(tx, tenantId, reviewId);
+  if (item.reason === "primary") {
+    // The tag itself stays; only the model's pick of the home is turned down.
+    await resolve(tx, tenantId, [reviewId], { decision: "rejected", resolvedBy: reviewer }, now);
+    return;
+  }
   await tx
     .delete(objectTags)
     .where(
@@ -412,9 +668,13 @@ export async function mergeReview(
   reviewId: string,
   intoValue: string,
   reviewer: string,
-  now?: Date,
+  options: DecisionOptions = {},
 ): Promise<void> {
+  const { now } = options;
   const item = await openItem(tx, tenantId, reviewId);
+  if (item.reason === "primary") {
+    throw new TagError("invalid", "a primary proposal is approved or rejected, not merged");
+  }
   if (intoValue === item.value) {
     throw new TagError("invalid", "merging a value into itself; approve it instead");
   }
@@ -427,7 +687,8 @@ export async function mergeReview(
       `cannot merge into ${item.facet}:${intoValue}: not an approved value`,
     );
   }
-  await applyReviewed(tx, tenantId, item, intoValue);
+  const others = await replacing(tx, tenantId, item, intoValue, reviewer, options);
+  await applyReviewed(tx, tenantId, item, intoValue, others, reviewer);
   await resolve(
     tx,
     tenantId,
@@ -463,8 +724,15 @@ async function openItem(tx: Tx, tenantId: string, reviewId: string): Promise<Rev
   return item;
 }
 
-function openItemFor(tx: Tx, tenantId: string, objectId: string, facet: string, value: string) {
-  return tx
+/** The open item deciding whether this tag applies (a primary proposal decides nothing of that). */
+async function openItemFor(
+  tx: Tx,
+  tenantId: string,
+  objectId: string,
+  facet: string,
+  value: string,
+): Promise<{ id: string; reason: ReviewReason; source: TagSource }[]> {
+  const rows = await tx
     .select({ id: tagReviews.id, reason: tagReviews.reason, source: tagReviews.source })
     .from(tagReviews)
     .where(
@@ -474,11 +742,42 @@ function openItemFor(tx: Tx, tenantId: string, objectId: string, facet: string, 
         eq(tagReviews.facet, facet),
         eq(tagReviews.value, value),
         isNull(tagReviews.resolvedAt),
+        ne(tagReviews.reason, "primary"),
       ),
     );
+  return rows as { id: string; reason: ReviewReason; source: TagSource }[];
 }
 
-async function applyReviewed(tx: Tx, tenantId: string, item: ReviewRow, value: string) {
+async function applyReviewed(
+  tx: Tx,
+  tenantId: string,
+  item: ReviewRow,
+  value: string,
+  others: readonly { value: string; primaryBy: string | null }[],
+  reviewer: string,
+) {
+  if (others.length > 0) {
+    // The reviewer chose this value over the others (replacing() checked they may): it is
+    // theirs, so no rule change takes it off and leaves the facet empty, and it takes the home.
+    const home = await replaceValues(tx, tenantId, item.objectId, item.facet, others);
+    const theirs = {
+      source: "user" as const,
+      appliedBy: reviewer,
+      confidence: 1,
+      reviewed: true,
+      modelAppliedBy: null,
+      modelConfidence: null,
+      ...(home ? { primaryBy: reviewer } : {}),
+    };
+    await tx
+      .insert(objectTags)
+      .values({ tenantId, objectId: item.objectId, facet: item.facet, value, ...theirs })
+      .onConflictDoUpdate({
+        target: [objectTags.tenantId, objectTags.objectId, objectTags.facet, objectTags.value],
+        set: theirs,
+      });
+    return;
+  }
   // A person decided a model's or person's item: its provenance replaces a rule's or pack's on
   // the tag, so it no longer follows the rule. A reviewed rule or pack item stays theirs (and a
   // rule's tag does follow the rule), and a person's own tag is never handed to a rule.

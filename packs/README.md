@@ -16,15 +16,23 @@ Each pack is a folder with two files:
   capabilities, no network).
 - `pack.json`: the content, described below. core/catalog `validatePack()` checks it.
 
-| Field                             | What                                                                                                         |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `pack_version`, `name`, `version` | `1`, a slug, semver                                                                                          |
-| `defaults`                        | the tenant's `visibility` and `exposure` for files no level tag covers                                       |
-| `facets`                          | `key`, `label`, `public` (shown on title-only cards), and `values` with optional `visibility` and `exposure` |
-| `rules`                           | tag rules (core/catalog `rules.ts`): path globs, sites, extensions, media types, client dictionaries         |
-| `policies`                        | local id → Cedar text, applied as `pack/<name>/<id>`                                                         |
-| `tests.policies`                  | a principal, an action, a resource's tags, zone and a client, and the expected `allow`, `deny` or `forbid`   |
-| `tests.levels`                    | tags and the levels they should resolve to                                                                   |
+| Field                             | What                                                                                                                                                     |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pack_version`, `name`, `version` | `1`, a slug, semver                                                                                                                                      |
+| `defaults`                        | the tenant's `visibility` and `exposure` for files no level tag covers                                                                                   |
+| `facets`                          | `key`, `label`, `public` (shown on title-only cards), `single` (one value per file), and `values` with optional `visibility` and `exposure`              |
+| `rules`                           | tag rules (core/catalog `rules.ts`): path globs, sites, extensions, media types, client dictionaries; `primary: true` makes a rule's tag the file's home |
+| `policies`                        | local id → Cedar text, applied as `pack/<name>/<id>`                                                                                                     |
+| `tests.policies`                  | a principal, an action, a resource's tags, zone and a client, and the expected `allow`, `deny` or `forbid`                                               |
+| `tests.levels`                    | tags and the levels they should resolve to                                                                                                               |
+
+**Homes.** A file's primary tag is its home: the one tag that says where it belongs, as its
+folder did (core/catalog `primary.ts`). A rule such as
+`{ "id": "apollo", "tag": "project:apollo", "when": { "path": "Projects/Apollo/**" }, "primary": true }`
+carries a folder layout over; a home a person chose is never replaced by a rule. A `single`
+facet (`sensitivity`) holds one value per file: a second value from a rule, pack or model, or a
+person's that would loosen a level, waits in review, and only a reviewer's explicit choice
+replaces the first. Where several rules give one such facet a value, the first in the list wins.
 
 In policies, match `resource.allTags.contains("x")` in a `forbid` (it sees model guesses too),
 and `resource in OpenHoard::Tag::"x"` in a `permit` (trusted tags only). See core/policy.

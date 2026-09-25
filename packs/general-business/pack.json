@@ -1,7 +1,7 @@
 {
   "pack_version": 1,
   "name": "general-business",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Sensitivity levels, departments and document kinds, with folder and file-type rules and two guardrail policies. A starting point: edit freely.",
   "defaults": {
     "visibility": "discoverable",
@@ -12,6 +12,7 @@
       "key": "sensitivity",
       "label": "Sensitivity",
       "public": true,
+      "single": true,
       "values": [
         {
           "value": "public",

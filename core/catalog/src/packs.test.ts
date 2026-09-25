@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import {
   facets,
   facetValues,
+  objectTags,
   queryRows,
   tenantPacks,
   tenants,
@@ -88,7 +89,7 @@ describe("the general business starter pack", () => {
 
   it("applies with its reviewed diff, loosening flagged", async () => {
     const p = await plan(STARTER);
-    expect(p).toMatchObject({ name: "general-business", version: "1.0.0", previous: null });
+    expect(p).toMatchObject({ name: "general-business", version: "1.1.0", previous: null });
     const kinds = p.changes.map((c) => c.kind);
     expect(kinds).toContain("set-defaults");
     expect(kinds.filter((k) => k === "add-value").length).toBe(22);
@@ -142,7 +143,7 @@ describe("the general business starter pack", () => {
     // Planning the same pack again finds nothing to do.
     const again = await plan(STARTER);
     expect(again.changes).toEqual([]);
-    expect(again.previous).toBe("1.0.0");
+    expect(again.previous).toBe("1.1.0");
   });
 });
 
@@ -197,6 +198,60 @@ describe("planPack and applyPack", () => {
     expect(runPackTests(reserved).every((r) => r.passed)).toBe(true);
   });
 
+  it("makes a facet single-value, warning about files that already carry several of its values", async () => {
+    const two = small({
+      facets: [
+        {
+          key: "sensitivity",
+          label: "Sensitivity",
+          values: [
+            { value: "secret", label: "Secret", visibility: "hidden", exposure: "local-only" },
+            { value: "internal", label: "Internal" },
+          ],
+        },
+      ],
+    });
+    const first = await plan(two);
+    expect(first.changes).toContainEqual(
+      expect.objectContaining({ kind: "add-facet", facet: "sensitivity", single: false }),
+    );
+    await apply(two, first.planHash);
+    await inTenant((tx) =>
+      tx.insert(objectTags).values(
+        ["secret", "internal"].map((value) => ({
+          tenantId: t.tenantId,
+          objectId: t.objectId,
+          facet: "sensitivity",
+          value,
+          source: "user" as const,
+          confidence: 1,
+        })),
+      ),
+    );
+    const single = small({
+      version: "1.1.0",
+      facets: [{ ...(two.facets?.[0] as PackFacet), single: true }],
+    });
+    const next = await plan(single);
+    expect(next.changes).toEqual([
+      expect.objectContaining({
+        kind: "change-facet",
+        facet: "sensitivity",
+        from: expect.objectContaining({ single: false }),
+        to: expect.objectContaining({ single: true }),
+        loosens: false,
+      }),
+    ]);
+    expect(next.warnings).toContain(
+      "facet sensitivity becomes single-value, and 1 object(s) carry more than one of its values: they keep them until a person chooses",
+    );
+    await apply(single, next.planHash);
+    const [row] = await inTenant((tx) =>
+      tx.select({ single: facets.single }).from(facets).where(eq(facets.key, "sensitivity")),
+    );
+    expect(row?.single).toBe(true);
+  });
+
   it("flags every loosening change to existing vocabulary", async () => {
     await inTenant(async (tx) => {
       await tx
@@ -233,8 +288,8 @@ describe("planPack and applyPack", () => {
       {
         kind: "change-facet",
         facet: "sensitivity",
-        from: { label: "Sensitivity", public: false },
-        to: { label: "Sensitivity", public: true },
+        from: { label: "Sensitivity", public: false, single: false },
+        to: { label: "Sensitivity", public: true, single: false },
         loosens: true,
       },
       {

@@ -146,6 +146,15 @@ person saying yes. `proposeTag()` applies a tag straight away only when that is 
 | approved, and below the confidence threshold (0.75)            | applied                     | review: low-confidence |
 | approved, otherwise                                            | applied                     | applied                |
 
+A single-value facet (`single` in a pack, e.g. `sensitivity`) holds one value per file. A second
+value replaces the first straight away only when a person proposes it and it loosens no level
+(`internal` → `restricted` does; `restricted` → `internal` doesn't). Anything else waits in
+review (`conflict`, unless another reason came first). A decision that would take another value
+off, whatever the item's reason, is refused (`TagError` `conflict`) until the reviewer passes
+`replace: true`; the value chosen is then the reviewer's, so a rule change can't leave the facet
+empty, and it takes over the file's home. Rules never propose a value where a person chose one,
+and on one facet only the first rule in the list that matches proposes (`skipped` lists the rest).
+
 A tag with an open review item waits for that item, whoever proposes it again, with one exception:
 a rule, pack or person proposing an approved value that waits only because a model proposed it
 applies it. A person's proposal also closes the model's item, as approved by them; a rule's or
@@ -176,6 +185,26 @@ Access decisions read tags through `tagsForDecisions()`:
   can only tighten them.
 - **Grants match only trusted or reviewed tags.** This holds even when a value gains levels or a
   grant after a model has used it.
+
+## Primary tag
+
+A file's primary tag is its home (T-409): the one tag that says where it belongs, as its folder
+did. It decides the default view and breadcrumb, the path a native open or a sync uses, who a
+file goes to at offboarding, and the project's email-in and digest. It grants nothing; access
+comes from the tag itself.
+
+- At most one per file, and always one of its trusted tags. The database holds both rules.
+- A person sets or clears it: `setPrimaryTag()`, `clearPrimaryTag()`, `primaryTagOf()`.
+- A rule with `primary: true` sets it when it applies its tag (a folder layout carries over:
+  `Projects/Apollo/**` → `project:apollo`). A home a rule set goes when no primary rule applies
+  its tag any more, including while that tag waits in review. Rules never replace or clear a
+  home a person chose; the first matching primary rule wins.
+- A model proposes it with `proposePrimaryTag()`: a review item (reason `primary`, one open per
+  file) that a person approves or rejects. It applies nothing and doesn't tighten levels. A
+  waiting proposal whose tag has left the file is withdrawn when the model proposes again.
+- It goes when its tag goes, and when a rule hands its tag back to a model. A value a person
+  chose on a single-value facet takes over the home from the value it replaces, as theirs.
+- Setting and clearing it trust the caller, like tagging: the API authorizes and audits.
 
 ## Rules
 

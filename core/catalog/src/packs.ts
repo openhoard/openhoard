@@ -67,6 +67,8 @@ export interface PackFacet {
   label: string;
   /** Tags of this facet may show on title-only cards (T-603). */
   public?: boolean;
+  /** At most one value per object, e.g. `sensitivity` (T-409). */
+  single?: boolean;
   values: PackValue[];
 }
 
@@ -221,13 +223,16 @@ export function validatePack(input: unknown): string[] {
   const keys = new Set<string>();
   for (const [i, facet] of list(p.facets, "facets", LIMITS.facets).entries()) {
     const at = `facet ${typeof facet.key === "string" ? facet.key : i}`;
-    only(facet, at, ["key", "label", "public", "values"]);
+    only(facet, at, ["key", "label", "public", "single", "values"]);
     if (typeof facet.key !== "string" || !FACET.test(facet.key)) bad(`${at}: key must be a slug`);
     else if (keys.has(facet.key)) bad(`${at}: listed twice`);
     else keys.add(facet.key);
     if (!text(facet.label, 200)) bad(`${at}: label must be 1 to 200 visible characters`);
     if (facet.public !== undefined && typeof facet.public !== "boolean") {
       bad(`${at}: public must be true or false`);
+    }
+    if (facet.single !== undefined && typeof facet.single !== "boolean") {
+      bad(`${at}: single must be true or false`);
     }
     if (!Array.isArray(facet.values)) {
       bad(`${at}: values must be a list`);
@@ -378,6 +383,17 @@ export function zoneLiterals(policy: string): string[] {
       [...(m[1] ?? "").matchAll(STRING_LITERAL)].map((l) => unquote(l[1])),
     ),
   ];
+}
+
+/** How many objects carry more than one value of `facet`. */
+async function objectsWithSeveral(tx: Tx, tenantId: string, facet: string): Promise<number> {
+  const [row] = await queryRows<{ n: number }>(
+    tx,
+    sql`select count(*)::int as n from (
+          select 1 from object_tags where tenant_id = ${tenantId} and facet = ${facet}
+          group by object_id having count(*) > 1) crowded`,
+  );
+  return row?.n ?? 0;
 }
 
 /** Cedar text with its `//` comments blanked, leaving string literals (which may hold `//`). */
@@ -581,12 +597,19 @@ function runSuite(
 /** One change applying (or removing) the pack would make, or something it would leave in place. */
 export type PackChange =
   | { kind: "set-defaults"; from: Levels; to: Levels; loosens: boolean }
-  | { kind: "add-facet"; facet: string; label: string; public: boolean; loosens: boolean }
+  | {
+      kind: "add-facet";
+      facet: string;
+      label: string;
+      public: boolean;
+      single: boolean;
+      loosens: boolean;
+    }
   | {
       kind: "change-facet";
       facet: string;
-      from: { label: string; public: boolean };
-      to: { label: string; public: boolean };
+      from: { label: string; public: boolean; single: boolean };
+      to: { label: string; public: boolean; single: boolean };
       loosens: boolean;
     }
   | { kind: "add-value"; tag: string; label: string; levels: NullableLevels; loosens: boolean }
@@ -722,7 +745,12 @@ async function plan(tx: Tx, tenantId: string, pack: Pack): Promise<PackPlan> {
   const currentFacets = new Map(
     (
       await tx
-        .select({ key: facets.key, label: facets.label, public: facets.public })
+        .select({
+          key: facets.key,
+          label: facets.label,
+          public: facets.public,
+          single: facets.single,
+        })
         .from(facets)
         .where(eq(facets.tenantId, tenantId))
     ).map((f) => [f.key, f]),
@@ -747,16 +775,32 @@ async function plan(tx: Tx, tenantId: string, pack: Pack): Promise<PackPlan> {
   for (const f of pack.facets ?? []) {
     const cur = currentFacets.get(f.key);
     const pub = f.public ?? false;
+    const single = f.single ?? false;
     if (!cur) {
-      changes.push({ kind: "add-facet", facet: f.key, label: f.label, public: pub, loosens: pub });
-    } else if (cur.label !== f.label || cur.public !== pub) {
+      changes.push({
+        kind: "add-facet",
+        facet: f.key,
+        label: f.label,
+        public: pub,
+        single,
+        loosens: pub,
+      });
+    } else if (cur.label !== f.label || cur.public !== pub || cur.single !== single) {
       changes.push({
         kind: "change-facet",
         facet: f.key,
-        from: { label: cur.label, public: cur.public },
-        to: { label: f.label, public: pub },
+        from: { label: cur.label, public: cur.public, single: cur.single },
+        to: { label: f.label, public: pub, single },
         loosens: pub && !cur.public,
       });
+      if (single && !cur.single) {
+        const crowded = await objectsWithSeveral(tx, tenantId, f.key);
+        if (crowded > 0) {
+          warnings.push(
+            `facet ${f.key} becomes single-value, and ${crowded} object(s) carry more than one of its values: they keep them until a person chooses`,
+          );
+        }
+      }
     }
     for (const v of f.values) {
       const tag = `${f.key}:${v.value}`;
@@ -1122,7 +1166,17 @@ async function writeVocabulary(
   );
   const facetRows = changes.flatMap((c) => {
     const f = c.kind === "add-facet" || c.kind === "change-facet" ? facetByKey.get(c.facet) : null;
-    return f ? [{ tenantId, key: f.key, label: f.label, public: f.public ?? false }] : [];
+    return f
+      ? [
+          {
+            tenantId,
+            key: f.key,
+            label: f.label,
+            public: f.public ?? false,
+            single: f.single ?? false,
+          },
+        ]
+      : [];
   });
   const valueRows = changes.flatMap((c) => {
     const hit =
@@ -1149,7 +1203,7 @@ async function writeVocabulary(
       .values(facetRows.slice(i, i + WRITE_BATCH))
       .onConflictDoUpdate({
         target: [facets.tenantId, facets.key],
-        set: { label: excluded("label"), public: excluded("public") },
+        set: { label: excluded("label"), public: excluded("public"), single: excluded("single") },
       });
   }
   for (let i = 0; i < valueRows.length; i += WRITE_BATCH) {

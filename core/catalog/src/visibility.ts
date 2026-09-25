@@ -22,7 +22,7 @@ import {
   type Exposure,
   type Visibility,
 } from "@openhoard/core-policy";
-import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import { lockObject } from "./locks.js";
 
 /*
@@ -217,6 +217,8 @@ async function collectLevels(
         eq(tagReviews.tenantId, tenantId),
         inArray(tagReviews.objectId, ids),
         isNull(tagReviews.resolvedAt),
+        // A primary proposal names a tag the object carries already, and applies nothing.
+        ne(tagReviews.reason, "primary"),
         levelled,
       ),
     );

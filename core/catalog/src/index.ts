@@ -4,6 +4,7 @@ export type * from "./types.js";
 export {
   approveReview,
   DEFAULT_MIN_CONFIDENCE,
+  type DecisionOptions,
   listOpenReviews,
   mergeReview,
   proposeTag,
@@ -14,6 +15,14 @@ export {
   type TagProposal,
   type TagSource,
 } from "./tagging.js";
+export {
+  clearPrimaryTag,
+  primaryTagOf,
+  proposePrimaryTag,
+  setPrimaryTag,
+  type PrimaryProposalOutcome,
+  type PrimaryTag,
+} from "./primary.js";
 export {
   applyRuleTags,
   evaluateRules,

@@ -282,6 +282,11 @@ export const facets = pgTable(
      * title-only card (e.g. `department`, `kind`; never `client`).
      */
     public: boolean("public").notNull().default(false),
+    /**
+     * At most one value of this facet per object (e.g. `sensitivity`): a second one waits in
+     * review unless a person sets it, and replaces the first when it applies (T-409).
+     */
+    single: boolean("single").notNull().default(false),
     createdAt: createdAt(),
   },
   (t) => [
@@ -353,6 +358,11 @@ export const objectTags = pgTable(
      */
     modelAppliedBy: text("model_applied_by"),
     modelConfidence: real("model_confidence"),
+    /**
+     * Set on the object's primary tag, its home (T-409): who made it primary, `user:…` or
+     * `rule:…`. At most one per object, and only on a trusted tag.
+     */
+    primaryBy: text("primary_by"),
     createdAt: createdAt(),
   },
   (t) => [
@@ -379,6 +389,15 @@ export const objectTags = pgTable(
     check(
       "object_tags_applied_by_matches_source",
       sql`applied_by is null or starts_with(applied_by, source || ':')`,
+    ),
+    // One primary tag per object, and never an unreviewed model guess: the home decides views,
+    // paths and offboarding, so only a person, a rule or a pack sets it.
+    uniqueIndex("object_tags_one_primary")
+      .on(t.tenantId, t.objectId)
+      .where(sql`primary_by is not null`),
+    check(
+      "object_tags_primary_trusted",
+      sql`primary_by is null or (primary_by ~ '^(user|rule|pack):.+$' and (source <> 'model' or reviewed))`,
     ),
     // Provenance only on a rule's or pack's tag, a model's applier, and a confidence with it.
     check(
@@ -631,7 +650,17 @@ export const grants = pgTable(
  * applies, reviewed, and a new value joins the vocabulary), rejects, or merges it into an
  * existing value. Resolved items stay, as the record of who decided.
  */
-export const REVIEW_REASONS = ["new-value", "low-confidence", "sensitive"] as const;
+/**
+ * `conflict`: a second value of a single-value facet. `primary`: a model proposing which of the
+ * object's trusted tags is its home (T-409); an item for that, not for applying a tag.
+ */
+export const REVIEW_REASONS = [
+  "new-value",
+  "low-confidence",
+  "sensitive",
+  "conflict",
+  "primary",
+] as const;
 /** `withdrawn`: a rule's item, closed when the rule stopped giving the tag before anyone decided. */
 export const REVIEW_DECISIONS = ["approved", "rejected", "merged", "withdrawn"] as const;
 
@@ -681,10 +710,14 @@ export const tagReviews = pgTable(
       .where(sql`resolved_at is null`),
     // An object's items, open or resolved (and the cascade when the object is deleted).
     index("tag_reviews_object_idx").on(t.tenantId, t.objectId),
-    // One open item per object and tag, however often it is proposed.
+    // One open item per object and tag, however often it is proposed; and apart from those,
+    // one open primary proposal per object.
     uniqueIndex("tag_reviews_one_open")
       .on(t.tenantId, t.objectId, t.facet, t.value)
-      .where(sql`resolved_at is null`),
+      .where(sql`resolved_at is null and reason <> 'primary'`),
+    uniqueIndex("tag_reviews_one_open_primary")
+      .on(t.tenantId, t.objectId)
+      .where(sql`resolved_at is null and reason = 'primary'`),
     idCheck("tag_reviews_id_format", "id", "review"),
     check("tag_reviews_reason_valid", sql.raw(`reason in (${quoted(REVIEW_REASONS)})`)),
     check("tag_reviews_source_valid", sql.raw(`source in (${quoted(TAG_SOURCES)})`)),

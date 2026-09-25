@@ -1,6 +1,7 @@
-import { objectTags, tagOf, tagReviews, type Tx } from "@openhoard/core-db";
-import { and, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { facets, objectTags, tagOf, tagReviews, type Tx } from "@openhoard/core-db";
+import { and, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { lockObject } from "./locks.js";
+import { clearPrimaryTag, makePrimary, primaryTagOf, type PrimaryTag } from "./primary.js";
 import { proposeTag, type TagOutcome } from "./tagging.js";
 
 /*
@@ -41,6 +42,12 @@ export interface MatchRule {
     /** Media types; `type/*` matches a whole family. */
     mime?: string[];
   };
+  /**
+   * Make the tag the object's primary tag, its home (T-409), when this rule applies it: how a
+   * folder layout (`Projects/Apollo/**` → `project:apollo`) carries over. Never over a home a
+   * person chose; when several primary rules match, the first in the list wins.
+   */
+  primary?: boolean;
 }
 
 export interface DictionaryRule {
@@ -89,6 +96,13 @@ export interface RuleTagSync {
   reverted: string[];
   /** The rules' open review items for tags no rule gives any more, closed as withdrawn. */
   withdrawn: string[];
+  /**
+   * Tags the rules give that they didn't propose, on a single-value facet: a person chose
+   * another value of it for this object, or a rule earlier in the list gives one; sorted.
+   */
+  skipped: string[];
+  /** The object's primary tag afterwards, whoever set it. */
+  primary: PrimaryTag | null;
 }
 
 /**
@@ -112,18 +126,13 @@ export async function applyRuleTags(
   input: RuleInput,
 ): Promise<RuleTagSync> {
   await lockObject(tx, tenantId, objectId);
-  const matched = evaluateRules(rules, input);
-  const outcomes: (TagOutcome & { rule: string })[] = [];
-  for (const { tag, rule } of matched) {
-    const outcome = await proposeTag(tx, tenantId, {
-      objectId,
-      tag,
-      source: "rule",
-      appliedBy: `rule:${rule}`,
-      confidence: 1,
-    });
-    outcomes.push({ ...outcome, rule });
-  }
+  const { matched, skipped } = await singleValued(
+    tx,
+    tenantId,
+    objectId,
+    rules,
+    evaluateRules(rules, input),
+  );
   const wanted = new Set(matched.map((m) => m.tag));
   const current = await tx
     .select({
@@ -160,8 +169,23 @@ export async function applyRuleTags(
         reviewed: false,
         modelAppliedBy: null,
         modelConfidence: null,
+        // A model's guess is no home.
+        primaryBy: null,
       })
       .where(staleTags(reverted));
+  }
+  // Proposed after the stale tags are gone, so a file moving from one rule's value of a
+  // single-value facet to another's never conflicts with the value it is leaving.
+  const outcomes: (TagOutcome & { rule: string })[] = [];
+  for (const { tag, rule } of matched) {
+    const outcome = await proposeTag(tx, tenantId, {
+      objectId,
+      tag,
+      source: "rule",
+      appliedBy: `rule:${rule}`,
+      confidence: 1,
+    });
+    outcomes.push({ ...outcome, rule });
   }
   // Under the object's lock, so no decision on these items runs meanwhile (each takes it).
   const withdrawn = await tx
@@ -192,7 +216,106 @@ export async function applyRuleTags(
     removed: tags(removed),
     reverted: tags(reverted),
     withdrawn: withdrawn.map((w) => w.id).sort(),
+    skipped,
+    primary: await syncPrimary(tx, tenantId, objectId, rules, input, outcomes),
   };
+}
+
+/**
+ * On single-value facets, what the rules propose: nothing where a person chose the object's
+ * value (their choice stands, so no conflict is raised again on every sync), and otherwise the
+ * value the first rule in the list gives (two rules never take turns replacing each other).
+ */
+async function singleValued(
+  tx: Tx,
+  tenantId: string,
+  objectId: string,
+  rules: readonly TagRule[],
+  matched: { tag: string; rule: string }[],
+): Promise<{ matched: { tag: string; rule: string }[]; skipped: string[] }> {
+  const facetOf = (tag: string) => tag.slice(0, tag.indexOf(":"));
+  const keys = [...new Set(matched.map((m) => facetOf(m.tag)))];
+  if (keys.length === 0) return { matched, skipped: [] };
+  const single = new Set(
+    (
+      await tx
+        .select({ key: facets.key })
+        .from(facets)
+        .where(
+          and(eq(facets.tenantId, tenantId), inArray(facets.key, keys), eq(facets.single, true)),
+        )
+    ).map((f) => f.key),
+  );
+  if (single.size === 0) return { matched, skipped: [] };
+  const chosen = new Set(
+    (
+      await tx
+        .select({ facet: objectTags.facet })
+        .from(objectTags)
+        .where(
+          and(
+            eq(objectTags.tenantId, tenantId),
+            eq(objectTags.objectId, objectId),
+            inArray(objectTags.facet, [...single]),
+            // A person's value, or a model's a person reviewed; a rule's own approved value is
+            // still the rule's.
+            or(
+              eq(objectTags.source, "user"),
+              and(eq(objectTags.source, "model"), eq(objectTags.reviewed, true)),
+            ),
+          ),
+        )
+    ).map((r) => r.facet),
+  );
+  const order = new Map(rules.map((r, i) => [r.id, i]));
+  const first = new Map<string, { tag: string; rule: string }>();
+  for (const m of matched) {
+    const facet = facetOf(m.tag);
+    if (!single.has(facet) || chosen.has(facet)) continue;
+    const best = first.get(facet);
+    const rank = (x: { tag: string; rule: string }) => order.get(x.rule) ?? Infinity;
+    if (!best || rank(m) < rank(best) || (rank(m) === rank(best) && m.tag < best.tag)) {
+      first.set(facet, m);
+    }
+  }
+  const keep = matched.filter(
+    (m) => !single.has(facetOf(m.tag)) || first.get(facetOf(m.tag)) === m,
+  );
+  return {
+    matched: keep,
+    skipped: matched.filter((m) => !keep.includes(m)).map((m) => m.tag),
+  };
+}
+
+/**
+ * The home the rules give: the first matching primary rule's tag, once applied. It replaces and
+ * clears only a rule's home (including when the rule's tag waits in review); a person's stands.
+ */
+async function syncPrimary(
+  tx: Tx,
+  tenantId: string,
+  objectId: string,
+  rules: readonly TagRule[],
+  input: RuleInput,
+  outcomes: readonly (TagOutcome & { rule: string })[],
+): Promise<PrimaryTag | null> {
+  const applied = new Set(outcomes.flatMap((o) => (o.applied ? [o.tag] : [])));
+  const rule = rules.find(
+    (r): r is MatchRule =>
+      !("dictionary" in r) && r.primary === true && applied.has(r.tag) && matches(r, input),
+  );
+  const current = await primaryTagOf(tx, tenantId, objectId);
+  const ours = current === null || current.by.startsWith("rule:");
+  if (!ours) return current;
+  if (rule) {
+    const want = { tag: rule.tag, by: `rule:${rule.id}` };
+    if (current?.tag !== want.tag || current.by !== want.by) {
+      await makePrimary(tx, tenantId, objectId, want.tag, want.by);
+    }
+    return want;
+  }
+  if (current) await clearPrimaryTag(tx, tenantId, objectId);
+  return null;
 }
 
 /** Checks rules loaded from a pack or an admin; returns what is wrong, empty when fine. */
@@ -242,9 +365,12 @@ export function validateRules(rules: unknown): string[] {
       }
       return;
     }
-    unknownKeys(rule, rule.id, ["id", "tag", "when"]);
+    unknownKeys(rule, rule.id, ["id", "tag", "when", "primary"]);
     if (typeof rule.tag !== "string" || !TAG.test(rule.tag)) {
       problems.push(`${rule.id}: tag must be facet:value`);
+    }
+    if (rule.primary !== undefined && typeof rule.primary !== "boolean") {
+      problems.push(`${rule.id}: primary must be true or false`);
     }
     const when = rule.when as Record<string, unknown> | undefined;
     if (typeof when !== "object" || when === null) {
