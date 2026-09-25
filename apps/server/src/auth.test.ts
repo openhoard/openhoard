@@ -81,9 +81,10 @@ class Browser {
       ...(init.headers as Record<string, string>),
       cookie: [...this.jar].map(([k, v]) => `${k}=${v}`).join("; "),
     };
-    const res = url.startsWith(PUBLIC)
-      ? await app.request(url, { ...init, headers })
-      : await fetch(url, { ...init, headers, redirect: "manual" });
+    const res =
+      new URL(url).origin === PUBLIC
+        ? await app.request(url, { ...init, headers })
+        : await fetch(url, { ...init, headers, redirect: "manual" });
     for (const c of res.headers.getSetCookie()) {
       const [pair = ""] = c.split(";");
       const at = pair.indexOf("=");
@@ -111,7 +112,7 @@ class Browser {
       body: new URLSearchParams({ login }).toString(),
     });
     location = new URL(submitted.headers.get("location") ?? "", idp.issuer).href;
-    for (let hops = 0; !location.startsWith(PUBLIC) && hops < 8; hops++) {
+    for (let hops = 0; new URL(location).origin !== PUBLIC && hops < 8; hops++) {
       const next = await this.go(location);
       location = new URL(next.headers.get("location") ?? "", idp.issuer).href;
     }

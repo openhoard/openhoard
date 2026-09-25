@@ -103,9 +103,10 @@ class Browser {
       ...(init.headers as Record<string, string>),
       cookie: [...this.jar].map(([k, v]) => `${k}=${v}`).join("; "),
     };
-    const res = url.startsWith(PUBLIC)
-      ? await app.request(url, { ...init, headers })
-      : await fetch(url, { ...init, headers, redirect: "manual" });
+    const res =
+      new URL(url).origin === PUBLIC
+        ? await app.request(url, { ...init, headers })
+        : await fetch(url, { ...init, headers, redirect: "manual" });
     for (const c of res.headers.getSetCookie()) {
       const [pair = ""] = c.split(";");
       const at = pair.indexOf("=");
