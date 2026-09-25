@@ -25,7 +25,9 @@ import {
   explainLevels,
   GENERIC_TITLE,
   levelsFor,
+  lockCurrentVersion,
   markProcessed,
+  markSuperseded,
   MAX_OBJECT_IDS,
   nonReaderTitle,
   proposeDisplayTitle,
@@ -154,6 +156,42 @@ describe("levelsFor", () => {
     expect(await processed()).toBe(true);
     expect(await processed()).toBe(false);
     expect(await levels()).toEqual({ visibility: "readable", exposure: "full", processed: true });
+  });
+
+  it("marks only the current version processed; a replaced one only as superseded", async () => {
+    const v2 = newId("version");
+    await inTenant((tx) =>
+      tx.insert(versions).values({
+        tenantId: t.tenantId,
+        id: v2,
+        objectId: t.objectId,
+        seq: 2,
+        blobId: t.blobId,
+        mime: "text/plain",
+      }),
+    );
+    const standing = (versionId: string, title = SEEDED_TITLE) =>
+      inTenant((tx) => lockCurrentVersion(tx, t.tenantId, { versionId, title }));
+    expect(await standing(t.versionId)).toBe("superseded");
+    // Superseded before renamed: a replaced version is done under any title.
+    expect(await standing(t.versionId, "Other.docx")).toBe("superseded");
+    expect(await standing(v2)).toBe("current");
+    expect(await standing(v2, "Other.docx")).toBe("renamed");
+    expect(await standing(newId("version"))).toBe("gone");
+    // A job that read version 1 can't make the object visible once version 2 exists.
+    expect(await processed()).toBe(false);
+    expect(await levels()).toMatchObject({ processed: false, visibility: "hidden" });
+    const superseded = (versionId: string) =>
+      inTenant((tx) => markSuperseded(tx, t.tenantId, versionId));
+    expect(await superseded(v2)).toBe(false);
+    expect(await superseded(t.versionId)).toBe(true);
+    expect(await superseded(t.versionId)).toBe(false);
+    // Marking the old one done changes nothing about what the current one allows.
+    expect(await levels()).toMatchObject({ processed: false, visibility: "hidden" });
+    expect(
+      await inTenant((tx) => markProcessed(tx, t.tenantId, { versionId: v2, title: SEEDED_TITLE })),
+    ).toBe(true);
+    expect(await levels()).toMatchObject({ processed: true, visibility: "discoverable" });
   });
 
   it("uses the tenant default without level tags, and the tenant's fail-closed default", async () => {

@@ -38,7 +38,10 @@ const SURFACE = {
     "approveReview",
     "clearPrimaryTag",
     "ingest",
+    // Takes the object's lock for the enrichment step that writes after it.
+    "lockCurrentVersion",
     "markProcessed",
+    "markSuperseded",
     "mergeReview",
     "proposeDisplayTitle",
     "proposePrimaryTag",

@@ -23,7 +23,7 @@ import {
   type Exposure,
   type Visibility,
 } from "@openhoard/core-policy";
-import { and, desc, eq, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, max, ne, or, sql } from "drizzle-orm";
 import type { ActivityRecorder } from "./activity.js";
 import { lockObject } from "./locks.js";
 
@@ -671,36 +671,69 @@ export async function setDisplayTitle(
   return updated.length > 0;
 }
 
+/** Where a version stands for enrichment; see {@link lockCurrentVersion}. */
+export type VersionStanding =
+  /** Its object's current version, under the title given. */
+  | "current"
+  /** A newer version of its object exists (checked before the title). */
+  | "superseded"
+  /** The current version, but the object's title is another now. */
+  | "renamed"
+  /** No such version (its object was purged). */
+  | "gone";
+
 /**
- * Enrichment finished a version, having seen the object under `title`: once it is the current
- * version, the object's tags and the tenant defaults decide its levels. Returns false, changing
- * nothing, if the version is unknown, already marked, or the object was renamed since (the
- * rename needs its own enrichment run).
+ * For enrichment (core/jobs): takes the version's object lock, held until the transaction ends,
+ * and says whether the version is still its object's current version under `title`, the one
+ * the enrichment job read. Ingest adds versions and renames under the same lock, so while it is
+ * held the answer stays true: an enrichment step writes in the same transaction, after it, and
+ * a job that read a version a newer one replaced, or a title a rename changed, writes nothing.
+ * Superseded is checked first: a replaced version never needs enriching again, whatever its
+ * title.
+ */
+export async function lockCurrentVersion(
+  tx: Tx,
+  tenantId: string,
+  input: { versionId: string; title: string },
+): Promise<VersionStanding> {
+  // A version never changes objects, so an unlocked read names the object to lock.
+  const [version] = await tx
+    .select({ objectId: versions.objectId, seq: versions.seq })
+    .from(versions)
+    .where(and(eq(versions.tenantId, tenantId), eq(versions.id, input.versionId)));
+  if (!version) return "gone";
+  // Ingest renames and adds versions under this lock, so once we hold it neither is half done.
+  // What it compares is read in statements of their own, after the lock: a single UPDATE …
+  // WHERE EXISTS would compare against the rows as of its snapshot, taken before it waited.
+  // FOR SHARE reads the latest committed row; in a snapshot transaction, a rename since the
+  // snapshot fails it with a serialization error (retry) instead.
+  await lockObject(tx, tenantId, version.objectId);
+  const [latest] = await tx
+    .select({ seq: max(versions.seq) })
+    .from(versions)
+    .where(and(eq(versions.tenantId, tenantId), eq(versions.objectId, version.objectId)));
+  if (latest?.seq !== version.seq) return "superseded";
+  const [object] = await tx
+    .select({ title: objects.title })
+    .from(objects)
+    .where(and(eq(objects.tenantId, tenantId), eq(objects.id, version.objectId)))
+    .for("share");
+  if (!object) return "gone";
+  return object.title === input.title ? "current" : "renamed";
+}
+
+/**
+ * Enrichment finished a version, having seen the object under `title`: the object's tags and
+ * the tenant defaults decide its levels from now on. Returns false, changing nothing, if the
+ * version is unknown, already marked, no longer the current version (a newer one has its own
+ * run), or the object was renamed since (the rename needs its own run).
  */
 export async function markProcessed(
   tx: Tx,
   tenantId: string,
   input: { versionId: string; title: string },
 ): Promise<boolean> {
-  // A version never changes objects, so an unlocked read names the object to lock.
-  const [version] = await tx
-    .select({ objectId: versions.objectId })
-    .from(versions)
-    .where(and(eq(versions.tenantId, tenantId), eq(versions.id, input.versionId)));
-  if (!version) return false;
-  // Ingest renames under this lock, so once we hold it no rename is half done. The title is
-  // compared in a statement of its own, after the lock: a single UPDATE … WHERE EXISTS would
-  // compare against the title as of its snapshot, taken before it waited, and mark the renamed
-  // object processed under a title nobody enriched. FOR SHARE reads the latest committed row;
-  // in a snapshot transaction, a rename since the snapshot fails it with a serialization error
-  // (retry) instead.
-  await lockObject(tx, tenantId, version.objectId);
-  const [object] = await tx
-    .select({ title: objects.title })
-    .from(objects)
-    .where(and(eq(objects.tenantId, tenantId), eq(objects.id, version.objectId)))
-    .for("share");
-  if (object?.title !== input.title) return false;
+  if ((await lockCurrentVersion(tx, tenantId, input)) !== "current") return false;
   const updated = await tx
     .update(versions)
     .set({ processedAt: sql`greatest(now(), ${versions.createdAt})` })
@@ -708,6 +741,39 @@ export async function markProcessed(
       and(
         eq(versions.tenantId, tenantId),
         eq(versions.id, input.versionId),
+        isNull(versions.processedAt),
+      ),
+    )
+    .returning({ id: versions.id });
+  return updated.length > 0;
+}
+
+/**
+ * Enrichment is done with a version a newer one replaced before it was processed: marks it
+ * processed without enriching it, so it leaves the unprocessed set (the sweep's index) for good.
+ * Returns false, changing nothing, unless the version exists, is unprocessed and isn't its
+ * object's current version.
+ *
+ * This loosens nothing. Levels, listings and search read only the current version's flag, and a
+ * version that was replaced never becomes current again (versions only ever get a higher seq).
+ * An earlier version opens only for its owner (read.ts), and its `processed` in listVersions()
+ * then means what it means for every other version: enrichment has nothing more to do with it.
+ */
+export async function markSuperseded(
+  tx: Tx,
+  tenantId: string,
+  versionId: string,
+): Promise<boolean> {
+  // The title plays no part: a superseded version is done under any title.
+  const standing = await lockCurrentVersion(tx, tenantId, { versionId, title: "" });
+  if (standing !== "superseded") return false;
+  const updated = await tx
+    .update(versions)
+    .set({ processedAt: sql`greatest(now(), ${versions.createdAt})` })
+    .where(
+      and(
+        eq(versions.tenantId, tenantId),
+        eq(versions.id, versionId),
         isNull(versions.processedAt),
       ),
     )

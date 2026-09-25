@@ -78,7 +78,12 @@ What someone who can't read a file learns about it:
   it at once. A model saying it is public changes nothing until a person agrees.
 - **Unprocessed objects are hidden.** Until enrichment finishes the current version
   (`markProcessed()`), an object is `hidden` and `metadata-only`. A new version or a rename
-  starts it over.
+  starts it over. `markProcessed()` marks only the object's current version, under the title
+  the enrichment job saw: a job for a replaced version, or an old title, changes nothing.
+  `lockCurrentVersion()` makes the same check for an enrichment step about to write, and holds
+  the object's lock while it writes (core/jobs). `markSuperseded()` marks a replaced version
+  done without enriching it; only the current version's flag counts for levels, and a replaced
+  version never becomes current again.
 
 `viewObjects()` returns what a caller may see of a list of objects, in order, leaving out
 hidden, deleted and unknown ones alike. Only active tenant members discover files. Guests and

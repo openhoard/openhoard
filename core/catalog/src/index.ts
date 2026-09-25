@@ -50,7 +50,9 @@ export {
   explainLevels,
   GENERIC_TITLE,
   levelsFor,
+  lockCurrentVersion,
   markProcessed,
+  markSuperseded,
   MAX_OBJECT_IDS,
   nonReaderTitle,
   proposeDisplayTitle,
@@ -64,6 +66,7 @@ export {
   type ObjectView,
   type RecordedRequest,
   type TitleOnlyView,
+  type VersionStanding,
   type ViewOptions,
   type ViewRequest,
 } from "./visibility.js";
