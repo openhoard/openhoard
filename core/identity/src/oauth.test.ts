@@ -7,8 +7,10 @@ import {
   createServiceAccount,
   createUser,
   IdentityError,
+  linkIdentity,
   lockUser,
   retireUser,
+  unlinkIdentity,
   unlockUser,
   type User,
 } from "./directory.js";
@@ -19,6 +21,7 @@ import {
   getClient,
   issueCode,
   listClients,
+  MAX_PENDING_CLIENTS,
   noteClient,
   oauthTokenTenant,
   parseScopes,
@@ -50,14 +53,14 @@ beforeEach(async () => {
   ana = await write((tx) =>
     createUser(tx, t.tenantId, { email: "ana@example.com", displayName: "Ana", source: "local" }),
   );
-  client = await write((tx) =>
+  client = (await write((tx) =>
     noteClient(
       tx,
       t.tenantId,
       { kind: "cimd", clientRef: CLAUDE, name: "Claude", redirectUris: [REDIRECT] },
       `user:${ana.id}`,
     ),
-  );
+  )) as OAuthClient;
 });
 afterEach(() => db?.close());
 
@@ -156,6 +159,38 @@ describe("clients", () => {
     ).rejects.toThrow(IdentityError);
   });
 
+  it("keep what the admin decided on, and stop recording past the pending cap", async () => {
+    await approve();
+    const again = await write((tx) =>
+      noteClient(
+        tx,
+        t.tenantId,
+        { kind: "cimd", clientRef: CLAUDE, name: "Claude?", redirectUris: [REDIRECT] },
+        `user:${ana.id}`,
+      ),
+    );
+    expect(again).toMatchObject({ status: "approved", name: "Claude" });
+    await write((tx) =>
+      tx.execute(sql`insert into oauth_clients (tenant_id, client_key, kind, client_ref, name, redirect_uris, requested_by)
+        select ${t.tenantId}, lpad(to_hex(i), 64, '0'), 'dcr', 'dcr:x', 'n', array['https://x.example/cb'], 'user:x'
+          from generate_series(1, ${MAX_PENDING_CLIENTS}) i`),
+    );
+    const capped = await write((tx) =>
+      noteClient(
+        tx,
+        t.tenantId,
+        {
+          kind: "cimd",
+          clientRef: "https://new.example/c.json",
+          name: "New",
+          redirectUris: [REDIRECT],
+        },
+        `user:${ana.id}`,
+      ),
+    );
+    expect(capped).toBeNull();
+  });
+
   it("are identified by metadata URL, or by redirect URIs with loopback ports ignored", () => {
     expect(clientKeyOf("cimd", CLAUDE)).not.toBe(clientKeyOf("cimd", CLAUDE + "x"));
     expect(clientKeyOf("dcr", ["http://127.0.0.1:5173/cb", "https://a.example/cb"])).toBe(
@@ -222,14 +257,14 @@ describe("authorization codes", () => {
 
   it("refuse a wrong verifier, client, redirect, resource, or an expired code, and are then used up", async () => {
     await approve();
-    const other = await write((tx) =>
+    const other = (await write((tx) =>
       noteClient(
         tx,
         t.tenantId,
         { kind: "dcr", clientRef: "dcr:x", name: "Other", redirectUris: ["https://o.example/cb"] },
         `user:${ana.id}`,
       ),
-    );
+    )) as OAuthClient;
     const cases: [string, Record<string, string>, string][] = [
       ["verifier", { codeVerifier: pkce().verifier }, "invalid_grant"],
       ["client", { clientKey: other.clientKey }, "invalid_grant"],
@@ -336,6 +371,21 @@ describe("access tokens", () => {
     const c = await tokens();
     await write((tx) => revokeUserGrants(tx, t.tenantId, ana.id, "system:t-104"));
     expect(await check(c.accessToken)).toMatchObject({ ok: false, refused: "revoked" });
+
+    const u = await tokens();
+    await write((tx) =>
+      linkIdentity(tx, t.tenantId, ana.id, { issuer: "https://i.example", subject: "s" }),
+    );
+    await write((tx) =>
+      unlinkIdentity(
+        tx,
+        t.tenantId,
+        ana.id,
+        { issuer: "https://i.example", subject: "s" },
+        "user:admin",
+      ),
+    );
+    expect(await check(u.accessToken)).toMatchObject({ ok: false, refused: "revoked" });
 
     const d = await tokens();
     await write((tx) => retireUser(tx, t.tenantId, ana.id, "user:admin"));

@@ -1,6 +1,6 @@
 {
-  "id": "9b074f8d-989e-478c-922a-26191ea68828",
-  "prevId": "7e676990-b03f-4389-82ac-01e70dd02b8f",
+  "id": "fab39ec7-f576-4674-bdbb-e6cb317c903d",
+  "prevId": "6a84804a-7e72-41df-a576-8ce17888aa47",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1624,6 +1624,27 @@
             },
             {
               "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "oauth_codes_grant_idx": {
+          "name": "oauth_codes_grant_idx",
+          "columns": [
+            {
+              "expression": "tenant_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "grant_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

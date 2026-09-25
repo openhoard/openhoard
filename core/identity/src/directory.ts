@@ -461,7 +461,7 @@ export async function lockUser(
 
 /**
  * Ends a user's live sessions and OAuth grants (a lock, a provider disable, retirement), or, with
- * `identity`, the sessions that identity signed in: they don't come back.
+ * `identity`, the sessions that identity signed in and every grant: they don't come back.
  */
 async function endSessions(
   tx: Tx,
@@ -483,8 +483,8 @@ async function endSessions(
           : []),
       ),
     );
-  if (identity) return;
-  // What AI clients hold for them ends too (the grants' tokens with them).
+  // What AI clients hold for them ends too (the grants' tokens with them). A grant doesn't record
+  // which identity signed in to consent, so unlinking one ends them all: the person consents again.
   await tx
     .update(oauthGrants)
     .set({ revokedAt: sql`greatest(now(), ${oauthGrants.createdAt})`, revokedBy: by })

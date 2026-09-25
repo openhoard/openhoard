@@ -1,6 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { request } from "node:https";
-import { isIP, type LookupFunction } from "node:net";
+import { BlockList, isIP, type LookupFunction } from "node:net";
 import { clientKeyOf, redirectIdentity, type ClientKind } from "@openhoard/core-identity";
 
 /*
@@ -8,8 +8,10 @@ import { clientKeyOf, redirectIdentity, type ClientKind } from "@openhoard/core-
  *
  * - Client ID Metadata Documents (preferred): the client_id is an https URL serving a JSON
  *   document whose `client_id` is that URL, with its name and redirect URIs. OpenHoard fetches
- *   it, guarded against server-side request forgery: https only, public addresses only (checked
- *   on the address actually connected to), no redirects, 5 s, 64 KB. Cached for minutes.
+ *   it, only for a signed-in person, guarded against server-side request forgery: https to a
+ *   named host (no address in the URL), public addresses only (checked on the address actually
+ *   connected to), no redirects, 5 s in all, 64 KB, a few at a time; results (and failures) are
+ *   cached for minutes.
  * - Dynamic client registration (older clients): registering returns a client_id that *is* the
  *   registration, `ohdcr.<base64url JSON>`: redirect URIs and a name. Registration is open to
  *   anyone, so a server-side record would add nothing but a table anyone can fill; the admin's
@@ -38,17 +40,25 @@ export class ClientError extends Error {
 
 const MAX_REDIRECTS = 10;
 const MAX_NAME = 200;
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+// Control characters and direction overrides: never shown on a page.
+// eslint-disable-next-line no-control-regex
+const UNSHOWN = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+const LOOPBACK = ["127.0.0.1", "localhost", "[::1]"];
 
 /** A redirect URI a client may register: https, or http on this machine; no fragment. */
 export function checkRedirectUri(uri: unknown): string {
-  if (typeof uri !== "string" || uri.length > 2048) throw new ClientError("invalid redirect_uri");
+  if (typeof uri !== "string" || uri.length > 2048 || CONTROL.test(uri)) {
+    throw new ClientError("invalid redirect_uri");
+  }
   let u: URL;
   try {
     u = new URL(uri);
   } catch {
     throw new ClientError("invalid redirect_uri");
   }
-  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(u.hostname);
+  const loopback = LOOPBACK.includes(u.hostname);
   if (u.protocol !== "https:" && !(u.protocol === "http:" && loopback)) {
     throw new ClientError("a redirect_uri is https, or http on the loopback address");
   }
@@ -61,11 +71,7 @@ export function checkRedirectUri(uri: unknown): string {
 function checkName(name: unknown, fallback: string): string {
   if (name === undefined) return fallback;
   if (typeof name !== "string") throw new ClientError("invalid client_name");
-  // Control characters and direction overrides out: it is shown on the consent page.
-  // eslint-disable-next-line no-control-regex
-  const clean = name
-    .replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
-    .trim();
+  const clean = name.replace(UNSHOWN, "").trim();
   return [...clean].slice(0, MAX_NAME).join("") || fallback;
 }
 
@@ -108,10 +114,9 @@ export function register(body: Registration): Record<string, unknown> {
   }
   const redirectUris = checkRedirects(body.redirect_uris);
   const name = checkName(body.client_name, new URL(redirectUris[0] as string).host);
-  const clientId =
-    DCR_PREFIX + Buffer.from(JSON.stringify({ n: name, r: redirectUris })).toString("base64url");
+  const encoded = Buffer.from(JSON.stringify({ n: name, r: redirectUris })).toString("base64url");
   return {
-    client_id: clientId,
+    client_id: DCR_PREFIX + encoded,
     client_id_issued_at: Math.floor(Date.now() / 1000),
     client_name: name,
     redirect_uris: redirectUris,
@@ -123,17 +128,17 @@ export function register(body: Registration): Record<string, unknown> {
 
 function fromRegistration(clientId: string): ResolvedClient {
   if (clientId.length > 8192) throw new ClientError("invalid client_id");
+  const encoded = clientId.slice(DCR_PREFIX.length);
+  const raw = Buffer.from(encoded, "base64url");
+  // Only the exact encoding register() made: no junk characters decoding to the same client.
+  if (raw.toString("base64url") !== encoded) throw new ClientError("invalid client_id");
   let v: { n?: unknown; r?: unknown };
   try {
-    v = JSON.parse(
-      Buffer.from(clientId.slice(DCR_PREFIX.length), "base64url").toString("utf8"),
-    ) as {
-      n?: unknown;
-      r?: unknown;
-    };
+    v = JSON.parse(raw.toString("utf8")) as { n?: unknown; r?: unknown };
   } catch {
     throw new ClientError("invalid client_id");
   }
+  if (typeof v !== "object" || v === null) throw new ClientError("invalid client_id");
   const redirectUris = checkRedirects(v.r);
   const clientKey = clientKeyOf("dcr", redirectUris);
   return {
@@ -157,39 +162,57 @@ const MAX_BYTES = 64 * 1024;
 const CACHE_DEFAULT_S = 300;
 const CACHE_MAX_S = 3600;
 const CACHE_ENTRIES = 1000;
+const MAX_IN_FLIGHT = 8;
+const FAILURE_CACHE_MS = 60_000;
 
-/** Whether an address is one a public client can't be at: private, loopback, link-local… */
+/** Addresses a public client can't be at: private, loopback, link-local, reserved, translated. */
+const NON_PUBLIC_V4 = new BlockList();
+// Separate lists: Node checks an IPv4 address against IPv6 rules too (as ::ffff:a.b.c.d), and
+// the IPv6 list blocks every mapped address.
+const NON_PUBLIC_V6 = new BlockList();
+for (const [net, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["192.88.99.0", 24],
+  ["192.168.0.0", 16],
+  ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
+  ["224.0.0.0", 4],
+  ["240.0.0.0", 4],
+] as const) {
+  NON_PUBLIC_V4.addSubnet(net, prefix, "ipv4");
+}
+for (const [net, prefix] of [
+  // Unspecified, loopback and every IPv4-embedding form (compatible, mapped, NAT64, 6to4,
+  // Teredo), any of which could name a private IPv4 address.
+  ["::", 96],
+  ["::ffff:0:0", 96],
+  ["64:ff9b::", 96],
+  ["64:ff9b:1::", 48],
+  ["100::", 64],
+  ["2001::", 32],
+  ["2001:db8::", 32],
+  ["2002::", 16],
+  ["fc00::", 7],
+  ["fe80::", 10],
+  ["fec0::", 10],
+  ["ff00::", 8],
+] as const) {
+  NON_PUBLIC_V6.addSubnet(net, prefix, "ipv6");
+}
+
+/** Whether an address is one a public client can't be at (anything but a plain public one). */
 export function isPrivateAddress(address: string): boolean {
-  if (isIP(address) === 4) {
-    const [a = 0, b = 0] = address.split(".").map(Number);
-    return (
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      (a === 100 && b >= 64 && b <= 127) ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168) ||
-      (a === 192 && b === 0) ||
-      (a === 198 && (b === 18 || b === 19)) ||
-      a >= 224
-    );
-  }
-  const v6 = address.toLowerCase();
-  if (v6.startsWith("::ffff:")) return isPrivateAddress(v6.slice(7));
-  return (
-    v6 === "::" ||
-    v6 === "::1" ||
-    v6.startsWith("fc") ||
-    v6.startsWith("fd") ||
-    v6.startsWith("fe8") ||
-    v6.startsWith("fe9") ||
-    v6.startsWith("fea") ||
-    v6.startsWith("feb") ||
-    v6.startsWith("ff") ||
-    v6.startsWith("64:ff9b:") ||
-    v6.startsWith("2001:db8")
-  );
+  const family = isIP(address);
+  if (family === 0) return true;
+  return family === 4 ? NON_PUBLIC_V4.check(address, "ipv4") : NON_PUBLIC_V6.check(address, "ipv6");
 }
 
 /**
@@ -201,7 +224,7 @@ const publicLookup: LookupFunction = (hostname, options, callback) => {
     (addresses) => {
       const ok = addresses.filter((a) => !isPrivateAddress(a.address));
       if (ok.length === 0 || ok.length !== addresses.length) {
-        callback(new Error(`${hostname} resolves to a non-public address`), "", 4);
+        callback(new Error("the host resolves to a non-public address"), "", 4);
         return;
       }
       const first = ok[0] as { address: string; family: number };
@@ -215,31 +238,28 @@ const publicLookup: LookupFunction = (hostname, options, callback) => {
   );
 };
 
-/** The real fetcher: https to public addresses, no redirects, bounded in time and size. */
+const unbracket = (host: string) => host.replace(/^\[|\]$/g, "");
+
+/** The real fetcher: https to public addresses of a named host, no redirects, bounded. */
 export const fetchMetadata: MetadataFetcher = (url) =>
   new Promise((resolve, reject) => {
     if (url.protocol !== "https:") {
       reject(new ClientError("a client metadata URL is https"));
       return;
     }
-    // An address in the URL skips the lookup, so it is checked here.
-    const host = url.hostname.replace(/^\[|\]$/g, "");
-    if (isIP(host) !== 0 && isPrivateAddress(host)) {
-      reject(new ClientError(`${url.hostname} is not a public address`));
+    // Clients are named by their domain: an address in the URL (which would skip the lookup)
+    // isn't one.
+    if (isIP(unbracket(url.hostname)) !== 0) {
+      reject(new ClientError("a client metadata URL names a host, not an address"));
       return;
     }
     const req = request(
       url,
-      {
-        method: "GET",
-        lookup: publicLookup,
-        headers: { accept: "application/json" },
-        timeout: FETCH_TIMEOUT_MS,
-      },
+      { method: "GET", lookup: publicLookup, headers: { accept: "application/json" } },
       (res) => {
         if (res.statusCode !== 200) {
           res.resume();
-          reject(new ClientError(`client metadata answered ${res.statusCode ?? "nothing"}`));
+          reject(new ClientError("client metadata couldn't be fetched"));
           return;
         }
         let size = 0;
@@ -262,19 +282,38 @@ export const fetchMetadata: MetadataFetcher = (url) =>
         res.on("error", reject);
       },
     );
-    req.on("timeout", () => req.destroy(new ClientError("client metadata timed out")));
+    // The whole exchange, not each silence, gets FETCH_TIMEOUT_MS.
+    const timer = setTimeout(
+      () => req.destroy(new ClientError("client metadata timed out")),
+      FETCH_TIMEOUT_MS,
+    );
+    req.on("close", () => clearTimeout(timer));
+    // What failed stays here (no port-scan oracle): the caller learns only that it did.
     req.on("error", (err) =>
-      reject(err instanceof ClientError ? err : new ClientError(`client metadata: ${err.message}`)),
+      reject(
+        err instanceof ClientError ? err : new ClientError("client metadata couldn't be fetched"),
+      ),
     );
     req.end();
   });
 
-/** Whether a client_id is a metadata document URL: https with a path (not just `/`). */
+/**
+ * Whether a client_id is a metadata document URL: https to a named host, with a path, written
+ * exactly as a URL parser writes it (no credentials, dot segments or fragment that would make
+ * one client look like another).
+ */
 export function isMetadataUrl(clientId: string): boolean {
+  if (clientId.length > 2048 || CONTROL.test(clientId)) return false;
   try {
     const u = new URL(clientId);
     return (
-      u.protocol === "https:" && u.pathname !== "/" && u.hash === "" && clientId.length <= 2048
+      u.protocol === "https:" &&
+      u.pathname !== "/" &&
+      u.href === clientId &&
+      u.username === "" &&
+      u.password === "" &&
+      u.hash === "" &&
+      isIP(unbracket(u.hostname)) === 0
     );
   } catch {
     return false;
@@ -284,6 +323,8 @@ export function isMetadataUrl(clientId: string): boolean {
 export class ClientResolver {
   readonly #fetch: MetadataFetcher;
   readonly #cache = new Map<string, { client: ResolvedClient; until: number }>();
+  readonly #failed = new Map<string, { error: ClientError; until: number }>();
+  readonly #inFlight = new Map<string, Promise<ResolvedClient>>();
 
   constructor(fetch: MetadataFetcher = fetchMetadata) {
     this.#fetch = fetch;
@@ -296,6 +337,29 @@ export class ClientResolver {
     if (!isMetadataUrl(clientId)) throw new ClientError("unknown client_id");
     const cached = this.#cache.get(clientId);
     if (cached && cached.until > Date.now()) return cached.client;
+    const failed = this.#failed.get(clientId);
+    if (failed && failed.until > Date.now()) throw failed.error;
+    const running = this.#inFlight.get(clientId);
+    if (running) return running;
+    if (this.#inFlight.size >= MAX_IN_FLIGHT) {
+      throw new ClientError("too many clients being checked; try again shortly");
+    }
+    const work = this.#fetchAndCheck(clientId).catch((err: unknown) => {
+      const error =
+        err instanceof ClientError ? err : new ClientError("client metadata couldn't be fetched");
+      if (this.#failed.size >= CACHE_ENTRIES) this.#failed.clear();
+      this.#failed.set(clientId, { error, until: Date.now() + FAILURE_CACHE_MS });
+      throw error;
+    });
+    this.#inFlight.set(clientId, work);
+    try {
+      return await work;
+    } finally {
+      this.#inFlight.delete(clientId);
+    }
+  }
+
+  async #fetchAndCheck(clientId: string): Promise<ResolvedClient> {
     const got = await this.#fetch(new URL(clientId));
     let doc: {
       client_id?: unknown;
@@ -331,27 +395,28 @@ export class ClientResolver {
     return client;
   }
 
-  /** The key a client_id's client has, without fetching anything (the token endpoint). */
-  keyOf(clientId: unknown): string | null {
+  /** A client_id's key and display ref, without fetching anything (the token endpoint). */
+  keyOf(clientId: unknown): { clientKey: string; clientRef: string } | null {
     if (typeof clientId !== "string") return null;
     if (clientId.startsWith(DCR_PREFIX)) {
       try {
-        return fromRegistration(clientId).clientKey;
+        const r = fromRegistration(clientId);
+        return { clientKey: r.clientKey, clientRef: r.clientRef };
       } catch {
         return null;
       }
     }
-    return isMetadataUrl(clientId) ? clientKeyOf("cimd", clientId) : null;
+    return isMetadataUrl(clientId)
+      ? { clientKey: clientKeyOf("cimd", clientId), clientRef: clientId }
+      : null;
   }
 }
 
 /**
  * The registered redirect URI a request names: exact, except a loopback one may use any port
- * (RFC 8252 §7.3); with none named, the client's only one.
+ * (RFC 8252 §7.3). The request must name it (the token request names it again).
  */
 export function matchRedirect(client: ResolvedClient, asked: unknown): string | null {
-  if (asked === undefined)
-    return client.redirectUris.length === 1 ? (client.redirectUris[0] as string) : null;
   if (typeof asked !== "string") return null;
   if (client.redirectUris.includes(asked)) return asked;
   try {

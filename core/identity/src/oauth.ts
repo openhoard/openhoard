@@ -163,22 +163,48 @@ const toClient = (r: ClientRow): OAuthClient => ({
   decidedAt: r.decidedAt,
 });
 
+/** Most clients a tenant keeps waiting for an admin; past it, new ones aren't recorded. */
+export const MAX_PENDING_CLIENTS = 200;
+
 /**
- * Records a client someone of the tenant tried (pending, for an admin), or refreshes what it
- * says about itself; never changes a decision. Returns it as it stands.
+ * Records a client someone of the tenant tried (pending, for an admin), or refreshes what a
+ * pending one says about itself; a decided client stays as the admin saw it. Returns it as it
+ * stands, or null when the tenant already has MAX_PENDING_CLIENTS waiting (any signed-in person,
+ * or a site sending them here, can add some).
  */
 export async function noteClient(
   tx: Tx,
   tenantId: string,
   input: OAuthClientInput,
   by: string,
-): Promise<OAuthClient> {
+): Promise<OAuthClient | null> {
   checkBy(by);
   const clientKey =
     input.kind === "cimd"
       ? clientKeyOf("cimd", input.clientRef)
       : clientKeyOf("dcr", input.redirectUris);
   const name = [...input.name].slice(0, 200).join("") || input.clientRef.slice(0, 200);
+  const known = await getClient(tx, tenantId, clientKey);
+  if (known) {
+    if (known.status !== "pending") return known;
+    const [row] = await tx
+      .update(oauthClients)
+      .set({ name, redirectUris: [...input.redirectUris] })
+      .where(
+        and(
+          eq(oauthClients.tenantId, tenantId),
+          eq(oauthClients.clientKey, clientKey),
+          eq(oauthClients.status, "pending"),
+        ),
+      )
+      .returning();
+    return row ? toClient(row) : getClient(tx, tenantId, clientKey);
+  }
+  const [waiting] = await tx
+    .select({ n: sql<number>`count(*)::int` })
+    .from(oauthClients)
+    .where(and(eq(oauthClients.tenantId, tenantId), eq(oauthClients.status, "pending")));
+  if ((waiting?.n ?? 0) >= MAX_PENDING_CLIENTS) return null;
   const [row] = await tx
     .insert(oauthClients)
     .values({
@@ -190,13 +216,9 @@ export async function noteClient(
       redirectUris: [...input.redirectUris],
       requestedBy: by,
     })
-    .onConflictDoUpdate({
-      target: [oauthClients.tenantId, oauthClients.clientKey],
-      set: { name, redirectUris: [...input.redirectUris] },
-    })
+    .onConflictDoNothing()
     .returning();
-  if (!row) throw new Error("client upsert returned nothing");
-  return toClient(row);
+  return row ? toClient(row) : getClient(tx, tenantId, clientKey);
 }
 
 export async function getClient(
@@ -537,6 +559,18 @@ export async function refreshGrant(
   });
   if (!m || m[1] !== tenantId) return refuse("unknown refresh token");
   const grantId = m[2] as string;
+  // Lock order, as lockUser() takes it: the person, then their grant.
+  const [owner] = await tx
+    .select({ userId: oauthGrants.userId })
+    .from(oauthGrants)
+    .where(and(eq(oauthGrants.tenantId, tenantId), eq(oauthGrants.id, grantId)));
+  if (owner) {
+    await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.tenantId, tenantId), eq(users.id, owner.userId)))
+      .for("key share");
+  }
   const [grant] = await tx
     .select({
       g: oauthGrants,

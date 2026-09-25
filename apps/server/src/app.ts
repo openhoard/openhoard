@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
 import type { Database } from "@openhoard/core-db";
 import type { Logger } from "pino";
@@ -25,7 +26,9 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
   const app = new Hono<AuthEnv>();
 
   // Baseline security headers on every response (nosniff, frame-deny, strict referrer, etc.).
-  app.use(secureHeaders());
+  // `same-origin`, not the default `no-referrer`: under no-referrer browsers send `Origin: null`
+  // on this server's own form posts (the OAuth consent), which the Origin check must see.
+  app.use(secureHeaders({ referrerPolicy: "same-origin" }));
 
   if (log) {
     app.use(async (c, next) => {
@@ -53,6 +56,16 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
       ...shared,
       ...(deps.fetchMetadata ? { fetchMetadata: deps.fetchMetadata } : {}),
     });
+    // Browser clients (the MCP Inspector) call /mcp across origins, with a bearer token and no
+    // cookies, and must read the WWW-Authenticate challenge.
+    app.use(
+      "/mcp",
+      cors({
+        origin: "*",
+        allowHeaders: ["authorization", "content-type", "mcp-protocol-version", "mcp-session-id"],
+        exposeHeaders: ["www-authenticate", "mcp-session-id"],
+      }),
+    );
     // The MCP server arrives with T-801; until then /mcp only proves a token.
     app.all("/mcp", requireBearer(), (c) => {
       const bearer = c.get("bearer");

@@ -99,6 +99,7 @@ ALTER TABLE "oauth_grants" ADD CONSTRAINT "oauth_grants_user_fk" FOREIGN KEY ("t
 ALTER TABLE "oauth_grants" ADD CONSTRAINT "oauth_grants_client_fk" FOREIGN KEY ("tenant_id","client_key") REFERENCES "public"."oauth_clients"("tenant_id","client_key") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "oauth_tokens" ADD CONSTRAINT "oauth_tokens_grant_fk" FOREIGN KEY ("tenant_id","grant_id") REFERENCES "public"."oauth_grants"("tenant_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "oauth_codes_expires_idx" ON "oauth_codes" USING btree ("tenant_id","expires_at");--> statement-breakpoint
+CREATE INDEX "oauth_codes_grant_idx" ON "oauth_codes" USING btree ("tenant_id","grant_id");--> statement-breakpoint
 CREATE INDEX "oauth_grants_user_idx" ON "oauth_grants" USING btree ("tenant_id","user_id");--> statement-breakpoint
 CREATE INDEX "oauth_grants_client_idx" ON "oauth_grants" USING btree ("tenant_id","client_key");--> statement-breakpoint
 CREATE INDEX "oauth_tokens_grant_idx" ON "oauth_tokens" USING btree ("tenant_id","grant_id");--> statement-breakpoint

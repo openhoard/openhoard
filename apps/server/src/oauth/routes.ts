@@ -35,6 +35,7 @@ import {
   type ResolvedClient,
 } from "./clients.js";
 import { consentPage, errorPage, pendingPage, type Page } from "./pages.js";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 
 /*
@@ -80,7 +81,7 @@ interface ConsentRequest {
   tenantId: string;
   sessionId: string;
   userId: string;
-  clientId: string;
+  clientRef: string;
   clientKey: string;
   redirectUri: string;
   codeChallenge: string;
@@ -154,6 +155,31 @@ export function mountOAuth(
     app.use(path, cors({ origin: "*", allowHeaders: ["content-type", "mcp-protocol-version"] }));
   }
 
+  // Small bodies only, and the media type each endpoint takes: never multipart (files), which
+  // parseBody() would buffer, before anyone is known.
+  app.use(
+    "/oauth/*",
+    bodyLimit({
+      maxSize: 64 * 1024,
+      onError: (c) =>
+        c.json({ error: "invalid_request", error_description: "the body is too large" }, 413),
+    }),
+  );
+  for (const [path, type] of [
+    ["/oauth/token", "application/x-www-form-urlencoded"],
+    ["/oauth/revoke", "application/x-www-form-urlencoded"],
+    ["/oauth/authorize", "application/x-www-form-urlencoded"],
+    ["/oauth/register", "application/json"],
+  ] as const) {
+    app.on("POST", path, async (c, next) => {
+      const given = (c.req.header("content-type") ?? "").split(";")[0]?.trim().toLowerCase();
+      if (given !== type) {
+        return c.json({ error: "invalid_request", error_description: `the body is ${type}` }, 415);
+      }
+      await next();
+    });
+  }
+
   // --- Discovery -------------------------------------------------------------------------------
 
   const protectedResource = (c: Context) =>
@@ -213,6 +239,15 @@ export function mountOAuth(
 
   app.get("/oauth/authorize", async (c) => {
     const q = c.req.query();
+    // Signed in first: nothing (not even fetching a client's document, or an error redirect)
+    // happens for someone nobody knows.
+    const signedIn = c.get("auth");
+    if (!signedIn) {
+      const here = new URL(c.req.url);
+      const path = `${here.pathname}${here.search}`;
+      if (path.length > RETURN_MAX) return show(c, errorPage("The request is too long."), 400);
+      return c.redirect(`/auth/sign-in?return_to=${encodeURIComponent(path)}`, 302);
+    }
     let client: ResolvedClient;
     try {
       client = await clients.resolve(q.client_id);
@@ -222,28 +257,8 @@ export function mountOAuth(
       return show(c, errorPage(`Unknown client: ${message}.`), 400);
     }
     const redirectUri = matchRedirect(client, q.redirect_uri);
-    if (!redirectUri)
+    if (!redirectUri) {
       return show(c, errorPage("The redirect URI isn't one this client registered."), 400);
-    const state = q.state ?? null;
-    const back = (error: string, description: string) =>
-      backWith(c, redirectUri, { error, error_description: description, state });
-
-    if (q.response_type !== "code") return back("unsupported_response_type", "only code");
-    if (q.code_challenge_method !== "S256" || !/^[A-Za-z0-9_-]{43}$/.test(q.code_challenge ?? "")) {
-      return back("invalid_request", "PKCE with S256 is required");
-    }
-    if (q.resource !== undefined && canonicalResource(q.resource) !== resource) {
-      return back("invalid_target", `tokens are for ${resource} only`);
-    }
-    const scopes = q.scope === undefined || q.scope === "" ? DEFAULT_SCOPES : parseScopes(q.scope);
-    if (!scopes) return back("invalid_scope", "scopes are files:read and files:tag");
-
-    const signedIn = c.get("auth");
-    if (!signedIn) {
-      const here = new URL(c.req.url);
-      const path = `${here.pathname}${here.search}`;
-      if (path.length > RETURN_MAX) return back("invalid_request", "the request is too long");
-      return c.redirect(`/auth/sign-in?return_to=${encodeURIComponent(path)}`, 302);
     }
     const { tenantId } = signedIn;
     const userId = signedIn.principal.userId;
@@ -259,10 +274,10 @@ export function mountOAuth(
         },
         userPrincipal(userId),
       );
-      const said = configured(tenantId)(n);
+      const said = n ? configured(tenantId)(n) : undefined;
       // Keep the config's approval in the database too, for the admin's list (T-106).
       const decided =
-        said !== undefined && said !== null && n.status === "pending"
+        n && said !== undefined && said !== null && n.status === "pending"
           ? await decideClient(
               tx,
               tenantId,
@@ -279,21 +294,36 @@ export function mountOAuth(
           action: "oauth.authorize",
           decision: "deny",
           client: client.clientRef,
-          detail: { reason: decided.status === "refused" ? "client-refused" : "client-pending" },
+          detail: { reason: decided?.status === "refused" ? "client-refused" : "client-pending" },
         });
       }
       return { noted: decided, trust: t, user: who };
     });
+    // Until an admin approved the client, nothing goes back to it (no redirect for anyone's URL).
     if (trust === null) {
-      if (noted.status === "refused")
-        return back("access_denied", "your admin refused this client");
+      if (noted?.status === "refused") {
+        return show(c, errorPage("Your admin refused this client."), 403);
+      }
       return show(c, pendingPage(client.name, client.clientRef), 403);
     }
+    const state = q.state ?? null;
+    const back = (error: string, description: string) =>
+      backWith(c, redirectUri, { error, error_description: description, state });
+    if (q.response_type !== "code") return back("unsupported_response_type", "only code");
+    if (q.code_challenge_method !== "S256" || !/^[A-Za-z0-9_-]{43}$/.test(q.code_challenge ?? "")) {
+      return back("invalid_request", "PKCE with S256 is required");
+    }
+    if (q.resource !== undefined && canonicalResource(q.resource) !== resource) {
+      return back("invalid_target", `tokens are for ${resource} only`);
+    }
+    const scopes = q.scope === undefined || q.scope === "" ? DEFAULT_SCOPES : parseScopes(q.scope);
+    if (!scopes) return back("invalid_scope", "scopes are files:read and files:tag");
+    if (state !== null && state.length > 1024) return back("invalid_request", "state is too long");
     const request: ConsentRequest = {
       tenantId,
       sessionId: signedIn.sessionId,
       userId,
-      clientId: client.clientId,
+      clientRef: client.clientRef,
       clientKey: client.clientKey,
       redirectUri,
       codeChallenge: q.code_challenge as string,
@@ -345,7 +375,7 @@ export function mountOAuth(
           actor,
           action: "oauth.authorize",
           decision: "deny",
-          client: r.clientId,
+          client: r.clientRef,
           detail: { reason: "person-denied" },
         });
         return null;
@@ -368,7 +398,7 @@ export function mountOAuth(
           actor,
           action: "oauth.authorize",
           decision: "allow",
-          client: r.clientId,
+          client: r.clientRef,
           detail: { scopes: r.scopes.join(" ") },
         });
         return code;
@@ -408,10 +438,9 @@ export function mountOAuth(
       return tokenError(c, "invalid_request", "a form body is expected");
     }
     const str = (k: string) => (typeof form[k] === "string" ? (form[k] as string) : undefined);
-    const clientId = str("client_id");
-    const clientKey = clients.keyOf(clientId);
-    if (!clientKey || clientId === undefined)
-      return tokenError(c, "invalid_client", "unknown client_id", 401);
+    const known = clients.keyOf(str("client_id"));
+    if (!known) return tokenError(c, "invalid_client", "unknown client_id", 401);
+    const { clientKey, clientRef } = known;
     const grantType = str("grant_type");
     const token =
       grantType === "authorization_code"
@@ -460,7 +489,7 @@ export function mountOAuth(
               : "oauth:unknown",
           action: grantType === "authorization_code" ? "oauth.token" : "oauth.refresh",
           decision: r.ok ? "allow" : "deny",
-          client: clientId.slice(0, 512),
+          client: clientRef,
           detail: r.ok
             ? { grant: r.grantId }
             : { reason: r.reason, ...(r.grantId ? { grant: r.grantId } : {}) },

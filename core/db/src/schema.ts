@@ -1126,6 +1126,8 @@ export const oauthCodes = pgTable(
       foreignColumns: [oauthClients.tenantId, oauthClients.clientKey],
     }),
     index("oauth_codes_expires_idx").on(t.tenantId, t.expiresAt),
+    // Pruning a grant checks no code still points at it.
+    index("oauth_codes_grant_idx").on(t.tenantId, t.grantId),
     idCheck("oauth_codes_id_format", "id", "oauthCode"),
     check("oauth_codes_person_only", sql.raw(PERSON_KINDS)),
     check("oauth_codes_secret_hash_format", sql.raw(`secret_hash ~ '${HEX64}'`)),

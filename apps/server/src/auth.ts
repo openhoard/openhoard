@@ -120,12 +120,23 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
   const audit = (tx: Tx, tenantId: string, record: AuditRecord) =>
     appendAudit(tx, tenantId, record);
 
+  /**
+   * Whether a request comes from this origin: its Origin header says so, or, where a browser's
+   * referrer policy made Origin `null`, its Sec-Fetch-Site (which pages can't set) does.
+   */
+  const sameOrigin = (o: string | undefined, site: string | undefined) =>
+    o === origin || (o === "null" && site === "same-origin");
+
   // Cross-site requests can't act for a signed-in person: a state-changing request carrying
   // the session cookie must come from this origin. (Without the cookie it acts for nobody.)
   app.use("*", async (c, next) => {
     const method = c.req.method;
     const unsafe = method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
-    if (unsafe && getCookie(c, SESSION_COOKIE) !== undefined && c.req.header("origin") !== origin) {
+    if (
+      unsafe &&
+      getCookie(c, SESSION_COOKIE) !== undefined &&
+      !sameOrigin(c.req.header("origin"), c.req.header("sec-fetch-site"))
+    ) {
       return c.json({ error: "forbidden" }, 403);
     }
     await next();

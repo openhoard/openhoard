@@ -155,14 +155,25 @@ exposure rules check (T-604).
   is told it is waiting.
 - A refused client is turned away, and its grants are revoked.
 - Taking a client out of the config stops its tokens.
+- A trust label in the config wins over one given in the app, and a refusal in the app wins over
+  the config.
+- At most 200 pending clients are recorded per tenant.
+- A decided client's record isn't changed by what it later says about itself.
 
 **The flow:**
 
 - Authorization code with PKCE, S256 only.
 - Tokens are for `resource` = `<publicUrl>/mcp` (RFC 8707).
 - The authorization response carries `iss` (RFC 9207).
-- Errors are shown on the page until the client and its redirect URI check out. After that they
-  go back to the client.
+- `/oauth/authorize` does nothing for someone who isn't signed in except send them to sign in.
+  It fetches no client document and redirects nowhere.
+- Errors are shown on the page until the client, its redirect URI (which the request must name)
+  and its approval check out. After that, protocol errors go back to the client with `state` and
+  `iss`, so an unapproved client gets no redirect at all.
+- Request bodies are limited to 64 KB, form-encoded (JSON for registration), and never multipart.
+- Pages are served with `Referrer-Policy: same-origin`. Under `no-referrer`, browsers send
+  `Origin: null` on the consent form's own post. A post whose Origin is `null` is accepted only
+  when `Sec-Fetch-Site: same-origin` says it came from this server.
 - The consent page names the client, where the answer goes, and what it may do. It warns when a
   program on the person's own computer is asking.
 - The consent form is sealed to the session for 10 minutes.
@@ -173,7 +184,8 @@ exposure rules check (T-604).
 - access tokens (1 hour);
 - refresh tokens, rotated on every use. The previous one presented again revokes the grant.
 - A grant lasts `auth.grantDays` (default 30, at most 90).
-- Locking, disabling or retiring a person revokes their grants, as it ends their sessions.
+- Locking, disabling or retiring a person revokes their grants, as it ends their sessions. So
+  does unlinking any of their sign-in identities: they consent again.
 
 **Scopes:** `files:read` (search, read, open) and `files:tag` (propose tags). They become the
 request's credential scope, so policy refuses anything else. A token without the scope a route

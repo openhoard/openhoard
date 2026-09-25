@@ -181,6 +181,14 @@ async function consent(browser: Browser, url: string, decision = "allow") {
   return { page: html, answer, request };
 }
 
+/** A browser signed in (through a first consent page). */
+async function signedIn(): Promise<Browser> {
+  const browser = new Browser();
+  const page = await browser.follow(authorizeUrl().url, person.upn, () => false);
+  expect(page.status).toBe(200);
+  return browser;
+}
+
 const form = (body: Record<string, string>) => ({
   method: "POST",
   headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -236,6 +244,15 @@ describe("discovery", () => {
     expect(res.headers.get("www-authenticate")).toBe(
       `Bearer resource_metadata="${PUBLIC}/.well-known/oauth-protected-resource/mcp", scope="files:read"`,
     );
+    const preflight = await app.request(RESOURCE, {
+      method: "OPTIONS",
+      headers: { origin: "https://inspector.example", "access-control-request-method": "POST" },
+    });
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("*");
+    const crossOrigin = await app.request(RESOURCE, {
+      headers: { origin: "https://inspector.example" },
+    });
+    expect(crossOrigin.headers.get("access-control-expose-headers")).toMatch(/www-authenticate/);
     for (const path of [
       "/.well-known/oauth-protected-resource/mcp",
       "/.well-known/oauth-protected-resource",
@@ -325,6 +342,22 @@ describe("the authorization code flow", () => {
     expect(back.searchParams.get("state")).toBe("st4te-xyz");
   });
 
+  it("accepts the consent form from a browser that sends Origin null for its own page", async () => {
+    const browser = new Browser();
+    const page = await browser.follow(authorizeUrl().url, person.upn, () => false);
+    const request = /name="request" value="([^"]+)"/.exec(await page.text())?.[1] ?? "";
+    const post = (headers: Record<string, string>) =>
+      browser.go(`${PUBLIC}/oauth/authorize`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
+        body: new URLSearchParams({ request, decision: "deny" }).toString(),
+      });
+    expect((await post({ origin: "null" })).status).toBe(403);
+    expect((await post({ origin: "null", "sec-fetch-site": "cross-site" })).status).toBe(403);
+    expect((await post({ origin: "null", "sec-fetch-site": "same-origin" })).status).toBe(302);
+    expect(page.headers.get("referrer-policy")).toBe("same-origin");
+  });
+
   it("binds the consent form to its session and to ten minutes", async () => {
     const { request } = await consent(new Browser(), authorizeUrl().url, "deny");
     // Another person's browser posting it (the sealed request is for another session).
@@ -388,11 +421,11 @@ describe("clients need an admin", () => {
     await db.withTenant(t.tenantId, (tx) =>
       decideClient(tx, t.tenantId, key, { approve: false }, "user:admin"),
     );
-    const res = await new Browser().follow(authorizeUrl().url, person.upn, (u) =>
-      u.startsWith(CLIENT_REDIRECT),
-    );
-    const back = new URL(res.headers.get("location") ?? "");
-    expect(back.searchParams.get("error")).toBe("access_denied");
+    const res = await new Browser().follow(authorizeUrl().url, person.upn, () => false);
+    // Shown here: nothing goes back to a client the admin refused.
+    expect(res.status).toBe(403);
+    expect(res.headers.get("location")).toBeNull();
+    expect(await res.text()).toContain("refused this client");
   });
 
   it("stops a client approved in the config once it is taken out", async () => {
@@ -436,12 +469,24 @@ describe("clients need an admin", () => {
 });
 
 describe("bad requests", () => {
+  it("does nothing for someone not signed in but send them to sign in", async () => {
+    // Not even a bad client is looked at, nor an error sent anywhere.
+    const res = await new Browser().go(
+      authorizeUrl({ client_id: "https://unknown.example/c.json" }).url,
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toMatch(/^\/auth\/sign-in\?return_to=/);
+  });
+
   it("shows errors instead of redirecting until client and redirect check out", async () => {
-    const browser = new Browser();
+    const browser = await signedIn();
     for (const params of [
       { client_id: "https://unknown.example/c.json" },
       { client_id: "not-a-client" },
+      { client_id: "https://claude.ai@client.example/oauth/mcp.json" },
+      { client_id: "https://127.0.0.1/oauth/mcp.json" },
       { redirect_uri: "https://evil.example/cb" },
+      { redirect_uri: undefined },
     ]) {
       const res = await browser.go(authorizeUrl(params).url);
       expect(res.status, JSON.stringify(params)).toBe(400);
@@ -453,7 +498,8 @@ describe("bad requests", () => {
     expect((await browser.go(authorizeUrl().url)).status).toBe(400);
   });
 
-  it("redirects protocol errors back with state and iss", async () => {
+  it("redirects protocol errors back with state and iss, for an approved client only", async () => {
+    const browser = await signedIn();
     const cases: [Record<string, string | undefined>, string][] = [
       [{ code_challenge_method: "plain" }, "invalid_request"],
       [{ code_challenge: undefined }, "invalid_request"],
@@ -462,12 +508,32 @@ describe("bad requests", () => {
       [{ scope: "files:read admin" }, "invalid_scope"],
     ];
     for (const [params, error] of cases) {
-      const res = await new Browser().go(authorizeUrl(params).url);
+      const res = await browser.go(authorizeUrl(params).url);
       const back = new URL(res.headers.get("location") ?? "");
       expect(back.searchParams.get("error"), error).toBe(error);
       expect(back.searchParams.get("state")).toBe("st4te-xyz");
       expect(back.searchParams.get("iss")).toBe(PUBLIC);
     }
+    // A client nobody approved gets no redirect, not even an error (no open redirect).
+    app = build([]);
+    const res = await browser.go(authorizeUrl({ response_type: "token" }).url);
+    expect(res.status).toBe(403);
+    expect(res.headers.get("location")).toBeNull();
+  });
+
+  it("takes small bodies of the right type only", async () => {
+    const multipart = new FormData();
+    multipart.set("grant_type", "authorization_code");
+    expect(
+      (await app.request(`${PUBLIC}/oauth/token`, { method: "POST", body: multipart })).status,
+    ).toBe(415);
+    const big = await app.request(
+      `${PUBLIC}/oauth/token`,
+      form({ grant_type: "x".repeat(70_000) }),
+    );
+    expect(big.status).toBe(413);
+    const register = await app.request(`${PUBLIC}/oauth/register`, form({ redirect_uris: "x" }));
+    expect(register.status).toBe(415);
   });
 
   it("refuses token requests that don't match their code", async () => {
@@ -605,9 +671,26 @@ describe("client resolution", () => {
     await expect(resolver.resolve("https://c.example/c.json")).rejects.toThrow(/public clients/);
     await expect(resolver.resolve("http://a.example/c.json")).rejects.toThrow(ClientError);
     await expect(resolver.resolve("https://a.example/")).rejects.toThrow(ClientError);
-    expect(resolver.keyOf("https://a.example/c.json")).toBe(a.clientKey);
+    expect(resolver.keyOf("https://a.example/c.json")).toEqual({
+      clientKey: a.clientKey,
+      clientRef: "https://a.example/c.json",
+    });
     expect(resolver.keyOf(42)).toBeNull();
-    expect(matchRedirect(a, undefined)).toBe("https://a.example/cb");
+    // Only the exact encoding registration made: junk that decodes the same is another id.
+    const dcr = String(register({ redirect_uris: ["https://a.example/cb"] }).client_id);
+    expect(resolver.keyOf(dcr)).not.toBeNull();
+    expect(resolver.keyOf(`${dcr}%00`)).toBeNull();
+    expect(resolver.keyOf(`${dcr}.`)).toBeNull();
+    for (const id of [
+      "https://u:p@a.example/c.json",
+      "https://a.example/x/../c.json",
+      "https://[::1]/c.json",
+      "https://A.example/c.json",
+    ]) {
+      await expect(resolver.resolve(id), id).rejects.toThrow(ClientError);
+    }
+    expect(matchRedirect(a, undefined)).toBeNull();
+    expect(matchRedirect(a, "https://a.example/cb")).toBe("https://a.example/cb");
     expect(matchRedirect(a, "https://a.example/cb2")).toBeNull();
   });
 
@@ -624,7 +707,19 @@ describe("client resolution", () => {
     }
   });
 
-  it("knows which addresses aren't public", () => {
+  it("knows which addresses aren't public, IPv4 inside IPv6 too", () => {
+    for (const a of [
+      "::ffff:7f00:1",
+      "::ffff:a00:1",
+      "0:0:0:0:0:ffff:7f00:1",
+      "::7f00:1",
+      "fec0::1",
+      "2002:7f00:1::",
+      "64:ff9b::a00:1",
+      "not-an-ip",
+    ]) {
+      expect(isPrivateAddress(a), a).toBe(true);
+    }
     for (const a of [
       "10.1.2.3",
       "127.0.0.1",

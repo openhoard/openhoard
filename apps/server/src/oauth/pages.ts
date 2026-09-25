@@ -24,7 +24,7 @@ export interface Page {
 }
 
 function page(title: string, body: string, formTargets: readonly string[] = []): Page {
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>${escapeHtml(title)} · OpenHoard</title><style>${STYLE}</style></head><body>${body}</body></html>`;
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="same-origin"><title>${escapeHtml(title)} · OpenHoard</title><style>${STYLE}</style></head><body>${body}</body></html>`;
   const forms = ["'self'", ...formTargets].join(" ");
   return {
     html,
