@@ -1,6 +1,6 @@
 # apps/server
 
-The OpenHoard gateway: the HTTP API, and later the MCP server. See
+The OpenHoard gateway: the HTTP API and the MCP server. See
 [docs/architecture.md](../../docs/architecture.md).
 
 ```sh
@@ -195,3 +195,50 @@ needs gets 403 with `error="insufficient_scope"` and the scopes to ask for.
 
 Every authorization and token decision is audited: `oauth.authorize`, `oauth.token` and
 `oauth.refresh`.
+
+## The MCP server (T-801)
+
+`<publicUrl>/mcp` speaks MCP over Streamable HTTP, behind the tokens above.
+
+- **Stateless.** Every request is a POST, and there is no `Mcp-Session-Id`: GET and DELETE get 405. Each request gets a fresh server, and its bearer token is checked against `oauth_tokens`
+  first, so a revoked grant or a locked person is refused on the next request. Without a valid
+  token the answer is 401, with `WWW-Authenticate` pointing at the RFC 9728 metadata.
+- **One message per POST.** JSON-RPC batches (dropped from MCP in 2025-06-18) get 400: in one, a
+  cancel or a repeated id could keep a tool running past its answer, and a hundred calls could
+  hold every database connection. Bodies are limited to 256 KB.
+- **Responses are JSON**, not an SSE stream. A request still running after 60 seconds gets 503,
+  and its tools are aborted (`ctx.signal`), as they are when the client hangs up.
+- **Origins.** A request carrying an `Origin` header (a browser) is refused with 403 unless it
+  is `publicUrl`'s origin, this machine's (`localhost`, `127.0.0.1`, `[::1]`: the MCP
+  Inspector), or listed in `auth.mcpOrigins`. That is the spec's defence against DNS rebinding.
+  Only those origins get CORS headers. Hosted clients call from their servers, with no `Origin`.
+- **Tools:** `whoami` (the person, the client's id and trust, the scopes granted). `find`, `recent`
+  and `describe` come with T-802. A tool is an `McpTool` (src/mcp.ts): it runs with the request's
+  caller and an activity buffer.
+- **Activity (T-205).** Each request gets an `ActivityBuffer` that the tools' gated reads record
+  into. It is written once the response is ready, and if that fails the answer is withheld (500):
+  an AI read is never left unrecorded. Events keep the client's id and trust.
+- A tool that fails answers `internal error`, never the thrown message, which could name a file.
+  The SDK's own argument-validation errors do describe the schema (field paths, patterns), never
+  the values sent.
+
+### Trying it from a hosted client (testing only)
+
+Claude, ChatGPT and other hosted clients need an https URL they can reach. For a test, a
+[Cloudflare quick tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/do-more-with-tunnels/trycloudflare/)
+gives one without an account:
+
+```sh
+cloudflared tunnel --url http://127.0.0.1:7420
+# prints https://<random words>.trycloudflare.com
+```
+
+1. Set `auth.publicUrl` to the printed URL and restart the server. Register
+   `<publicUrl>/auth/callback/<provider id>` as a redirect URI with the sign-in provider.
+2. Approve the client in `auth.clients` (above), then add `<publicUrl>/mcp` to the client as a
+   connector and sign in.
+
+Quick tunnels are for testing: the URL changes on every run, and there is no uptime guarantee.
+OpenHoard depends on no domain of ours. A self-hoster serves it at their own `publicUrl`, behind
+their own proxy or tunnel. A tunnel plugin running on the self-hoster's own Cloudflare account may
+come later.

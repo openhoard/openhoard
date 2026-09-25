@@ -223,8 +223,35 @@ async function fullFlow(scope = "files:read") {
   return tokens.body as { access_token: string; refresh_token: string; scope: string };
 }
 
-const mcp = (token?: string) =>
-  app.request(RESOURCE, token ? { headers: { authorization: `Bearer ${token}` } } : {});
+/** Calls the MCP server's whoami with the token, as a client would (T-801). */
+const mcp = async (token?: string) => {
+  const res = await app.request(RESOURCE, {
+    method: "POST",
+    headers: {
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "whoami", arguments: {} },
+    }),
+  });
+  return {
+    status: res.status,
+    headers: res.headers,
+    /** whoami's answer as { signedInAs, client, scopes }, or the error body. */
+    json: async () => {
+      const body = (await res.json()) as {
+        result?: { structuredContent?: { user: { id: string }; client: unknown; scopes: unknown } };
+      };
+      const who = body.result?.structuredContent;
+      return who ? { signedInAs: who.user.id, client: who.client, scopes: who.scopes } : body;
+    },
+  };
+};
 
 async function auditActions() {
   const lines: string[] = [];
@@ -246,14 +273,18 @@ describe("discovery", () => {
     expect(res.headers.get("www-authenticate")).toBe(
       `Bearer resource_metadata="${PUBLIC}/.well-known/oauth-protected-resource/mcp", scope="files:read"`,
     );
+    // The MCP Inspector runs on this machine: its origin may call /mcp and read the challenge.
+    const inspector = "http://localhost:6274";
     const preflight = await app.request(RESOURCE, {
       method: "OPTIONS",
-      headers: { origin: "https://inspector.example", "access-control-request-method": "POST" },
+      headers: { origin: inspector, "access-control-request-method": "POST" },
     });
-    expect(preflight.headers.get("access-control-allow-origin")).toBe("*");
+    expect(preflight.headers.get("access-control-allow-origin")).toBe(inspector);
     const crossOrigin = await app.request(RESOURCE, {
-      headers: { origin: "https://inspector.example" },
+      method: "POST",
+      headers: { origin: inspector },
     });
+    expect(crossOrigin.status).toBe(401);
     expect(crossOrigin.headers.get("access-control-expose-headers")).toMatch(/www-authenticate/);
     for (const path of [
       "/.well-known/oauth-protected-resource/mcp",
@@ -299,7 +330,7 @@ describe("the authorization code flow", () => {
       scope: "files:read",
     });
     const res = await mcp(tokens.body.access_token as string);
-    expect(res.status).toBe(501);
+    expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({
       signedInAs: ana.id,
       client: { id: CLIENT_ID, trust: "commercial" },
@@ -331,7 +362,7 @@ describe("the authorization code flow", () => {
       refresh_token: string;
     };
     expect(second.refresh_token).not.toBe(first.refresh_token);
-    expect((await mcp(second.access_token)).status).toBe(501);
+    expect((await mcp(second.access_token)).status).toBe(200);
     const replay = await refresh(first.refresh_token);
     expect(replay.status).toBe(400);
     expect((await mcp(second.access_token)).status).toBe(401);
@@ -423,7 +454,7 @@ describe("clients need an admin", () => {
           from generate_series(1, 50) i`),
     );
     const tokens = await fullFlow();
-    expect((await mcp(tokens.access_token)).status).toBe(501);
+    expect((await mcp(tokens.access_token)).status).toBe(200);
   });
 
   it("sends a refused client away, config or not", async () => {

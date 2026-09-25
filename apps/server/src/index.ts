@@ -9,3 +9,4 @@ export {
   type ProviderConfig,
 } from "./config.js";
 export { createLogger } from "./logger.js";
+export { TOOLS, whoami, type McpTool, type ToolContext } from "./mcp.js";

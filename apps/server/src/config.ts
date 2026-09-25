@@ -118,6 +118,14 @@ export const AuthSchema = z
     providers: z.array(ProviderSchema).default([]),
     /** MCP clients approved per tenant (T-105); others wait for an admin. */
     clients: z.array(ApprovedClientSchema).default([]),
+    /**
+     * Browser origins, besides publicUrl's and this machine's, that may call /mcp (a web MCP
+     * client). Hosted clients call from their servers and need none.
+     */
+    mcpOrigins: z
+      .array(z.url().refine((u) => /^https?:$/.test(new URL(u).protocol), "an http(s) origin"))
+      .max(50)
+      .default([]),
     /** How long an MCP client's grant lasts before the person consents again (default 30). */
     grantDays: z.coerce.number().int().min(1).max(90).default(30),
     /**
