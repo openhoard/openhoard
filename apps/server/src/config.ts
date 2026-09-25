@@ -77,6 +77,32 @@ export function externalIdClaim(p: ProviderConfig): "oid" | "sub" | undefined {
   return undefined;
 }
 
+/**
+ * An MCP client an admin approved for a tenant (T-105), until T-106 manages approvals in the app:
+ * by its Client ID Metadata Document URL, or, for a client that registers dynamically, by its
+ * exact redirect URIs (every one of them must be listed).
+ */
+export const ApprovedClientSchema = z
+  .object({
+    tenantId: z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
+    clientId: z.url().optional(),
+    redirectUris: z.array(z.url()).min(1).max(20).optional(),
+    trust: z.enum(["local", "commercial", "consumer"]),
+    /** For the admin's own notes. */
+    note: z.string().max(200).optional(),
+  })
+  .strict()
+  .superRefine((c, ctx) => {
+    if ((c.clientId === undefined) === (c.redirectUris === undefined)) {
+      ctx.addIssue({ code: "custom", message: "name a client by clientId or by redirectUris" });
+    }
+    if (c.clientId !== undefined && !c.clientId.startsWith("https://")) {
+      ctx.addIssue({ code: "custom", path: ["clientId"], message: "a client id URL is https" });
+    }
+  });
+
+export type ApprovedClient = z.infer<typeof ApprovedClientSchema>;
+
 /** Signing in (T-102): off unless configured. */
 export const AuthSchema = z
   .object({
@@ -90,6 +116,10 @@ export const AuthSchema = z
     /** And at the latest after this long (default 7 days, at most 30). */
     sessionMaxHours: z.coerce.number().int().min(1).max(720).default(168),
     providers: z.array(ProviderSchema).default([]),
+    /** MCP clients approved per tenant (T-105); others wait for an admin. */
+    clients: z.array(ApprovedClientSchema).default([]),
+    /** How long an MCP client's grant lasts before the person consents again (default 30). */
+    grantDays: z.coerce.number().int().min(1).max(90).default(30),
     /**
      * Seals sign-ins under way in their cookie: 32 random bytes, base64url. Set it (or
      * OPENHOARD_AUTH_COOKIE_KEY) when several servers share one address; otherwise each process

@@ -82,13 +82,13 @@ only a hash is stored.
 
 **Routes:**
 
-| Route                     | What it does                                                                                                   |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `GET /auth/providers`     | The providers to offer on a sign-in page.                                                                      |
-| `GET /auth/login/<id>`    | Starts sign-in. `?return_to=/path` sets where to come back to (a path on this server, at most 512 characters). |
-| `GET /auth/callback/<id>` | The provider sends the browser back here.                                                                      |
-| `GET /auth/me`            | Who is signed in (401 if nobody).                                                                              |
-| `POST /auth/logout`       | Ends the session (204).                                                                                        |
+| Route                     | What it does                                                                                                     |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `GET /auth/providers`     | The providers to offer on a sign-in page.                                                                        |
+| `GET /auth/login/<id>`    | Starts sign-in. `?return_to=/path` sets where to come back to (a path on this server, at most 1,536 characters). |
+| `GET /auth/callback/<id>` | The provider sends the browser back here.                                                                        |
+| `GET /auth/me`            | Who is signed in (401 if nobody).                                                                                |
+| `POST /auth/logout`       | Ends the session (204).                                                                                          |
 
 Every sign-in is written to the audit log (`auth.sign-in`), whether it was allowed or refused, and
 so is every sign-out (`auth.sign-out`). A refused person nobody provisioned is logged as
@@ -96,3 +96,88 @@ so is every sign-out (`auth.sign-out`). A refused person nobody provisioned is l
 
 Later routes use `requireSignIn` and `c.get("auth")`: the tenant, the session and the
 principal.
+
+## MCP clients: OAuth 2.1 (T-105)
+
+OpenHoard is its own OAuth 2.1 authorization server for MCP clients (Claude, ChatGPT, Copilot, the
+MCP Inspector), following the MCP authorization spec. The MCP server is `<publicUrl>/mcp` (T-801),
+and tokens are good for it and nothing else.
+
+| Route                                           | What it does                                                   |
+| ----------------------------------------------- | -------------------------------------------------------------- |
+| `GET /.well-known/oauth-protected-resource/mcp` | RFC 9728: where to get tokens for `/mcp` (also without `/mcp`) |
+| `GET /.well-known/oauth-authorization-server`   | RFC 8414 metadata                                              |
+| `POST /oauth/register`                          | Dynamic client registration (RFC 7591), public clients only    |
+| `GET /oauth/authorize`                          | Signs the person in (above), then asks for their consent       |
+| `POST /oauth/token`                             | `authorization_code` and `refresh_token`                       |
+| `POST /oauth/revoke`                            | RFC 7009                                                       |
+
+**Clients** identify themselves in one of two ways:
+
+- **Client ID Metadata Documents** (what the spec prefers): the client id is an https URL.
+  OpenHoard fetches it with these limits:
+  - public addresses only, checked on the address it actually connects to;
+  - no redirects;
+  - 5 seconds and 64 KB at most;
+  - cached for up to an hour.
+- **Dynamic registration** (older clients): registering stores nothing. The client id encodes the
+  redirect URIs and the name.
+
+**Admin approval.** A client gets tokens in a tenant only once an admin approved it with a trust
+label (`local`, `commercial` or `consumer`). The label becomes the request's client trust, which
+exposure rules check (T-604).
+
+- Until T-106 adds approval in the app, list approved clients in the config:
+
+  ```json
+  {
+    "auth": {
+      "clients": [
+        {
+          "tenantId": "ten_…",
+          "clientId": "https://claude.ai/oauth/mcp-client-metadata.json",
+          "trust": "commercial"
+        },
+        {
+          "tenantId": "ten_…",
+          "redirectUris": ["http://127.0.0.1/callback"],
+          "trust": "local"
+        }
+      ]
+    }
+  }
+  ```
+
+  A dynamically registered client is named by its exact redirect URIs. On the loopback address,
+  any port counts (RFC 8252).
+
+- A client nobody approved is recorded as pending in the tenant (`oauth_clients`), and the person
+  is told it is waiting.
+- A refused client is turned away, and its grants are revoked.
+- Taking a client out of the config stops its tokens.
+
+**The flow:**
+
+- Authorization code with PKCE, S256 only.
+- Tokens are for `resource` = `<publicUrl>/mcp` (RFC 8707).
+- The authorization response carries `iss` (RFC 9207).
+- Errors are shown on the page until the client and its redirect URI check out. After that they
+  go back to the client.
+- The consent page names the client, where the answer goes, and what it may do. It warns when a
+  program on the person's own computer is asking.
+- The consent form is sealed to the session for 10 minutes.
+
+**Tokens** are opaque, and only their hashes are stored:
+
+- the code (60 s, used once, and a replay revokes what it made);
+- access tokens (1 hour);
+- refresh tokens, rotated on every use. The previous one presented again revokes the grant.
+- A grant lasts `auth.grantDays` (default 30, at most 90).
+- Locking, disabling or retiring a person revokes their grants, as it ends their sessions.
+
+**Scopes:** `files:read` (search, read, open) and `files:tag` (propose tags). They become the
+request's credential scope, so policy refuses anything else. A token without the scope a route
+needs gets 403 with `error="insufficient_scope"` and the scopes to ask for.
+
+Every authorization and token decision is audited: `oauth.authorize`, `oauth.token` and
+`oauth.refresh`.

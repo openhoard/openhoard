@@ -37,39 +37,54 @@ export function loginCookieName(state: string, secure: boolean): string {
 }
 
 export function sealLogin(key: Buffer, login: LoginState): string {
+  return seal(key, AAD, login);
+}
+
+/**
+ * Seals a value for `purpose` (AES-256-GCM, the purpose as associated data): what one purpose
+ * sealed never opens as another's.
+ */
+export function seal(key: Buffer, purpose: Buffer | string, value: unknown): string {
   const iv = randomBytes(IV_BYTES);
   const cipher = createCipheriv("aes-256-gcm", key, iv);
-  cipher.setAAD(AAD);
-  const body = Buffer.concat([cipher.update(JSON.stringify(login), "utf8"), cipher.final()]);
+  cipher.setAAD(typeof purpose === "string" ? Buffer.from(purpose) : purpose);
+  const body = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
   return Buffer.concat([iv, body, cipher.getAuthTag()]).toString("base64url");
 }
 
-/** The sign-in a cookie holds, or null if it isn't one this key sealed, or it is malformed. */
-export function openLogin(key: Buffer, sealed: string): LoginState | null {
+/** What seal() sealed for `purpose`, parsed; null if it wasn't, or it is malformed. */
+export function unseal(key: Buffer, purpose: Buffer | string, sealed: string): unknown {
+  if (typeof sealed !== "string" || sealed.length > 16384) return null;
   const raw = Buffer.from(sealed, "base64url");
   if (raw.length <= IV_BYTES + TAG_BYTES) return null;
   try {
     const decipher = createDecipheriv("aes-256-gcm", key, raw.subarray(0, IV_BYTES));
-    decipher.setAAD(AAD);
+    decipher.setAAD(typeof purpose === "string" ? Buffer.from(purpose) : purpose);
     decipher.setAuthTag(raw.subarray(raw.length - TAG_BYTES));
     const text = Buffer.concat([
       decipher.update(raw.subarray(IV_BYTES, raw.length - TAG_BYTES)),
       decipher.final(),
     ]).toString("utf8");
-    const v = JSON.parse(text) as Partial<LoginState>;
-    const str = (x: unknown): x is string => typeof x === "string";
-    if (
-      !str(v.provider) ||
-      !str(v.state) ||
-      !str(v.codeVerifier) ||
-      !str(v.nonce) ||
-      !str(v.returnTo) ||
-      typeof v.expiresAt !== "number"
-    ) {
-      return null;
-    }
-    return v as LoginState;
+    return JSON.parse(text) as unknown;
   } catch {
     return null;
   }
+}
+
+/** The sign-in a cookie holds, or null if it isn't one this key sealed, or it is malformed. */
+export function openLogin(key: Buffer, sealed: string): LoginState | null {
+  const v = unseal(key, AAD, sealed) as Partial<LoginState> | null;
+  if (typeof v !== "object" || v === null) return null;
+  const str = (x: unknown): x is string => typeof x === "string";
+  if (
+    !str(v.provider) ||
+    !str(v.state) ||
+    !str(v.codeVerifier) ||
+    !str(v.nonce) ||
+    !str(v.returnTo) ||
+    typeof v.expiresAt !== "number"
+  ) {
+    return null;
+  }
+  return v as LoginState;
 }

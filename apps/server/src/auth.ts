@@ -13,15 +13,17 @@ import {
   startSession,
   touchSession,
   userPrincipal,
+  type OAuthScope,
   type SessionCheck,
 } from "@openhoard/core-identity";
-import type { AuthzPrincipal } from "@openhoard/core-policy";
+import type { AuthzClient, AuthzPrincipal } from "@openhoard/core-policy";
 import type { Hono, MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as oidc from "openid-client";
 import type { Logger } from "pino";
 import { externalIdClaim, type AuthConfig, type ProviderConfig } from "./config.js";
 import { loginCookieName, loginKey, openLogin, sealLogin } from "./login-state.js";
+import { signInPage } from "./oauth/pages.js";
 
 /*
  * Signing in (T-102): OpenID Connect, authorization code with PKCE, as a relying party of the
@@ -29,6 +31,7 @@ import { loginCookieName, loginKey, openLogin, sealLogin } from "./login-state.j
  * person's account is before anything is read.
  *
  *   GET  /auth/providers           the providers to offer
+ *   GET  /auth/sign-in             a page offering them (straight to the only one)
  *   GET  /auth/login/:provider     → the provider, with state, nonce and a PKCE challenge
  *   GET  /auth/callback/:provider  ← back: checks everything, starts a session
  *   GET  /auth/me                  who is signed in
@@ -48,6 +51,8 @@ export interface AuthDeps {
   auth: AuthConfig;
   db: Database;
   log?: Logger;
+  /** Seals what the server hands the browser to bring back (login-state.ts). */
+  key?: Buffer;
 }
 
 /** What a signed-in request carries (c.get("auth")). */
@@ -57,7 +62,16 @@ export interface SignedIn {
   principal: AuthzPrincipal;
 }
 
-export type AuthEnv = { Variables: { auth?: SignedIn } };
+/** What a request with a valid OAuth access token carries (c.get("bearer"), T-105). */
+export interface BearerAuth {
+  tenantId: string;
+  principal: AuthzPrincipal;
+  client: AuthzClient;
+  grantId: string;
+  scopes: OAuthScope[];
+}
+
+export type AuthEnv = { Variables: { auth?: SignedIn; bearer?: BearerAuth } };
 
 const LOGIN_TTL = 600;
 /** Reading a session: a snapshot the principal cache serves from, that writes nothing. */
@@ -73,7 +87,7 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
   // One cookie per sign-in under way, named by its state, so two tabs don't undo each other.
   const loginCookie = (state: string) => loginCookieName(state, secure);
   // Without a configured key, sign-ins under way don't survive a restart (or reach another node).
-  const key = loginKey(auth.cookieKey);
+  const key = deps.key ?? loginKey(auth.cookieKey);
   if (auth.cookieKey === undefined) {
     log?.info("sign-in: no auth.cookieKey, so this process made its own (fine for one server)");
   }
@@ -154,6 +168,21 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
       providers: auth.providers.map((p) => ({ id: p.id, label: p.label ?? p.id, kind: p.kind })),
     }),
   );
+
+  // Where anything that needs a signed-in person sends the browser (the OAuth consent, T-105).
+  app.get("/auth/sign-in", (c) => {
+    const back = returnPath(c.req.query("return_to"));
+    if (auth.providers.length === 1) {
+      const only = auth.providers[0] as ProviderConfig;
+      return c.redirect(`/auth/login/${only.id}?return_to=${encodeURIComponent(back)}`, 302);
+    }
+    const shown = signInPage(
+      auth.providers.map((p) => ({ id: p.id, label: p.label ?? p.id })),
+      back,
+    );
+    c.header("content-security-policy", shown.csp);
+    return c.html(shown.html);
+  });
 
   app.get("/auth/login/:provider", async (c) => {
     const p = providers.get(c.req.param("provider"));
@@ -361,13 +390,16 @@ export const requireSignIn: MiddlewareHandler<AuthEnv> = async (c, next) => {
 };
 
 /**
- * Where to return after signing in: a path on this server, at most 512 characters (every sign-in
- * under way rides in a cookie sent to the callback, and headers have a limit), else `/`.
+ * Where to return after signing in: a path on this server, at most RETURN_MAX characters (every
+ * sign-in under way rides in a cookie sent to the callback, and headers have a limit), else `/`.
  */
 function returnPath(asked: string | undefined): string {
   const path = localPath(asked);
-  return path !== null && path.length <= 512 ? path : "/";
+  return path !== null && path.length <= RETURN_MAX ? path : "/";
 }
+
+/** Longest return path: room for an OAuth authorization request (T-105). */
+export const RETURN_MAX = 1536;
 
 /** Equal strings, compared in constant time. */
 function sameText(a: string, b: string): boolean {

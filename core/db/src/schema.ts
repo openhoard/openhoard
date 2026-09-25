@@ -1020,6 +1020,223 @@ export const activityEvents = pgTable(
   ],
 );
 
+/** OAuth scopes an MCP client may ask for (T-105), and the policy actions each allows. */
+export const OAUTH_SCOPES = ["files:read", "files:tag"] as const;
+/** The trust an admin gives an approved AI client: every client trust but first-party. */
+export const AI_CLIENT_TRUSTS = ["local", "commercial", "consumer"] as const;
+
+const HEX64 = "^[0-9a-f]{64}$";
+const PERSON_KINDS = "user_kind in ('member', 'guest')";
+
+/**
+ * OAuth clients a tenant has seen (T-105, T-106): an MCP client people of the tenant tried to
+ * connect. `client_key` is a SHA-256 of what identifies the client: its Client ID Metadata
+ * Document URL (`cimd`), or its redirect URIs (`dcr`, dynamically registered, which OpenHoard
+ * keeps no record of). A client gets tokens only once an admin approved it, with a trust label.
+ */
+export const oauthClients = pgTable(
+  "oauth_clients",
+  {
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    clientKey: text("client_key").notNull(),
+    kind: text("kind").notNull(),
+    /** What people and admins see as its id: the metadata URL, or `dcr:<key prefix>`. */
+    clientRef: text("client_ref").notNull(),
+    /** As the client says: never trusted for anything but display. */
+    name: text("name").notNull(),
+    redirectUris: text("redirect_uris").array().notNull(),
+    status: text("status").notNull().default("pending"),
+    trust: text("trust"),
+    requestedBy: text("requested_by").notNull(),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    decidedBy: text("decided_by"),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.clientKey] }),
+    check("oauth_clients_key_format", sql.raw(`client_key ~ '${HEX64}'`)),
+    check("oauth_clients_kind_valid", sql`kind in ('cimd', 'dcr')`),
+    check("oauth_clients_ref_length", sql`char_length(client_ref) between 1 and 2048`),
+    check("oauth_clients_name_length", sql`char_length(name) between 1 and 200`),
+    check(
+      "oauth_clients_redirects",
+      sql`cardinality(redirect_uris) between 1 and 20 and array_position(redirect_uris, null) is null`,
+    ),
+    check("oauth_clients_status_valid", sql`status in ('pending', 'approved', 'refused')`),
+    check(
+      "oauth_clients_trust",
+      sql.raw(
+        `(status = 'approved') = (trust is not null) and (trust is null or trust in (${quoted(AI_CLIENT_TRUSTS)}))`,
+      ),
+    ),
+    check(
+      "oauth_clients_decision",
+      sql`(status = 'pending') = (decided_at is null) and (decided_at is null) = (decided_by is null)`,
+    ),
+    check("oauth_clients_requested_by", sql`requested_by ~ '^(user|system):.+$'`),
+    check("oauth_clients_decided_by", sql`decided_by is null or decided_by ~ '^(user|system):.+$'`),
+  ],
+);
+
+const scopesCheck = (name: string) =>
+  check(
+    name,
+    sql.raw(
+      `cardinality(scopes) between 1 and ${OAUTH_SCOPES.length} and scopes <@ ${sqlArray(OAUTH_SCOPES)}`,
+    ),
+  );
+
+/**
+ * Authorization codes (T-105): a person consented, and the client gets a code for tokens. Used
+ * once, within a minute, by the client it was for, at the redirect URI it went to, with the PKCE
+ * verifier behind `code_challenge`. A code used twice revokes the grant it made.
+ */
+export const oauthCodes = pgTable(
+  "oauth_codes",
+  {
+    tenantId: text("tenant_id").notNull(),
+    id: text("id").notNull(),
+    secretHash: text("secret_hash").notNull(),
+    userId: text("user_id").notNull(),
+    userKind: text("user_kind").notNull(),
+    clientKey: text("client_key").notNull(),
+    redirectUri: text("redirect_uri").notNull(),
+    /** base64url SHA-256 of the verifier (S256, the only method). */
+    codeChallenge: text("code_challenge").notNull(),
+    scopes: text("scopes").array().notNull(),
+    resource: text("resource").notNull(),
+    createdAt: createdAt(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    /** The grant it made, to revoke when the code is replayed. */
+    grantId: text("grant_id"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    foreignKey({
+      name: "oauth_codes_user_fk",
+      columns: [t.tenantId, t.userId, t.userKind],
+      foreignColumns: [users.tenantId, users.id, users.kind],
+    }).onUpdate("cascade"),
+    foreignKey({
+      name: "oauth_codes_client_fk",
+      columns: [t.tenantId, t.clientKey],
+      foreignColumns: [oauthClients.tenantId, oauthClients.clientKey],
+    }),
+    index("oauth_codes_expires_idx").on(t.tenantId, t.expiresAt),
+    idCheck("oauth_codes_id_format", "id", "oauthCode"),
+    check("oauth_codes_person_only", sql.raw(PERSON_KINDS)),
+    check("oauth_codes_secret_hash_format", sql.raw(`secret_hash ~ '${HEX64}'`)),
+    check("oauth_codes_redirect_length", sql`char_length(redirect_uri) between 1 and 2048`),
+    check("oauth_codes_challenge_format", sql`code_challenge ~ '^[A-Za-z0-9_-]{43}$'`),
+    scopesCheck("oauth_codes_scopes"),
+    check("oauth_codes_resource_length", sql`char_length(resource) between 1 and 2048`),
+    check(
+      "oauth_codes_expiry",
+      sql`expires_at > created_at and expires_at <= created_at + interval '10 minutes'`,
+    ),
+    check("oauth_codes_used", sql`used_at is null or used_at >= created_at`),
+  ],
+);
+
+/**
+ * What a person let a client do (T-105): the scopes, for one resource (the MCP server), until
+ * `expires_at` or revocation. The client holds a refresh token for it, rotated on every use; a
+ * refresh token used again after it was rotated revokes the grant (it was stolen or replayed).
+ */
+export const oauthGrants = pgTable(
+  "oauth_grants",
+  {
+    tenantId: text("tenant_id").notNull(),
+    id: text("id").notNull(),
+    userId: text("user_id").notNull(),
+    userKind: text("user_kind").notNull(),
+    clientKey: text("client_key").notNull(),
+    scopes: text("scopes").array().notNull(),
+    resource: text("resource").notNull(),
+    refreshHash: text("refresh_hash").notNull(),
+    /** The refresh token before the current one: presenting it again means a replay. */
+    previousRefreshHash: text("previous_refresh_hash"),
+    createdAt: createdAt(),
+    refreshedAt: timestamp("refreshed_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: text("revoked_by"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    foreignKey({
+      name: "oauth_grants_user_fk",
+      columns: [t.tenantId, t.userId, t.userKind],
+      foreignColumns: [users.tenantId, users.id, users.kind],
+    }).onUpdate("cascade"),
+    foreignKey({
+      name: "oauth_grants_client_fk",
+      columns: [t.tenantId, t.clientKey],
+      foreignColumns: [oauthClients.tenantId, oauthClients.clientKey],
+    }),
+    // A person's grants (to revoke them all), a client's (when an admin refuses it).
+    index("oauth_grants_user_idx").on(t.tenantId, t.userId),
+    index("oauth_grants_client_idx").on(t.tenantId, t.clientKey),
+    idCheck("oauth_grants_id_format", "id", "oauthGrant"),
+    check("oauth_grants_person_only", sql.raw(PERSON_KINDS)),
+    scopesCheck("oauth_grants_scopes"),
+    check("oauth_grants_resource_length", sql`char_length(resource) between 1 and 2048`),
+    check(
+      "oauth_grants_refresh_format",
+      sql.raw(
+        `refresh_hash ~ '${HEX64}' and (previous_refresh_hash is null or previous_refresh_hash ~ '${HEX64}')`,
+      ),
+    ),
+    check(
+      "oauth_grants_expiry",
+      sql`expires_at > created_at and expires_at <= created_at + interval '90 days'`,
+    ),
+    check(
+      "oauth_grants_revocation_complete",
+      sql`(revoked_at is null) = (revoked_by is null) and (revoked_at is null or revoked_at >= created_at)`,
+    ),
+    check(
+      "oauth_grants_revoked_by_principal",
+      sql`revoked_by is null or revoked_by ~ '^(user|system|scim):.+$'`,
+    ),
+  ],
+);
+
+/** Access tokens (T-105): short-lived, one grant's, checked on every request. */
+export const oauthTokens = pgTable(
+  "oauth_tokens",
+  {
+    tenantId: text("tenant_id").notNull(),
+    id: text("id").notNull(),
+    grantId: text("grant_id").notNull(),
+    secretHash: text("secret_hash").notNull(),
+    /** The grant's scopes, or fewer when the client asked for fewer at refresh. */
+    scopes: text("scopes").array().notNull(),
+    createdAt: createdAt(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    scopesCheck("oauth_tokens_scopes"),
+    foreignKey({
+      name: "oauth_tokens_grant_fk",
+      columns: [t.tenantId, t.grantId],
+      foreignColumns: [oauthGrants.tenantId, oauthGrants.id],
+    }).onDelete("cascade"),
+    index("oauth_tokens_grant_idx").on(t.tenantId, t.grantId),
+    index("oauth_tokens_expires_idx").on(t.tenantId, t.expiresAt),
+    idCheck("oauth_tokens_id_format", "id", "oauthToken"),
+    check("oauth_tokens_secret_hash_format", sql.raw(`secret_hash ~ '${HEX64}'`)),
+    check(
+      "oauth_tokens_expiry",
+      sql`expires_at > created_at and expires_at <= created_at + interval '1 day'`,
+    ),
+  ],
+);
+
 /*
  * Audit (T-701): one append-only, hash-chained log per tenant, in its own schema. core/audit
  * appends and verifies; the chain rules are in core/audit/src/chain.ts.
@@ -1085,4 +1302,8 @@ export const tables = {
   apiKeys,
   activityEvents,
   sessions,
+  oauthClients,
+  oauthCodes,
+  oauthGrants,
+  oauthTokens,
 } as const;

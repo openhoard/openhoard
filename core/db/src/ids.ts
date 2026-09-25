@@ -26,6 +26,9 @@ export const ID_PREFIXES = {
   apiKey: "key",
   activity: "act",
   session: "ses",
+  oauthCode: "oac",
+  oauthGrant: "ogr",
+  oauthToken: "oat",
 } as const;
 export type IdKind = keyof typeof ID_PREFIXES;
 

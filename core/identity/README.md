@@ -86,6 +86,28 @@ through a group, guest status, and whether the user is active. A disabled user c
 inactive, and `authorize()` denies them. Its `at` applies to grants only (which were live
 then); memberships, kind and stops are always the current ones.
 
+## OAuth for MCP clients
+
+[`oauth.ts`](src/oauth.ts) (T-105) is the core of the authorization server. The HTTP side is in
+apps/server.
+
+- `noteClient()` records a client a tenant's person tried; it starts pending.
+  `decideClient()` is an admin's approval (with a trust label) or refusal, and a refusal revokes
+  the client's grants.
+- `issueCode()` needs an approved client and an active person. `redeemCode()` checks the client,
+  the redirect URI, the resource and PKCE (S256), and works once. A code presented again revokes
+  its grant.
+- `refreshGrant()` rotates the refresh token, and the previous one presented again revokes the
+  grant. It can narrow the scopes of the new access token.
+- `checkAccessToken()` writes nothing, like `checkSession()`. It returns the principal, with the
+  grant's scopes as its credential scope, and the client with its trust label.
+- `revokeGrant()`, `revokeUserGrants()` and `revokeByToken()` (RFC 7009) end grants, and
+  `pruneOAuth()` clears ended ones. Locking, disabling and retiring a person revoke their grants.
+- Tokens are `ohac.`, `ohrt.` and `ohat.<tenant>.<id>.<secret>`, and only their hashes are
+  stored.
+- A `TrustResolver` lets the server's config approve a client without a database decision. It
+  never overrides a refusal.
+
 ## The principal cache
 
 Every request needs its caller's principal, so `PrincipalCache.resolve()` keeps them. It is

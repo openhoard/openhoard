@@ -15,6 +15,7 @@ import {
   users,
   type Tx,
   sessions,
+  oauthGrants,
 } from "@openhoard/core-db";
 import type { AuthzPrincipal } from "@openhoard/core-policy";
 import { and, asc, eq, gt, isNull, ne, sql } from "drizzle-orm";
@@ -458,7 +459,10 @@ export async function lockUser(
   return true;
 }
 
-/** Ends a user's live sessions (a lock, a provider disable, retirement): they don't come back. */
+/**
+ * Ends a user's live sessions and OAuth grants (a lock, a provider disable, retirement), or, with
+ * `identity`, the sessions that identity signed in: they don't come back.
+ */
 async function endSessions(
   tx: Tx,
   tenantId: string,
@@ -477,6 +481,18 @@ async function endSessions(
         ...(identity
           ? [eq(sessions.issuer, identity.issuer), eq(sessions.subject, identity.subject)]
           : []),
+      ),
+    );
+  if (identity) return;
+  // What AI clients hold for them ends too (the grants' tokens with them).
+  await tx
+    .update(oauthGrants)
+    .set({ revokedAt: sql`greatest(now(), ${oauthGrants.createdAt})`, revokedBy: by })
+    .where(
+      and(
+        eq(oauthGrants.tenantId, tenantId),
+        eq(oauthGrants.userId, userId),
+        isNull(oauthGrants.revokedAt),
       ),
     );
 }

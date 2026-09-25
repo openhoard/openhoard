@@ -5,6 +5,9 @@ import type { Database } from "@openhoard/core-db";
 import type { Logger } from "pino";
 import { mountAuth, type AuthEnv } from "./auth.js";
 import type { Config } from "./config.js";
+import { loginKey } from "./login-state.js";
+import type { MetadataFetcher } from "./oauth/clients.js";
+import { mountOAuth } from "./oauth/routes.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   version: string;
@@ -13,6 +16,8 @@ const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url),
 export interface AppDeps {
   /** The database; needed when sign-in is configured. */
   db?: Database;
+  /** Fetches MCP clients' metadata documents (tests pass their own). */
+  fetchMetadata?: MetadataFetcher;
 }
 
 /** Builds the HTTP app. Kept free of listeners so tests can call it directly. */
@@ -40,7 +45,27 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
 
   if (config.auth) {
     if (!deps.db) throw new Error("sign-in (auth) needs the database");
-    mountAuth(app, { auth: config.auth, db: deps.db, ...(log ? { log } : {}) });
+    const key = loginKey(config.auth.cookieKey);
+    const shared = { auth: config.auth, db: deps.db, key, ...(log ? { log } : {}) };
+    mountAuth(app, shared);
+    // OpenHoard's OAuth authorization server for MCP clients (T-105), and the resource they reach.
+    const { requireBearer } = mountOAuth(app, {
+      ...shared,
+      ...(deps.fetchMetadata ? { fetchMetadata: deps.fetchMetadata } : {}),
+    });
+    // The MCP server arrives with T-801; until then /mcp only proves a token.
+    app.all("/mcp", requireBearer(), (c) => {
+      const bearer = c.get("bearer");
+      return c.json(
+        {
+          error: "the MCP server arrives with T-801",
+          signedInAs: bearer?.principal.userId,
+          client: bearer?.client,
+          scopes: bearer?.scopes,
+        },
+        501,
+      );
+    });
   }
 
   app.get("/healthz", (c) => c.json({ status: "ok" }));
