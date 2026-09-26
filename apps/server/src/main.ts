@@ -64,6 +64,12 @@ try {
             log: log.child({ component: "summarize" }),
             ...models.summarize,
           },
+          // Embeddings (T-407) when a provider has an embeddings model; none, keyword search only.
+          embed: {
+            router: models.router,
+            budget: models.budget,
+            log: log.child({ component: "embed" }),
+          },
         }),
   });
 } catch (err) {

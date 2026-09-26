@@ -231,9 +231,11 @@ describe("searchObjects", () => {
     const reader = person({ tagGrants: [t.tag] });
     expect(await search(reader, "", noRead)).toEqual({
       hits: [],
+      explanations: [],
       total: 0,
       totalIsLowerBound: false,
       facets: {},
+      vectorPlans: [],
     });
     // A forbid on read makes the caller a non-reader: a discoverable file still lists, title only.
     await setDefault("discoverable");
@@ -266,13 +268,18 @@ describe("searchObjects", () => {
     const reader = person({ tagGrants: [t.tag] });
     const found = async (query: string) =>
       (await search(reader, query, noRead)).hits.map((h) => h.id);
-    // The grant holder is a non-reader here: the real title and hidden tags match nothing.
-    for (const query of ["report", "sensitivity:internal", t.tag]) {
+    // The grant holder is a non-reader here: the real title and hidden tags match nothing. ("report"
+    // would: words match the tags a caller is shown, and kind:report is public.)
+    for (const query of ["docx", "sensitivity:internal", "internal", t.tag, "acme"]) {
       expect(await found(query), query).toEqual([]);
       expect((await search(reader, query, noRead)).total, query).toBe(0);
     }
     expect(await found("quarterly")).toEqual([t.objectId]);
     expect(await found("kind:report")).toEqual([t.objectId]);
+    expect(await found("report")).toEqual([t.objectId]);
+    expect(
+      (await search(reader, "report", noRead)).explanations[0]?.channels.keyword?.fields,
+    ).toEqual(["tags"]);
     // Without the forbid, the same caller reads it and matches the real title and every tag.
     expect(await ids(reader, "report")).toEqual([t.objectId]);
     expect(await ids(reader, "sensitivity:internal")).toEqual([t.objectId]);

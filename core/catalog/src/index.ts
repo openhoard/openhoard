@@ -74,13 +74,35 @@ export {
   type ViewRequest,
 } from "./visibility.js";
 export {
+  EXACT_SEARCH_ROWS,
+  HNSW_EF_SEARCH,
+  HNSW_ITERATIVE_SCAN,
+  MAX_QUERY_VECTORS,
   SEARCH_CANDIDATES,
   searchObjects,
   suggestTitles,
+  VECTOR_NEIGHBOURS,
+  vectorPlanFor,
+  type HitExplanation,
+  type QueryVector,
+  type SearchField,
   type SearchQuery,
   type SearchResult,
+  type SearchTuning,
+  type Snippet,
   type SuggestQuery,
+  type VectorPlan,
 } from "./search.js";
+export {
+  isEmbeddingModel,
+  MAX_EMBEDDINGS_PER_VERSION,
+  pruneEmbeddings,
+  readEmbeddings,
+  saveEmbeddings,
+  versionsWithoutEmbeddings,
+  type EmbeddingItem,
+  type EmbeddingPart,
+} from "./embeddings.js";
 export {
   listVersions,
   openContent,

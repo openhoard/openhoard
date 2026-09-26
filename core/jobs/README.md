@@ -98,7 +98,7 @@ started: tenant, object, version, seq, title, media type, blob. The default set,
 `defaultEnrichSteps()`, runs in this order:
 
 ```text
-extract-text → injection-flag → rule-tags → summarize
+extract-text → injection-flag → rule-tags → summarize → embed
 ```
 
 - `extract-text` (`extractStep`, below, T-402), when the server passes `content` (where
@@ -108,7 +108,10 @@ extract-text → injection-flag → rule-tags → summarize
   sees it;
 - `summarize` (`summarizeStep`, [summarize.ts](src/summarize.ts), T-405), only with `content`
   and `summarize: { router, budget }` (core/models): no model runs unless an admin configures
-  one (the PRD's cost guard: nothing reads the whole corpus through a model by default).
+  one (the PRD's cost guard: nothing reads the whole corpus through a model by default);
+- `embed` (`embedStep`, [embed.ts](src/embed.ts), T-407), only with `content` and `embed: {
+router, budget }` with a provider that has an `embedModel`. Without one, search is keyword
+  only.
 
 **Injection flagging** (`injection-flag`, T-408). The step scores the version with core/summarize
 `detectInjection()`: the file name, the extracted text, the extractor's hidden-text signals
@@ -169,6 +172,27 @@ reservation is always settled, with the HTTP requests that went out counted in `
 `refused`, `unavailable` or `budget` (after an admin fixed a key or raised the budget; the API
 authorizes and audits it); core/catalog `cardSkipCounts()` gives the counts per reason.
 
+**Embeddings** (`embed`, T-407). After the summary, the step embeds the version's summary and
+chunks of its extracted text (1,200 characters overlapping by 200, cut at a space, at most 16
+per version, spread evenly over a longer text, each cut to the provider's `maxInputChars`) in
+one call, and stores them with core/catalog `saveEmbeddings()` under `<provider id>/<model>`:
+
+- **Which provider:** the router's `embed` order (local first by default; the intended setup is
+  a local Ollama model such as `nomic-embed-text`, which every exposure but `metadata-only`
+  allows), the first the file's exposure allows now; the client asks again right before the
+  call. A commercial provider gets only files whose exposure allows it. A `metadata-only` file,
+  which includes every file flagged `risk:injection`, reaches none: the pipeline skips the step,
+  so such a file has no content vectors and matches search only on what its card shows.
+- **Idempotent:** each text's SHA-256 is stored with its vector; a re-run embeds only texts that
+  changed (a new summary) and writes nothing when none did.
+- **Another model** (a new `embedModel`, another provider first) is another name: its vectors
+  are written beside the old ones. `reembed(db, jobs, tenant, model)` enqueues the tenant's
+  current versions with text or a summary but no vectors under `model`; afterwards core/catalog
+  `pruneEmbeddings(keep)` drops the old model's. Until then searches use the old vectors.
+- **Failures:** vectors that can't be stored (mixed sizes, zeros), a refusal or a bad answer are
+  logged and the version is processed without vectors; a provider down or rate-limited fails the
+  step so the job retries, except on its last attempt. A spent budget skips it with a warning.
+
 **Known gap: a job whose lease expires on its last attempt.** The model step's own time budget
 (8 minutes, enforced with an abort) keeps it inside the lease, so a lease expiry means the
 extract step or the host; but if one happens on a job's last attempt, the job is dead-lettered
@@ -214,7 +238,8 @@ local-only and code zones are never read on the server. `extract.limits` and
 | `rule-tags`      | milliseconds                                                                |
 | `summarize`      | 8 minutes (`summarize.budgetMs`): two calls of 60 s per attempt, 2 retries, |
 |                  | backoff up to 30 s each                                                     |
-| margin           | about 4 minutes for the transactions and a slow host                        |
+| `embed`          | 2 minutes (`embed.budgetMs`): one call                                      |
+| margin           | about 2 minutes for the transactions and a slow host                        |
 
 A step past its budget aborts (and fails the job, which retries), so a slow file's job doesn't
 outlive its lease and run twice. Raise the lease with the budgets if you raise either.

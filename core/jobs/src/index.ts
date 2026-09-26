@@ -16,6 +16,16 @@ export {
   type WithheldStep,
 } from "./enrich.js";
 export { extractsZone, extractStep, type ExtractStepOptions } from "./extract.js";
+export {
+  CHUNK_DEFAULTS,
+  chunkText,
+  EMBED_BUDGET_MS,
+  embedStep,
+  MAX_CHUNKS,
+  type Chunk,
+  type EmbedStepOptions,
+} from "./embed.js";
+export { reembed } from "./reembed.js";
 export { RESUMMARIZABLE, resummarize } from "./resummarize.js";
 export { injectionFlagStep, scoreVersion, type FlagStepOptions } from "./flag.js";
 export { SUMMARIZE_BUDGET_MS, summarizeStep, type SummarizeStepOptions } from "./summarize.js";

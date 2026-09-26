@@ -10,6 +10,7 @@ import {
   type EnrichPayload,
   type EnrichStep,
 } from "./enrich.js";
+import type { EmbedStepOptions } from "./embed.js";
 import type { ExtractStepOptions } from "./extract.js";
 import type { SummarizeStepOptions } from "./summarize.js";
 import {
@@ -81,8 +82,8 @@ export interface EnrichQueueOptions {
   retryBackoff?: boolean;
   /**
    * How long a job may run before it counts as crashed and is retried, in seconds. Default
-   * 1,500 (25 minutes): the extract step's 13 minutes, the summarize step's 8, and room for the
-   * rest (see the README's time budget).
+   * 1,500 (25 minutes): the extract step's 13 minutes, the summarize step's 8, the embed step's
+   * 2, and room for the rest (see the README's time budget).
    */
   expireInSeconds?: number;
 }
@@ -108,6 +109,11 @@ export interface JobsOptions {
    * with `content`. Without it, no model runs. Ignored when `steps` is given.
    */
   summarize?: SummarizeStepOptions;
+  /**
+   * Embeddings (T-407) with these providers and budget, for the default steps with `content`.
+   * Without it, no vectors are made and search is keyword only. Ignored when `steps` is given.
+   */
+  embed?: EmbedStepOptions;
   /**
    * The extract step's settings (with `content`): limits, and `indexedZones` to extract indexed
    * zones' content too (default off; managed zones always, local-only and code zones never).
@@ -177,6 +183,7 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
         ...(options.content === undefined ? {} : { content: options.content }),
         ...(options.extract === undefined ? {} : { extract: options.extract }),
         ...(options.summarize === undefined ? {} : { summarize: options.summarize }),
+        ...(options.embed === undefined ? {} : { embed: options.embed }),
       })),
   ];
   const names = new Set<string>();

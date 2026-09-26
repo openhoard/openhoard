@@ -28,6 +28,12 @@ export interface ProviderConfig {
   chatModel: string;
   /** The model for embeddings, where the API has them (not Anthropic's). */
   embedModel?: string;
+  /**
+   * The stub only: the size of its embeddings, 2 to 4,096. Default 8. The stub's vectors are
+   * hashed words (clients.ts stubEmbedding()), so texts sharing words are near each other,
+   * which is enough for search's tests and CI.
+   */
+  embedDimensions?: number;
   /** Per HTTP request, in milliseconds. Default 60,000. */
   timeoutMs?: number;
   /** Retries of one call after a 429, a 5xx or a timeout. Default 2. */
@@ -101,6 +107,8 @@ export interface ModelClient {
   readonly kind: ProviderKind;
   readonly adapter: Adapter;
   readonly chatModel: string;
+  /** The embeddings model, when the provider has one configured (then `embed` is present). */
+  readonly embedModel?: string;
   /** The most document characters to send. */
   readonly maxInputChars: number;
   readonly maxOutputTokens: number;

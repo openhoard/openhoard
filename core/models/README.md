@@ -79,6 +79,21 @@ providers and order), and no provider is picked for `metadata-only` content.
 prefers a stronger commercial model lists it first for the task; local-only files still go to a
 local one, or to none.
 
+## Embeddings
+
+A provider with an `embedModel` embeds (task `embed`, used by core/jobs' `embed` step, T-407).
+Its vectors are stored under `embeddingModelId(client)`, `<provider id>/<model>`: vectors of
+different models can't be compared, so another model is another name, never mixed with the
+old one's. The stub embeds hashed words (`stubEmbedding()`, `embedDimensions` in size, default
+8): deterministic, and texts that share words point alike, which is what CI's search tests
+need.
+
+`embedQuery(router, text, { signal, kinds })` embeds a search query once per embeddings model,
+named the same way, for core/catalog's hybrid search (T-503). The query is the caller's own
+words, not a file's content, so no file's exposure applies; it goes to `local` providers only
+unless `kinds` says otherwise. A provider that fails is left out (its code logged, never the
+query), and search goes on with keywords.
+
 ## The daily token budget
 
 `reserveTokens()` reserves a call's most (input estimate plus output caps) against the tenant's
@@ -118,7 +133,7 @@ Default 5 million tokens a day per tenant (`models.dailyTokenBudget`), with per-
         "chatModel": "gpt-4.1-mini"
       }
     ],
-    "tasks": { "summarize": ["ollama", "claude"] },
+    "tasks": { "summarize": ["ollama", "claude"], "embed": ["ollama"] },
     "dailyTokenBudget": 2000000,
     "summarize": { "budgetMs": 480000 }
   }

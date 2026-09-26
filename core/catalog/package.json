@@ -18,6 +18,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "bench:recall": "tsx scripts/vector-recall.ts",
     "clean": "rimraf dist coverage"
   },
   "dependencies": {

@@ -61,6 +61,10 @@ const SURFACE = {
     "saveExtract",
     // Enrichment's summarize step, through its guarded write (T-405).
     "saveCard",
+    // Enrichment's embed step, through its guarded write (T-407).
+    "saveEmbeddings",
+    // After a model change, once a re-embed has done the tenant (T-407).
+    "pruneEmbeddings",
     "setDisplayTitle",
     "setPrimaryTag",
     "writeActivity",
@@ -94,6 +98,10 @@ const SURFACE = {
     // A version's model card, for the summarize step; readers get the summary through
     // viewObjects(), gated by exposure (T-405).
     "readCard",
+    // Stored vectors are content: for the embed step (what it can keep) and reembed() only;
+    // search uses them only for a caller who may have the content (T-503).
+    "readEmbeddings",
+    "versionsWithoutEmbeddings",
     "sourceItemState",
     "tenantPolicies",
     "tenantRules",
@@ -104,7 +112,9 @@ const SURFACE = {
     "contentHash",
     "contentHasher",
     "evaluateRules",
+    "fuseChannels",
     "globMatch",
+    "isEmbeddingModel",
     "nonReaderTitle",
     "normalizeMime",
     "packPolicies",
@@ -114,6 +124,7 @@ const SURFACE = {
     "scopedBlobId",
     "validatePack",
     "validateRules",
+    "vectorPlanFor",
   ],
   value: [
     "ACTIVITY_PAGE",
@@ -121,18 +132,24 @@ const SURFACE = {
     "APPLY_TRANSACTION",
     "BUILTIN_RULE_PREFIX",
     "DEFAULT_MIN_CONFIDENCE",
+    "EXACT_SEARCH_ROWS",
     "ExplainError",
     "GENERIC_TITLE",
+    "HNSW_EF_SEARCH",
+    "HNSW_ITERATIVE_SCAN",
     "INGEST_LIMITS",
     "INJECTION_DETECTOR",
     "INJECTION_TAG",
     "IngestError",
     "InjectionReviewError",
+    "MAX_EMBEDDINGS_PER_VERSION",
     "MAX_OBJECT_IDS",
+    "MAX_QUERY_VECTORS",
     "PackError",
     "REPEAT_WINDOW_MS",
     "SEARCH_CANDIDATES",
     "TagError",
+    "VECTOR_NEIGHBOURS",
     "VIEW_TRANSACTION",
   ],
 } as const;
@@ -225,13 +242,18 @@ describe("the catalog's export surface", () => {
     }
     // Hits, total, facets and suggestions come only from the gate's views.
     const search = fn("searchObjects");
-    expect(search).toMatch(/hits: found\.views\.slice\(/);
-    expect(search).toMatch(/total: found\.views\.length/);
-    expect(search).toMatch(/for \(const view of found\.views\)[\s\S]*view\.tags/);
-    expect(fn("suggestTitles")).toMatch(/for \(const view of found\.views\)[\s\S]*view\.title/);
+    expect(search).toMatch(/const page = found\.hits\.slice\(/);
+    expect(search).toMatch(/hits: page\.map\(\(h\) => h\.view\)/);
+    expect(search).toMatch(/total: found\.hits\.length/);
+    expect(search).toMatch(/for \(const \{ view \} of found\.hits\)[\s\S]*view\.tags/);
+    expect(fn("suggestTitles")).toMatch(
+      /for \(const \{ view \} of found\.hits\)[\s\S]*view\.title/,
+    );
+    // Every hit is a survivor, and every survivor a view the gate gave.
     const gated = fn("gatedMatches");
-    expect(gated).toMatch(/const views = [^;]*viewObjects\(/);
-    expect(gated).toMatch(/views: views\.map\(/);
+    expect(gated).toMatch(/const gated =\s[^;]*viewObjects\(/);
+    expect(gated).toMatch(/for \(const view of gated\) \{/);
+    expect(gated).toMatch(/const hits = fused\.map\([\s\S]*survivorOf\.get\(/);
   });
 
   it("answers every gated read with nothing for a hidden file and a caller authorize() refuses", async () => {

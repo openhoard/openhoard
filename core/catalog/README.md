@@ -6,7 +6,9 @@ Part of the OpenHoard trusted core. See [../README.md](../README.md) and
 - [`hash.ts`](src/hash.ts): content hashes (BLAKE3, `b3:`) and tenant-scoped blob ids
   (`b3t:`, ADR-0013).
 - [`ingest.ts`](src/ingest.ts): recording source items, their versions and blobs (T-204).
-- [`rank.ts`](src/rank.ts): reciprocal rank fusion for hybrid search.
+- [`rank.ts`](src/rank.ts): reciprocal rank fusion for hybrid search, with per-channel ranks.
+- [`search.ts`](src/search.ts): search behind policy: keyword, vector and hybrid (T-501..T-504).
+- [`embeddings.ts`](src/embeddings.ts): versions' vectors per embedding model (T-407).
 - [`tagging.ts`](src/tagging.ts): applying tags and the review inbox (T-406).
 - [`visibility.ts`](src/visibility.ts): visibility levels, display titles and what non-readers
   see (T-603).
@@ -53,11 +55,24 @@ zone's only when the server opts in (core/jobs `extract.indexedZones`, default o
 local-only zone's never on the server (its content isn't meant to reach it), nor a code zone's
 yet. For those, no row is written.
 
-**Search must gate what it matches.** Extracted text is content. When search (T-501) matches
-queries against it, a match may only count for someone the file's levels let read its content
-(and, for an AI client, whose trust its exposure allows): a hit on extracted text must never
-surface, rank or even count a file for someone who may only see its title or nothing. Summaries
-(T-405) send it to a model only as the exposure allows.
+**Search gates what it matches.** Extracted text is content. Search (T-501, below) matches
+queries against it only for someone the file's levels let read its content (and, for an AI
+client, whose trust its exposure allows): a hit on extracted text never surfaces, ranks or even
+counts a file for someone who may only see its title or nothing. Summaries (T-405) and
+embeddings (T-407) send it to a model only as the exposure allows.
+
+## Embeddings
+
+`version_embeddings` (T-407) holds a version's vectors, per model: its summary (seq 0) and
+chunks of its extracted text, each with the text's SHA-256, the vector's size and the kind of
+provider that made it. The model is named `<provider id>/<model>` (core/models
+`embeddingModelId()`), so another model's vectors are stored beside the old ones and searches
+use each only with a query embedded by the same model. `saveEmbeddings()` makes a version's set
+under one model exactly what it is given (through enrichment's guarded write);
+`readEmbeddings()` lets the embed step keep what didn't change; `versionsWithoutEmbeddings()`
+is what core/jobs `reembed()` enqueues after a model change, and `pruneEmbeddings(keep)` drops
+old models' vectors once that is done. Vectors are content: search uses them only for a caller
+who may have it.
 
 ## Model cards and risk flags
 
@@ -215,9 +230,9 @@ applies the file's levels (T-206). The read API is built on it, in a snapshot (`
   `enrichmentExposure(objectId)` is the exposure the tags give a file before it is processed, for
   the enrichment pipeline's model steps (core/jobs): capped at `commercial-only` until a trusted
   tag gives it one, so an unclassified file never reaches a consumer provider whatever the
-  tenant default. Everyone else sees an unprocessed file as `metadata-only`. Search matches
-  titles and tags only; content search (T-501) must match content only where the client's trust
-  reaches the exposure.
+  tenant default. Everyone else sees an unprocessed file as `metadata-only`. Search matches a
+  metadata-only card on its title and trusted tags only, never its content (text, summary,
+  vectors), which it matches only where the client's trust reaches the exposure (Search, below).
 - Each checks for a snapshot before it reads anything, and treats input that can't name
   anything (a malformed id, a NUL byte) as unknown.
 
@@ -263,19 +278,52 @@ recording read requires a recorder, records exactly its event, and nothing for a
 
 ## Search
 
-`searchObjects({ query, limit })` (T-504) filters inside the query, then uses the gate:
+`searchObjects({ query, limit, vectors?, snippets? }, tuning?)` (T-504, hybrid since T-501..T-503)
+filters inside the query, then uses the gate, then fuses:
 
 1. SQL picks the candidates the caller may see: files they own or read by a grant (on the file,
    or on one of its trusted tags), and, for members, files whose effective level is discoverable
    or readable (the same rule as `levelsFor()`). A key's scope narrows it, and needs both
-   `search` and `read`. Each candidate is matched twice: as a reader sees it (words in the real
-   title, `facet:value` terms against every tag) and as anyone else does (the title they are
-   shown, trusted tags of public facets). Up to `SEARCH_CANDIDATES` (1,000), best match first.
-2. `viewObjects(…, { search: true })` checks every candidate: `read` and `search`, pack rules
-   included (a forbid on `search` takes a file out), and the levels. A view is kept, and ranked,
-   by the match for what it shows, so a grant holder a pack turns into a non-reader matches only
-   the title-only card. Hits and `total` come only from what passes. Title-only views are
-   ordered without their update time, which they don't show.
+   `search` and `read`.
+2. **Keyword (T-501).** Words match each object's search document (core/db `search_documents`,
+   kept by triggers: title A, tag values B, summary C, extracted text D; `simple` configuration,
+   no stemming, see core/db), through its GIN indexes, ranked by weighted `ts_rank`. Each
+   candidate is matched once per way it may be shown: a reader whose card isn't metadata-only
+   on everything (the summary only while the file's exposure still allows the provider that
+   wrote it, as the card shows it); a reader's metadata-only card (T-604) on the title and
+   trusted tags; anyone else on the title they are shown and trusted tags of public facets.
+   `facet:value` terms filter by the tags that view shows. Up to `SEARCH_CANDIDATES` (1,000).
+3. **Vector (T-502).** `vectors` are the query's words embedded, one per model (core/models
+   `embedQuery()`: local providers only by default). For each, the nearest summaries and chunks
+   (`VECTOR_NEIGHBOURS`, 50, from cosine similarity 0.3 up) among files SQL expects the caller
+   may have the content of: a reader, the file's exposure reaching the client. The plan is spike
+   S1's rule, chosen here, never by the planner: count the visible vectors (capped at
+   `EXACT_SEARCH_ROWS`, 50,000, so the count is bounded); at or below it, exact search; above it,
+   the model size's partial HNSW index with `hnsw.iterative_scan = relaxed_order` and
+   `hnsw.ef_search = 200`, set for that statement only. `vectorPlans` says which ran. Sizes
+   without an index (not 384, 768, 1024 or 1536) are always searched exactly.
+4. `viewObjects(…, { search: true })` checks every candidate from both: `read` and `search`,
+   pack rules included (a forbid on `search` takes a file out), and the levels. A keyword match
+   is kept only if it holds for the view the caller got; a vector match only for a reader's card
+   that isn't metadata-only. So a file can only match on what its card shows the caller:
+   nothing content-derived (text, summary, model tags, vectors) reaches a caller who may not
+   have the content, through hits, ranks, counts, facets or suggestions.
+5. **Fusion (T-503).** The survivors are ranked per channel (keyword; vector, one list per
+   model; activity: the caller's own views, opens and edits in the last 30 days, T-205, at half
+   weight) and fused with Reciprocal Rank Fusion (`fuseChannels()`, rank.ts). Ranks count
+   survivors only, so a file the gate removed moves nobody. Title-only views are ordered
+   without their update time, which they don't show. Each hit has an `explanations[i]`: the
+   fused score, and per channel its rank (keyword: the fields its words matched, only among
+   those the view shows; vector: the model and similarity).
+
+**Snippets.** `snippets: true` adds highlighted lines of extracted text to a hit's explanation,
+only for OpenHoard's own apps (first-party) and a hit whose keyword match was on the text: plain
+text with highlight offsets, control characters folded, never markup. Document text can carry
+instructions for an AI, so AI clients get no snippets in M1 (the T-405 output filter is for
+model answers, not documents).
+
+**Degrading.** Without an embeddings model (or when it fails), callers pass no `vectors` and
+search is keyword only. Without extracted text, titles and tags still match.
 
 **Facets and suggestions (T-505).** `facets` counts, per facet and value, every match in `total`
 (not only the hits), from the tags each match shows the caller: a hidden file, or a tag the
@@ -289,9 +337,18 @@ one token.
 
 **Limits (option 1).** SQL knows grants, ownership and levels, not a pack's Cedar rules. A file
 someone may read only through a pack permit may be missed by their search (it still opens by
-id). Past the candidate cap, SQL's guess picks which candidates are checked, so a pack-forbidden
-file can crowd out a visible one or set `totalIsLowerBound`. Every search scans the tenant's
-files; T-501 brings an index.
+id), and is never matched on its content. Past the candidate cap, or among the nearest vectors,
+SQL's guess picks which candidates are checked, so a pack-forbidden file can crowd out a
+visible one or set `totalIsLowerBound` (it is never shown or counted). Keyword candidates come
+through the GIN indexes; working out who may see them, and the vector search's eligible set
+(every file the caller reads), still visits each of the caller's files per query: fine at tens
+of thousands, seconds at 100,000+ (`scripts/vector-recall.ts` measures it). Spike S1's
+per-principal visible-row counts and a set-based level computation are the next step.
+
+**Recall (T-502).** `vector-recall.test.ts` builds 1,200 files of 384-dimension vectors and
+checks filtered recall@10 on the HNSW path stays within 5 points of unfiltered, and that the
+production plan is exact for small visible sets; `pnpm --filter @openhoard/core-catalog
+bench:recall -- --url postgres://…` runs the same at scale on native PostgreSQL.
 
 **Upgrade (option 3).** Compile the subset of Cedar that packs use (tag, zone, group and client
 conditions) into the candidate SQL, keep the gate as the final check, and drop the candidate cap

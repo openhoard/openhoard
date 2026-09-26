@@ -254,6 +254,8 @@ export const ModelProviderSchema = z
     /** Default for anthropic: claude-haiku-4-5 (Haiku class); required for openai and ollama. */
     chatModel: z.string().min(1).max(200).optional(),
     embedModel: z.string().min(1).max(200).optional(),
+    /** stub only: the size of its hashed-word embeddings (tests, CI, trials). */
+    embedDimensions: z.number().int().min(2).max(4_096).optional(),
     timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
     maxRetries: z.number().int().min(0).max(10).optional(),
     maxRetryAfterMs: z.number().int().min(0).max(600_000).optional(),

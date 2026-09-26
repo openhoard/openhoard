@@ -112,6 +112,10 @@ export function checkProviderConfig(config: ProviderConfig, apiKey?: string): st
   range("maxOutputTokens", 64, 32_000);
   range("maxResponseBytes", 4_096, 64 * 1024 * 1024);
   range("concurrency", 1, 64);
+  range("embedDimensions", 2, 4_096);
+  if (config.embedDimensions !== undefined && config.adapter !== "stub") {
+    problems.push(`${at}: embedDimensions is for the stub only (a real model has its own)`);
+  }
   return problems;
 }
 
@@ -377,13 +381,8 @@ export function createModelClient(
   > = {
     async stub(r) {
       if (!(await r.guard())) throw new ModelError("withheld", config.id);
-      // Deterministic 8-dimensional vectors from character codes: enough for plumbing tests.
-      const vectors = r.texts.map((t) => {
-        const v = new Array<number>(8).fill(0);
-        for (let i = 0; i < t.length; i++) v[i % 8] = (v[i % 8] ?? 0) + (t.charCodeAt(i) % 17);
-        const norm = Math.hypot(...v) || 1;
-        return v.map((x) => x / norm);
-      });
+      r.signal.throwIfAborted();
+      const vectors = r.texts.map((t) => stubEmbedding(t, config.embedDimensions ?? 8));
       const tokens = r.texts.reduce((n, t) => n + estimateTokens(t), 0);
       return { vectors, usage: { inputTokens: tokens, outputTokens: 0 } };
     },
@@ -451,6 +450,7 @@ export function createModelClient(
     kind,
     adapter: config.adapter,
     chatModel: config.chatModel,
+    ...(embedder === undefined || embedModel === undefined ? {} : { embedModel }),
     maxInputChars,
     maxOutputTokens,
     chat: (r) => limit(r.signal, () => chat(r)),
@@ -458,6 +458,37 @@ export function createModelClient(
       ? {}
       : { embed: (r: EmbedRequest) => limit(r.signal, () => embedder(r, embedModel)) }),
   };
+}
+
+/**
+ * The stub's embedding of a text: its words (letters and digits, lower-cased) hashed into
+ * `dimensions` buckets with a sign (FNV-1a), then scaled to length 1. Deterministic, and texts
+ * that share words point the same way, so a query finds the documents with its words, like a
+ * very plain semantic model. A text without words gets the first axis (a zero vector has no
+ * cosine distance).
+ */
+export function stubEmbedding(text: string, dimensions: number): number[] {
+  const v = new Array<number>(dimensions).fill(0);
+  for (const word of text.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+    if (word === "") continue;
+    let h = 0x811c9dc5;
+    for (let i = 0; i < word.length; i++) h = Math.imul(h ^ word.charCodeAt(i), 0x01000193);
+    const bucket = (h >>> 0) % dimensions;
+    v[bucket] = (v[bucket] ?? 0) + (h >>> 31 === 1 ? -1 : 1);
+  }
+  const norm = Math.hypot(...v);
+  if (norm === 0) return v.map((_, i) => (i === 0 ? 1 : 0));
+  return v.map((x) => x / norm);
+}
+
+/**
+ * The name an embedding model's vectors are stored under: `<provider id>/<model>`, or null for
+ * a provider without embeddings. Vectors of different models can't be compared, so another
+ * model (or the same name on another provider) is another name: its vectors are stored beside
+ * the old ones, and search embeds the query once per name (embedQuery()).
+ */
+export function embeddingModelId(client: Pick<ModelClient, "id" | "embedModel">): string | null {
+  return client.embedModel === undefined ? null : `${client.id}/${client.embedModel}`;
 }
 
 function isVector(v: unknown): v is number[] {

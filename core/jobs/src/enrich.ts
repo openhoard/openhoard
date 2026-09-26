@@ -12,6 +12,7 @@ import {
 import { isId, objects, versions, type Database, type Tx } from "@openhoard/core-db";
 import { mayProcess, type Exposure, type ProviderKind } from "@openhoard/core-policy";
 import { and, eq, max } from "drizzle-orm";
+import { embedStep, type EmbedStepOptions } from "./embed.js";
 import { extractStep, type ExtractStepOptions } from "./extract.js";
 import { injectionFlagStep } from "./flag.js";
 import { summarizeStep, type SummarizeStepOptions } from "./summarize.js";
@@ -168,7 +169,7 @@ export const ruleTagStep: EnrichStep = {
 /**
  * The steps a server runs unless told otherwise, in this order:
  *
- *   extract-text → injection-flag → rule-tags → summarize
+ *   extract-text → injection-flag → rule-tags → summarize → embed
  *
  * - extract-text (T-402, extract.ts), when the server has somewhere to read versions' bytes
  *   from (`content`);
@@ -177,20 +178,26 @@ export const ruleTagStep: EnrichStep = {
  * - summarize (T-405, summarize.ts), when models are configured (`summarize.router` with a
  *   provider for summaries) and there is extracted text. Off by default: the cost guard says no
  *   model runs across a corpus unless an admin configures one.
+ * - embed (T-407, embed.ts), when an embeddings provider is configured (`embed.router`), after
+ *   the summary so it embeds that too. Without one, search is keyword only.
  */
 export function defaultEnrichSteps(
   options: {
     content?: ContentSource;
     extract?: Omit<ExtractStepOptions, "content">;
     summarize?: SummarizeStepOptions;
+    embed?: EmbedStepOptions;
   } = {},
 ): EnrichStep[] {
-  const { content, extract, summarize } = options;
+  const { content, extract, summarize, embed } = options;
   const steps: EnrichStep[] = [];
   if (content) steps.push(extractStep({ ...extract, content }));
   steps.push(injectionFlagStep(), ruleTagStep);
   if (content && summarize && summarize.router.candidates("summarize").length > 0) {
     steps.push(summarizeStep(summarize));
+  }
+  if (content && embed && embed.router.candidates("embed").length > 0) {
+    steps.push(embedStep(embed));
   }
   return steps;
 }

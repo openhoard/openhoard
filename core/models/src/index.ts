@@ -14,12 +14,15 @@ export {
   createModelClient,
   DEFAULTS,
   echoResponder,
+  embeddingModelId,
   estimateTokens,
+  stubEmbedding,
   type ClientOptions,
   type StubResponder,
 } from "./clients.js";
 export { MODEL_ERROR_CODES, ModelError, type ModelErrorCode } from "./errors.js";
 export { isPrivateAddress, parseRetryAfter, type Lookup } from "./http.js";
+export { embedQuery, type EmbedQueryOptions, type QueryEmbedding } from "./query.js";
 export { createModelRouter, MODEL_TASKS, type ModelRouter, type ModelTask } from "./router.js";
 export {
   ADAPTERS,
