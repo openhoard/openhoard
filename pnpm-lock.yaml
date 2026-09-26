@@ -283,6 +283,19 @@ importers:
         specifier: ^0.45.3
         version: 0.45.3(@electric-sql/pglite@0.5.8)(@types/pg@8.23.1)(pg@8.23.0)
 
+  connectors/fs:
+    dependencies:
+      '@openhoard/sdk':
+        specifier: workspace:^
+        version: link:../../packages/sdk
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      vitest:
+        specifier: ^5.0.1
+        version: 5.0.1(@types/node@24.13.6)(@vitest/coverage-v8@5.0.1)(vite@7.3.6(@types/node@24.13.6)(jiti@2.6.1)(tsx@4.23.15)(yaml@2.9.1))
+
   core/audit:
     dependencies:
       '@openhoard/core-db':

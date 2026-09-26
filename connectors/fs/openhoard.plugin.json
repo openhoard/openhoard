@@ -1,0 +1,21 @@
+{
+  "manifest_version": 1,
+  "name": "connector-fs",
+  "version": "0.1.0",
+  "type": "connector",
+  "description": "A local folder, indexed in place: crawl, delta by snapshot comparison, exact reads, file: URLs to open files natively.",
+  "publisher": "openhoard",
+  "license": "Apache-2.0",
+  "capabilities": [
+    "read:metadata",
+    "read:content",
+    "source:crawl",
+    "source:delta",
+    "import:acl",
+    "source:redirect"
+  ],
+  "network": [],
+  "max_exposure": "full",
+  "runtime": "process",
+  "limits": { "memory_mb": 512, "timeout_s": 3600 }
+}

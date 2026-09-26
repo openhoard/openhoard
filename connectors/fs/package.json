@@ -1,0 +1,32 @@
+{
+  "name": "@openhoard/connector-fs",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local folder connector: crawls a folder in place (an Indexed zone), follows changes by comparing snapshots, reads exactly the crawled bytes.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "openhoard.plugin.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rimraf dist coverage"
+  },
+  "dependencies": {
+    "@openhoard/sdk": "workspace:^"
+  },
+  "devDependencies": {
+    "@openhoard/config": "workspace:*",
+    "vitest": "^5.0.1"
+  },
+  "license": "Apache-2.0"
+}
