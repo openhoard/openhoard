@@ -9,6 +9,7 @@ import {
   type EnrichPayload,
   type EnrichStep,
 } from "./enrich.js";
+import type { ExtractStepOptions } from "./extract.js";
 import {
   maintainTenant,
   maintenanceSettings,
@@ -96,6 +97,11 @@ export interface JobsOptions {
    * connector's source): with it, they extract text (T-402). Ignored when `steps` is given.
    */
   content?: ContentSource;
+  /**
+   * The extract step's settings (with `content`): limits, and `indexedZones` to extract indexed
+   * zones' content too (default off; managed zones always, local-only and code zones never).
+   */
+  extract?: Omit<ExtractStepOptions, "content">;
   enrich?: EnrichQueueOptions;
   /** Scheduled maintenance, or false for none. */
   maintenance?: (MaintenanceOptions & { cron?: string }) | false;
@@ -156,7 +162,10 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
   const worker = options.worker !== false;
   const steps = [
     ...(options.steps ??
-      defaultEnrichSteps(options.content === undefined ? {} : { content: options.content })),
+      defaultEnrichSteps({
+        ...(options.content === undefined ? {} : { content: options.content }),
+        ...(options.extract === undefined ? {} : { extract: options.extract }),
+      })),
   ];
   const names = new Set<string>();
   for (const step of steps) {

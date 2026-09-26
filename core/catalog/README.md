@@ -36,7 +36,24 @@ the source for indexed zones, and it must return exactly the bytes of the versio
 when the item changed at the source since the crawl that made the version (eTag or version
 marker differs), it refuses (throws, or returns null) rather than hand over newer bytes, which
 belong to the next version and its own job. It throws when the source is unreachable for now,
-so the job is retried.
+so the job is retried, and it stops (closes its stream) when the signal it is given aborts.
+
+The contract is enforced, not only stated: the extractor refuses content longer or shorter than
+`ref.size` (`input-failed`, retried), and `blobContentSource()` with the tenant's blob key
+hashes every byte (BLAKE3) and fails a stream whose bytes don't give `ref.blobId`. OpenHoard
+keeps no tenant blob keys yet, so today only the size is checked; a connector's source should
+hash the same way once they exist.
+
+**Which zones are extracted** (`ref.zoneKind`): a managed zone's content always; an indexed
+zone's only when the server opts in (core/jobs `extract.indexedZones`, default off); a
+local-only zone's never on the server (its content isn't meant to reach it), nor a code zone's
+yet. For those, no row is written.
+
+**Search must gate what it matches.** Extracted text is content. When search (T-501) matches
+queries against it, a match may only count for someone the file's levels let read its content
+(and, for an AI client, whose trust its exposure allows): a hit on extracted text must never
+surface, rank or even count a file for someone who may only see its title or nothing. Summaries
+(T-405) send it to a model only as the exposure allows.
 
 ## Ingest
 

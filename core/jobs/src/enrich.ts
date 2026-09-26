@@ -12,7 +12,7 @@ import {
 import { isId, objects, versions, type Database, type Tx } from "@openhoard/core-db";
 import { mayProcess, type Exposure, type ProviderKind } from "@openhoard/core-policy";
 import { and, eq, max } from "drizzle-orm";
-import { extractStep } from "./extract.js";
+import { extractStep, type ExtractStepOptions } from "./extract.js";
 
 /*
  * The enrichment pipeline (T-401): what happens to a version after ingest records it, until
@@ -155,8 +155,11 @@ export const ruleTagStep: EnrichStep = {
  * somewhere to read versions' bytes from (`content`), text extraction (T-402, extract.ts).
  * Model steps (T-404, T-405) join here.
  */
-export function defaultEnrichSteps(options: { content?: ContentSource } = {}): EnrichStep[] {
-  return options.content ? [ruleTagStep, extractStep({ content: options.content })] : [ruleTagStep];
+export function defaultEnrichSteps(
+  options: { content?: ContentSource; extract?: Omit<ExtractStepOptions, "content"> } = {},
+): EnrichStep[] {
+  const { content, extract } = options;
+  return content ? [ruleTagStep, extractStep({ ...extract, content })] : [ruleTagStep];
 }
 
 /** A step the pipeline skipped: the file's exposure keeps its content from the step's provider. */

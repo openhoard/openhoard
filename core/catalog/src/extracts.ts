@@ -3,8 +3,11 @@ import {
   EXTRACT_STATUSES,
   isId,
   MAX_EXTRACT_TEXT_BYTES,
+  objects,
   versionExtracts,
   versions,
+  ZONE_KINDS,
+  zones,
   type Tx,
 } from "@openhoard/core-db";
 import { and, eq, sql } from "drizzle-orm";
@@ -27,9 +30,14 @@ export interface ContentRef {
   blobId: string;
   /** Where OpenHoard holds the bytes (a managed zone), or null when only the source does. */
   location: string | null;
+  /** The content's exact size in bytes: a source returning more or fewer bytes is wrong. */
   size: number;
   mime: string;
+  /** The object's zone kind: which content may be read for extraction at all depends on it. */
+  zoneKind: ZoneKind;
 }
+
+export type ZoneKind = (typeof ZONE_KINDS)[number];
 
 /**
  * Reads a version's bytes for enrichment. core/storage's `blobContentSource()` reads what
@@ -37,7 +45,10 @@ export interface ContentRef {
  * bytes stay in the source.
  *
  * A source must return exactly the version's bytes, the blob `ref.blobId` names, or null when
- * it can't reach them (not its zone, no connector). An indexed zone's source must refuse when
+ * it can't reach them (not its zone, no connector). The extractor enforces the size (a stream
+ * that ends early or runs long is refused, and retried); a source that can hash the bytes
+ * against the blob id (blobContentSource() with the tenant's blob key) enforces the rest, by
+ * throwing at the end of a stream that doesn't match. An indexed zone's source must refuse when
  * the item changed since the crawl that made this version (its eTag or version marker differs)
  * rather than return newer bytes: they belong to the next version, which has its own job. It
  * throws when reading fails for now (the store is unreachable): the job tries again later.
@@ -60,9 +71,15 @@ export async function contentRef(
       mime: versions.mime,
       location: blobs.location,
       size: blobs.size,
+      zoneKind: zones.kind,
     })
     .from(versions)
     .innerJoin(blobs, and(eq(blobs.tenantId, versions.tenantId), eq(blobs.id, versions.blobId)))
+    .innerJoin(
+      objects,
+      and(eq(objects.tenantId, versions.tenantId), eq(objects.id, versions.objectId)),
+    )
+    .innerJoin(zones, and(eq(zones.tenantId, objects.tenantId), eq(zones.id, objects.zoneId)))
     .where(and(eq(versions.tenantId, tenantId), eq(versions.id, versionId)));
   return row ? { tenantId, versionId, ...row } : null;
 }
@@ -164,11 +181,37 @@ function checkExtract(e: VersionExtract & { objectId: string; versionId: string 
   if (typeof e.text !== "string" || typeof e.truncated !== "boolean") bad("text");
   if (!extracted && (e.text !== "" || e.truncated)) bad("text without an extraction");
   if (Buffer.byteLength(e.text, "utf8") > MAX_EXTRACT_TEXT_BYTES) bad("text too large");
-  // Postgres text holds no NUL; the extractor's sanitizer never leaves one.
-  if (e.text.includes(String.fromCharCode(0))) bad("NUL in text");
+  // Postgres text holds no NUL, and UTF-8 has no lone surrogates (a driver would write U+FFFD,
+  // or fail): the extractor's sanitizer never leaves either.
+  if (!storable(e.text)) bad("unstorable text");
   const plain = (v: unknown) => typeof v === "object" && v !== null && !Array.isArray(v);
   if (!plain(e.metadata) || !Array.isArray(e.signals) || !Array.isArray(e.warnings)) bad("json");
   if (!e.warnings.every((w) => typeof w === "string")) bad("warnings");
-  // Nor does jsonb: JSON writes a NUL as an escape, which Postgres refuses.
-  if (JSON.stringify([e.metadata, e.signals, e.warnings]).includes("\\u0000")) bad("NUL in JSON");
+  // Nor does jsonb, in values or keys.
+  if (!storableJson([e.metadata, e.signals, e.warnings])) bad("unstorable JSON");
+}
+
+/** No NUL and no lone surrogate: text PostgreSQL stores as given. */
+function storable(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 0) return false;
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = s.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      i++;
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Every string in a JSON value, keys included, {@link storable}; bounded depth. */
+function storableJson(value: unknown, depth = 0): boolean {
+  if (depth > 64) return false;
+  if (typeof value === "string") return storable(value);
+  if (typeof value !== "object" || value === null) return true;
+  if (Array.isArray(value)) return value.every((v) => storableJson(v, depth + 1));
+  return Object.entries(value).every(([k, v]) => storable(k) && storableJson(v, depth + 1));
 }

@@ -110,6 +110,7 @@ export {
   type ContentSource,
   type ExtractStatus,
   type VersionExtract,
+  type ZoneKind,
 } from "./extracts.js";
 export {
   explainAccess,

@@ -88,6 +88,12 @@ describe("version extracts", () => {
     expect(await read(t, "not-a-version")).toBe(null);
   });
 
+  it("stores well-formed text beyond the Basic Multilingual Plane", async () => {
+    const e = extracted(`emoji ${String.fromCodePoint(0x1f600)}`);
+    await save({ ...e, metadata: { title: String.fromCodePoint(0x1f4c8) } });
+    expect((await read())?.text).toBe(e.text);
+  });
+
   it("refuses a malformed extraction before writing", async () => {
     const bad: [string, Partial<VersionExtract> & { objectId?: string }][] = [
       ["status", { status: "done" as never }],
@@ -98,11 +104,16 @@ describe("version extracts", () => {
       ["failure", { status: "failed", kind: null, text: "", failure: null }],
       ["text without an extraction", { status: "unsupported", kind: null, text: "x" }],
       ["text too large", { text: "x".repeat(4 * 1024 * 1024 + 1) }],
-      ["NUL in text", { text: `a${String.fromCharCode(0)}` }],
+      ["unstorable text", { text: `a${String.fromCharCode(0)}` }],
+      ["unstorable text", { text: `a${String.fromCharCode(0xd800)}b` }],
+      ["unstorable text", { text: `a${String.fromCharCode(0xdc00)}` }],
       ["json", { metadata: [] as never }],
       ["json", { signals: {} as never }],
       ["warnings", { warnings: [1] as never }],
-      ["NUL in JSON", { metadata: { title: `a${String.fromCharCode(0)}` } }],
+      ["unstorable JSON", { metadata: { title: `a${String.fromCharCode(0)}` } }],
+      ["unstorable JSON", { metadata: { title: `a${String.fromCharCode(0xd83d)}` } }],
+      ["unstorable JSON", { signals: [{ sample: `${String.fromCharCode(0xde00)}` }] }],
+      ["unstorable JSON", { metadata: { [`k${String.fromCharCode(0xd800)}`]: 1 } }],
       ["ids", { objectId: "obj_nope" }],
     ];
     for (const [what, change] of bad) {
@@ -157,6 +168,7 @@ describe("content references", () => {
       location: "managed/key",
       size: 1234,
       mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      zoneKind: "indexed",
     });
   });
 

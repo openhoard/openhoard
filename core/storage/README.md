@@ -51,10 +51,14 @@ const stream = await blobs.open(tenantId, blobId, { offset: 0, length: 1024 });
 
 ## Enrichment
 
-`blobContentSource(store)` is how enrichment reads the bytes OpenHoard holds (core/catalog
-`ContentSource`, T-402): a version whose blob has a location streams from the store by its
-content-addressed id; one without (an indexed zone) is left to a connector's source (null). A
-blob the catalog says is stored but the store doesn't have throws, so the job retries and then
+`blobContentSource(store, { tenantKey })` is how enrichment reads the bytes OpenHoard holds
+(core/catalog `ContentSource`, T-402): only a managed zone's version, whose blob has a
+location, streams from the store by its content-addressed id; anything else (an indexed or
+local-only zone) is null. The stream is checked as it is read: its size against the
+version's, and, given the tenant's blob key, its BLAKE3 hash against the blob id
+(ContentMismatchError at the end otherwise); OpenHoard keeps no tenant keys yet, so today it is
+the size. When the signal it is given aborts, the store's stream is destroyed. A blob the
+catalog says is stored but the store doesn't have throws, so the job retries and then
 dead-letters for an operator instead of treating the content as absent.
 
 ## Limits

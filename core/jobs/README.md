@@ -102,21 +102,34 @@ version's bytes through the `ContentSource` (core/catalog), extracts them in a l
 process ([@openhoard/enricher-extract](../../enrichers/extract/README.md)), and stores the result
 per version with core/catalog `saveExtract()` through `write`:
 
-| The extractor answers                                       | Stored        | The job           |
-| ----------------------------------------------------------- | ------------- | ----------------- |
-| text and metadata                                           | `extracted`   | goes on           |
-| a type it doesn't read (checked before any byte is read)    | `unsupported` | goes on           |
-| no source reaches the bytes (an indexed zone before T-301)  | `unavailable` | goes on           |
-| the file's own failure: malformed, encrypted, a zip bomb, a | `failed`      | goes on           |
-| timeout, out of memory, a crash                             |               |                   |
-| the source failed part way, or no process could start       | nothing       | fails and retries |
+| The extractor answers                                            | Stored        | The job           |
+| ---------------------------------------------------------------- | ------------- | ----------------- |
+| text and metadata                                                | `extracted`   | goes on           |
+| a type it doesn't read (checked before any byte is read)         | `unsupported` | goes on           |
+| no source reaches the bytes (an indexed zone before T-301)       | `unavailable` | goes on           |
+| the file's own failure: malformed, encrypted, a zip bomb, out of | `failed`      | goes on           |
+| memory, a crash                                                  |               |                   |
+| a timeout, or killed by a signal nobody sent: tried once more    | the second    | goes on           |
+| (a timeout with twice the time, if that fits the step's budget)  | answer        |                   |
+| the source failed, stalled, or sent the wrong size (or hash)     | nothing       | fails and retries |
+| no process could start                                           | nothing       | fails and retries |
 
-So a hostile file costs one child process once, never the job's retries, and its version is
-processed like any other. The step names no provider: the content goes to OpenHoard's own
-process on the same machine and nowhere else, so it runs whatever the file's exposure,
-`metadata-only` included; what reads the stored text later (a model step) is what exposure
-gates. It runs after the rule tagger: rules decide from the title and media type, and nothing
-they match on comes from the content yet.
+So a hostile file costs at most two child processes, never the job's retries, and its version
+is processed like any other. Each row names the extractor's version: a newer extractor can find
+the rows it would do better (failed, unsupported, or simply older) and re-run them; no job for
+that exists yet. Each attempt's ContentSource gets a signal the step aborts when the attempt
+ends, so a stalled store stream is closed.
+
+Only a managed zone's content is read by default. `startJobs({ content, extract: {
+indexedZones: true } })` opts indexed zones in (their bytes come from the customer's store);
+local-only and code zones are never read on the server. `extract.limits` and
+`extract.budgetMs` (13 minutes, under the job's lease) tune the rest.
+
+The step names no provider: the content goes to OpenHoard's own process on the same machine and
+nowhere else, so it runs whatever the file's exposure, `metadata-only` included; what reads the
+stored text later (a model step, search) is what levels and exposure gate. It runs after the
+rule tagger: rules decide from the title and media type, and nothing they match on comes from
+the content yet.
 
 **Writes only for the current version.** A step writes only through `write(tx => …)`. It opens a
 short transaction, takes the object's lock and checks, with core/catalog `lockCurrentVersion()`,
@@ -249,6 +262,7 @@ transaction that returns ids. The work itself goes through `withTenant()`, one t
 | `worker`                   | true                   | work the queues and keep the schedule in this process               |
 | `steps`                    | `defaultEnrichSteps()` | the enrichment steps, in order                                      |
 | `content`                  | none                   | where versions' bytes are read; the default steps then extract text |
+| `extract`                  | managed zones only     | the extract step's settings: `indexedZones`, `limits`, `budgetMs`   |
 | `enrich`                   | see above              | concurrency (2, or 1 on PGlite), retries, expiry                    |
 | `maintenance`              | the defaults above     | or false                                                            |
 | `pollingIntervalSeconds`   | 2                      | how often an idle worker looks for jobs                             |

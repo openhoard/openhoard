@@ -1,4 +1,4 @@
-export { blobContentSource } from "./content.js";
+export { blobContentSource, ContentMismatchError, type BlobContentOptions } from "./content.js";
 export {
   BlobNotFoundError,
   blobPath,

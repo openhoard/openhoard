@@ -5,28 +5,44 @@ import {
   type ContentSource,
   type IngestResult,
 } from "@openhoard/core-catalog";
-import { versionExtracts, versions, type Database } from "@openhoard/core-db";
+import { newId, versionExtracts, versions, zones, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
-import { EXTRACTOR_VERSION } from "@openhoard/enricher-extract";
+import {
+  EXTRACTOR_VERSION,
+  type extract,
+  type ExtractLimits,
+  type ExtractResult,
+} from "@openhoard/enricher-extract";
 import { docx, MIME } from "@openhoard/testkit";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { defaultEnrichSteps, enrichVersion, ruleTagStep, type EnrichStep } from "./enrich.js";
-import { extractStep } from "./extract.js";
+import { extractStep, type ExtractStepOptions } from "./extract.js";
 import { startJobs, type Jobs } from "./jobs.js";
 
 /*
  * T-402 in the pipeline: the extract step reads a version's bytes through a ContentSource,
  * extracts them in a child process, and stores one row per version through the guarded write.
  * The seeded tenant's default exposure is metadata-only: extraction runs anyway (it sends the
- * content nowhere), which every test here relies on.
+ * content nowhere), which every test here relies on. Files go to a managed zone unless a test
+ * says otherwise: the seeded zone is indexed, whose content is extracted only on opt-in.
  */
 
 let db: Database;
 let t: SeededTenant;
+let managed: string;
+let localOnly: string;
 beforeEach(async () => {
   db = await openTestDatabase();
   t = await seedTenant(db, 1);
+  managed = newId("zone");
+  localOnly = newId("zone");
+  await db.withTenant(t.tenantId, (tx) =>
+    tx.insert(zones).values([
+      { tenantId: t.tenantId, id: managed, kind: "managed", name: "Managed" },
+      { tenantId: t.tenantId, id: localOnly, kind: "local-only", name: "Laptop" },
+    ]),
+  );
 });
 const started: Jobs[] = [];
 afterEach(async () => {
@@ -40,13 +56,19 @@ const REPORT = docx({
   core: { title: "Q3", creator: "Ann" },
 });
 
-/** A content source over bytes by blob id; it records what it was asked for. */
-function memorySource(bytes: Map<string, Uint8Array>) {
-  const opened: ContentRef[] = [];
+/** Every file's bytes by blob id, as the tests' content sources serve them. */
+let bytesOf: Map<string, Uint8Array>;
+beforeEach(() => {
+  bytesOf = new Map();
+});
+
+/** A content source over `bytesOf`; it records what it was asked for, and with which signal. */
+function memorySource() {
+  const opened: { ref: ContentRef; signal: AbortSignal }[] = [];
   const source: ContentSource = {
-    async open(ref) {
-      opened.push(ref);
-      const b = bytes.get(ref.blobId);
+    async open(ref, signal) {
+      opened.push({ ref, signal });
+      const b = bytesOf.get(ref.blobId);
       if (b === undefined) return null;
       return (async function* () {
         yield b;
@@ -57,21 +79,29 @@ function memorySource(bytes: Map<string, Uint8Array>) {
 }
 
 let items = 0;
+/** Ingests a file with these bytes (their real size) into the managed zone, or `zone`. */
 async function ingestFile(
   title: string,
   mime: string,
-  options: { externalId?: string } = {},
+  bytes: Uint8Array | undefined,
+  options: { externalId?: string; zone?: "managed" | "indexed" | "local-only" } = {},
 ): Promise<IngestResult & { blobId: string }> {
   const n = ++items;
   const blobId = `b3t:${n.toString(16).padStart(64, "c")}`;
+  if (bytes) bytesOf.set(blobId, bytes);
+  const zone = options.zone ?? "managed";
   const result = await db.withTenant(t.tenantId, (tx) =>
     ingest(tx, t.tenantId, {
       source: "test",
       externalId: options.externalId ?? `file-${n}`,
-      zoneId: t.zoneId,
+      zoneId: zone === "managed" ? managed : zone === "local-only" ? localOnly : t.zoneId,
       title,
       ownerId: `user:${t.userId}`,
-      content: { blobId, size: 100 },
+      content: {
+        blobId,
+        size: bytes?.byteLength ?? 100,
+        ...(zone === "managed" ? { location: "stored" } : {}),
+      },
       mime,
     }),
   );
@@ -92,11 +122,15 @@ const run = (steps: readonly EnrichStep[], versionId: string) =>
 const stored = (versionId: string) =>
   db.withTenant(t.tenantId, (tx) => readExtract(tx, t.tenantId, versionId));
 
+const step = (more: Partial<ExtractStepOptions> = {}) => {
+  const { source, opened } = memorySource();
+  return { step: extractStep({ content: source, ...more }), opened };
+};
+
 describe("the extract step", () => {
   it("extracts a version's text and stores it, and a re-run rewrites the same row", async () => {
-    const file = await ingestFile("Q3 report.docx", MIME.docx);
-    const { source } = memorySource(new Map([[file.blobId, REPORT]]));
-    const steps = [ruleTagStep, extractStep({ content: source })];
+    const file = await ingestFile("Q3 report.docx", MIME.docx, REPORT);
+    const steps = [ruleTagStep, step().step];
     expect(await run(steps, file.versionId)).toBe("processed");
     const first = await stored(file.versionId);
     expect(first).toMatchObject({
@@ -119,15 +153,9 @@ describe("the extract step", () => {
   });
 
   it("records a hostile or broken file as failed, and the version is still processed", async () => {
-    const pdf = await ingestFile("Invoice.pdf", MIME.pdf);
-    const csv = await ingestFile("Export.csv", MIME.csv);
-    const { source } = memorySource(
-      new Map([
-        [pdf.blobId, enc.encode("%PDF-1.7 not really")],
-        [csv.blobId, enc.encode(`${"x,".repeat(10_000)}x`)],
-      ]),
-    );
-    const steps = [extractStep({ content: source, limits: { maxRecordBytes: 1024 } })];
+    const pdf = await ingestFile("Invoice.pdf", MIME.pdf, enc.encode("%PDF-1.7 not really"));
+    const csv = await ingestFile("Export.csv", MIME.csv, enc.encode(`${"x,".repeat(10_000)}x`));
+    const steps = [step({ limits: { maxRecordBytes: 1024 } }).step];
     expect(await run(steps, pdf.versionId)).toBe("processed");
     expect(await run(steps, csv.versionId)).toBe("processed");
     expect(await stored(pdf.versionId)).toMatchObject({
@@ -142,19 +170,46 @@ describe("the extract step", () => {
   });
 
   it("stores unsupported types without reading them, and unreachable bytes as unavailable", async () => {
-    const image = await ingestFile("Photo.png", "image/png");
-    const missing = await ingestFile("Notes.txt", MIME.txt);
-    const { source, opened } = memorySource(new Map());
-    const steps = [extractStep({ content: source })];
-    expect(await run(steps, image.versionId)).toBe("processed");
-    expect(await run(steps, missing.versionId)).toBe("processed");
-    expect(opened.map((r) => r.versionId)).toEqual([missing.versionId]);
+    const image = await ingestFile("Photo.png", "image/png", enc.encode("png"));
+    const missing = await ingestFile("Notes.txt", MIME.txt, undefined);
+    const { step: s, opened } = step();
+    expect(await run([s], image.versionId)).toBe("processed");
+    expect(await run([s], missing.versionId)).toBe("processed");
+    expect(opened.map((o) => o.ref.versionId)).toEqual([missing.versionId]);
     expect(await stored(image.versionId)).toMatchObject({ status: "unsupported", kind: null });
     expect(await stored(missing.versionId)).toMatchObject({ status: "unavailable", text: "" });
   });
 
+  it("reads managed zones, indexed zones only on opt-in, local-only zones never", async () => {
+    const indexed = await ingestFile("Indexed.txt", MIME.txt, enc.encode("indexed words"), {
+      zone: "indexed",
+    });
+    const local = await ingestFile("Local.txt", MIME.txt, enc.encode("local words"), {
+      zone: "local-only",
+    });
+    const off = step();
+    expect(await run([off.step], indexed.versionId)).toBe("processed");
+    expect(await run([off.step], local.versionId)).toBe("processed");
+    expect(off.opened).toEqual([]);
+    expect(await stored(indexed.versionId)).toBe(null);
+    expect(await stored(local.versionId)).toBe(null);
+
+    const on = step({ indexedZones: true });
+    const again = await ingestFile("Indexed 2.txt", MIME.txt, enc.encode("indexed words"), {
+      zone: "indexed",
+    });
+    const local2 = await ingestFile("Local 2.txt", MIME.txt, enc.encode("local"), {
+      zone: "local-only",
+    });
+    await run([on.step], again.versionId);
+    await run([on.step], local2.versionId);
+    expect(on.opened.map((o) => o.ref.zoneKind)).toEqual(["indexed"]);
+    expect(await stored(again.versionId)).toMatchObject({ text: "indexed words" });
+    expect(await stored(local2.versionId)).toBe(null);
+  });
+
   it("fails the job, storing nothing, when the bytes can't be read now: it will be retried", async () => {
-    const file = await ingestFile("Notes.txt", MIME.txt);
+    const file = await ingestFile("Notes.txt", MIME.txt, enc.encode("partial and more"));
     const failing: ContentSource = {
       async open() {
         return (async function* () {
@@ -163,9 +218,18 @@ describe("the extract step", () => {
         })();
       },
     };
-    await expect(run([extractStep({ content: failing })], file.versionId)).rejects.toThrow(
-      "enrichment step extract-text failed",
-    );
+    const short: ContentSource = {
+      async open() {
+        return (async function* () {
+          yield enc.encode("partial");
+        })();
+      },
+    };
+    for (const content of [failing, short]) {
+      await expect(run([extractStep({ content })], file.versionId)).rejects.toThrow(
+        "enrichment step extract-text failed",
+      );
+    }
     expect(await stored(file.versionId)).toBe(null);
     const [row] = await db.withTenant(t.tenantId, (tx) =>
       tx
@@ -177,11 +241,15 @@ describe("the extract step", () => {
   });
 
   it("stores nothing for a version a newer one replaced while it was extracting", async () => {
-    const file = await ingestFile("Notes.txt", MIME.txt, { externalId: "notes" });
+    const file = await ingestFile("Notes.txt", MIME.txt, enc.encode("old words"), {
+      externalId: "notes",
+    });
     let newer: IngestResult | undefined;
     const racing: ContentSource = {
       async open() {
-        newer = await ingestFile("Notes.txt", MIME.txt, { externalId: "notes" });
+        newer = await ingestFile("Notes.txt", MIME.txt, enc.encode("new words!"), {
+          externalId: "notes",
+        });
         return (async function* () {
           yield enc.encode("old words");
         })();
@@ -194,16 +262,15 @@ describe("the extract step", () => {
 
   it("runs from startJobs' default steps when the server gives a content source", async () => {
     expect(defaultEnrichSteps().map((s) => s.name)).toEqual(["rule-tags"]);
-    const file = await ingestFile("Notes.md", MIME.md);
-    const { source } = memorySource(
-      new Map([[file.blobId, enc.encode("# Hi\n<!-- psst -->\nthere")]]),
-    );
+    const file = await ingestFile("Notes.md", MIME.md, enc.encode("# Hi\n<!-- psst -->\nthere"));
+    const { source } = memorySource();
     expect(defaultEnrichSteps({ content: source }).map((s) => [s.name, s.provider])).toEqual([
       ["rule-tags", undefined],
       ["extract-text", undefined],
     ]);
     const jobs = await startJobs(db, {
       content: source,
+      extract: { limits: { maxTextBytes: 1024 } },
       pollingIntervalSeconds: 0.5,
       maintenance: false,
     });
@@ -221,5 +288,75 @@ describe("the extract step", () => {
       text: "# Hi\n\nthere",
       signals: [{ kind: "html-comment", count: 1, sample: "psst" }],
     });
+  });
+});
+
+describe("the extract step's second try", () => {
+  const OK: ExtractResult = {
+    ok: true,
+    extraction: {
+      kind: "text",
+      text: "at last",
+      truncated: false,
+      metadata: {},
+      signals: [],
+      warnings: [],
+    },
+    stats: { bytesRead: 5, peakRssBytes: 1 },
+  };
+  const TIMEOUT: ExtractResult = { ok: false, failure: "timeout", permanent: true };
+  const KILLED: ExtractResult = { ok: false, failure: "killed", permanent: false };
+
+  /** An extractor that answers `answers` in turn, recording each call's time limit. */
+  function scripted(answers: ExtractResult[]) {
+    const limits: (number | undefined)[] = [];
+    const extractor = (async (stream, _hint, options) => {
+      for await (const _ of stream) void _;
+      limits.push(options?.limits?.timeoutMs);
+      return answers.shift() as ExtractResult;
+    }) as typeof extract;
+    return { extractor, limits };
+  }
+
+  async function runWith(answers: ExtractResult[], more: Partial<ExtractStepOptions> = {}) {
+    const file = await ingestFile("Notes.txt", MIME.txt, enc.encode("hello"));
+    const { extractor, limits } = scripted(answers);
+    const { step: s, opened } = step({ extractor, ...more });
+    expect(await run([s], file.versionId)).toBe("processed");
+    return { limits, opened, extract: await stored(file.versionId) };
+  }
+
+  it("tries a timeout once more with twice the time, reading the content again", async () => {
+    const { limits, opened, extract } = await runWith([TIMEOUT, OK], {
+      limits: { timeoutMs: 1_000 } satisfies Partial<ExtractLimits>,
+    });
+    expect(limits).toEqual([1_000, 2_000]);
+    expect(opened).toHaveLength(2);
+    expect(extract).toMatchObject({ status: "extracted", text: "at last" });
+  });
+
+  it("stores the second timeout as failed", async () => {
+    const { limits, extract } = await runWith([TIMEOUT, TIMEOUT]);
+    expect(limits).toHaveLength(2);
+    expect(extract).toMatchObject({ status: "failed", failure: "timeout" });
+  });
+
+  it("doesn't try again when twice the time doesn't fit the step's budget", async () => {
+    const { limits, extract } = await runWith([TIMEOUT, OK], { budgetMs: 1 });
+    expect(limits).toHaveLength(1);
+    expect(extract).toMatchObject({ status: "failed", failure: "timeout" });
+  });
+
+  it("tries a process killed by a signal nobody sent once more, then takes it as the file's", async () => {
+    const once = await runWith([KILLED, OK]);
+    expect(once.extract).toMatchObject({ status: "extracted" });
+    expect(once.limits[0]).toBe(once.limits[1]);
+    const twice = await runWith([KILLED, KILLED]);
+    expect(twice.extract).toMatchObject({ status: "failed", failure: "killed" });
+  });
+
+  it("aborts each attempt's signal to the source when the attempt ends", async () => {
+    const { opened } = await runWith([TIMEOUT, OK]);
+    expect(opened.map((o) => o.signal.aborted)).toEqual([true, true]);
   });
 });
