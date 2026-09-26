@@ -14,7 +14,7 @@ import {
   type Tx,
 } from "@openhoard/core-db";
 import type { Action, AuthzClient, AuthzPrincipal, ClientTrust } from "@openhoard/core-policy";
-import { and, eq, isNull, lt, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { IdentityError, resolveWithExpiry } from "./directory.js";
 import type { PrincipalCache } from "./principal-cache.js";
 
@@ -912,35 +912,61 @@ export async function revokeUserGrants(
   return rows.length;
 }
 
-/** Removes a tenant's codes, access tokens and ended grants from before `before`. */
+/**
+ * Removes a tenant's OAuth rows that ended before `before`: up to `limit` codes and up to `limit`
+ * access tokens that expired, and up to `limit` grants that expired or were revoked (their
+ * tokens with them). A grant a kept code still points at stays, so a replay of that code can
+ * still revoke it; codes go first, so a grant goes with its last code, or on a later call when the
+ * limit kept that code back. Returns how many of each went:
+ * call it again while any reaches `limit` (the scheduled maintenance in core/jobs does), so no
+ * one transaction deletes without bound.
+ */
 export async function pruneOAuth(
   tx: Tx,
   tenantId: string,
   before: Date,
+  limit = 10_000,
 ): Promise<{ codes: number; tokens: number; grants: number }> {
   if (!(before instanceof Date) || Number.isNaN(before.getTime())) {
     throw new IdentityError("invalid", "invalid time");
   }
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100_000) {
+    throw new IdentityError("invalid", "limit is 1 to 100000");
+  }
   const at = sql`${before.toISOString()}::timestamptz`;
+  const dueCodes = tx
+    .select({ id: oauthCodes.id })
+    .from(oauthCodes)
+    .where(and(eq(oauthCodes.tenantId, tenantId), lt(oauthCodes.expiresAt, at)))
+    .limit(limit);
   const codes = await tx
     .delete(oauthCodes)
-    .where(and(eq(oauthCodes.tenantId, tenantId), lt(oauthCodes.expiresAt, at)))
+    .where(and(eq(oauthCodes.tenantId, tenantId), inArray(oauthCodes.id, dueCodes)))
     .returning({ id: oauthCodes.id });
+  const dueTokens = tx
+    .select({ id: oauthTokens.id })
+    .from(oauthTokens)
+    .where(and(eq(oauthTokens.tenantId, tenantId), lt(oauthTokens.expiresAt, at)))
+    .limit(limit);
   const tokens = await tx
     .delete(oauthTokens)
-    .where(and(eq(oauthTokens.tenantId, tenantId), lt(oauthTokens.expiresAt, at)))
+    .where(and(eq(oauthTokens.tenantId, tenantId), inArray(oauthTokens.id, dueTokens)))
     .returning({ id: oauthTokens.id });
-  const ended = or(lt(oauthGrants.expiresAt, at), lt(oauthGrants.revokedAt, at));
-  // Codes point at grants: a code still kept keeps its grant.
-  const grants = await tx
-    .delete(oauthGrants)
+  const dueGrants = tx
+    .select({ id: oauthGrants.id })
+    .from(oauthGrants)
     .where(
       and(
         eq(oauthGrants.tenantId, tenantId),
-        ended,
+        or(lt(oauthGrants.expiresAt, at), lt(oauthGrants.revokedAt, at)),
+        // Codes point at grants: a code still kept keeps its grant.
         sql`not exists (select 1 from oauth_codes c where c.tenant_id = ${oauthGrants.tenantId} and c.grant_id = ${oauthGrants.id})`,
       ),
     )
+    .limit(limit);
+  const grants = await tx
+    .delete(oauthGrants)
+    .where(and(eq(oauthGrants.tenantId, tenantId), inArray(oauthGrants.id, dueGrants)))
     .returning({ id: oauthGrants.id });
   return { codes: codes.length, tokens: tokens.length, grants: grants.length };
 }

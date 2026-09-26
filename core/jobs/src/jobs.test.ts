@@ -12,7 +12,12 @@ import {
   activityEvents,
   NestedWorkError,
   newId,
+  oauthClients,
+  oauthCodes,
+  oauthGrants,
+  oauthTokens,
   objectTags,
+  scimTokens,
   sessions,
   tagReviews,
   versions,
@@ -746,9 +751,82 @@ describe("the worker", () => {
 describe("maintenance", () => {
   const DAY = 24 * 60 * 60 * 1000;
 
-  /** Old ended sessions, an old and a new activity event, for one tenant. */
+  /**
+   * Old ended sessions, an old and a new activity event, an AI client's grant revoked long ago
+   * (with its code and token) and a live one, and a SCIM token revoked long ago and a live one,
+   * for one tenant.
+   */
   async function oldRows(s: SeededTenant) {
     await db.withTenant(s.tenantId, async (tx) => {
+      const clientKey = "c".repeat(64);
+      await tx.insert(oauthClients).values({
+        tenantId: s.tenantId,
+        clientKey,
+        kind: "cimd",
+        clientRef: "https://client.example/mcp.json",
+        name: "Client",
+        redirectUris: ["https://client.example/cb"],
+        requestedBy: "system:test",
+      });
+      for (const [days, revoked] of [
+        [50, true],
+        [0, false],
+      ] as const) {
+        const grantId = newId("oauthGrant");
+        const ago = sql`now() - make_interval(days => ${days})`;
+        await tx.insert(oauthGrants).values({
+          tenantId: s.tenantId,
+          id: grantId,
+          userId: s.userId,
+          userKind: "member",
+          clientKey,
+          scopes: ["files:read"],
+          resource: "https://hoard.example/mcp",
+          refreshHash: "0".repeat(64),
+          createdAt: ago,
+          expiresAt: sql`now() - make_interval(days => ${days}) + interval '30 days'`,
+          ...(revoked ? { revokedAt: ago, revokedBy: "user:admin" } : {}),
+        });
+        await tx.insert(oauthCodes).values({
+          tenantId: s.tenantId,
+          id: newId("oauthCode"),
+          secretHash: "0".repeat(64),
+          userId: s.userId,
+          userKind: "member",
+          clientKey,
+          redirectUri: "https://client.example/cb",
+          codeChallenge: "x".repeat(43),
+          scopes: ["files:read"],
+          resource: "https://hoard.example/mcp",
+          createdAt: ago,
+          expiresAt: sql`now() - make_interval(days => ${days}) + interval '1 minute'`,
+          usedAt: ago,
+          grantId,
+        });
+        await tx.insert(oauthTokens).values({
+          tenantId: s.tenantId,
+          id: newId("oauthToken"),
+          grantId,
+          secretHash: "0".repeat(64),
+          scopes: ["files:read"],
+          createdAt: ago,
+          expiresAt: sql`now() - make_interval(days => ${days}) + interval '1 hour'`,
+        });
+      }
+      for (const revoked of [true, false]) {
+        await tx.insert(scimTokens).values({
+          tenantId: s.tenantId,
+          id: newId("scimToken"),
+          name: "IdP",
+          secretHash: "0".repeat(64),
+          createdBy: "system:admin-cli",
+          createdAt: sql`now() - interval '200 days'`,
+          expiresAt: sql`now() + interval '100 days'`,
+          ...(revoked
+            ? { revokedAt: sql`now() - interval '100 days'`, revokedBy: "system:admin-cli" }
+            : {}),
+        });
+      }
       for (const days of [40, 50, 1]) {
         await tx.insert(sessions).values({
           tenantId: s.tenantId,
@@ -785,6 +863,8 @@ describe("maintenance", () => {
   const remaining = (tenantId: string) =>
     db.withTenant(tenantId, async (tx) => ({
       sessions: (await tx.select().from(sessions)).length,
+      oauthGrants: (await tx.select().from(oauthGrants)).length,
+      scimTokens: (await tx.select().from(scimTokens)).length,
       activity: (await tx.select().from(activityEvents)).length,
     }));
 
@@ -823,10 +903,25 @@ describe("maintenance", () => {
         key: s.tenantId,
       });
       const done = await settled(jobs, QUEUES.maintenanceTenant, perTenant?.id ?? null);
-      // One batch at a time: the two sessions that ended over 30 days ago, the event from
-      // 500 days ago; the recent ones stay.
-      expect(done.output).toEqual({ sessions: 2, activity: 1, swept: 1, deadLettered: 0 });
-      expect(await remaining(s.tenantId)).toEqual({ sessions: 1, activity: 1 });
+      // One batch at a time: the two sessions that ended over 30 days ago, the OAuth grant
+      // revoked 50 days ago with its code and token, the SCIM token revoked 100 days ago, the
+      // event from 500 days ago; the recent ones stay.
+      expect(done.output).toEqual({
+        sessions: 2,
+        oauthCodes: 1,
+        oauthTokens: 1,
+        oauthGrants: 1,
+        scimTokens: 1,
+        activity: 1,
+        swept: 1,
+        deadLettered: 0,
+      });
+      expect(await remaining(s.tenantId)).toEqual({
+        sessions: 1,
+        oauthGrants: 1,
+        scimTokens: 1,
+        activity: 1,
+      });
     }
     // The swept versions are enriched now; the fresh one wasn't enqueued by anyone.
     await waitFor(async () => ((await processedAt(lost.versionId)) ? true : null), "the sweep");

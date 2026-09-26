@@ -9,6 +9,7 @@ import {
   issueScimToken,
   listScimTokens,
   parseScimToken,
+  pruneScimTokens,
   revokeScimToken,
   SCIM_TOKEN_MAX_DAYS,
   scimActor,
@@ -214,6 +215,43 @@ describe("checking", () => {
       ok: false,
       refused: { tokenId: old.id, reason: "expired" },
     });
+  });
+
+  it("prunes tokens revoked or expired before a time, in bounded batches, in their tenant only", async () => {
+    const live = await issue();
+    const revoked = await issue();
+    const expired = await issue();
+    const otherRevoked = await issue({}, other.tenantId);
+    await write((tx) => revokeScimToken(tx, t.tenantId, revoked.id, "user:admin"));
+    await write(
+      (tx) => revokeScimToken(tx, other.tenantId, otherRevoked.id, "user:admin"),
+      other.tenantId,
+    );
+    await write((tx) =>
+      tx
+        .update(scimTokens)
+        .set({
+          createdAt: sql`now() - interval '2 days'`,
+          expiresAt: sql`now() - interval '1 day'`,
+        })
+        .where(eq(scimTokens.id, expired.id)),
+    );
+    const prune = (before: Date, limit?: number) =>
+      write((tx) => pruneScimTokens(tx, t.tenantId, before, limit));
+    // Before anything ended, nothing goes.
+    expect(await prune(days(-3))).toBe(0);
+    const later = days(1);
+    expect(await prune(later, 1)).toBe(1);
+    expect(await prune(later)).toBe(1);
+    expect(await prune(later)).toBe(0);
+    expect((await write((tx) => listScimTokens(tx, t.tenantId))).map((x) => x.id)).toEqual([
+      live.id,
+    ]);
+    expect(await write((tx) => listScimTokens(tx, other.tenantId), other.tenantId)).toHaveLength(1);
+    for (const bad of [0, 100_001, 1.5]) {
+      expect(await identityCode(prune(later, bad))).toBe("invalid");
+    }
+    expect(await identityCode(prune(new Date(Number.NaN)))).toBe("invalid");
   });
 
   it("gives the audit what it needs: the actor is a principal core/audit accepts", async () => {

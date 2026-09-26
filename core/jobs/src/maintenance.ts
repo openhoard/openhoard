@@ -1,6 +1,6 @@
 import { pruneActivity } from "@openhoard/core-catalog";
 import { versions, type Database } from "@openhoard/core-db";
-import { pruneSessions } from "@openhoard/core-identity";
+import { pruneOAuth, pruneScimTokens, pruneSessions } from "@openhoard/core-identity";
 import { and, asc, eq, gt, isNull, lt, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { EnrichPayload } from "./enrich.js";
@@ -12,6 +12,12 @@ import type { EnrichPayload } from "./enrich.js";
  *
  * - Sessions (core/identity) that ended more than `sessionRetentionDays` ago go. The audit log
  *   keeps sign-ins and sign-outs; the rows are only needed while a session can still be used.
+ * - OAuth rows (core/identity) that ended more than `oauthRetentionDays` ago go: expired codes
+ *   and access tokens, and grants that expired or were revoked, with their tokens. Every
+ *   decision is in the audit log; the rows are only needed while they can be used, and a while
+ *   after, so a replayed code or refresh token is still recognized and revokes what it made.
+ * - SCIM tokens (core/identity) revoked or expired more than `scimTokenRetentionDays` ago go. The
+ *   audit log keeps their issue, revocation and every use; admins see them listed a while after.
  * - Activity events (core/catalog) older than `activityRetentionDays` go.
  * - The sweep finds current versions left unprocessed for longer than `sweepAfterMinutes` and
  *   enqueues them again. Enqueueing happens after ingest commits, so a crash in between loses the
@@ -27,6 +33,10 @@ import type { EnrichPayload } from "./enrich.js";
 export interface MaintenanceOptions {
   /** How long ended sessions are kept, in days. Default 30. */
   sessionRetentionDays?: number;
+  /** How long ended OAuth codes, tokens and grants are kept, in days. Default 30. */
+  oauthRetentionDays?: number;
+  /** How long revoked or expired SCIM tokens are kept, in days. Default 90. */
+  scimTokenRetentionDays?: number;
   /** How long activity events are kept, in days. Default 400 (a year and a margin). */
   activityRetentionDays?: number;
   /** Rows one transaction deletes. Default 1,000. */
@@ -43,6 +53,8 @@ export interface MaintenanceOptions {
 
 export const MAINTENANCE_DEFAULTS: Readonly<Required<MaintenanceOptions>> = {
   sessionRetentionDays: 30,
+  oauthRetentionDays: 30,
+  scimTokenRetentionDays: 90,
   activityRetentionDays: 400,
   batchSize: 1_000,
   maxBatches: 10,
@@ -53,6 +65,8 @@ export const MAINTENANCE_DEFAULTS: Readonly<Required<MaintenanceOptions>> = {
 
 const LIMITS: Record<keyof MaintenanceOptions, [number, number]> = {
   sessionRetentionDays: [1, 3650],
+  oauthRetentionDays: [1, 3650],
+  scimTokenRetentionDays: [1, 3650],
   activityRetentionDays: [1, 3650],
   batchSize: [1, 100_000],
   maxBatches: [1, 1_000],
@@ -82,6 +96,11 @@ export function maintenanceSettings(
 /** What one tenant's maintenance run did. */
 export interface TenantMaintenance {
   sessions: number;
+  /** OAuth rows removed: expired codes and access tokens, ended grants. */
+  oauthCodes: number;
+  oauthTokens: number;
+  oauthGrants: number;
+  scimTokens: number;
   activity: number;
   /** Versions the sweep enqueued (a new job, or one already waiting). */
   swept: number;
@@ -105,15 +124,40 @@ export async function maintainTenant(
 ): Promise<TenantMaintenance> {
   const day = 24 * 60 * 60 * 1000;
   const sessionsBefore = new Date(Date.now() - options.sessionRetentionDays * day);
+  const oauthBefore = new Date(Date.now() - options.oauthRetentionDays * day);
+  const scimBefore = new Date(Date.now() - options.scimTokenRetentionDays * day);
   const activityBefore = new Date(Date.now() - options.activityRetentionDays * day);
   const sessions = await inBatches(options, () =>
     db.withTenant(tenantId, (tx) => pruneSessions(tx, tenantId, sessionsBefore, options.batchSize)),
+  );
+  const oauth = { codes: 0, tokens: 0, grants: 0 };
+  // Each kind up to a batch per transaction; again while any filled its batch.
+  for (let i = 0; i < options.maxBatches; i++) {
+    const n = await db.withTenant(tenantId, (tx) =>
+      pruneOAuth(tx, tenantId, oauthBefore, options.batchSize),
+    );
+    oauth.codes += n.codes;
+    oauth.tokens += n.tokens;
+    oauth.grants += n.grants;
+    if (Math.max(n.codes, n.tokens, n.grants) < options.batchSize) break;
+  }
+  const scimTokens = await inBatches(options, () =>
+    db.withTenant(tenantId, (tx) => pruneScimTokens(tx, tenantId, scimBefore, options.batchSize)),
   );
   const activity = await inBatches(options, () =>
     db.withTenant(tenantId, (tx) => pruneActivity(tx, tenantId, activityBefore, options.batchSize)),
   );
   const { swept, deadLettered } = await sweep(db, tenantId, options, queue);
-  return { sessions, activity, swept, deadLettered };
+  return {
+    sessions,
+    oauthCodes: oauth.codes,
+    oauthTokens: oauth.tokens,
+    oauthGrants: oauth.grants,
+    scimTokens,
+    activity,
+    swept,
+    deadLettered,
+  };
 }
 
 /** Runs `batch` until it removes less than a batch, or `maxBatches` times; returns the total. */

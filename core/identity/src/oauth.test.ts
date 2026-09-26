@@ -612,11 +612,30 @@ describe("revocation and pruning", () => {
     const live = await tokens();
     await write((tx) => revokeGrant(tx, t.tenantId, live.grantId, "user:admin"));
     const later = new Date(Date.now() + 2 * 3600 * 1000);
-    const pruned = await write((tx) => pruneOAuth(tx, t.tenantId, later));
+    // Nothing had ended an hour ago.
+    expect(
+      await write((tx) => pruneOAuth(tx, t.tenantId, new Date(Date.now() - 3600 * 1000))),
+    ).toEqual({ codes: 0, tokens: 0, grants: 0 });
+    // In batches of one: a code and a token a call, and the revoked grant once its code is gone.
+    const first = await write((tx) => pruneOAuth(tx, t.tenantId, later, 1));
+    expect(first).toMatchObject({ codes: 1, tokens: 1 });
+    const pruned = { ...first };
+    for (let call = 0; call < 3; call++) {
+      const next = await write((tx) => pruneOAuth(tx, t.tenantId, later, 1));
+      pruned.codes += next.codes;
+      pruned.tokens += next.tokens;
+      pruned.grants += next.grants;
+    }
     expect(pruned.codes).toBe(2);
-    expect(pruned.tokens).toBe(2);
-    // Both grants' codes went first; the revoked grant goes, the live one stays.
+    // Expired tokens go by themselves, or with their grant (so one may not be counted).
+    expect(pruned.tokens).toBeGreaterThanOrEqual(1);
+    // The revoked grant goes, the live one stays.
     expect(pruned.grants).toBe(1);
+    for (const bad of [0, 100_001]) {
+      await expect(write((tx) => pruneOAuth(tx, t.tenantId, later, bad))).rejects.toThrow(
+        /limit is 1 to 100000/,
+      );
+    }
     const counts = await write(async (tx) => ({
       codes: (await tx.select().from(oauthCodes)).length,
       grants: (await tx.select().from(oauthGrants)).length,

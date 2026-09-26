@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { isId, newId, queryRows, scimTokens, type Tx } from "@openhoard/core-db";
-import { and, asc, eq, isNull, or, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, or, sql, type SQL } from "drizzle-orm";
 import { IdentityError } from "./directory.js";
 
 /*
@@ -237,6 +237,43 @@ export async function touchScimToken(tx: Tx, tenantId: string, tokenId: string):
     )
     .returning({ id: scimTokens.id });
   return rows.length > 0;
+}
+
+/**
+ * Removes up to `limit` of a tenant's SCIM tokens that were revoked or expired before `before`;
+ * returns how many went. Call it again until it returns less than the limit (the scheduled
+ * maintenance in core/jobs does). The audit log keeps each token's issue, revocation and uses
+ * (`scim:<token id>`); the row only matters while the token could still work, and for
+ * listScimTokens() a while after.
+ */
+export async function pruneScimTokens(
+  tx: Tx,
+  tenantId: string,
+  before: Date,
+  limit = 1_000,
+): Promise<number> {
+  if (!(before instanceof Date) || Number.isNaN(before.getTime())) {
+    throw new IdentityError("invalid", "invalid time");
+  }
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100_000) {
+    throw new IdentityError("invalid", "limit is 1 to 100000");
+  }
+  const at = sql`${before.toISOString()}::timestamptz`;
+  const due = tx
+    .select({ id: scimTokens.id })
+    .from(scimTokens)
+    .where(
+      and(
+        eq(scimTokens.tenantId, tenantId),
+        or(lt(scimTokens.revokedAt, at), lt(scimTokens.expiresAt, at)),
+      ),
+    )
+    .limit(limit);
+  const rows = await tx
+    .delete(scimTokens)
+    .where(and(eq(scimTokens.tenantId, tenantId), inArray(scimTokens.id, due)))
+    .returning({ id: scimTokens.id });
+  return rows.length;
 }
 
 const hash = (secret: string) => createHash("sha256").update(secret).digest("hex");

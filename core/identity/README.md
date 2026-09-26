@@ -187,7 +187,8 @@ apps/server.
 - `checkAccessToken()` writes nothing, like `checkSession()`. It returns the principal, with the
   grant's scopes as its credential scope, and the client with its trust label.
 - `revokeGrant()`, `revokeUserGrants()` and `revokeByToken()` (RFC 7009) end grants, and
-  `pruneOAuth()` clears ended ones. Locking, disabling and retiring a person revoke their grants.
+  `pruneOAuth()` clears ended ones in bounded batches (core/jobs' maintenance runs it). Locking,
+  disabling and retiring a person revoke their grants.
 - Tokens are `ohac.`, `ohrt.` and `ohat.<tenant>.<id>.<secret>`, and only their hashes are
   stored.
 - A `TrustResolver` lets the server's config approve a client without a database decision. It
@@ -250,7 +251,8 @@ the directory lets manage SCIM users and groups), not as a principal with grants
   the endpoint is one URL for all tenants (`parseScimToken()`).
 - A token expires within a year (`expiresAt`, or `days` by the database's clock) and can be
   revoked (`revokeScimToken()`). `listScimTokens()` shows them without secrets, with when each
-  was last used (`touchScimToken()`, at most once a minute).
+  was last used (`touchScimToken()`, at most once a minute). `pruneScimTokens()` removes those
+  that stopped working long ago, in bounded batches (core/jobs' maintenance runs it).
 - `checkScimToken()` reads the token on every request, so a revoked or expired one fails on the
   next, compares the secret in constant time, and for a refused attempt on a real token id says
   why (`wrong-secret`, `revoked`, `expired`), for the audit log only. The server audits every
