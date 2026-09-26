@@ -3,8 +3,12 @@
   "tasks": {
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
     "typecheck": { "dependsOn": ["^build"] },
-    "test": { "dependsOn": ["^build"] },
-    "test:coverage": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
+    "test": { "dependsOn": ["^build"], "env": ["OPENHOARD_TEST_POSTGRES_URL"] },
+    "test:coverage": {
+      "dependsOn": ["^build"],
+      "env": ["OPENHOARD_TEST_POSTGRES_URL"],
+      "outputs": ["coverage/**"]
+    },
     "dev": { "dependsOn": ["^build"], "cache": false, "persistent": true },
     "clean": { "cache": false }
   }

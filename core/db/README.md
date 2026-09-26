@@ -187,4 +187,9 @@ and with pgvector installed; each test then creates and drops its own database:
 OPENHOARD_TEST_POSTGRES_URL=postgres://owner:secret@localhost:5432/postgres pnpm --filter @openhoard/core-db test
 ```
 
+Turbo passes the variable to `test` and `test:coverage` too (turbo.json `env`), and its value is
+part of their cache key, so `pnpm turbo run test --filter=…` with it set runs on PostgreSQL and
+never replays a PGlite run. `openSharedTestDatabases()` gives two handles on one test database,
+as two server processes would hold (two connection pools on PostgreSQL, the same PGlite).
+
 CI does both: PGlite on every OS, and PostgreSQL 18 on Linux.
