@@ -245,8 +245,43 @@ const attacks: (Done & { c: InjectionCase })[] = [];
 const benign: (Done & { name: string })[] = [];
 let modelCalls = 0;
 
+/**
+ * The corpus runs through @openhoard/enricher-extract as built (its dist, as CI builds it before
+ * tests: turbo's test tasks depend on ^build). A stale or broken build would quietly lower the
+ * detection rate instead of failing for what it is, so each format is checked first, loudly.
+ */
+async function extractorWorks(): Promise<void> {
+  const probes: [string, string, Uint8Array, string][] = [
+    ["probe.pdf", MIME.pdf, pdf({ texts: [{ text: "Probe PDF text" }] }), "Probe PDF text"],
+    [
+      "probe.docx",
+      MIME.docx,
+      docx({ paragraphs: [[{ text: "Probe DOCX text" }]] }),
+      "Probe DOCX text",
+    ],
+    [
+      "probe.xlsx",
+      MIME.xlsx,
+      xlsx({ sheets: [{ name: "S", rows: [["Probe XLSX"]] }] }),
+      "Probe XLSX",
+    ],
+  ];
+  for (const [name, mime, bytes, expected] of probes) {
+    async function* stream() {
+      yield bytes;
+    }
+    const r = await extract(stream(), { mime, name }, { size: bytes.byteLength });
+    if (!r.ok || !r.extraction.text.includes(expected)) {
+      throw new Error(
+        `the extractor can't read ${name} here (${r.ok ? "no text" : r.failure}): rebuild it (pnpm --filter @openhoard/enricher-extract build) and run its own tests; the S8 rate below would be wrong`,
+      );
+    }
+  }
+}
+
 beforeAll(
   async () => {
+    await extractorWorks();
     db = await openTestDatabase();
     t = await seedTenant(db, 1);
     const managed = newId("zone");

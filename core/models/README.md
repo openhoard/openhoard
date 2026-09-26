@@ -50,8 +50,15 @@ schema has no field for a key, so one pasted into `config.json` fails loudly.
   one ends the call as `rate-limited` so the job's own retry waits instead.
 - **A capped answer**: `maxResponseBytes` (1 MiB), checked on `content-length` and while
   streaming.
-- **No redirects** (a key must not follow one to another host), and https unless the URL is
-  loopback or the provider is `local`.
+- **No redirects**: a 3xx fails the call at once as `refused`, never followed or retried (a key
+  must not follow one to another host).
+- **https, or plain http to private addresses only**: http is allowed in the settings only for
+  loopback URLs and `local` providers, and every http request may only connect to loopback,
+  RFC 1918, link-local or IPv6 unique-local addresses. The check runs inside the connection's own
+  DNS lookup, on every address returned, so the socket connects to an address that was checked
+  (a name re-pointed between check and connect, DNS rebinding, changes nothing); IP literals are
+  checked as written. Anything else fails as `blocked` before a byte is sent. Node's http client
+  is used rather than fetch for exactly this.
 - **Nothing secret in logs or errors**: a `ModelError` carries a code, the provider's id and the
   HTTP status; log lines carry the id, status, attempt and wait. Never the request, the answer,
   a header or a key.
@@ -75,8 +82,11 @@ local one, or to none.
 `reserveTokens()` reserves a call's most (input estimate plus output caps) against the tenant's
 budget for the UTC day, in one statement that adds only if the total stays within it, so
 concurrent jobs in any number of processes can't spend past it together. `settleTokens()`
-replaces the reservation with what the provider reported (or the estimate, characters / 4,
-when it reported nothing). Table `model_usage` (tenant, day), under row-level security.
+replaces the reservation with what the provider reported (clamped by the caller), or the
+estimate when it reported nothing: a token per Chinese, Japanese or Korean character, four other
+characters a token (so CJK text isn't undercounted fourfold). `calls` counts the HTTP requests
+that went out, retries and repairs included. Table `model_usage` (tenant, day), under row-level
+security.
 
 A spent budget is a clear, quiet failure: the summarize step records the version as skipped
 (`budget`), logs a warning, and the file is processed and visible by its tags without a summary.

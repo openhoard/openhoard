@@ -9,7 +9,7 @@ import {
 } from "./clients.js";
 import { ModelError } from "./errors.js";
 import { fakeApi, hang, json, type FakeApi } from "./fake-server.fixtures.js";
-import { parseRetryAfter } from "./http.js";
+import { isPrivateAddress, parseRetryAfter, type Lookup } from "./http.js";
 import type { ChatRequest, ProviderConfig } from "./types.js";
 
 /*
@@ -423,15 +423,17 @@ describe("failures, retries and limits", () => {
     });
   });
 
-  it("follows no redirect (a key must not travel to another host)", async () => {
+  it("refuses a redirect at once, without retrying (a key must not travel to another host)", async () => {
     api = await fakeApi((_r, res) => {
       res.writeHead(307, { location: "http://127.0.0.1:9/steal" }).end();
     });
     await expect(
       client({ adapter: "openai" }, { apiKey: KEY }).chat(request()),
     ).rejects.toMatchObject({
-      code: "network",
+      code: "refused",
+      status: 307,
     });
+    expect(api.requests).toHaveLength(1);
   });
 
   it("fails as network when nothing listens", async () => {
@@ -462,6 +464,91 @@ describe("failures, retries and limits", () => {
     controller.abort(new Error("gone"));
     await expect(waiting).rejects.toThrow("gone");
     await Promise.all(hold);
+  });
+});
+
+describe("plain http reaches private addresses only, as resolved", () => {
+  const port = () => new URL(api?.url ?? "http://127.0.0.1:9").port;
+  const resolvingTo =
+    (address: string, family = 4): Lookup =>
+    (_host, _options, callback) =>
+      callback(null, [{ address, family }]);
+
+  it("connects when the name resolves to a private address, and to that address", async () => {
+    api = await fakeApi(json(ollamaOk));
+    const c = client(
+      { adapter: "ollama", kind: "local", baseUrl: `http://gpu-box.lan:${port()}` },
+      { lookup: resolvingTo("127.0.0.1") },
+    );
+    expect((await c.chat(request())).text).toBe("{}");
+    expect(api.requests).toHaveLength(1);
+  });
+
+  it("refuses a name that resolves to a public address, before sending anything", async () => {
+    api = await fakeApi(json(ollamaOk));
+    for (const address of ["203.0.113.5", "8.8.8.8", "::ffff:8.8.8.8", "2001:db8::1"]) {
+      const c = client(
+        { adapter: "ollama", kind: "local", baseUrl: `http://gpu-box.lan:${port()}` },
+        { lookup: resolvingTo(address, address.includes(":") ? 6 : 4) },
+      );
+      await expect(c.chat(request()), address).rejects.toMatchObject({
+        code: "blocked",
+        retryable: false,
+      });
+    }
+    // One public address among private ones is enough to refuse.
+    const mixed: Lookup = (_h, _o, cb) =>
+      cb(null, [
+        { address: "127.0.0.1", family: 4 },
+        { address: "93.184.216.34", family: 4 },
+      ]);
+    await expect(
+      client(
+        { adapter: "ollama", kind: "local", baseUrl: `http://x.lan:${port()}` },
+        { lookup: mixed },
+      ).chat(request()),
+    ).rejects.toMatchObject({ code: "blocked" });
+    expect(api.requests).toHaveLength(0);
+  });
+
+  it("refuses a public IP literal, and knows the private ranges", async () => {
+    await expect(
+      client({ adapter: "ollama", kind: "local", baseUrl: "http://93.184.216.34:11434" }).chat(
+        request(),
+      ),
+    ).rejects.toMatchObject({ code: "blocked" });
+    for (const a of [
+      "127.0.0.1",
+      "10.1.2.3",
+      "172.16.0.1",
+      "172.31.255.255",
+      "192.168.1.1",
+      "169.254.1.1",
+      "::1",
+      "fd00::1",
+      "fe80::1",
+      "::ffff:10.0.0.1",
+    ]) {
+      expect(isPrivateAddress(a), a).toBe(true);
+    }
+    for (const a of ["172.32.0.1", "8.8.8.8", "2001:db8::1", "::ffff:8.8.8.8", "localhost", ""]) {
+      expect(isPrivateAddress(a), a).toBe(false);
+    }
+  });
+});
+
+describe("counting", () => {
+  it("counts every request that goes out, retries included", async () => {
+    api = await fakeApi(json({}, 503), json(openaiOk));
+    let sent = 0;
+    await client({ adapter: "openai" }).chat(request({ onAttempt: () => sent++ }));
+    expect(sent).toBe(2);
+  });
+
+  it("estimates a token per CJK character, four characters a token otherwise", () => {
+    expect(estimateTokens("abcdefgh")).toBe(2);
+    expect(estimateTokens("日本語のテキスト")).toBe(8);
+    expect(estimateTokens("한국어 abcd")).toBe(3 + 2);
   });
 });
 

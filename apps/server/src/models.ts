@@ -93,6 +93,19 @@ export function createServerModels(
   };
 }
 
+/**
+ * What to warn about at startup: model providers configured where no summary can run, because
+ * this server reads no version's bytes (no content source: M1 zones are index-only). Null when
+ * there is nothing to say.
+ */
+export function modelsStartupWarning(
+  models: ServerModels | null,
+  hasContentSource: boolean,
+): string | null {
+  if (models === null || hasContentSource) return null;
+  return "model providers are configured, but this server reads no file content yet (no content source): no summaries will run";
+}
+
 /** `o` without its undefined properties, typed so (exactOptionalPropertyTypes). */
 function stripUndefined<T extends object>(o: T): { [K in keyof T]?: Exclude<T[K], undefined> } {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as {

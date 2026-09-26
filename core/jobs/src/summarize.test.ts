@@ -1,5 +1,6 @@
 import {
   ingest,
+  markNotInjection,
   readCard,
   saveExtract,
   viewObjects,
@@ -9,11 +10,13 @@ import {
 import {
   facets,
   facetValues,
+  modelUsage,
   newId,
   objects,
   objectTags,
   tagReviews,
   tenants,
+  versions,
   zones,
   type Database,
   type Tx,
@@ -35,13 +38,13 @@ import {
   type Exposure,
   type ProviderKind,
 } from "@openhoard/core-policy";
-import { ModelOutputError } from "@openhoard/core-summarize";
 import { and, eq } from "drizzle-orm";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EnrichStepError, enrichVersion, ruleTagStep, type EnrichStep } from "./enrich.js";
 import { injectionFlagStep } from "./flag.js";
+import { startJobs } from "./jobs.js";
 import { summarizeStep, type SummarizeStepOptions } from "./summarize.js";
 
 /*
@@ -345,6 +348,34 @@ describe("the summarize step", () => {
   });
 });
 
+describe("a person's 'not an injection' decision", () => {
+  it("is respected by both the flag and the summary, across new versions", async () => {
+    const text = "A security guide: attackers write 'ignore all previous instructions'.";
+    const f = await file("Security guide.txt", text);
+    const { client, calls } = stub("ollama", "local", answer({}));
+    const steps = pipeline(createModelRouter([client]));
+    await run(steps, f.versionId);
+    expect(calls).toHaveLength(0);
+    await inTenant((tx) =>
+      markNotInjection(tx, t.tenantId, { objectId: f.objectId, by: `user:${t.userId}` }),
+    );
+    // Enrichment runs again (an operator's re-run of the same version).
+    await inTenant((tx) =>
+      tx.update(versions).set({ processedAt: null }).where(eq(versions.id, f.versionId)),
+    );
+    expect(await run(steps, f.versionId)).toBe("processed");
+    expect(calls).toHaveLength(1);
+    expect(await card(f.versionId)).toMatchObject({ status: "summarized" });
+    const flags = await inTenant((tx) =>
+      tx
+        .select()
+        .from(objectTags)
+        .where(and(eq(objectTags.objectId, f.objectId), eq(objectTags.facet, "risk"))),
+    );
+    expect(flags).toEqual([]);
+  });
+});
+
 describe("routing by exposure, up to the send", () => {
   const both = () => {
     const local = stub("ollama", "local", answer({ summary: "Local summary." }));
@@ -450,23 +481,47 @@ describe("the budget and the schema", () => {
     expect(await card(f.versionId)).toMatchObject({ status: "summarized" });
   });
 
-  it("fails the step typed when the repair fails too, and settles the budget to what was spent", async () => {
+  it("records model-output when the repair fails too, processes the version, settles the budget", async () => {
     const { client, calls } = stub("ollama", "local", '{"summary": 1}');
     const f = await file("Report.txt", "A report.");
-    const err = await run(pipeline(createModelRouter([client])), f.versionId).catch(
-      (e: unknown) => e,
-    );
-    expect(err).toBeInstanceOf(EnrichStepError);
-    expect((err as EnrichStepError).step).toBe("summarize");
-    expect((err as Error).cause).toBeInstanceOf(ModelOutputError);
+    expect(await run(pipeline(createModelRouter([client])), f.versionId)).toBe("processed");
     expect(calls).toHaveLength(2);
-    expect(await card(f.versionId)).toBe(null);
-    const spent = await inTenant((tx) => tokensToday(tx, t.tenantId));
-    expect(spent).toBeGreaterThan(0);
+    expect(await card(f.versionId)).toMatchObject({ status: "skipped", reason: "model-output" });
+    const [usage] = await inTenant((tx) => tx.select().from(modelUsage));
+    expect(usage?.calls).toBe(2);
+    expect(usage?.tokens).toBeGreaterThan(0);
     // Only the two calls' estimate, not the reservation (which included the output caps).
-    expect(spent).toBeLessThan(2 * 800);
+    expect(usage?.tokens).toBeLessThan(2 * 800);
   });
 });
+
+/** A fake provider API on loopback answering every request with `answer`. */
+async function fakeProvider(answer: (res: ServerResponse) => void) {
+  let requests = 0;
+  const server = createServer((req, res) => {
+    requests++;
+    req.resume();
+    req.on("end", () => answer(res));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    requests: () => requests,
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+    },
+  };
+}
+const openai = (baseUrl: string, more: object = {}) =>
+  createModelClient(
+    { id: "azure", kind: "commercial", adapter: "openai", chatModel: "gpt", baseUrl, ...more },
+    { apiKey: "k", backoffBaseMs: 5 },
+  );
+const reply = (status: number, body: unknown) => (res: ServerResponse) => {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(body));
+};
 
 describe("provider failures", () => {
   it("fails the step with a typed, retryable error that carries no key or content", async () => {
@@ -506,6 +561,104 @@ describe("provider failures", () => {
     } finally {
       server.closeAllConnections();
       await new Promise((r) => server.close(r));
+    }
+  });
+
+  it.each([
+    [
+      "a content filter's 400",
+      reply(400, { error: { code: "content_filter", message: "filtered" } }),
+      "refused",
+    ],
+    ["a wrong key", reply(401, { error: "no" }), "refused"],
+    ["an answer of the wrong shape", reply(200, { choices: [] }), "bad-response"],
+    [
+      "an oversized answer",
+      reply(200, { choices: [{ message: { content: "x".repeat(20_000) } }] }),
+      "too-large",
+    ],
+  ])("records %s as skipped, once, without failing the job", async (_what, answer, reason) => {
+    const api = await fakeProvider(answer);
+    try {
+      const f = await file("Report.txt", "A report.");
+      const client = openai(api.url, { maxResponseBytes: 8_192 });
+      expect(await run(pipeline(createModelRouter([client])), f.versionId)).toBe("processed");
+      expect(await card(f.versionId)).toMatchObject({ status: "skipped", reason });
+      expect(api.requests()).toBe(1);
+      const [usage] = await inTenant((tx) => tx.select().from(modelUsage));
+      expect(usage).toMatchObject({ calls: 1 });
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("clamps absurd reported usage to the reservation", async () => {
+    const api = await fakeProvider(
+      reply(200, {
+        choices: [{ message: { content: answer({}) }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1e15, completion_tokens: 9e14 },
+      }),
+    );
+    try {
+      const f = await file("Report.txt", "A report.");
+      await run(pipeline(createModelRouter([openai(api.url)])), f.versionId);
+      const c = await card(f.versionId);
+      expect(c).toMatchObject({ status: "summarized" });
+      const spent = await inTenant((tx) => tokensToday(tx, t.tenantId));
+      // One call: at most its share of the reservation (input estimate + 800), twice over.
+      expect(spent).toBeLessThan(10_000);
+      expect(c?.status === "summarized" ? c.inputTokens : -1).toBeLessThan(10_000);
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("fails on a transient error, but on the job's last attempt records unavailable", async () => {
+    const api = await fakeProvider(reply(503, { error: "busy" }));
+    try {
+      const f = await file("Report.txt", "A report.");
+      const steps = pipeline(createModelRouter([openai(api.url, { maxRetries: 0 })]));
+      await expect(run(steps, f.versionId)).rejects.toBeInstanceOf(EnrichStepError);
+      expect(await card(f.versionId)).toBe(null);
+      const last = await enrichVersion(
+        db,
+        steps,
+        { tenantId: t.tenantId, versionId: f.versionId },
+        { signal: new AbortController().signal, requeue: async () => {}, finalAttempt: true },
+      );
+      expect(last).toBe("processed");
+      expect(await card(f.versionId)).toMatchObject({ status: "skipped", reason: "unavailable" });
+      // Both reservations went back but for what was spent: nothing reported, nothing counted.
+      expect(await inTenant((tx) => tokensToday(tx, t.tenantId))).toBe(0);
+      const [usage] = await inTenant((tx) => tx.select().from(modelUsage));
+      expect(usage?.calls).toBe(2);
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("the worker tells the step when no retry is left: the version is processed, not dead-lettered", async () => {
+    const api = await fakeProvider(reply(503, { error: "busy" }));
+    const jobs = await startJobs(db, {
+      steps: pipeline(createModelRouter([openai(api.url, { maxRetries: 0 })])),
+      enrich: { retryLimit: 1, retryDelaySeconds: 0, retryBackoff: false },
+      pollingIntervalSeconds: 0.5,
+      maintenance: false,
+    });
+    try {
+      const f = await file("Report.txt", "A report.");
+      await jobs.enqueueVersion(t.tenantId, f.versionId);
+      const deadline = Date.now() + (process.platform === "win32" ? 120_000 : 30_000);
+      let c = await card(f.versionId);
+      while (c === null && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 200));
+        c = await card(f.versionId);
+      }
+      expect(c).toMatchObject({ status: "skipped", reason: "unavailable" });
+      expect(api.requests()).toBe(2);
+    } finally {
+      await jobs.stop({ timeoutMs: 2_000 });
+      await api.close();
     }
   });
 });

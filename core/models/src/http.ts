@@ -1,3 +1,7 @@
+import { lookup as dnsLookup, type LookupAddress, type LookupOptions } from "node:dns";
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { BlockList, isIP } from "node:net";
 import { ModelError } from "./errors.js";
 import type { ModelsLogger } from "./types.js";
 
@@ -10,10 +14,27 @@ import type { ModelsLogger } from "./types.js";
  * - retries with exponential backoff and jitter on 429, 5xx (and Anthropic's 529), timeouts and
  *   connection failures; a Retry-After (seconds or an HTTP date) is honoured when it is short
  *   enough, and ends the call as `rate-limited` when it isn't, so the job's own retry waits;
+ * - no redirects: a 3xx fails the call at once as `refused` (a key must not follow one to
+ *   another host, and a redirect is not something to retry);
+ * - over plain http, only private addresses: loopback, RFC 1918, link-local, and IPv6 unique
+ *   local or link-local. The check runs on the addresses DNS returned, inside the connection's
+ *   own lookup, so the socket connects to an address that was checked: a name that resolves
+ *   elsewhere a second later (DNS rebinding) changes nothing. An IP literal is checked as given.
+ *   Anything else fails as `blocked`, before a byte is sent;
  * - a cap on the response body, read as a stream and cut off past it;
  * - errors and log lines that carry the provider's id, the status and the attempt, never the
  *   request, the response or the headers (the key is in them).
+ *
+ * Node's own http client, not fetch: it lets the lookup be checked and pinned, and never follows
+ * redirects.
  */
+
+/** A dns.lookup-shaped resolver (tests replace it). */
+export type Lookup = (
+  hostname: string,
+  options: LookupOptions & { all: true },
+  callback: (err: NodeJS.ErrnoException | null, addresses: LookupAddress[]) => void,
+) => void;
 
 export interface PostOptions {
   providerId: string;
@@ -27,12 +48,39 @@ export interface PostOptions {
   maxRetryAfterMs: number;
   maxResponseBytes: number;
   log?: ModelsLogger;
+  /** Called each time a request is actually sent (retries count). */
+  onAttempt?: () => void;
   /** Tests shorten the backoff. Default 1,000 ms, doubled per retry, capped at 30 s. */
   backoffBaseMs?: number;
+  /** Tests resolve names their own way. Default dns.lookup. */
+  lookup?: Lookup;
 }
 
 /** HTTP statuses tried again. 529 is Anthropic's "overloaded". */
 const RETRY_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504, 529]);
+
+const PRIVATE = new BlockList();
+PRIVATE.addSubnet("127.0.0.0", 8, "ipv4");
+PRIVATE.addSubnet("10.0.0.0", 8, "ipv4");
+PRIVATE.addSubnet("172.16.0.0", 12, "ipv4");
+PRIVATE.addSubnet("192.168.0.0", 16, "ipv4");
+PRIVATE.addSubnet("169.254.0.0", 16, "ipv4");
+PRIVATE.addAddress("::1", "ipv6");
+PRIVATE.addSubnet("fc00::", 7, "ipv6");
+PRIVATE.addSubnet("fe80::", 10, "ipv6");
+
+/** Whether an address is loopback, RFC 1918, link-local or IPv6 unique local (mapped v4 too). */
+export function isPrivateAddress(address: string): boolean {
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(address);
+  if (mapped?.[1]) return PRIVATE.check(mapped[1], "ipv4");
+  const family = isIP(address);
+  if (family === 4) return PRIVATE.check(address, "ipv4");
+  if (family === 6) return PRIVATE.check(address, "ipv6");
+  return false;
+}
+
+/** Thrown inside the lookup when an address isn't private: the request never connects. */
+class BlockedAddress extends Error {}
 
 /** Waits `ms`, or rejects with the signal's reason when it aborts. */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -63,28 +111,84 @@ export function parseRetryAfter(value: string | null, now = Date.now()): number 
   return Number.isNaN(at) ? null : Math.max(0, at - now);
 }
 
-/** Reads a response body up to `max` bytes; past it, cancels the stream and throws too-large. */
-async function readCapped(response: Response, max: number, providerId: string): Promise<string> {
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > max) {
-    await response.body?.cancel().catch(() => {});
-    throw new ModelError("too-large", providerId, { status: response.status });
-  }
-  if (!response.body) return "";
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > max) {
-      await reader.cancel().catch(() => {});
-      throw new ModelError("too-large", providerId, { status: response.status });
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString("utf8");
+interface Answer {
+  status: number;
+  headers: IncomingHttpHeaders;
+  body: string;
+}
+
+/** One HTTP request; resolves with the whole (capped) answer. */
+function send(
+  url: URL,
+  headers: Record<string, string>,
+  payload: string,
+  signal: AbortSignal,
+  options: { privateOnly: boolean; lookup: Lookup; max: number; providerId: string },
+): Promise<Answer> {
+  return new Promise<Answer>((resolve, reject) => {
+    const checkedLookup = (
+      hostname: string,
+      lookupOptions: LookupOptions,
+      callback: (
+        err: NodeJS.ErrnoException | null,
+        address: string | LookupAddress[],
+        family?: number,
+      ) => void,
+    ) => {
+      options.lookup(hostname, { ...lookupOptions, all: true }, (err, addresses) => {
+        if (err) return callback(err, "");
+        if (addresses.length === 0 || addresses.some((a) => !isPrivateAddress(a.address))) {
+          return callback(new BlockedAddress(), "");
+        }
+        if (lookupOptions.all === true) return callback(null, addresses);
+        const first = addresses[0] as LookupAddress;
+        callback(null, first.address, first.family);
+      });
+    };
+    const req = (url.protocol === "https:" ? httpsRequest : httpRequest)(
+      url,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...headers,
+          "content-length": String(Buffer.byteLength(payload)),
+        },
+        signal,
+        // A fresh connection per request: nothing half-read from a cut-off answer is reused.
+        agent: false,
+        ...(options.privateOnly ? { lookup: checkedLookup as never } : {}),
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        const declared = Number(res.headers["content-length"]);
+        if (Number.isFinite(declared) && declared > options.max) {
+          // Rejected before the destroy, whose own errors then change nothing.
+          reject(new ModelError("too-large", options.providerId, { status }));
+          res.destroy();
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        res.on("data", (chunk: Buffer) => {
+          size += chunk.byteLength;
+          if (size > options.max) {
+            reject(new ModelError("too-large", options.providerId, { status }));
+            res.destroy();
+          } else {
+            chunks.push(chunk);
+          }
+        });
+        res.on("end", () =>
+          resolve({ status, headers: res.headers, body: Buffer.concat(chunks).toString("utf8") }),
+        );
+        res.on("error", reject);
+        res.on("aborted", () => reject(new Error("aborted")));
+      },
+    );
+    req.on("error", reject);
+    req.end(payload);
+  });
 }
 
 /**
@@ -95,6 +199,14 @@ export async function postJson(options: PostOptions): Promise<unknown> {
   const { providerId, signal, log } = options;
   const base = options.backoffBaseMs ?? 1_000;
   const payload = JSON.stringify(options.body);
+  const url = new URL(options.url);
+  const privateOnly = url.protocol === "http:";
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  // An IP literal never goes through the lookup: checked here.
+  if (privateOnly && isIP(host) !== 0 && !isPrivateAddress(host)) {
+    throw new ModelError("blocked", providerId);
+  }
+  const lookup = options.lookup ?? (dnsLookup as unknown as Lookup);
   let last: ModelError | undefined;
   for (let attempt = 0; attempt <= options.maxRetries; attempt++) {
     signal.throwIfAborted();
@@ -113,42 +225,36 @@ export async function postJson(options: PostOptions): Promise<unknown> {
     signal.throwIfAborted();
     const timeout = AbortSignal.timeout(options.timeoutMs);
     const both = AbortSignal.any([signal, timeout]);
-    let response: Response;
+    options.onAttempt?.();
+    let answer: Answer;
     try {
-      response = await fetch(options.url, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...options.headers },
-        body: payload,
-        signal: both,
-        redirect: "error",
+      answer = await send(url, options.headers, payload, both, {
+        privateOnly,
+        lookup,
+        max: options.maxResponseBytes,
+        providerId,
       });
-    } catch {
-      signal.throwIfAborted();
-      last = new ModelError(timeout.aborted ? "timeout" : "network", providerId);
-      continue;
-    }
-    let text: string;
-    try {
-      text = await readCapped(response, options.maxResponseBytes, providerId);
     } catch (e) {
       signal.throwIfAborted();
       if (e instanceof ModelError) throw e;
-      last = new ModelError(timeout.aborted ? "timeout" : "network", providerId, {
-        status: response.status,
-      });
+      if (e instanceof BlockedAddress) throw new ModelError("blocked", providerId);
+      last = new ModelError(timeout.aborted ? "timeout" : "network", providerId);
       continue;
     }
-    if (response.ok) {
+    const { status } = answer;
+    if (status >= 200 && status < 300) {
       try {
-        return JSON.parse(text);
+        return JSON.parse(answer.body);
       } catch {
-        throw new ModelError("bad-response", providerId, { status: response.status });
+        throw new ModelError("bad-response", providerId, { status });
       }
     }
-    const status = response.status;
+    // A redirect is refused outright: never followed, never retried.
+    if (status >= 300 && status < 400) throw new ModelError("refused", providerId, { status });
     if (status === 401 || status === 403) throw new ModelError("auth", providerId, { status });
     if (!RETRY_STATUS.has(status)) throw new ModelError("refused", providerId, { status });
-    const retryAfter = parseRetryAfter(response.headers.get("retry-after"));
+    const header = answer.headers["retry-after"];
+    const retryAfter = parseRetryAfter(typeof header === "string" ? header : null);
     const code = status === 429 ? "rate-limited" : status === 408 ? "timeout" : "server";
     if (retryAfter !== null && retryAfter > options.maxRetryAfterMs) {
       // Longer than a call may wait: the job's own retry (with its backoff) comes back later.

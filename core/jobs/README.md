@@ -119,10 +119,12 @@ the object (core/catalog `applyInjectionFlag()`, applied by `rule:builtin/inject
 which the rule tagger leaves alone); the starter pack's value sets `exposure: metadata-only`, so
 AI clients get metadata-only cards and no content, and every model step after it is withheld by
 the pipeline (people in OpenHoard's own apps still read the file). Not flagged, it takes its own
-flag off again (a clean new version). Without an extraction it scores the name alone. A tenant
-whose vocabulary lacks an approved metadata-only `risk:injection` can't be flagged: the step
-throws `RiskVocabularyError`, the job retries, and the version stays unprocessed (hidden,
-metadata-only) until an admin applies the starter pack. Only pattern ids and a score reach logs.
+flag off again (a clean new version). Without an extraction it scores the name alone (this runs
+in the server today, without a content source). `risk:injection` is built-in vocabulary (core/db
+`ensureBuiltInVocabulary()`: every tenant has it, and it is put back before a flag), so a flag
+never waits on an admin and never leaves a file hidden. A person's "not an injection" decision
+(core/catalog `markNotInjection()`) stops the detector flagging that object, across edits. Only
+pattern ids and a score reach logs.
 
 On the S8 corpus v0 through the real extractor ([s8-corpus.test.ts](src/s8-corpus.test.ts)),
 48 of 50 attack files are flagged (96%) and none of 20 benign files with the same kinds of
@@ -143,8 +145,8 @@ per version and prompt version (`PROMPT_VERSION`), the step:
 4. sends the prompt (core/summarize `buildSummaryPrompt()`: the document as data between
    nonce-carrying markers, the tenant's approved vocabulary without the `risk` facet); the
    provider's client asks `mayProcess` again right before every HTTP attempt;
-5. validates the answer against the strict card schema, repairs once, and fails the step with
-   `ModelOutputError` if the repair fails too (the job retries: models aren't deterministic);
+5. validates the answer against the strict card schema, repairs once, and records `skipped` /
+   `model-output` if the repair fails too;
 6. filters it (`filterCardOutput()`: sentences with instructions, links, emails, markup or role
    labels go; tags outside the vocabulary and in `risk` go) and writes in one guarded
    transaction: the settled token count, the card (`version_cards`), the model's tags through
@@ -152,9 +154,16 @@ per version and prompt version (`PROMPT_VERSION`), the step:
    title proposal (`proposeDisplayTitle()`: non-readers see `Document` until the owner
    confirms).
 
-Provider errors (429 past its Retry-After budget, 5xx, timeouts, a wrong key) fail the step
-with a `ModelError` that names the provider and the status, never the key or the content; the
-job retries with its backoff, and the version stays unprocessed meanwhile (fail closed).
+What a model can't do is recorded, not retried at a cost: an answer that fails the schema twice
+(`model-output`), a refusal (`refused`: a content filter's 400, a wrong key, a blocked address),
+an answer of the wrong shape (`bad-response`) or over the cap (`too-large`) is stored as
+`skipped` with that reason and a warning, and the version is processed without a summary.
+Transient errors (rate-limited, 5xx, timeouts, network) fail the step so the job retries with its
+backoff; on the job's last attempt (`context.finalAttempt`, from pg-boss's retry count) they are
+recorded as `unavailable` instead, so no version is dead-lettered and left hidden for want of a
+summary. Errors name the provider and the status, never the key or the content. Reported usage
+is clamped (whole, not negative, at most the call's share of the reservation) and the
+reservation is always settled, with the HTTP requests that went out counted in `calls`.
 
 **Text extraction** (`extract-text`, [extract.ts](src/extract.ts), T-402). The step reads the
 version's bytes through the `ContentSource` (core/catalog), extracts them in a limited child

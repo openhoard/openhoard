@@ -67,6 +67,8 @@ export interface ChatRequest {
    * no call can skip the check.
    */
   guard: () => Promise<boolean>;
+  /** Called each time a request actually goes out (retries count), for the budget's `calls`. */
+  onAttempt?: () => void;
 }
 
 export interface TokenUsage {

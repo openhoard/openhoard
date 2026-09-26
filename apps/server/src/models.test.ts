@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
-import { createServerModels, DEFAULT_ANTHROPIC_MODEL } from "./models.js";
+import { createServerModels, DEFAULT_ANTHROPIC_MODEL, modelsStartupWarning } from "./models.js";
 
 /*
  * T-404 in the server: providers from `models`, keys only from the environment, and nothing
@@ -116,6 +116,14 @@ describe("models configuration", () => {
       tasks: { summarize: ["gpt"] },
     });
     expect(() => createServerModels(c.models, {})).toThrow("no provider gpt");
+  });
+
+  it("warns at startup when providers are configured but no content can be read", () => {
+    const c = config({ providers: [{ id: "ci", kind: "local", adapter: "stub" }] });
+    const models = createServerModels(c.models, {});
+    expect(modelsStartupWarning(models, false)).toContain("no summaries will run");
+    expect(modelsStartupWarning(models, true)).toBe(null);
+    expect(modelsStartupWarning(null, false)).toBe(null);
   });
 
   it("redacts keys and headers from logs", () => {

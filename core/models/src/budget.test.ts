@@ -58,6 +58,15 @@ describe("the daily token budget", () => {
     expect(await today(a)).toBe(0);
     await db.withTenant(a.tenantId, (tx) => settleTokens(tx, a.tenantId, { ...r, tokens: 500 }, 0));
     expect(await today(a)).toBe(0);
+    // Requests are counted as they went out, and nonsense usage counts as nothing.
+    await db.withTenant(a.tenantId, (tx) =>
+      settleTokens(tx, a.tenantId, { ...r, tokens: 0 }, Number.POSITIVE_INFINITY, 3),
+    );
+    await db.withTenant(a.tenantId, (tx) =>
+      settleTokens(tx, a.tenantId, { ...r, tokens: 0 }, 0, -2),
+    );
+    const [row] = await db.withTenant(a.tenantId, (tx) => tx.select().from(modelUsage));
+    expect(row).toMatchObject({ tokens: 0, calls: 3 });
   });
 
   it("never lets concurrent reservations spend past the budget together", async () => {

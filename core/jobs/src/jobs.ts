@@ -1,7 +1,7 @@
 import type { ContentSource, IngestResult } from "@openhoard/core-catalog";
 import { insideWithTenant, isId, NestedWorkError, type Database } from "@openhoard/core-db";
 import { queueConnectionOf } from "@openhoard/core-db/queue";
-import { PgBoss, type ConstructorOptions, type Job, type Queue } from "pg-boss";
+import { PgBoss, type ConstructorOptions, type JobWithMetadata, type Queue } from "pg-boss";
 import {
   defaultEnrichSteps,
   enrichVersion,
@@ -299,8 +299,15 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
     if (worker) {
       await boss.work<unknown>(
         QUEUES.enrich,
-        { localConcurrency: enrich.concurrency, pollingIntervalSeconds: polling },
-        tracked(async ([job]) => runEnrichJob(db, steps, job as Job<unknown>, enqueueVersion, log)),
+        {
+          localConcurrency: enrich.concurrency,
+          pollingIntervalSeconds: polling,
+          // retryCount and retryLimit: a step knows when a failure would dead-letter the job.
+          includeMetadata: true,
+        },
+        tracked(async ([job]) =>
+          runEnrichJob(db, steps, job as JobWithMetadata<unknown>, enqueueVersion, log),
+        ),
       );
       if (maintenance) {
         await boss.work<unknown>(
@@ -383,7 +390,7 @@ export function enrichKey(payload: EnrichPayload): string {
 async function runEnrichJob(
   db: Database,
   steps: readonly EnrichStep[],
-  job: Job<unknown>,
+  job: JobWithMetadata<unknown>,
   enqueueVersion: (tenantId: string, versionId: string) => Promise<string | null>,
   log: JobsLogger,
 ) {
@@ -392,6 +399,8 @@ async function runEnrichJob(
   const withheld: { step: string; provider: string; exposure: string | null }[] = [];
   const outcome = await enrichVersion(db, steps, job.data, {
     signal: job.signal,
+    // No retry is left after this run: steps record what they couldn't do instead of failing.
+    finalAttempt: job.retryCount >= job.retryLimit,
     requeue: (p) => enqueueVersion(p.tenantId, p.versionId),
     onWithheld: (w) =>
       withheld.push({ step: w.step, provider: w.provider.id, exposure: w.exposure }),

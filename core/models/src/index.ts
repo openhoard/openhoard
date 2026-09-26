@@ -19,7 +19,7 @@ export {
   type StubResponder,
 } from "./clients.js";
 export { MODEL_ERROR_CODES, ModelError, type ModelErrorCode } from "./errors.js";
-export { parseRetryAfter } from "./http.js";
+export { isPrivateAddress, parseRetryAfter, type Lookup } from "./http.js";
 export { createModelRouter, MODEL_TASKS, type ModelRouter, type ModelTask } from "./router.js";
 export {
   ADAPTERS,

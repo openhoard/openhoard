@@ -93,6 +93,12 @@ export interface EnrichContext {
   mayProcess(provider: ModelProvider): Promise<boolean>;
   /** Aborted when the job's lease expires or the worker stops: stop, and throw. */
   readonly signal: AbortSignal;
+  /**
+   * No retry is left after this run: a step that fails now dead-letters the job and leaves the
+   * version unprocessed (hidden). A step whose failure is only a missing extra (a summary)
+   * records it and returns instead.
+   */
+  readonly finalAttempt: boolean;
 }
 
 /**
@@ -263,6 +269,8 @@ export async function enrichVersion(
   payload: unknown,
   options: {
     signal: AbortSignal;
+    /** No retry is left after this run (the worker knows from pg-boss). Default false. */
+    finalAttempt?: boolean;
     requeue: (payload: EnrichPayload) => Promise<unknown>;
     /** A step skipped because the file's exposure keeps its content from the step's provider. */
     onWithheld?: (withheld: WithheldStep) => void;
@@ -306,6 +314,7 @@ export async function enrichVersion(
       return done.value as Awaited<ReturnType<typeof work>>;
     },
     signal: options.signal,
+    finalAttempt: options.finalAttempt === true,
   };
   for (const step of steps) {
     options.signal.throwIfAborted();

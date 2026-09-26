@@ -63,9 +63,9 @@ export async function reserveTokens(
   const rows = await queryRows<{ day: string }>(
     tx,
     sql`insert into model_usage as u (tenant_id, day, tokens, calls)
-        values (${tenantId}, to_char(now() at time zone 'utc', 'YYYY-MM-DD'), ${tokens}, 1)
+        values (${tenantId}, to_char(now() at time zone 'utc', 'YYYY-MM-DD'), ${tokens}, 0)
         on conflict (tenant_id, day) do update
-          set tokens = u.tokens + excluded.tokens, calls = u.calls + 1, updated_at = now()
+          set tokens = u.tokens + excluded.tokens, updated_at = now()
           where u.tokens + excluded.tokens <= ${limit}
         returning u.day`,
   );
@@ -74,20 +74,29 @@ export async function reserveTokens(
 }
 
 /**
- * Replaces a reservation with what was actually spent (never below zero for the day). A call
- * that failed before sending anything settles with 0.
+ * Replaces a reservation with what was actually spent (never below zero for the day), and adds
+ * the HTTP requests that went out (`calls`: retries and repairs each count). A call that failed
+ * before sending anything settles with 0 and 0. `used` must already be bounded by the caller
+ * (the summarize step clamps what providers report); anything not a finite number counts as 0.
  */
 export async function settleTokens(
   tx: Tx,
   tenantId: string,
   reservation: Reservation,
   used: number,
+  calls = 0,
 ): Promise<void> {
-  const delta = Math.max(0, Math.floor(used)) - reservation.tokens;
-  if (delta === 0) return;
+  const spent = Number.isFinite(used) ? Math.max(0, Math.floor(used)) : 0;
+  const requests = Number.isSafeInteger(calls) && calls > 0 ? calls : 0;
+  const delta = spent - reservation.tokens;
+  if (delta === 0 && requests === 0) return;
   await tx
     .update(modelUsage)
-    .set({ tokens: sql`greatest(0, ${modelUsage.tokens} + ${delta})`, updatedAt: sql`now()` })
+    .set({
+      tokens: sql`greatest(0, ${modelUsage.tokens} + ${delta})`,
+      calls: sql`${modelUsage.calls} + ${requests}`,
+      updatedAt: sql`now()`,
+    })
     .where(and(eq(modelUsage.tenantId, tenantId), eq(modelUsage.day, reservation.day)));
 }
 

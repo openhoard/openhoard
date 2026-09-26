@@ -26,6 +26,8 @@ export const MODEL_ERROR_CODES = [
   "too-large",
   /** The provider has no such operation (embeddings on Anthropic's API). */
   "unsupported",
+  /** Plain http to an address that isn't loopback or private (checked on the resolved one). */
+  "blocked",
 ] as const;
 export type ModelErrorCode = (typeof MODEL_ERROR_CODES)[number];
 

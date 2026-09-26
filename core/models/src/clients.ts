@@ -1,6 +1,6 @@
 import { mayProcess, type ProviderKind } from "@openhoard/core-policy";
 import { ModelError } from "./errors.js";
-import { postJson } from "./http.js";
+import { postJson, type Lookup } from "./http.js";
 import type {
   Adapter,
   ChatRequest,
@@ -153,9 +153,17 @@ function limiter(n: number) {
   };
 }
 
-/** An estimate of tokens for text: four characters a token, rounded up. */
+/** Han, kana and Hangul: about a token a character in every tokenizer we know of. */
+const DENSE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
+
+/**
+ * An estimate of tokens for text: a token for each Chinese, Japanese or Korean character, four
+ * other characters a token, rounded up. Deliberately high rather than low: it sizes budget
+ * reservations, and CJK text at four characters a token would be undercounted about fourfold.
+ */
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  const dense = text.length - text.replace(DENSE, "").length;
+  return dense + Math.ceil((text.length - dense) / 4);
 }
 
 const num = (v: unknown): number | null =>
@@ -172,6 +180,8 @@ export interface ClientOptions {
   stub?: StubResponder;
   /** Tests shorten the backoff between retries. */
   backoffBaseMs?: number;
+  /** Tests resolve host names their own way (the private-address check). */
+  lookup?: Lookup;
 }
 
 /**
@@ -226,6 +236,8 @@ export function createModelClient(
       ...settings,
       ...(options.log ? { log: options.log } : {}),
       ...(options.backoffBaseMs === undefined ? {} : { backoffBaseMs: options.backoffBaseMs }),
+      ...(options.lookup === undefined ? {} : { lookup: options.lookup }),
+      ...("onAttempt" in r && r.onAttempt !== undefined ? { onAttempt: r.onAttempt } : {}),
     });
   const bad = () => new ModelError("bad-response", config.id);
   const cap = (r: ChatRequest) => Math.min(r.maxOutputTokens ?? maxOutputTokens, maxOutputTokens);
@@ -238,6 +250,7 @@ export function createModelClient(
     async stub(r) {
       if (!(await r.guard())) throw new ModelError("withheld", config.id);
       r.signal.throwIfAborted();
+      r.onAttempt?.();
       const text = (options.stub ?? echoResponder)({ system: r.system, user: r.user });
       return { text, usage: estimate(r, text), truncated: false };
     },

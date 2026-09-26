@@ -6,7 +6,7 @@ import { adminArgument, runAdmin } from "./admin.js";
 import { closeApp, createApp } from "./app.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
-import { createServerModels } from "./models.js";
+import { createServerModels, modelsStartupWarning } from "./models.js";
 
 // `main.js [options] admin …` runs an admin command (admin.ts) instead of the server, then exits.
 // `admin` is the first argument that isn't an option (`--data-dir x admin …` is admin too).
@@ -49,6 +49,9 @@ let jobs: Jobs;
 try {
   // Model providers (T-404) from `models`, keys from OPENHOARD_MODEL_<ID>_API_KEY; none, no model.
   const models = createServerModels(config.models, process.env, log.child({ component: "models" }));
+  // The server passes no content source yet (M1 zones are index-only): say so, once.
+  const warning = modelsStartupWarning(models, false);
+  if (warning !== null) log.warn(warning);
   jobs = await startJobs(db, {
     worker: config.jobs.worker,
     log: log.child({ component: "jobs" }),
