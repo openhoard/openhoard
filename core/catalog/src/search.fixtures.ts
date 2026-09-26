@@ -44,7 +44,7 @@ export interface DocInput {
   text?: string;
   summary?: { text: string; kind: "local" | "commercial" | "consumer" };
   /** Vectors under this model, of the summary and the text as one chunk. */
-  embed?: { model: string; dimensions?: number };
+  embed?: { model: string; dimensions?: number; kind?: "local" | "commercial" | "consumer" };
   owner?: string;
   processed?: boolean;
 }
@@ -161,7 +161,7 @@ export async function addDoc(
         objectId,
         versionId,
         model: doc.embed.model,
-        providerKind: "local",
+        providerKind: doc.embed.kind ?? "local",
         items,
       });
     }

@@ -459,7 +459,10 @@ describe("searchObjects and suggestTitles under the leak harness (T-504, T-505, 
     async () => {
       const report = await runLeakHarness({
         tenant,
-        target: searchAs({ client: { id: "ai", trust: "commercial" }, tuning: { exactLimit: 0 } }),
+        target: searchAs({
+          client: { id: "ai", trust: "commercial" },
+          tuning: { exactLimit: 0, neighbours: 2 },
+        }),
         sampleUsers: 3,
         contentCanaries,
         contentVisible: contentVisibleTo("commercial"),

@@ -345,6 +345,24 @@ through the GIN indexes; working out who may see them, and the vector search's e
 of thousands, seconds at 100,000+ (`scripts/vector-recall.ts` measures it). Spike S1's
 per-principal visible-row counts and a set-based level computation are the next step.
 
+**Timing.** Because SQL works out every candidate's levels, a search takes longer the more files
+there are that the caller can't see: about 6 ms per 4,000 hidden files (review measurement). A patient
+caller can estimate, from response times, roughly how many files exist that they can't see (a
+count, never which files or what is in them). Padding responses or precomputing visible sets
+closes it; neither is done in M1.
+
+**One HNSW index per size, shared by every tenant.** An iterative scan filters by tenant and
+access as it goes, so another tenant's dense cluster near a query can use up its tuple budget
+(`hnsw.max_scan_tuples`, set to `HNSW_MAX_SCAN_TUPLES`, 40,000, for the HNSW statement). A scan
+that comes back with fewer than the neighbours asked for falls back to exact search, and
+`vectorPlans` reports the plan that answered. Partition the vector indexes by tenant before
+hosting many tenants on one database.
+
+**Vectors and their provider.** Like a summary, a vector matches only while the file's exposure
+still allows the kind of provider that made it: a file tightened to local-only since a commercial
+model embedded it isn't found by those vectors (its words still match). Re-embedding it with an
+allowed provider is `reembed()` after a model change; tightening doesn't enqueue it yet.
+
 **Recall (T-502).** `vector-recall.test.ts` builds 1,200 files of 384-dimension vectors and
 checks filtered recall@10 on the HNSW path stays within 5 points of unfiltered, and that the
 production plan is exact for small visible sets; `pnpm --filter @openhoard/core-catalog

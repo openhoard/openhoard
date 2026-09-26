@@ -92,7 +92,9 @@ need.
 named the same way, for core/catalog's hybrid search (T-503). The query is the caller's own
 words, not a file's content, so no file's exposure applies; it goes to `local` providers only
 unless `kinds` says otherwise. A provider that fails is left out (its code logged, never the
-query), and search goes on with keywords.
+query), and search goes on with keywords. With `budget: { db, tenantId, budget }` each call
+counts in the tenant's daily budget like enrichment's (tokens and `calls`, local providers
+too); a spent budget leaves the model out. Call it outside any `withTenant()` transaction.
 
 ## The daily token budget
 

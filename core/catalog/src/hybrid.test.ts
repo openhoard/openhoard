@@ -370,7 +370,7 @@ describe("vector search (T-502)", () => {
     const q = vectorQuery("safari", "zebra giraffe", 384);
     const exact = await search(q);
     expect(exact.vectorPlans).toEqual([{ model: MODEL, plan: "exact" }]);
-    const hnsw = await search(q, { tuning: { exactLimit: 1 } });
+    const hnsw = await search(q, { tuning: { exactLimit: 1, neighbours: 1 } });
     expect(hnsw.vectorPlans).toEqual([{ model: MODEL, plan: "hnsw" }]);
     expect(hnsw.hits.map((h) => h.id)).toEqual([zebra]);
     expect(exact.hits.map((h) => h.id)).toEqual([zebra]);
@@ -386,11 +386,11 @@ describe("vector search (T-502)", () => {
     const plan = await db.withTenant(
       t.tenantId,
       async (tx) => {
-        const eligible = sql`with eligible as (select object_id as id, version_id from search_documents)`;
+        const eligible = sql`with eligible as (select object_id as id, version_id, 3 as exposure from search_documents)`;
         const rows = await withHnswSettings(tx, async () => {
-          const inside = await queryRows<{ ef: string; scan: string }>(
+          const inside = await queryRows<{ ef: string; scan: string; max: string }>(
             tx,
-            sql`select current_setting('hnsw.ef_search') as ef, current_setting('hnsw.iterative_scan') as scan`,
+            sql`select current_setting('hnsw.ef_search') as ef, current_setting('hnsw.iterative_scan') as scan, current_setting('hnsw.max_scan_tuples') as max`,
           );
           const explained = await queryRows<Record<string, string>>(
             tx,
@@ -398,16 +398,16 @@ describe("vector search (T-502)", () => {
           );
           return { inside, explained };
         });
-        const after = await queryRows<{ ef: string; scan: string }>(
+        const after = await queryRows<{ ef: string; scan: string; max: string }>(
           tx,
-          sql`select current_setting('hnsw.ef_search') as ef, current_setting('hnsw.iterative_scan') as scan`,
+          sql`select current_setting('hnsw.ef_search') as ef, current_setting('hnsw.iterative_scan') as scan, current_setting('hnsw.max_scan_tuples') as max`,
         );
         return { ...rows, after };
       },
       VIEW_TRANSACTION,
     );
-    expect(plan.inside).toEqual([{ ef: "200", scan: "relaxed_order" }]);
-    expect(plan.after).toEqual([{ ef: "40", scan: "off" }]);
+    expect(plan.inside).toEqual([{ ef: "200", scan: "relaxed_order", max: "40000" }]);
+    expect(plan.after).toEqual([{ ef: "40", scan: "off", max: "20000" }]);
     const text = plan.explained.map((r) => Object.values(r).join(" ")).join("\n");
     expect(text).toMatch(/version_embeddings_hnsw_768/);
     expect(() => hnswSql(sql``, t.tenantId, { model: MODEL, vector: [1, 0] }, 10)).toThrow(

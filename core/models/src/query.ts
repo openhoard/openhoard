@@ -1,5 +1,7 @@
+import type { Database } from "@openhoard/core-db";
 import type { ProviderKind } from "@openhoard/core-policy";
-import { embeddingModelId } from "./clients.js";
+import { reserveTokens, settleTokens, type TokenBudget } from "./budget.js";
+import { embeddingModelId, estimateTokens } from "./clients.js";
 import type { ModelRouter } from "./router.js";
 import type { ModelsLogger } from "./types.js";
 
@@ -15,6 +17,10 @@ import type { ModelsLogger } from "./types.js";
  * `kinds` widens that. A provider that fails is left out, and search goes on without its
  * vectors: keyword search never depends on a model (and with no embeddings configured at all,
  * this returns nothing and search is keyword only).
+ *
+ * Every call counts in the tenant's daily token budget (`budget`), local providers too, as
+ * enrichment's calls do: tokens reserved from an estimate before the call, settled with what the
+ * provider reported, and the request counted in `calls`. A spent budget leaves the model out.
  */
 
 /** A query's embedding under one model. */
@@ -30,6 +36,11 @@ export interface EmbedQueryOptions {
   kinds?: readonly ProviderKind[];
   /** Longest query text sent, in characters. Default 1,000 (the search's own cap). */
   maxChars?: number;
+  /**
+   * The tenant's budget to count the calls in (core/models reserveTokens()): each in a short
+   * transaction of its own, so call embedQuery() outside any withTenant() callback.
+   */
+  budget?: { db: Database; tenantId: string; budget: TokenBudget };
   log?: ModelsLogger;
 }
 
@@ -42,6 +53,7 @@ export async function embedQuery(
   const query = [...text.trim()].slice(0, options.maxChars ?? 1_000).join("");
   if (query === "") return [];
   const kinds = options.kinds ?? ["local"];
+  const account = options.budget;
   const out: QueryEmbedding[] = [];
   const seen = new Set<string>();
   for (const client of router.candidates("embed")) {
@@ -50,13 +62,34 @@ export async function embedQuery(
       continue;
     }
     seen.add(model);
+    const estimate = estimateTokens(query);
+    const reservation =
+      account === undefined
+        ? undefined
+        : await account.db.withTenant(account.tenantId, (tx) =>
+            reserveTokens(
+              tx,
+              account.tenantId,
+              estimate,
+              account.budget.limitFor(account.tenantId),
+            ),
+          );
+    if (reservation === null) {
+      options.log?.warn?.(
+        { provider: client.id, code: "budget" },
+        "model token budget spent for today: searching without query embeddings",
+      );
+      continue;
+    }
+    let used = 0;
     try {
-      const { vectors } = await client.embed({
+      const { vectors, usage } = await client.embed({
         texts: [query],
         signal: options.signal,
         // The caller's own words: which kinds may have them is `kinds`, checked above.
         guard: () => Promise.resolve(true),
       });
+      used = Number.isFinite(usage.inputTokens) ? Math.min(estimate * 4, usage.inputTokens) : 0;
       const vector = vectors[0];
       if (vector !== undefined) out.push({ model, vector });
     } catch (e) {
@@ -66,6 +99,14 @@ export async function embedQuery(
         { provider: client.id, code: (e as { code?: unknown }).code ?? "error" },
         "query embedding failed: searching without it",
       );
+    } finally {
+      if (account !== undefined && reservation !== undefined) {
+        await account.db
+          .withTenant(account.tenantId, (tx) =>
+            settleTokens(tx, account.tenantId, reservation, used, 1),
+          )
+          .catch(() => {});
+      }
     }
   }
   return out;

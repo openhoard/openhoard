@@ -1,4 +1,8 @@
+import { modelUsage } from "@openhoard/core-db";
+import { openTestDatabase, seedTenant } from "@openhoard/core-db/testing";
+import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
+import { dailyTokenBudget } from "./budget.js";
 import {
   checkProviderConfig,
   createModelClient,
@@ -109,5 +113,36 @@ describe("embedQuery", () => {
     await expect(
       embedQuery(createModelRouter([slow]), "q", { signal: stopped.signal }),
     ).rejects.toThrow("aborted");
+  });
+});
+
+describe("embedQuery and the budget", () => {
+  it("counts every query embedding in the tenant's budget, local ones too, and stops when it is spent", async () => {
+    const db = await openTestDatabase();
+    try {
+      const t = await seedTenant(db, 1);
+      const router = createModelRouter([stub("ollama", "local", { embedModel: "a" })]);
+      const usage = () =>
+        db.withTenant(t.tenantId, (tx) =>
+          tx.select().from(modelUsage).where(eq(modelUsage.tenantId, t.tenantId)),
+        );
+      const account = { db, tenantId: t.tenantId, budget: dailyTokenBudget(1_000) };
+      const out = await embedQuery(router, "zebra giraffe", { signal: signal(), budget: account });
+      expect(out).toHaveLength(1);
+      const [row] = await usage();
+      expect(row?.calls).toBe(1);
+      expect(Number(row?.tokens)).toBeGreaterThan(0);
+      const warned: string[] = [];
+      const spent = await embedQuery(router, "zebra", {
+        signal: signal(),
+        budget: { ...account, budget: dailyTokenBudget(0) },
+        log: { warn: (_fields, message) => void warned.push(message) },
+      });
+      expect(spent).toEqual([]);
+      expect(warned[0]).toMatch(/budget spent/);
+      expect((await usage())[0]?.calls).toBe(1);
+    } finally {
+      await db.close();
+    }
   });
 });

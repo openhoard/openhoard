@@ -83,6 +83,13 @@ export const EXACT_SEARCH_ROWS = 50_000;
 /** Spike S1's HNSW settings above the threshold. */
 export const HNSW_EF_SEARCH = 200;
 export const HNSW_ITERATIVE_SCAN = "relaxed_order";
+/**
+ * How many index tuples an iterative scan visits at most (`hnsw.max_scan_tuples`). The HNSW
+ * indexes serve every tenant, so a scan may pass other tenants' (or other callers') vectors
+ * first; past this bound it stops, and a short answer falls back to exact search. Partition the
+ * vector indexes by tenant before hosting many tenants on one database (T-502 follow-up).
+ */
+export const HNSW_MAX_SCAN_TUPLES = 40_000;
 /** Nearest files per model a vector search returns at most. */
 export const VECTOR_NEIGHBOURS = 50;
 /** Query embeddings one search uses at most. */
@@ -123,6 +130,8 @@ export interface SearchTuning {
   minSimilarity?: number;
   /** Activity from this many days back boosts a hit. Default 30. */
   activityDays?: number;
+  /** `hnsw.max_scan_tuples` for the HNSW plan. Default {@link HNSW_MAX_SCAN_TUPLES}. */
+  maxScanTuples?: number;
 }
 
 /** A field a keyword match was on. */
@@ -447,10 +456,16 @@ function tagMatch(tenantId: string, tags: readonly string[], shown: SQL): SQL {
  * where SQL expects a reader, exposure, as ranks; and whether the caller may have its content
  * (`content_ok`) and its summary (`summary_ok`, the provider that wrote it still allowed).
  */
+/**
+ * The least exposure rank at which a provider of this kind may have a file's content
+ * (core/policy mayProcess()): local 1, commercial 2, consumer 3, anything else never.
+ */
+const providerNeed = (kind: SQL) =>
+  sql`(case ${kind} when 'local' then 1 when 'commercial' then 2 when 'consumer' then 3 else ${NEVER} end)`;
+
 function levelled(tenantId: string, caller: Caller, from: SQL): SQL {
   const exposure = effectiveLevel(tenantId, "exposure");
-  const need = (kind: SQL) =>
-    sql`(case ${kind} when 'local' then 1 when 'commercial' then 2 when 'consumer' then 3 else ${NEVER} end)`;
+  const need = providerNeed;
   return sql`select b.*,
              (b.readable and b.exposure >= ${caller.contentNeed}) as content_ok,
              (b.readable and b.exposure >= ${caller.contentNeed}
@@ -543,7 +558,9 @@ async function gatedMatches(
         updated(y.view) - updated(x.view) ||
         (x.view.id < y.view.id ? -1 : x.view.id > y.view.id ? 1 : 0),
     );
-  const lists: ChannelList<"keyword" | "vector" | "activity">[] = [
+  // One vector list per model (`vector:<model>`): similarities of different models don't
+  // compare, and an explanation pairs each model's rank with its own similarity.
+  const lists: ChannelList<"keyword" | `vector:${string}` | "activity">[] = [
     { channel: "keyword", ids: byKeyword.map((s) => s.view.id) },
   ];
   const models = match.vectors.map((v) => v.model);
@@ -554,7 +571,11 @@ async function gatedMatches(
         return m === undefined ? [] : [{ id: s.view.id, similarity: m.similarity }];
       })
       .sort((x, y) => y.similarity - x.similarity || (x.id < y.id ? -1 : 1));
-    lists.push({ channel: "vector", ids: ranked.map((r) => r.id), weight: 1 / models.length });
+    lists.push({
+      channel: `vector:${model}`,
+      ids: ranked.map((r) => r.id),
+      weight: 1 / models.length,
+    });
   }
   // Activity only reorders what matched; with no words it orders a listing too.
   const recent =
@@ -577,17 +598,32 @@ async function gatedMatches(
     if (f.ranks.keyword !== undefined && s.keyword !== undefined) {
       channels.keyword = { rank: f.ranks.keyword, fields: s.keyword.fields };
     }
-    if (f.ranks.vector !== undefined && s.vector !== undefined) {
-      // The best model's place, among those that found it.
-      const best = [...s.vector].sort((x, y) => y.similarity - x.similarity)[0];
-      if (best !== undefined) {
-        channels.vector = { rank: f.ranks.vector, similarity: best.similarity, model: best.model };
-      }
-    }
+    // The model it is most similar by, with its place in that model's list.
+    const best = s.vector === undefined ? undefined : bestModel(s.vector, f.ranks);
+    if (best !== undefined) channels.vector = best;
     if (f.ranks.activity !== undefined) channels.activity = { rank: f.ranks.activity };
     return { view: s.view, explanation: { id: f.id, score: f.score, channels } };
   });
   return { hits, lowerBound: rows.length > SEARCH_CANDIDATES, plans };
+}
+
+/**
+ * A hit's vector explanation: the model it is most similar by (ties by name), its similarity
+ * and its rank in that model's list, so the two always describe the same list.
+ */
+export function bestModel(
+  found: readonly { model: string; similarity: number }[],
+  ranks: Partial<Record<string, number>>,
+): { rank: number; similarity: number; model: string } | undefined {
+  const ranked = found.flatMap((v) => {
+    const rank = ranks[`vector:${v.model}`];
+    return rank === undefined ? [] : [{ ...v, rank }];
+  });
+  ranked.sort(
+    (x, y) => y.similarity - x.similarity || (x.model < y.model ? -1 : x.model > y.model ? 1 : 0),
+  );
+  const best = ranked[0];
+  return best && { rank: best.rank, similarity: best.similarity, model: best.model };
 }
 
 /** A card's update time; -Infinity for a title-only view, which doesn't show one. */
@@ -790,16 +826,30 @@ async function nearest(
   const dimensions = query.vector.length;
   const literal = `[${query.vector.join(",")}]`;
   // The vectors a caller may be matched on: current versions (the search document's) of files
-  // SQL expects them to read, whose exposure reaches the client, carrying the tag filters.
+  // SQL expects them to read, whose exposure reaches the client, carrying the tag filters; and
+  // of those, only vectors whose provider the file's exposure still allows (as a summary is
+  // shown, T-405): a file tightened to local-only since a commercial model embedded it
+  // matches nothing by those vectors.
   const eligible = sql`with candidates as (${candidates(tenantId, caller, sql`true`)}),
       levelled as (${levelled(tenantId, caller, sql`select * from candidates where readable`)}),
-      eligible as materialized (select a.id, a.version_id from levelled a
+      eligible as materialized (select a.id, a.version_id, a.exposure from levelled a
                     where a.content_ok and a.version_id is not null
                       and ${tagMatch(tenantId, tags, sql`true`)})`;
+  const allowed = sql`x.exposure >= ${providerNeed(sql`e.provider_kind`)}`;
   // One statement counts the visible vectors (at most one past the threshold) and, when the
   // count says exact, searches exactly: the eligible set is worked out once. Past the threshold
   // the exact half doesn't run (its condition is false before any row is read).
   const indexed = (INDEXED_DIMENSIONS as readonly number[]).includes(dimensions);
+  const exact = (where: SQL) => sql`
+            -- No index can serve this ORDER BY: the indexes are on a cast to a fixed size.
+            select e.object_id as id, min(e.embedding <=> ${literal}::vector) as distance
+              from version_embeddings e
+              join eligible x on x.id = e.object_id and x.version_id = e.version_id
+             where e.tenant_id = ${tenantId} and e.model = ${query.model}
+               and e.dimensions = ${dimensions} and ${allowed} and ${where}
+             group by e.object_id
+             order by distance, id
+             limit ${neighbours}`;
   const counted = await queryRows<{ n: number; id: string | null; distance: number | null }>(
     tx,
     sql`${eligible},
@@ -808,31 +858,34 @@ async function nearest(
             select 1 from version_embeddings e
               join eligible x on x.id = e.object_id and x.version_id = e.version_id
              where e.tenant_id = ${tenantId} and e.model = ${query.model}
-               and e.dimensions = ${dimensions}
+               and e.dimensions = ${dimensions} and ${allowed}
              limit ${exactLimit + 1}) c)
         select c.n, exact.id, exact.distance from counted c
-          left join lateral (
-            -- No index can serve this ORDER BY: the indexes are on a cast to a fixed size.
-            select e.object_id as id, min(e.embedding <=> ${literal}::vector) as distance
-              from version_embeddings e
-              join eligible x on x.id = e.object_id and x.version_id = e.version_id
-             where e.tenant_id = ${tenantId} and e.model = ${query.model}
-               and e.dimensions = ${dimensions}
-               and ${indexed ? sql`c.n <= ${exactLimit}::bigint` : sql`true`}
-             group by e.object_id
-             order by distance, id
-             limit ${neighbours}) exact on true`,
+          left join lateral (${exact(indexed ? sql`c.n <= ${exactLimit}::bigint` : sql`true`)}) exact
+            on true`,
   );
-  const plan = vectorPlanFor(Number(counted[0]?.n ?? 0), dimensions, exactLimit);
-  const rows =
-    plan === "exact"
-      ? counted.flatMap((r) => (r.id === null ? [] : [{ id: r.id, distance: Number(r.distance) }]))
-      : await withHnswSettings(tx, () =>
-          queryRows<{ id: string; distance: number }>(
-            tx,
-            hnswSql(eligible, tenantId, query, neighbours),
-          ),
-        );
+  const toRows = (list: { id: string | null; distance: number | null }[]) =>
+    list.flatMap((r) => (r.id === null ? [] : [{ id: r.id, distance: Number(r.distance) }]));
+  let plan = vectorPlanFor(Number(counted[0]?.n ?? 0), dimensions, exactLimit);
+  let rows = toRows(counted);
+  if (plan === "hnsw") {
+    rows = await withHnswSettings(
+      tx,
+      () =>
+        queryRows<{ id: string; distance: number }>(
+          tx,
+          hnswSql(eligible, tenantId, query, neighbours),
+        ),
+      tuning.maxScanTuples,
+    );
+    // The index serves every tenant (and every caller's files): an iterative scan can stop at
+    // its tuple limit among others' vectors before it has found this caller's nearest. Fewer
+    // than asked, while more than the threshold are visible, means it did: search exactly.
+    if (rows.length < neighbours) {
+      plan = "exact";
+      rows = toRows(await queryRows(tx, sql`${eligible} ${exact(sql`true`)}`));
+    }
+  }
   return {
     plan,
     near: rows
@@ -844,9 +897,11 @@ async function nearest(
 /**
  * The HNSW query (exported for the plan tests): the model's partial index, by the same cast and
  * predicate as its definition (migration 0053; the size is from INDEXED_DIMENSIONS, never from
- * input), the filter kept a subplan (OFFSET 0) so the index scan checks each row it yields;
- * more rows than files, since a file has several chunks, re-sorted because relaxed order may
- * return near neighbours slightly out of order.
+ * input), the filter kept a subplan (OFFSET 0) so the index scan checks each row it yields: the
+ * row's version must be eligible and its provider allowed by the file's exposure (one text key,
+ * `version:kind`, so the subplan is hashed); more rows than files, since a file has several
+ * chunks, re-sorted because relaxed order may return near neighbours slightly out of order.
+ * `eligible` is a WITH clause defining `eligible(id, version_id, exposure)`.
  */
 export function hnswSql(
   eligible: SQL,
@@ -862,12 +917,17 @@ export function hnswSql(
   const literal = `[${query.vector.join(",")}]`;
   const distance = sql`e.embedding::${cast} <=> ${literal}::${cast}`;
   return sql`${eligible},
+      allowed as materialized (
+        select x.version_id || ':' || k.kind as key
+          from eligible x
+          cross join (values ('local', 1), ('commercial', 2), ('consumer', 3)) k(kind, need)
+         where x.exposure >= k.need),
       near as materialized (
         select e.object_id, ${distance} as distance
           from version_embeddings e
          where e.tenant_id = ${tenantId} and e.model = ${query.model}
            and e.dimensions = ${sql.raw(String(dimensions))}
-           and e.version_id in (select version_id from eligible offset 0)
+           and e.version_id || ':' || e.provider_kind in (select key from allowed offset 0)
          order by ${distance}
          limit ${neighbours * 4})
       select object_id as id, min(distance) as distance from near
@@ -879,28 +939,51 @@ export function hnswSql(
 /**
  * Runs `work` with spike S1's HNSW settings, local to the transaction, and puts the previous
  * values back after, so nothing else in the caller's transaction runs with them.
+ * `hnsw.max_scan_tuples` bounds how far an iterative scan goes ({@link HNSW_MAX_SCAN_TUPLES}):
+ * the index is shared by every tenant, so without a bound a caller's search could walk another
+ * tenant's dense cluster; with it, the caller searches exactly when the scan comes back short.
+ * If `work` fails (the transaction is then aborted and the restore can't run), its error is the
+ * one thrown, not the restore's.
  */
-export async function withHnswSettings<T>(tx: Tx, work: () => Promise<T>): Promise<T> {
-  const [before] = await queryRows<{ ef: string | null; scan: string | null }>(
+export async function withHnswSettings<T>(
+  tx: Tx,
+  work: () => Promise<T>,
+  maxScanTuples = HNSW_MAX_SCAN_TUPLES,
+): Promise<T> {
+  if (!Number.isSafeInteger(maxScanTuples) || maxScanTuples < 1) {
+    throw new RangeError("maxScanTuples must be a positive whole number");
+  }
+  const [before] = await queryRows<{ ef: string | null; scan: string | null; max: string | null }>(
     tx,
     sql`select current_setting('hnsw.ef_search', true) as ef,
-               current_setting('hnsw.iterative_scan', true) as scan`,
+               current_setting('hnsw.iterative_scan', true) as scan,
+               current_setting('hnsw.max_scan_tuples', true) as max`,
   );
   await queryRows(
     tx,
     sql`select set_config('hnsw.ef_search', ${String(HNSW_EF_SEARCH)}, true),
-               set_config('hnsw.iterative_scan', ${HNSW_ITERATIVE_SCAN}, true)`,
+               set_config('hnsw.iterative_scan', ${HNSW_ITERATIVE_SCAN}, true),
+               set_config('hnsw.max_scan_tuples', ${String(maxScanTuples)}, true)`,
   );
-  try {
-    return await work();
-  } finally {
+  const restore = () =>
     // pgvector's own defaults when nothing was set before (the library may load only now).
-    await queryRows(
+    queryRows(
       tx,
       sql`select set_config('hnsw.ef_search', ${before?.ef || "40"}, true),
-                 set_config('hnsw.iterative_scan', ${before?.scan || "off"}, true)`,
+                 set_config('hnsw.iterative_scan', ${before?.scan || "off"}, true),
+                 set_config('hnsw.max_scan_tuples', ${before?.max || "20000"}, true)`,
     );
+  let result: T;
+  try {
+    result = await work();
+  } catch (e) {
+    // The transaction is likely aborted: the restore would fail with "current transaction is
+    // aborted" and hide what went wrong. The transaction ends anyway, and its settings with it.
+    await restore().catch(() => {});
+    throw e;
   }
+  await restore();
+  return result;
 }
 
 /** The caller's own views, opens and edits of these files lately, most recent first. */
