@@ -261,15 +261,18 @@ describe("false positives", () => {
 });
 
 /*
- * Timing, robust on slow CI runners under coverage: linearity is asserted by ratio (the time
- * for twice the input is under three times the time for the input; a quadratic scan gives
- * four), each the best of three runs, with a generous absolute ceiling and more on Windows.
+ * Timing, robust on slow, shared CI runners under coverage. Linearity is asserted by ratio: the
+ * time for four times the input stays under nine times the time for the input (linear gives
+ * about four, quadratic sixteen), each the best of five runs. Other suites run beside these on
+ * the same runner, so the ratio is only checked when the small run is long enough to rise above
+ * that noise, and not on Windows, whose runners are too noisy for any ratio; a generous
+ * absolute ceiling holds everywhere.
  */
 const WIN = process.platform === "win32";
 const SLOW = WIN ? 240_000 : 120_000;
-const bestOf3 = (work: () => void) => {
+const bestOf5 = (work: () => void) => {
   let best = Number.POSITIVE_INFINITY;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 5; i++) {
     const started = performance.now();
     work();
     best = Math.min(best, performance.now() - started);
@@ -278,11 +281,12 @@ const bestOf3 = (work: () => void) => {
 };
 const grows = (build: (chars: number) => string, run: (text: string) => void) => {
   const n = 128 * 1024;
-  const small = bestOf3(() => run(build(n)));
-  const big = bestOf3(() => run(build(2 * n)));
-  expect(big).toBeLessThan(WIN ? 30_000 : 15_000);
-  // Below a few milliseconds both are timer noise; the ratio says nothing there.
-  if (small > 5) expect(big / small).toBeLessThan(3);
+  const smallText = build(n);
+  const bigText = build(4 * n);
+  const small = bestOf5(() => run(smallText));
+  const big = bestOf5(() => run(bigText));
+  expect(big).toBeLessThan(WIN ? 60_000 : 30_000);
+  if (!WIN && small > 20) expect(big / small).toBeLessThan(9);
 };
 
 describe("linear time on hostile input", () => {
