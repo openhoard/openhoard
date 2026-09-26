@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import { secureHeaders } from "hono/secure-headers";
 import type { Database } from "@openhoard/core-db";
 import type { Logger } from "pino";
+import { mountAdminApi } from "./admin-api.js";
 import { mountAuth, type AuthEnv } from "./auth.js";
 import type { Config } from "./config.js";
 import { loginKey } from "./login-state.js";
@@ -80,6 +81,8 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
     const key = loginKey(config.auth.cookieKey);
     const shared = { auth: config.auth, db: deps.db, key, ...(log ? { log } : {}) };
     mountAuth(app, shared);
+    // Tenant administration (T-106), behind the session and its CSRF check.
+    mountAdminApi(app, { auth: config.auth, db: deps.db, ...(log ? { log } : {}) });
     // OpenHoard's OAuth authorization server for MCP clients (T-105), and the resource they reach.
     const { requireBearer } = mountOAuth(app, {
       ...shared,

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { exportAudit } from "@openhoard/core-audit";
 import { openDatabase, type Database } from "@openhoard/core-db";
 import { openTestDatabase, TEST_POSTGRES_ENV } from "@openhoard/core-db/testing";
+import { addMember, createGroup, createUser } from "@openhoard/core-identity";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ADMIN_ACTOR, adminArgument, runAdmin } from "./admin.js";
 import { createApp } from "./app.js";
@@ -145,6 +146,155 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
       ["scim-token.revoke", "deny"],
     ]);
     expect(JSON.stringify(byAdmin)).not.toContain(token.split(".")[3] as string);
+  });
+
+  // T-106: the first admin comes from the operator; the CLI is also the way back in.
+  it("grants, lists and removes admins, never the last, all audited", async () => {
+    const tenantId = (await admin("tenant", "create", "--name", "Acme")).out.trim();
+    const people = await inspect((db) =>
+      db.withTenant(tenantId, async (tx) => {
+        const ana = await createUser(tx, tenantId, {
+          email: "ana@acme.example",
+          displayName: "Ana",
+          source: "scim",
+          externalId: "entra-ana",
+          userName: "ana.upn@acme.example",
+        });
+        const bo = await createUser(tx, tenantId, {
+          email: "bo@acme.example",
+          displayName: "Bo",
+          source: "local",
+        });
+        const guest = await createUser(tx, tenantId, {
+          email: "gil@partner.example",
+          displayName: "Gil",
+          source: "local",
+          kind: "guest",
+        });
+        const g = await createGroup(tx, tenantId, {
+          name: "Admins",
+          source: "scim",
+          externalId: "entra-admins",
+        });
+        const cy = await createUser(tx, tenantId, {
+          email: "cy@acme.example",
+          displayName: "Cy",
+          source: "scim",
+          externalId: "entra-cy",
+        });
+        await addMember(tx, tenantId, g.id, cy.id, "scim");
+        return { ana, bo, guest, cy };
+      }),
+    );
+    const none = await admin("user", "list-admins", "--tenant", tenantId);
+    expect(none.code).toBe(0);
+    expect(none.err).toContain("has no admin");
+
+    const byEmail = await admin(
+      "user",
+      "grant-admin",
+      "--tenant",
+      tenantId,
+      "--user",
+      "ANA@acme.example",
+    );
+    expect(byEmail.code, byEmail.err).toBe(0);
+    expect(byEmail.out.trim()).toBe(people.ana.id);
+    expect(byEmail.err).toContain("is an admin now");
+    const byUpn = await admin(
+      "user",
+      "grant-admin",
+      "--tenant",
+      tenantId,
+      "--user",
+      "ana.upn@acme.example",
+    );
+    expect(byUpn.err).toContain("was an admin already");
+    const guest = await admin(
+      "user",
+      "grant-admin",
+      "--tenant",
+      tenantId,
+      "--user",
+      people.guest.id,
+    );
+    expect(guest.code).toBe(1);
+    expect(guest.err).toContain("never a guest");
+    expect(
+      (await admin("user", "grant-admin", "--tenant", tenantId, "--user", "nobody@x.example")).code,
+    ).toBe(1);
+
+    const last = await admin("user", "revoke-admin", "--tenant", tenantId, "--user", people.ana.id);
+    expect(last.code).toBe(1);
+    expect(last.err).toContain("last admin");
+    expect(
+      (await admin("user", "grant-admin", "--tenant", tenantId, "--user", people.bo.id)).code,
+    ).toBe(0);
+    const listed = await admin("user", "list-admins", "--tenant", tenantId);
+    expect(listed.out).toContain(`${people.ana.id}\trole\tactive\tana@acme.example\tAna\n`);
+    expect(listed.out).toContain(`${people.bo.id}\trole\tactive\t`);
+    const removed = await admin(
+      "user",
+      "revoke-admin",
+      "--tenant",
+      tenantId,
+      "--user",
+      "ana.upn@acme.example",
+    );
+    expect(removed.code, removed.err).toBe(0);
+    expect(removed.err).toContain("no longer an admin");
+
+    // With the tenant's admin group in the config, its members count and stay the provider's.
+    writeFileSync(
+      join(dir, "config.json"),
+      JSON.stringify({
+        auth: {
+          publicUrl: "https://hoard.example.com",
+          adminGroups: [{ tenantId, externalId: "entra-admins" }],
+        },
+      }),
+    );
+    const withGroup = await admin("user", "list-admins", "--tenant", tenantId);
+    expect(withGroup.out).toContain(`${people.cy.id}\tgroup\tactive\t`);
+    const cy = await admin("user", "revoke-admin", "--tenant", tenantId, "--user", people.cy.id);
+    expect(cy.code).toBe(1);
+    expect(cy.err).toContain("admin group");
+    // Cy counts, so Bo, the last with the role, may go.
+    expect(
+      (await admin("user", "revoke-admin", "--tenant", tenantId, "--user", people.bo.id)).code,
+    ).toBe(0);
+    const unknown = "ten_" + "0".repeat(26);
+    expect((await admin("user", "list-admins", "--tenant", unknown)).code).toBe(1);
+    expect((await admin("user", "grant-admin", "--tenant", unknown, "--user", "x")).code).toBe(1);
+    expect((await admin("user", "grant-admin", "--tenant", tenantId)).code).toBe(2);
+
+    const events = await inspect(async (db) => {
+      const lines: string[] = [];
+      await exportAudit(db, tenantId, {}, "ndjson", (s: string) => void lines.push(s));
+      return lines
+        .join("")
+        .split("\n")
+        .filter(Boolean)
+        .map(
+          (l) =>
+            JSON.parse(l) as { action: string; decision: string; detail?: { reason?: string } },
+        );
+    });
+    expect(
+      events
+        .filter((e) => e.action.startsWith("admin."))
+        .map((e) => `${e.action}:${e.decision}:${e.detail?.reason ?? ""}`),
+    ).toEqual([
+      "admin.grant:allow:",
+      "admin.grant:allow:",
+      "admin.grant:deny:not-a-member",
+      "admin.grant:deny:unknown-user",
+      "admin.revoke:deny:last-admin",
+      "admin.grant:allow:",
+      "admin.revoke:allow:",
+      "admin.revoke:deny:admin-group",
+      "admin.revoke:allow:",
+    ]);
   });
 
   it("prints the Tenant URL when the server's public URL is configured", async () => {

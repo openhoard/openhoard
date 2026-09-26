@@ -141,9 +141,10 @@ and tokens are good for it and nothing else.
 
 **Admin approval.** A client gets tokens in a tenant only once an admin approved it with a trust
 label (`local`, `commercial` or `consumer`). The label becomes the request's client trust, which
-exposure rules check (T-604).
+policy (`context.client.trust` in Cedar) and exposure (T-604) check on every request.
 
-- Until T-106 adds approval in the app, list approved clients in the config:
+- Admins approve, refuse and revoke clients in the app, with the admin API (T-106, below).
+- The config can approve clients too, as a bootstrap or an override (`auth.clients`):
 
   ```json
   {
@@ -168,11 +169,16 @@ exposure rules check (T-604).
   any port counts (RFC 8252).
 
 - A client nobody approved is recorded as pending in the tenant (`oauth_clients`), and the person
-  is told it is waiting.
-- A refused client is turned away, and its grants are revoked.
-- Taking a client out of the config stops its tokens.
-- A trust label in the config wins over one given in the app, and a refusal in the app wins over
-  the config.
+  is told it is waiting. It gets no code, no token, and no redirect.
+- A refused or revoked client is turned away, its grants are revoked (its tokens fail from their
+  next request) and codes it hasn't redeemed are used up.
+- **Precedence** (src/oauth/allowlist.ts), most binding first:
+  1. a refusal made in the app stands, whatever the config says (fail closed);
+  2. a client the config lists is approved with the config's label, and the app can't refuse,
+     revoke or relabel it (the admin API answers 409: change the config);
+  3. a client approved through the config and then taken out of it is no longer approved (its
+     tokens stop), until an admin approves it in the app;
+  4. otherwise the app's decision.
 - Pending clients are capped at 20 per person and 1,000 per tenant, and lapse after 30 days. A
   client the config approves is recorded whatever the counts.
 - At most two client documents per person are fetched at a time (eight in all).
@@ -211,6 +217,61 @@ needs gets 403 with `error="insufficient_scope"` and the scopes to ask for.
 
 Every authorization and token decision is audited: `oauth.authorize`, `oauth.token` and
 `oauth.refresh`.
+
+## Tenant admins and the admin API (T-106)
+
+A tenant's **admins** decide which AI clients its people may connect, and who else is an admin.
+Admin is for administration only (tenant settings, clients, admins): it never lets anyone read a
+file their grants don't. `authorize()` doesn't read it and Cedar never sees it.
+
+Someone is an admin two ways:
+
+- **The admin role**, held in OpenHoard. The first admin is made by the operator with the admin
+  CLI (`admin user grant-admin`, below); admins make others in the app.
+- **The tenant's admin group** (optional): one identity provider group per tenant, named in the
+  config by its SCIM externalId (Entra: the group's object id). The provider decides who is in
+  it, so the app can't remove its members: they leave the group upstream.
+
+  ```json
+  { "auth": { "adminGroups": [{ "tenantId": "ten_…", "externalId": "<group object id>" }] } }
+  ```
+
+Either way it counts only for an active member: locking, a provider disable or becoming a guest
+suspends it, retirement removes the role, and a guest or a service account is never made one.
+Removing the tenant's last admin who counts (group admins included) is refused, in the app and
+in the CLI. Locks, disables and retirements aren't limited by it (the identity provider may do
+all three), so a tenant can end up with no admin; the CLI makes a new one. Admin status is part of
+the person's principal (`principal.admin`, `/auth/me` says `admin`), and a change reaches every
+server on the next request (the principal epoch).
+
+The **admin API** is JSON under `/api/admin`, for the admin UI to come and for scripts:
+
+| Route                                  | What it does                                                                 |
+| -------------------------------------- | ---------------------------------------------------------------------------- |
+| `GET /api/admin/clients`               | Every client the tenant's people tried                                       |
+| `POST /api/admin/clients/:key/approve` | `{"trust": "local"}` (or `commercial`, `consumer`); relabels an approved one |
+| `POST /api/admin/clients/:key/refuse`  | A pending client                                                             |
+| `POST /api/admin/clients/:key/revoke`  | An approved client: its grants and tokens end                                |
+| `GET /api/admin/admins`                | The tenant's admins, how (`role`, `group`), and if they count now            |
+| `POST /api/admin/admins`               | `{"userId": "usr_…"}`, or `{"email": …}`, or `{"userName": …}`               |
+| `DELETE /api/admin/admins/:userId`     | Takes the role away                                                          |
+
+- **Who.** A person signed in with the session cookie (above), who is an admin, through
+  OpenHoard's own app (an AI client's token never administers). Anyone else gets 401 or 403, and
+  a 403 is audited (`admin.access`). Each change checks again, in its own transaction.
+- **CSRF.** Changes carry the session cookie, so their `Origin` must be `publicUrl`'s, and they
+  take `application/json` only.
+- **A recent sign-in.** Approving a client and changing who is an admin take a sign-in within
+  `auth.adminSignInMinutes` (default 15): otherwise 403 with `"signIn": "/auth/sign-in"`.
+  Refusing and revoking a client never do, so an emergency cut-off is never a sign-in away.
+- **What identifies a client** is shown first: its metadata document URL (`clientId`), or for a
+  dynamically registered client its `redirectUris` (where its codes go). The name it gives itself
+  is `claimedName`: anyone can call themselves Claude. `managedBy` says whether the config
+  decides it, `approved` and `trust` what it gets now.
+- **Audit.** Every decision, allowed or refused: `oauth-client.approve`, `oauth-client.refuse`,
+  `oauth-client.revoke` (with the label, the previous one, and the status it was in), and
+  `admin.grant`, `admin.revoke`; refusals say why (`sign-in-again`, `config-managed`,
+  `status-changed`, `last-admin`, `admin-group`, …).
 
 ## The MCP server (T-801)
 
@@ -251,8 +312,9 @@ cloudflared tunnel --url http://127.0.0.1:7420
 
 1. Set `auth.publicUrl` to the printed URL and restart the server. Register
    `<publicUrl>/auth/callback/<provider id>` as a redirect URI with the sign-in provider.
-2. Approve the client in `auth.clients` (above), then add `<publicUrl>/mcp` to the client as a
-   connector and sign in.
+2. Add `<publicUrl>/mcp` to the client as a connector and sign in: the client waits for an
+   admin. Approve it with the admin API (`GET /api/admin/clients`, then
+   `POST /api/admin/clients/<key>/approve`), or in `auth.clients` (above), and connect again.
 
 Quick tunnels are for testing: the URL changes on every run, and there is no uptime guarantee.
 OpenHoard depends on no domain of ours. A self-hoster serves it at their own `publicUrl`, behind
@@ -398,7 +460,7 @@ database closes, and writes none after.
 **Transactions.** Each request is one transaction, with its audit record written last. Writes to
 one tenant run one at a time (the principal lock). A refused request (4xx) changes nothing.
 
-## Admin commands (T-103)
+## Admin commands (T-103, T-106)
 
 Until there is an admin UI, the server's entry point has a few admin commands. They read the same
 configuration as the server, and accept `--data-dir` as it does (before or after `admin`). They
@@ -410,7 +472,17 @@ node apps/server/dist/main.js admin tenant list
 node apps/server/dist/main.js admin scim-token issue --tenant ten_… --name "Entra provisioning" [--days 365]
 node apps/server/dist/main.js admin scim-token list --tenant ten_…
 node apps/server/dist/main.js admin scim-token revoke --tenant ten_… --id sct_…
+node apps/server/dist/main.js admin user grant-admin --tenant ten_… --user <usr_… | email | userName>
+node apps/server/dist/main.js admin user revoke-admin --tenant ten_… --user <usr_… | email | userName>
+node apps/server/dist/main.js admin user list-admins --tenant ten_…
 ```
+
+- **Admins.** `user grant-admin` makes the tenant's first admin (the person must exist: provisioned
+  over SCIM, or invited), and is the way back in when a tenant has none left. `--user` takes an
+  id, or an email or userName exactly one current person has. `list-admins` prints each admin's
+  id, how they are one (`role`, `group`, `role+group`), whether it counts now, email and name.
+  The admin group (config `auth.adminGroups`) is read from the same config. Removing the last
+  admin is refused here too.
 
 - **Output.** The id or token goes to standard output, and messages go to standard error. The
   exit code is 0 for done, 1 for failed and 2 for misused.
@@ -419,8 +491,8 @@ node apps/server/dist/main.js admin scim-token revoke --tenant ten_… --id sct_
   start the server again. With PostgreSQL they run beside the server.
 - **What a new tenant gets.** `tenant create` makes the tenant row, with the fail-closed
   defaults (hidden, metadata-only), and its principal epoch: nothing else.
-- **Audit.** Creating a tenant, and issuing or revoking a token, are audited as
-  `system:admin-cli`.
+- **Audit.** Creating a tenant, issuing or revoking a token, and granting or removing an admin
+  (refusals too) are audited as `system:admin-cli`.
 
 ## Testing with a new Entra tenant (T-102 and T-103 together)
 
@@ -507,6 +579,10 @@ example `cloudflared tunnel --url http://127.0.0.1:7420`), and use the tunnel's 
      sends DELETE, which retires them.
    - `node apps/server/dist/main.js admin scim-token list --tenant ten_…` shows when the token
      was last used.
+   - Make the test account the tenant's first admin (T-106): `admin user grant-admin --tenant
+ten_… --user <its UPN>` (server stopped, on PGlite), then `GET /api/admin/admins` after
+     signing in. Or name an Entra group in `auth.adminGroups` by its object id, assign it to the
+     app, and provision it: its members are admins.
    - The audit log has every request.
 
 Sources relied on for Entra's behaviour:

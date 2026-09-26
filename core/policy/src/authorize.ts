@@ -48,6 +48,13 @@ export interface AuthzPrincipal {
    * outside it is forbidden by the core rule `core/scope`, whatever grants allow.
    */
   scope?: CredentialScope;
+  /**
+   * A tenant admin (T-106): may administer the tenant (its settings, AI clients, admins), through
+   * OpenHoard's own app ({@link mayAdminister}). It gives nothing on files: authorize() doesn't
+   * read it and Cedar never sees it, so no rule, core or pack, can turn it into access. Absent:
+   * false. core/identity sets it only for an active member (never a guest or a service account).
+   */
+  admin?: boolean;
 }
 
 export interface CredentialScope {
@@ -169,6 +176,31 @@ export class Authorizer {
 }
 
 /**
+ * Whether a caller may administer the tenant (T-106): its settings, its AI clients and its
+ * admins. Only an active member marked admin, signed in to OpenHoard's own app (first-party),
+ * with no narrower credential (an API key's or an AI client's scope): an AI client acting for an
+ * admin is not the admin. Never throws; anything malformed is a deny.
+ *
+ * This is for administration endpoints only. Files are authorize()'s, where admin counts for
+ * nothing: an admin reads what their grants let them read, like anyone.
+ */
+export function mayAdminister(principal: AuthzPrincipal, client: AuthzClient): AuthzDecision {
+  const p = principal as Partial<AuthzPrincipal> | null | undefined;
+  if (!p || !isId(p.userId)) return deny("malformed request: principal.userId");
+  if (client?.trust !== "first-party") {
+    return deny("administration goes through OpenHoard's own app", [], "forbid");
+  }
+  if (p.scope !== undefined) {
+    return deny("a scoped credential can't administer", [], "forbid");
+  }
+  if (p.admin !== true) return deny("not an admin", [], "no-permit");
+  if (p.active !== true || p.guest !== false || p.service === true) {
+    return deny("only an active member administers", [], "forbid");
+  }
+  return { allow: true, kind: "allow", reason: "tenant admin", policies: [] };
+}
+
+/**
  * Whether the request is within the credential's scope. A service account without one is out of
  * scope for everything: it acts through a key, and a principal rebuilt from its id alone (a job,
  * a session) must not get what the key never allowed.
@@ -210,6 +242,7 @@ function malformed(r: AuthzRequest): string | undefined {
   if (typeof p.guest !== "boolean") return "principal.guest";
   if (typeof p.active !== "boolean") return "principal.active";
   if (p.service !== undefined && typeof p.service !== "boolean") return "principal.service";
+  if (p.admin !== undefined && typeof p.admin !== "boolean") return "principal.admin";
   if (p.scope !== undefined) {
     const s = p.scope as Partial<CredentialScope> | null;
     const actions = s?.actions;

@@ -9,28 +9,42 @@ import {
   type Database,
 } from "@openhoard/core-db";
 import {
+  findUserByEmail,
+  findUserByUserName,
+  getUser,
+  grantAdmin,
+  IdentityError,
   issueScimToken,
+  listAdmins,
   listScimTokens,
+  revokeAdmin,
   revokeScimToken,
   SCIM_TOKEN_MAX_DAYS,
+  type User,
 } from "@openhoard/core-identity";
-import { ensureDataDir, loadConfig, type Config } from "./config.js";
+import { adminGroupOf, ensureDataDir, loadConfig, type Config } from "./config.js";
 
 /*
- * `openhoard admin …` (T-103): what an operator needs before there is an admin UI, to create a
- * tenant and connect its identity provider over SCIM.
+ * `openhoard admin …` (T-103, T-106): what an operator needs before there is an admin UI, to
+ * create a tenant, connect its identity provider over SCIM, and make its first admin.
  *
  *   admin tenant create --name "Acme"
  *   admin tenant list
  *   admin scim-token issue  --tenant ten_… --name "Entra" [--days 365]
  *   admin scim-token list   --tenant ten_…
  *   admin scim-token revoke --tenant ten_… --id sct_…
+ *   admin user grant-admin  --tenant ten_… --user <usr_… | email | userName>
+ *   admin user revoke-admin --tenant ten_… --user <usr_… | email | userName>
+ *   admin user list-admins  --tenant ten_…
  *
  * It reads the server's configuration (and `--data-dir`, as the server does) and opens the same
  * database. The embedded database (PGlite) belongs to one process at a time, so while the
  * server runs on it these commands refuse, and say so; with PostgreSQL they run beside it.
- * Creating a tenant and issuing or revoking a token are audited as `system:admin-cli`. A token
- * is printed once, and only its hash is kept.
+ * Every change (a tenant, a token issued or revoked, an admin granted or removed) is audited as
+ * `system:admin-cli`, refusals too for admins. A token is printed once, and only its hash is
+ * kept. The CLI is the way in when a tenant has no admin (the first one, or after the last was
+ * locked or left); admins then make others in the app (the admin API). Removing the last admin
+ * is refused here too.
  */
 
 export const ADMIN_ACTOR = "system:admin-cli";
@@ -70,6 +84,11 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
                                                    issue a SCIM token (printed once)
   scim-token list --tenant <ten_…>                 list a tenant's SCIM tokens
   scim-token revoke --tenant <ten_…> --id <sct_…>  revoke a SCIM token
+  user grant-admin --tenant <ten_…> --user <usr_…|email|userName>
+                                                   make a person the tenant's admin
+  user revoke-admin --tenant <ten_…> --user <usr_…|email|userName>
+                                                   take the admin role away
+  user list-admins --tenant <ten_…>                list the tenant's admins
 `;
 
 class UsageError extends Error {}
@@ -88,6 +107,7 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         tenant: { type: "string" },
         id: { type: "string" },
         days: { type: "string" },
+        user: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -107,6 +127,9 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "scim-token issue",
     "scim-token list",
     "scim-token revoke",
+    "user grant-admin",
+    "user revoke-admin",
+    "user list-admins",
   ];
   if (!known.includes(command)) {
     io.err(`unknown command: ${command}\n\n${USAGE}`);
@@ -156,6 +179,18 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         return await tokenIssue(db, config, values, io);
       case "scim-token list":
         return await tokenList(db, tenantArg(values.tenant), io);
+      case "user grant-admin":
+      case "user revoke-admin":
+        return await adminChange(
+          db,
+          config,
+          command === "user grant-admin" ? "grant" : "revoke",
+          tenantArg(values.tenant),
+          need(values.user, "--user"),
+          io,
+        );
+      case "user list-admins":
+        return await adminList(db, config, tenantArg(values.tenant), io);
       default:
         return await tokenRevoke(db, tenantArg(values.tenant), need(values.id, "--id"), io);
     }
@@ -320,5 +355,170 @@ async function tokenRevoke(
     return 1;
   }
   io.err(`Revoked ${tokenId}: it fails from the next request.\n`);
+  return 0;
+}
+
+/**
+ * The current person `--user` names: an id, or an email or userName that exactly one current
+ * person has (a UPN often looks like an email: both are tried, and two people are ambiguous).
+ */
+async function namedUser(
+  db: Database,
+  tenantId: string,
+  named: string,
+): Promise<User | "none" | "ambiguous"> {
+  return db.withTenant(tenantId, async (tx) => {
+    if (isId("user", named)) {
+      const u = await getUser(tx, tenantId, named);
+      return u && u.retired === null ? u : "none";
+    }
+    const found = [
+      await findUserByEmail(tx, tenantId, named),
+      await findUserByUserName(tx, tenantId, named),
+    ].filter((u): u is User => u !== null);
+    const ids = new Set(found.map((u) => u.id));
+    if (ids.size === 0) return "none";
+    return ids.size === 1 ? (found[0] as User) : "ambiguous";
+  });
+}
+
+/** Why the directory refused an admin change, for the operator. */
+function adminRefusal(e: IdentityError): { reason: string; message: string } {
+  switch (e.code) {
+    case "invalid":
+      return {
+        reason: "not-a-member",
+        message: "only a member is an admin, never a guest or a service account",
+      };
+    case "inactive":
+      return { reason: "inactive", message: "they are locked or disabled: unlock them first" };
+    case "wrong-source":
+      return {
+        reason: "admin-group",
+        message: "they are an admin through the identity provider's admin group: remove them there",
+      };
+    case "conflict":
+      return {
+        reason: "last-admin",
+        message: "the tenant's last admin: make someone else admin first",
+      };
+    default:
+      return { reason: "unknown-user", message: "no such person" };
+  }
+}
+
+async function adminChange(
+  db: Database,
+  config: Config,
+  change: "grant" | "revoke",
+  tenantId: string,
+  named: string,
+  io: AdminIo,
+): Promise<number> {
+  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  const action = change === "grant" ? "admin.grant" : "admin.revoke";
+  const user = await namedUser(db, tenantId, named);
+  const refused = async (reason: string, message: string, userId?: string) => {
+    await db.withTenant(tenantId, (tx) =>
+      appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action,
+        decision: "deny",
+        detail: { ...(userId ? { user: userId } : {}), reason },
+      }),
+    );
+    io.err(`${message}\n`);
+    return 1;
+  };
+  if (user === "none")
+    return refused("unknown-user", `tenant ${tenantId} has no current person ${named}`);
+  if (user === "ambiguous") {
+    return refused(
+      "ambiguous",
+      `${named} is one person's email and another's userName: use the id`,
+    );
+  }
+  const adminGroup = adminGroupOf(config.auth)(tenantId);
+  try {
+    const outcome = await db.withTenant(tenantId, async (tx) => {
+      const done =
+        change === "grant"
+          ? { changed: await grantAdmin(tx, tenantId, user.id, ADMIN_ACTOR), byGroup: false }
+          : await revokeAdmin(
+              tx,
+              tenantId,
+              user.id,
+              ADMIN_ACTOR,
+              adminGroup === undefined ? {} : { adminGroup },
+            ).then((r) => ({ changed: r.revoked, byGroup: r.stillAdminByGroup }));
+      await appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action,
+        decision: "allow",
+        detail: {
+          user: user.id,
+          ...(done.changed ? {} : { unchanged: true }),
+          ...(done.byGroup ? { stillAdminByGroup: true } : {}),
+        },
+      });
+      return done;
+    });
+    const who = `${user.displayName} (${user.id})`;
+    if (change === "grant") {
+      io.err(outcome.changed ? `${who} is an admin now.\n` : `${who} was an admin already.\n`);
+    } else if (!outcome.changed) {
+      io.err(`${who} wasn't an admin.\n`);
+    } else {
+      io.err(
+        outcome.byGroup
+          ? `Removed ${who}'s admin role; they stay an admin through the admin group.\n`
+          : `${who} is no longer an admin.\n`,
+      );
+    }
+    io.out(`${user.id}\n`);
+    return 0;
+  } catch (e) {
+    if (!(e instanceof IdentityError)) throw e;
+    const { reason, message } = adminRefusal(e);
+    return refused(reason, message, user.id);
+  }
+}
+
+async function adminList(
+  db: Database,
+  config: Config,
+  tenantId: string,
+  io: AdminIo,
+): Promise<number> {
+  const adminGroup = adminGroupOf(config.auth)(tenantId);
+  const admins = await db.withTenant(tenantId, async (tx) =>
+    (await getTenant(tx, tenantId))
+      ? listAdmins(tx, tenantId, adminGroup === undefined ? {} : { adminGroup })
+      : null,
+  );
+  if (!admins) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  for (const a of admins) {
+    const state = a.effective
+      ? "active"
+      : a.user.kind !== "member"
+        ? a.user.kind
+        : a.user.lock
+          ? "locked"
+          : "disabled";
+    io.out(
+      [a.user.id, a.via.join("+"), state, a.user.email ?? "", a.user.displayName].join("\t") + "\n",
+    );
+  }
+  if (admins.length === 0) {
+    io.err(
+      `tenant ${tenantId} has no admin: openhoard admin user grant-admin --tenant ${tenantId} --user <email>\n`,
+    );
+  }
   return 0;
 }

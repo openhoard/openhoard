@@ -268,7 +268,7 @@ export async function checkSession(
   tx: Tx,
   tenantId: string,
   token: string,
-  options: { cache?: PrincipalCache } = {},
+  options: { cache?: PrincipalCache; adminGroup?: string } = {},
 ): Promise<SessionCheck> {
   const m = typeof token === "string" ? TOKEN.exec(token) : null;
   if (!m || m[1] !== tenantId) return { ok: false, refused: "unknown" };
@@ -298,7 +298,15 @@ export async function checkSession(
   if (!row.live) return { ok: false, refused: "ended" };
   const principal = options.cache
     ? await options.cache.resolve(tx, tenantId, row.userId)
-    : ((await resolveWithExpiry(tx, tenantId, row.userId))?.principal ?? null);
+    : ((
+        await resolveWithExpiry(
+          tx,
+          tenantId,
+          row.userId,
+          undefined,
+          options.adminGroup === undefined ? {} : { adminGroup: options.adminGroup },
+        )
+      )?.principal ?? null);
   if (!principal || !principal.active || principal.service === true) {
     return { ok: false, refused: "account-inactive" };
   }

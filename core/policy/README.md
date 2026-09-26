@@ -29,6 +29,15 @@ const shape = decideRead({
 whatever the exposure) or an AI client's trust label, which exposure then limits. Only
 `canRead === true` counts as a reader.
 
+## Administration (T-106)
+
+`mayAdminister(principal, client)` is the check for administration endpoints (tenant settings,
+AI clients, admins): an active member whose principal says `admin` (core/identity), through
+OpenHoard's own app, with no narrower credential (an API key's or an AI client's scope). It is
+separate from `authorize()` on purpose: `authorize()` never reads `admin`, and the Cedar schema
+has no such attribute (a rule naming it is refused when the engine is built), so no core or pack
+rule can turn administration into file access.
+
 ## How authorize() decides
 
 Following spike S3, **grants are data and rules are Cedar**:

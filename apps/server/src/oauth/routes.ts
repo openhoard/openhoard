@@ -12,20 +12,19 @@ import {
   parseScopes,
   PrincipalCache,
   redeemCode,
-  redirectIdentity,
   refreshGrant,
   revokeByToken,
   userPrincipal,
   type GrantResult,
-  type OAuthClient,
   type OAuthScope,
   type TrustResolver,
 } from "@openhoard/core-identity";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import type { Logger } from "pino";
 import { RETURN_MAX, type AuthEnv } from "../auth.js";
-import type { ApprovedClient, AuthConfig } from "../config.js";
+import type { AuthConfig } from "../config.js";
 import { seal, unseal } from "../login-state.js";
+import { configuredTrust, listedIn } from "./allowlist.js";
 import {
   ClientError,
   ClientResolver,
@@ -54,9 +53,10 @@ import { cors } from "hono/cors";
  *   (RFC 8707), `<publicUrl>/mcp`, and nothing else is accepted.
  * - Errors before the client and its redirect URI check out are shown here, never redirected
  *   (no open redirect); after, they go back to the client with `state` and `iss` (RFC 9207).
- * - A client needs an admin's approval in the person's tenant: in the config (`auth.clients`),
- *   or in the database (T-106). Until then the person sees that it waits, and the tenant has a
- *   pending request for the admin.
+ * - A client needs an admin's approval in the person's tenant: in the app (the admin API,
+ *   T-106) or in the config (`auth.clients`); allowlist.ts has which wins. Until then the person
+ *   sees that it waits, and the tenant has a pending request for the admin. The check is made
+ *   again on every code, token and MCP request, so a revocation counts from the next one.
  * - The consent form carries the checked request sealed and bound to the session, for ten
  *   minutes; the session cookie's Origin check covers the POST.
  * - Every authorization and token decision is audited.
@@ -113,15 +113,8 @@ export function mountOAuth(
   const clients = new ClientResolver(deps.fetchMetadata);
   const cache = new PrincipalCache();
 
-  /** What the config says about a client in a tenant (see TrustResolver). */
-  const configured =
-    (tenantId: string): TrustResolver =>
-    (client: OAuthClient) => {
-      const listed = auth.clients.find((a) => approves(a, tenantId, client));
-      if (listed) return listed.trust;
-      // Approved through the config once, and no longer listed there: not approved.
-      return client.decidedBy === "system:config" ? null : undefined;
-    };
+  /** What the config says about a client in a tenant (allowlist.ts has the precedence). */
+  const configured = (tenantId: string): TrustResolver => configuredTrust(auth, tenantId);
 
   const audit = (tx: Tx, tenantId: string, record: AuditRecord) =>
     appendAudit(tx, tenantId, record);
@@ -266,7 +259,7 @@ export function mountOAuth(
     const { tenantId } = signedIn;
     const userId = signedIn.principal.userId;
     // The config's approval is known before anything is recorded: it doesn't wait on the counts.
-    const inConfig = auth.clients.some((a) => approves(a, tenantId, client));
+    const inConfig = listedIn(auth, tenantId, client) !== undefined;
     const { noted, trust, user } = await db.withTenant(tenantId, async (tx) => {
       const n = await noteClient(
         tx,
@@ -599,17 +592,4 @@ export function mountOAuth(
     };
 
   return { requireBearer };
-}
-
-/** Whether an approved-client entry of the config names this client in this tenant. */
-function approves(
-  a: ApprovedClient,
-  tenantId: string,
-  client: Pick<OAuthClient, "kind" | "clientRef" | "redirectUris">,
-): boolean {
-  if (a.tenantId !== tenantId) return false;
-  if (a.clientId !== undefined) return client.kind === "cimd" && client.clientRef === a.clientId;
-  if (client.kind !== "dcr" || !a.redirectUris) return false;
-  const listed = new Set(a.redirectUris.map(redirectIdentity));
-  return client.redirectUris.every((r) => listed.has(redirectIdentity(r)));
 }

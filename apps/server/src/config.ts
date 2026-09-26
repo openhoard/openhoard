@@ -78,9 +78,13 @@ export function externalIdClaim(p: ProviderConfig): "oid" | "sub" | undefined {
 }
 
 /**
- * An MCP client an admin approved for a tenant (T-105), until T-106 manages approvals in the app:
- * by its Client ID Metadata Document URL, or, for a client that registers dynamically, by its
- * exact redirect URIs (every one of them must be listed).
+ * An MCP client the operator approves for a tenant in the config (T-105): by its Client ID
+ * Metadata Document URL, or, for a client that registers dynamically, by its exact redirect URIs
+ * (every one of them must be listed). Since T-106 admins approve clients in the app (the admin
+ * API); this list stays as a bootstrap and an override: a client listed here is approved with
+ * this trust label whatever the app says (except a refusal made in the app before it was
+ * listed, which stands), and the app can't refuse, revoke or relabel it. Taking it out of the
+ * list ends the approval it gave.
  */
 export const ApprovedClientSchema = z
   .object({
@@ -103,6 +107,21 @@ export const ApprovedClientSchema = z
 
 export type ApprovedClient = z.infer<typeof ApprovedClientSchema>;
 
+/**
+ * A tenant's admin group (T-106): the identity provider group whose members are the tenant's
+ * admins, named by its SCIM externalId (Entra: the group's object id, as provisioned). The
+ * identity provider decides who is in it, so its admins can't be removed in the app. Optional:
+ * admins are also made with the admin CLI and the admin API.
+ */
+export const AdminGroupSchema = z
+  .object({
+    tenantId: z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
+    externalId: z.string().min(1).max(512),
+  })
+  .strict();
+
+export type AdminGroup = z.infer<typeof AdminGroupSchema>;
+
 /** Signing in (T-102): off unless configured. */
 export const AuthSchema = z
   .object({
@@ -116,8 +135,16 @@ export const AuthSchema = z
     /** And at the latest after this long (default 7 days, at most 30). */
     sessionMaxHours: z.coerce.number().int().min(1).max(720).default(168),
     providers: z.array(ProviderSchema).default([]),
-    /** MCP clients approved per tenant (T-105); others wait for an admin. */
+    /** MCP clients approved per tenant in the config (T-105); others wait for an admin. */
     clients: z.array(ApprovedClientSchema).default([]),
+    /** At most one admin group per tenant (T-106). */
+    adminGroups: z.array(AdminGroupSchema).max(1000).default([]),
+    /**
+     * How recently an admin must have signed in to approve a client or change who is an admin
+     * (default 15 minutes); older sessions sign in again first. Refusing and revoking clients
+     * never waits on it.
+     */
+    adminSignInMinutes: z.coerce.number().int().min(1).max(1440).default(15),
     /**
      * Browser origins, besides publicUrl's and this machine's, that may call /mcp (a web MCP
      * client). Hosted clients call from their servers and need none.
@@ -176,6 +203,16 @@ export const AuthSchema = z
       }
       matching.add(p.tenantId);
     });
+    const adminTenants = a.adminGroups.map((g) => g.tenantId);
+    adminTenants.forEach((id, i) => {
+      if (adminTenants.indexOf(id) !== i) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["adminGroups", i, "tenantId"],
+          message: "one admin group per tenant",
+        });
+      }
+    });
     const ids = a.providers.map((p) => p.id);
     ids.forEach((id, i) => {
       if (ids.indexOf(id) !== i) {
@@ -189,6 +226,14 @@ export const AuthSchema = z
   });
 
 export type AuthConfig = z.infer<typeof AuthSchema>;
+
+/** Each tenant's admin group, by SCIM externalId, as the config names it (T-106). */
+export function adminGroupOf(
+  auth: Pick<AuthConfig, "adminGroups"> | undefined,
+): (tenantId: string) => string | undefined {
+  const groups = new Map((auth?.adminGroups ?? []).map((g) => [g.tenantId, g.externalId]));
+  return (tenantId) => groups.get(tenantId);
+}
 
 export const ConfigSchema = z
   .object({

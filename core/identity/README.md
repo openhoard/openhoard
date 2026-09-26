@@ -12,6 +12,7 @@ ask here, never the `users`, `groups` and `group_members` tables in core/db.
 - [`api-keys.ts`](src/api-keys.ts): service accounts' API keys (T-111).
 - [`sessions.ts`](src/sessions.ts): signing in and sessions (T-102).
 - [`scim-tokens.ts`](src/scim-tokens.ts): each tenant's SCIM bearer tokens (T-103).
+- [`admins.ts`](src/admins.ts): tenant admins (T-106).
 
 ## Sources
 
@@ -86,7 +87,31 @@ Sessions:
 `resolvePrincipal()` returns what `authorize()` needs: groups, every grant held directly or
 through a group, guest status, and whether the user is active. A disabled user comes back
 inactive, and `authorize()` denies them. Its `at` applies to grants only (which were live
-then); memberships, kind and stops are always the current ones.
+then); memberships, kind and stops are always the current ones. It also says whether the user is
+a tenant admin (`admin`, below), which `authorize()` never reads.
+
+## Admins
+
+[`admins.ts`](src/admins.ts) (T-106): who administers a tenant (its settings, its AI clients, its
+admins). Administration only: an admin reads the files their grants allow, like anyone
+(core/policy `mayAdminister()` is the check; Cedar never sees admin).
+
+- Two ways to be one: the **admin role** held in OpenHoard (`users.admin_at`: `grantAdmin()`,
+  `revokeAdmin()`), or membership of the tenant's **admin group**, the SCIM group whose externalId
+  the server's config names (`adminGroup` options). The identity provider owns that membership,
+  so `revokeAdmin()` refuses a group admin (`wrong-source`).
+- It counts only for an active member (`isAdmin()`): a lock, a provider disable or the guest kind
+  suspends it; retirement removes the role. `grantAdmin()` refuses guests and service accounts
+  (the database refuses a service account's role too) and locked or disabled people.
+- `revokeAdmin()` refuses the tenant's last admin who counts (`conflict`), group admins included.
+  Locks, disables and retirements aren't limited, so a tenant can end with none: the admin CLI
+  grants one.
+- Both take the principal lock first, which serializes the last-admin check. `listAdmins()` lists
+  every holder with how (`role`, `group`) and whether it counts now.
+- The role is part of the principal, so its column bumps the principal epoch, and so does a
+  group's external id (it can make a group the admin group); core/db migration 0036.
+  `PrincipalCache` takes the config's admin group per tenant (`adminGroup`), and an OAuth access
+  token's principal never carries admin: an AI client acting for an admin isn't one.
 
 ## OAuth for MCP clients
 
@@ -94,8 +119,13 @@ then); memberships, kind and stops are always the current ones.
 apps/server.
 
 - `noteClient()` records a client a tenant's person tried; it starts pending.
-  `decideClient()` is an admin's approval (with a trust label) or refusal, and a refusal revokes
-  the client's grants.
+  `decideClient()` is an admin's approval (with a trust label; a new label counts from the
+  client's next request) or refusal. A refusal (of an approved client: its revocation, T-106)
+  revokes the client's grants, so its tokens fail on their next request, and uses up its
+  unredeemed codes. `expect` makes it compare-and-set on the status the admin saw.
+- Code, token and refresh requests hold the client's row (`FOR SHARE`) while they use its
+  approval, and a decision locks it first, so a grant made under an approval is always there for
+  the refusal that follows to revoke. Order: the person, the client, then its codes and grants.
 - `issueCode()` needs an approved client and an active person. `redeemCode()` checks the client,
   the redirect URI, the resource and PKCE (S256), and works once. A code presented again revokes
   its grant.
@@ -108,13 +138,14 @@ apps/server.
 - Tokens are `ohac.`, `ohrt.` and `ohat.<tenant>.<id>.<secret>`, and only their hashes are
   stored.
 - A `TrustResolver` lets the server's config approve a client without a database decision. It
-  never overrides a refusal.
+  never overrides a refusal (apps/server's allowlist.ts has the whole precedence).
 
 ## The principal cache
 
 Every request needs its caller's principal, so `PrincipalCache.resolve()` keeps them. It is
 invalidated by the database, so it holds across processes: every change `resolvePrincipal()`
-reads (grants, memberships, a user's kind, lock, provider disable or retirement) bumps the
+reads (grants, memberships, a user's kind, lock, provider disable, retirement or admin role, a
+group's external id) bumps the
 tenant's principal epoch in the writing transaction, by trigger. An entry is used only by a
 snapshot that sees the epoch it was resolved at, so a change reaches every process as soon as a
 snapshot shows it committed. Grants are resolved as of the moment the epoch is read, not the
@@ -131,7 +162,7 @@ one-object share, drops the tenant's entries.
 Every function here that changes a principal takes the tenant's epoch lock first (core/db
 `lockPrincipals()`), before its row locks, so two such transactions can't deadlock on the
 triggers' bump. A new column `resolvePrincipal()` reads needs its trigger too (core/db
-migration 0021).
+migrations 0021 and 0036).
 
 Emails are still unique among current users, keyed by `emailKey()`:
 

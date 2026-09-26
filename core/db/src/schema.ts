@@ -480,6 +480,13 @@ export const users = pgTable(
     providerDisabledBy: text("provider_disabled_by"),
     retiredAt: timestamp("retired_at", { withTimezone: true }),
     retiredBy: text("retired_by"),
+    /**
+     * The admin role held in OpenHoard (T-106): when it was granted, and by whom (an admin, or
+     * `system:admin-cli`). It counts only while the user is an active member (core/identity);
+     * retirement removes it. Never a service account's.
+     */
+    adminAt: timestamp("admin_at", { withTimezone: true }),
+    adminBy: text("admin_by"),
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.id] }),
@@ -541,6 +548,10 @@ export const users = pgTable(
       "users_retired_by_principal",
       sql`retired_by is null or retired_by ~ '^(user|system|scim):.+$'`,
     ),
+    check("users_admin_complete", sql`(admin_at is null) = (admin_by is null)`),
+    check("users_admin_by_principal", sql`admin_by is null or admin_by ~ '^(user|system):.+$'`),
+    check("users_admin_person", sql`admin_at is null or kind <> 'service'`),
+    check("users_admin_current", sql`admin_at is null or retired_at is null`),
   ],
 );
 

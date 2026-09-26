@@ -21,7 +21,7 @@ import type { Hono, MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as oidc from "openid-client";
 import type { Logger } from "pino";
-import { externalIdClaim, type AuthConfig, type ProviderConfig } from "./config.js";
+import { adminGroupOf, externalIdClaim, type AuthConfig, type ProviderConfig } from "./config.js";
 import { loginCookieName, loginKey, openLogin, sealLogin } from "./login-state.js";
 import { signInPage } from "./oauth/pages.js";
 
@@ -59,7 +59,10 @@ export interface AuthDeps {
 export interface SignedIn {
   tenantId: string;
   sessionId: string;
+  /** Who, as authorize() sees them; `admin` says whether they administer the tenant (T-106). */
   principal: AuthzPrincipal;
+  /** When they signed in (the session started): the admin API asks for a recent one. */
+  signedInAt: Date;
 }
 
 /** What a request with a valid OAuth access token carries (c.get("bearer"), T-105). */
@@ -92,7 +95,8 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
     log?.info("sign-in: no auth.cookieKey, so this process made its own (fine for one server)");
   }
   const providers = new Map(auth.providers.map((p) => [p.id, p]));
-  const cache = new PrincipalCache();
+  // The admin group each tenant's config names is part of who its people are (T-106).
+  const cache = new PrincipalCache({ adminGroup: adminGroupOf(auth) });
   const discovered = new Map<string, Promise<oidc.Configuration>>();
 
   /** The provider's configuration, discovered once (and again after a failure). */
@@ -166,6 +170,7 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
           tenantId: named.tenantId,
           sessionId: check.session.id,
           principal: check.principal,
+          signedInAt: check.session.createdAt,
         });
       } else {
         deleteCookie(c, SESSION_COOKIE, { path: "/", secure });
@@ -372,6 +377,8 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
     return c.json({
       user: { id: user.id, displayName: user.displayName, email: user.email, kind: user.kind },
       tenantId: signedIn.tenantId,
+      // Whether the app should offer administration (the admin API decides for itself).
+      admin: signedIn.principal.admin === true,
     });
   });
 

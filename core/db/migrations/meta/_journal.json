@@ -246,6 +246,20 @@
       "when": 1790373409530,
       "tag": "0034_scim_tokens_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1790391506539,
+      "tag": "0035_users_admin",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1790391511397,
+      "tag": "0036_admin_principal_epoch",
+      "breakpoints": true
     }
   ]
 }

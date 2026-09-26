@@ -246,15 +246,23 @@ export async function noteClient(
   return row ? toClient(row) : getClient(tx, tenantId, clientKey);
 }
 
+/**
+ * A client by key. `lock: "share"` holds its row until the transaction ends, so an admin's
+ * decision on it (decideClient(), which updates the row) waits for what this transaction does
+ * with the approval it read: a grant made under an approval is there to revoke when the refusal
+ * runs.
+ */
 export async function getClient(
   tx: Tx,
   tenantId: string,
   clientKey: string,
+  options: { lock?: "share" } = {},
 ): Promise<OAuthClient | null> {
-  const [row] = await tx
+  const query = tx
     .select()
     .from(oauthClients)
     .where(and(eq(oauthClients.tenantId, tenantId), eq(oauthClients.clientKey, clientKey)));
+  const [row] = options.lock === "share" ? await query.for("share") : await query;
   return row ? toClient(row) : null;
 }
 
@@ -268,8 +276,15 @@ export async function listClients(tx: Tx, tenantId: string): Promise<OAuthClient
 }
 
 /**
- * An admin's decision on a client: approved with a trust label, or refused (which revokes every
- * grant the client holds in the tenant). `by` is `user:` or `system:`.
+ * An admin's decision on a client: approved with a trust label (a new label for an approved one
+ * takes effect on its next request), or refused, which revokes every grant the client holds in
+ * the tenant, so its tokens stop working on their next request, and uses up codes it hasn't
+ * redeemed. An approved client an admin refuses is how its approval is revoked (T-106). `by` is
+ * `user:` or `system:`.
+ *
+ * `expect`, when given, is the statuses the admin saw the client in: if it has moved on since
+ * (another admin decided), nothing changes and this throws `conflict`. Returns the client as
+ * decided, and `was`, its status before.
  */
 export async function decideClient(
   tx: Tx,
@@ -277,12 +292,25 @@ export async function decideClient(
   clientKey: string,
   decision: { approve: true; trust: ClientTrust } | { approve: false },
   by: string,
-): Promise<OAuthClient> {
+  options: { expect?: readonly ClientStatus[] } = {},
+): Promise<OAuthClient & { was: ClientStatus }> {
   if (typeof by !== "string" || !/^(user|system):[^\0]{1,1000}$/.test(by)) {
     throw new IdentityError("invalid", "an admin decides: user:… or system:…");
   }
   if (decision.approve && !(AI_CLIENT_TRUSTS as readonly string[]).includes(decision.trust)) {
     throw new IdentityError("invalid", `trust is one of ${AI_CLIENT_TRUSTS.join(", ")}`);
+  }
+  // The row first: code and token requests holding it (getClient(…, { lock: "share" })) finish
+  // before this decides, so a grant they make is one the refusal below sees and revokes.
+  const [current] = await tx
+    .select({ status: oauthClients.status })
+    .from(oauthClients)
+    .where(and(eq(oauthClients.tenantId, tenantId), eq(oauthClients.clientKey, clientKey)))
+    .for("update");
+  if (!current) throw new IdentityError("not-found", "no such client");
+  const was = current.status as ClientStatus;
+  if (options.expect !== undefined && !options.expect.includes(was)) {
+    throw new IdentityError("conflict", `the client is ${was} now`);
   }
   const [row] = await tx
     .update(oauthClients)
@@ -306,8 +334,20 @@ export async function decideClient(
           isNull(oauthGrants.revokedAt),
         ),
       );
+    // A code not yet redeemed can't be any more: were the client approved again within its
+    // minute, it would make a grant from consent given before the refusal.
+    await tx
+      .update(oauthCodes)
+      .set({ usedAt: sql`greatest(now(), ${oauthCodes.createdAt})` })
+      .where(
+        and(
+          eq(oauthCodes.tenantId, tenantId),
+          eq(oauthCodes.clientKey, clientKey),
+          isNull(oauthCodes.usedAt),
+        ),
+      );
   }
-  return toClient(row);
+  return { ...toClient(row), was };
 }
 
 /**
@@ -360,7 +400,7 @@ export async function issueCode(
     throw new IdentityError("invalid", "unknown scope");
   }
   const user = await livePerson(tx, tenantId, input.userId);
-  const client = await getClient(tx, tenantId, input.clientKey);
+  const client = await getClient(tx, tenantId, input.clientKey, { lock: "share" });
   if (approvedTrust(client, options.clientTrust) === null) {
     throw new IdentityError("invalid", "client not approved");
   }
@@ -478,6 +518,9 @@ export async function redeemCode(
     ...extra,
   });
   if (!m || m[1] !== tenantId) return refuse("unknown code");
+  // The client the request names, before the code: an admin's decision (decideClient()) locks
+  // the client, then the codes, so this order never waits on it crosswise.
+  const client = await getClient(tx, tenantId, given.clientKey, { lock: "share" });
   const [found] = await tx
     .select({ code: oauthCodes, live: sql<boolean>`${oauthCodes.expiresAt} > now()` })
     .from(oauthCodes)
@@ -512,7 +555,7 @@ export async function redeemCode(
   if (!timingSafeEqual(Buffer.from(challenge), Buffer.from(row.codeChallenge))) {
     return refuse("PKCE verification failed", { userId: row.userId });
   }
-  const client = await getClient(tx, tenantId, row.clientKey);
+  // The code is this client's (checked above), whose row is held since the start.
   if (approvedTrust(client, given.clientTrust) === null) {
     return {
       ok: false,
@@ -584,9 +627,10 @@ export async function refreshGrant(
   });
   if (!m || m[1] !== tenantId) return refuse("unknown refresh token");
   const grantId = m[2] as string;
-  // Lock order, as lockUser() takes it: the person, then their grant.
+  // Lock order, as lockUser() takes it: the person, then their grant; the client between them,
+  // as an admin's decision (decideClient()) takes the client before the grants.
   const [owner] = await tx
-    .select({ userId: oauthGrants.userId })
+    .select({ userId: oauthGrants.userId, clientKey: oauthGrants.clientKey })
     .from(oauthGrants)
     .where(and(eq(oauthGrants.tenantId, tenantId), eq(oauthGrants.id, grantId)));
   if (owner) {
@@ -596,6 +640,8 @@ export async function refreshGrant(
       .where(and(eq(users.tenantId, tenantId), eq(users.id, owner.userId)))
       .for("key share");
   }
+  // A grant never changes clients, so the unlocked read names the one to hold.
+  const client = owner ? await getClient(tx, tenantId, owner.clientKey, { lock: "share" }) : null;
   const [grant] = await tx
     .select({
       g: oauthGrants,
@@ -627,7 +673,6 @@ export async function refreshGrant(
     }
     scopes = [...new Set(given.scopes)].sort();
   }
-  const client = await getClient(tx, tenantId, grant.g.clientKey);
   if (approvedTrust(client, given.clientTrust) === null) {
     return { ok: false, error: "invalid_client", reason: "client not approved", ...who };
   }
@@ -723,9 +768,12 @@ export async function checkAccessToken(
   if (!base || !base.active || base.service === true) {
     return { ok: false, refused: "account-inactive", grantId };
   }
+  // An AI client acting for an admin isn't the admin (T-106): administration is the person's, in
+  // OpenHoard's own app.
+  const { admin: _admin, ...person } = base;
   return {
     ok: true,
-    principal: { ...base, scope: scopeOf(row.scopes) },
+    principal: { ...person, scope: scopeOf(row.scopes) },
     client: { id: client.clientRef, trust },
     grantId,
     clientKey: row.clientKey,

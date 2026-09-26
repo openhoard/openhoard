@@ -81,6 +81,12 @@ export interface User {
   lock: Stop | null;
   providerDisabled: Stop | null;
   retired: Stop | null;
+  /**
+   * The admin role held in OpenHoard (T-106, admins.ts): who granted it, when. It counts only
+   * while the user is an active member; an identity provider's admin group can make someone an
+   * admin without it (isAdmin()).
+   */
+  adminRole: Stop | null;
 }
 
 export interface Group {
@@ -290,6 +296,7 @@ const toUser = (r: UserRow): User => ({
   lock: stop(r.lockedAt, r.lockedBy),
   providerDisabled: stop(r.providerDisabledAt, r.providerDisabledBy),
   retired: stop(r.retiredAt, r.retiredBy),
+  adminRole: stop(r.adminAt, r.adminBy),
 });
 type GroupRow = typeof groups.$inferSelect;
 const toGroup = (r: GroupRow): Group => ({
@@ -698,9 +705,11 @@ export async function retireUser(
     .where(
       and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.userId, userId), isNull(apiKeys.revokedAt)),
     );
+  // Retirement is final, so an admin role goes with it (T-106): a retired admin isn't one anyway,
+  // and nobody should find the role there later.
   await tx
     .update(users)
-    .set({ retiredAt: sql`now()`, retiredBy: by })
+    .set({ retiredAt: sql`now()`, retiredBy: by, adminAt: null, adminBy: null })
     .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)));
   return true;
 }
@@ -890,7 +899,9 @@ export async function renameGroup(
 
 /**
  * Changes a group's name or external id, as the source that manages it. Another group's external
- * id is a `conflict`, and the transaction stays usable.
+ * id is a `conflict`, and the transaction stays usable. An external id can make a group the
+ * tenant's admin group (T-106), so changing one is a principal change: it takes the principal
+ * lock first, and bumps the epoch (core/db migration 0036).
  */
 export async function updateGroup(
   tx: Tx,
@@ -899,6 +910,7 @@ export async function updateGroup(
   changes: { name?: string; externalId?: string | null },
   as: IdentitySource,
 ): Promise<Group> {
+  if (changes.externalId !== undefined) await lockPrincipals(tx, tenantId);
   const current = await ownedGroup(tx, tenantId, groupId, as);
   const set: Partial<typeof groups.$inferInsert> = {};
   if (changes.name !== undefined) set.name = checkName("name", changes.name);
@@ -1188,17 +1200,32 @@ export async function membersOf(
  * history isn't kept. So a past `at` answers "what would this person, as they are now, have
  * held then?", not "what could they see then?".
  *
+ * The principal says whether the user is an admin (T-106, admins.ts): an active member with the
+ * admin role, or in the tenant's admin group (`options.adminGroup`, the SCIM externalId the
+ * server's config names). It is for administration only; authorize() never reads it.
+ *
  * Uncached; principal-cache.ts caches it. Every change this reads (memberships, grants, the
- * user's stops and kind) bumps the tenant's principal epoch, by trigger (core/db migration 0021),
- * which is what invalidates the cache: a new column read here needs its trigger too.
+ * user's stops, kind and admin role, a group's external id) bumps the tenant's principal epoch,
+ * by trigger (core/db migrations 0021 and 0036), which is what invalidates the cache: a new
+ * column read here needs its trigger too.
  */
 export async function resolvePrincipal(
   tx: Tx,
   tenantId: string,
   userId: string,
   at?: Date,
+  options: PrincipalOptions = {},
 ): Promise<AuthzPrincipal | null> {
-  return (await resolveWithExpiry(tx, tenantId, userId, at))?.principal ?? null;
+  return (await resolveWithExpiry(tx, tenantId, userId, at, options))?.principal ?? null;
+}
+
+/** What resolving a principal needs besides the database. */
+export interface PrincipalOptions {
+  /**
+   * The SCIM externalId of the identity provider's group whose members are the tenant's admins
+   * (the server's config, T-106), if there is one.
+   */
+  adminGroup?: string | undefined;
 }
 
 /** resolvePrincipal(), and when the soonest of the grants it counted expires (null: none do). */
@@ -1207,6 +1234,7 @@ export async function resolveWithExpiry(
   tenantId: string,
   userId: string,
   at?: Date,
+  options: PrincipalOptions = {},
 ): Promise<{ principal: AuthzPrincipal; expiresAt: Date | null } | null> {
   const user = await getUser(tx, tenantId, userId);
   if (!user) return null;
@@ -1217,6 +1245,14 @@ export async function resolveWithExpiry(
     .where(and(eq(groupMembers.tenantId, tenantId), eq(groupMembers.userId, userId)))
     .orderBy(asc(groupMembers.groupId));
   const groupIds = memberships.map((m) => m.groupId);
+  const adminGroup =
+    options.adminGroup === undefined
+      ? null
+      : await findGroupByExternalId(tx, tenantId, options.adminGroup);
+  const admin =
+    user.active &&
+    user.kind === "member" &&
+    (user.adminRole !== null || (adminGroup !== null && groupIds.includes(adminGroup.id)));
   const live = await liveGrants(
     tx,
     tenantId,
@@ -1232,6 +1268,7 @@ export async function resolveWithExpiry(
       guest: user.kind === "guest",
       active: user.active,
       ...(user.kind === "service" ? { service: true } : {}),
+      ...(admin ? { admin: true } : {}),
     },
     expiresAt: expiries.length === 0 ? null : new Date(Math.min(...expiries)),
   };

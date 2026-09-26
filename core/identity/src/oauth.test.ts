@@ -324,7 +324,57 @@ describe("authorization codes", () => {
     await write((tx) =>
       decideClient(tx, t.tenantId, client.clientKey, { approve: false }, "user:admin"),
     );
-    expect(await redeem(b)).toMatchObject({ ok: false, error: "invalid_client" });
+    // The refusal used the code up (T-106), as the lock did.
+    expect(await redeem(b)).toMatchObject({ ok: false, error: "invalid_grant" });
+  });
+
+  // T-106: an admin's approval, refusal, revocation and relabelling, as the admin API makes them.
+  it("decide only from the status the admin saw, and a refusal uses up waiting codes", async () => {
+    const approved = await write((tx) =>
+      decideClient(
+        tx,
+        t.tenantId,
+        client.clientKey,
+        { approve: true, trust: "consumer" },
+        "user:admin",
+        { expect: ["pending"] },
+      ),
+    );
+    expect(approved).toMatchObject({ status: "approved", trust: "consumer", was: "pending" });
+    // Another admin acting on the pending client they saw: it moved on.
+    const late = write((tx) =>
+      decideClient(tx, t.tenantId, client.clientKey, { approve: false }, "user:other", {
+        expect: ["pending"],
+      }),
+    );
+    await expect(late).rejects.toMatchObject({ code: "conflict" });
+    expect(await write((tx) => getClient(tx, t.tenantId, client.clientKey))).toMatchObject({
+      status: "approved",
+      decidedBy: "user:admin",
+    });
+    // A new label reaches the next check of a token issued under the old one.
+    const r = await tokens();
+    expect(await check(r.accessToken)).toMatchObject({ ok: true, client: { trust: "consumer" } });
+    await approve("commercial");
+    expect(await check(r.accessToken)).toMatchObject({
+      ok: true,
+      client: { trust: "commercial" },
+    });
+    // Revoked: its grants end, and a code waiting to be redeemed is used up, so approving the
+    // client again within the code's minute doesn't turn consent from before into a grant.
+    const waiting = await code();
+    const revoked = await write((tx) =>
+      decideClient(tx, t.tenantId, client.clientKey, { approve: false }, "user:admin", {
+        expect: ["approved"],
+      }),
+    );
+    expect(revoked).toMatchObject({ status: "refused", trust: null, was: "approved" });
+    expect(await check(r.accessToken)).toMatchObject({ ok: false, refused: "revoked" });
+    await approve();
+    expect(await redeem(waiting)).toMatchObject({ ok: false, error: "invalid_grant" });
+    await expect(
+      write((tx) => decideClient(tx, t.tenantId, "0".repeat(64), { approve: false }, "user:admin")),
+    ).rejects.toMatchObject({ code: "not-found" });
   });
 });
 

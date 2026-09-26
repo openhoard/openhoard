@@ -1,7 +1,7 @@
 import { queryRows, type Tx } from "@openhoard/core-db";
 import type { AuthzPrincipal } from "@openhoard/core-policy";
 import { sql } from "drizzle-orm";
-import { resolveWithExpiry } from "./directory.js";
+import { resolveWithExpiry, type PrincipalOptions } from "./directory.js";
 
 /*
  * The principal-set service (T-107): resolvePrincipal() with a cache in front, since every
@@ -34,6 +34,11 @@ export interface PrincipalCacheOptions {
   maxEntries?: number;
   /** Longest an entry lives, whatever changes. Default 60 s. */
   ttlMillis?: number;
+  /**
+   * Each tenant's admin group, by SCIM externalId (the server's config, T-106): see
+   * resolvePrincipal(). Fixed for the cache's life: a config change comes with a new process.
+   */
+  adminGroup?: (tenantId: string) => string | undefined;
 }
 
 export interface PrincipalCacheStats {
@@ -55,11 +60,13 @@ export class PrincipalCache {
   readonly #entries = new Map<string, Entry>();
   readonly #max: number;
   readonly #ttl: number;
+  readonly #adminGroup: ((tenantId: string) => string | undefined) | undefined;
   #stats = { hits: 0, misses: 0, bypassed: 0 };
 
   constructor(options: PrincipalCacheOptions = {}) {
     this.#max = options.maxEntries ?? 10_000;
     this.#ttl = options.ttlMillis ?? 60_000;
+    this.#adminGroup = options.adminGroup;
     if (!Number.isSafeInteger(this.#max) || this.#max < 1) {
       throw new RangeError("maxEntries must be a whole number of at least 1");
     }
@@ -88,7 +95,10 @@ export class PrincipalCache {
     const snapshot = state?.isolation === "repeatable read" || state?.isolation === "serializable";
     if (!state || state.readOnly !== "on" || !snapshot || state.epoch === null) {
       this.#stats.bypassed++;
-      return (await resolveWithExpiry(tx, tenantId, userId))?.principal ?? null;
+      return (
+        (await resolveWithExpiry(tx, tenantId, userId, undefined, this.options(tenantId)))
+          ?.principal ?? null
+      );
     }
     const epoch = Number(state.epoch);
     const at = new Date(state.moment);
@@ -103,7 +113,7 @@ export class PrincipalCache {
       return entry.principal;
     }
     this.#stats.misses++;
-    const resolved = await resolveWithExpiry(tx, tenantId, userId, at);
+    const resolved = await resolveWithExpiry(tx, tenantId, userId, at, this.options(tenantId));
     if (!resolved) {
       this.#entries.delete(key);
       return null;
@@ -122,6 +132,12 @@ export class PrincipalCache {
       }
     }
     return principal;
+  }
+
+  /** What resolving a principal of this tenant needs besides the database. */
+  options(tenantId: string): PrincipalOptions {
+    const adminGroup = this.#adminGroup?.(tenantId);
+    return adminGroup === undefined ? {} : { adminGroup };
   }
 
   /** Forgets this process's entries: for one tenant, or all. The epoch makes this rarely needed. */

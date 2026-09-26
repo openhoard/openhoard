@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   Authorizer,
+  mayAdminister,
   type AuthzDecision,
   type AuthzRequest,
   type EngineRequest,
   type PolicyEngine,
 } from "./authorize.js";
+import { createCedarEngine, PolicyError } from "./cedar.js";
 
 const request = (): AuthzRequest => ({
   principal: {
@@ -174,6 +176,7 @@ describe("Authorizer", () => {
     ["principal.groupIds", { ...r, principal: { ...r.principal, groupIds: ["g", , "h"] } }],
     ["principal.guest", { ...r, principal: { ...r.principal, guest: "no" } }],
     ["principal.active", { ...r, principal: { ...r.principal, active: 1 } }],
+    ["principal.admin", { ...r, principal: { ...r.principal, admin: "yes" } }],
     ["action", { ...r, action: "share" }],
     ["action", { ...r, action: undefined }],
     ["resource.id", { ...r, resource: { ...r.resource, id: "" } }],
@@ -195,5 +198,55 @@ describe("Authorizer", () => {
       policies: [],
     });
     expect(seen).toEqual([]);
+  });
+});
+
+describe("administration (T-106)", () => {
+  const admin = { ...request().principal, admin: true };
+  const app = { id: "openhoard-web", trust: "first-party" } as const;
+
+  it("lets an active member marked admin administer, through OpenHoard's own app only", () => {
+    expect(mayAdminister(admin, app)).toMatchObject({ allow: true, kind: "allow" });
+    for (const trust of ["local", "commercial", "consumer"] as const) {
+      expect(mayAdminister(admin, { id: "claude", trust })).toMatchObject({
+        allow: false,
+        kind: "forbid",
+      });
+    }
+    // A key's or an AI client's scope is narrower than the person: not the admin.
+    const scoped = { ...admin, scope: { actions: ["read" as const], zones: ["managed"] } };
+    expect(mayAdminister(scoped, app)).toMatchObject({ allow: false, kind: "forbid" });
+  });
+
+  it("refuses anyone else, and anything malformed", () => {
+    const p = request().principal;
+    expect(mayAdminister(p, app)).toMatchObject({ allow: false, kind: "no-permit" });
+    expect(mayAdminister({ ...admin, admin: "yes" } as never, app).allow).toBe(false);
+    expect(mayAdminister({ ...admin, active: false }, app)).toMatchObject({ kind: "forbid" });
+    expect(mayAdminister({ ...admin, guest: true }, app)).toMatchObject({ kind: "forbid" });
+    expect(mayAdminister({ ...admin, service: true }, app)).toMatchObject({ kind: "forbid" });
+    expect(mayAdminister(null as never, app)).toMatchObject({ allow: false, kind: "error" });
+    expect(mayAdminister(admin, undefined as never).allow).toBe(false);
+  });
+
+  it("gives an admin nothing on files: authorize() and Cedar never see it", () => {
+    const authz = new Authorizer(createCedarEngine());
+    const r = request();
+    const noGrants = { ...r.principal, tagGrants: [], admin: true };
+    for (const action of ["search", "read", "open", "tag"] as const) {
+      expect(authz.authorize({ ...r, action, principal: noGrants })).toMatchObject({
+        allow: false,
+        kind: "no-permit",
+      });
+    }
+    // Nor can a pack rule reach it: the schema has no such attribute, so the rule is refused.
+    expect(() =>
+      createCedarEngine({
+        "pack/admins": `permit (principal, action, resource) when { principal.admin };`,
+      }),
+    ).toThrow(PolicyError);
+    const { engine, seen } = recording();
+    new Authorizer(engine).authorize({ ...r, principal: noGrants });
+    expect(seen[0]?.readGranted).toBe(false);
   });
 });
