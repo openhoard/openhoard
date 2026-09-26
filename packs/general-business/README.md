@@ -8,11 +8,20 @@ own pack.
 | `sensitivity` | `public` (readable, full), `internal` (discoverable, commercial AI), `confidential` (hidden, local AI), `restricted` (hidden, no AI) | yes    |
 | `department`  | executive, finance, hr, legal, sales, marketing, engineering, operations, it                                                         | yes    |
 | `kind`        | contract, invoice, report, presentation, spreadsheet, policy, proposal, minutes, handbook                                            | yes    |
+| `risk`        | `injection` (no AI): set only by OpenHoard's injection detector (T-408), never by a model                                            | no     |
 | `client`      | none: values arrive through the review inbox                                                                                         | no     |
 | `project`     | none: values arrive through the review inbox                                                                                         | no     |
 
 **Defaults.** Untagged work is discoverable, and only commercial or local AI clients may
 receive its content.
+
+**Risk flags.** `risk:injection` is how enrichment marks a file whose name or content looks like
+it carries instructions for an AI (hidden text with instructions, "ignore all previous
+instructions", fake tool calls…). The value sets `exposure: metadata-only` and nothing else: AI
+clients get a metadata-only card and no content, no model summarizes the file, and people in
+OpenHoard's own apps still see and open it as before. It is built-in vocabulary: every tenant
+has it whether or not this pack is applied, and its levels can't be changed: a pack that lists
+it with another exposure, or any visibility, is refused (only its label is yours).
 
 **Rules.** Department folders (`**/Finance/**`, `**/HR/**`, …) tag the department. HR files are
 also tagged `sensitivity:confidential`. `**/Confidential/**` sets confidentiality. Contract and

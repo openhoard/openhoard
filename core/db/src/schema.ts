@@ -1187,6 +1187,172 @@ export const versionExtracts = pgTable(
   ],
 );
 
+/** How a version's model card ended (T-405); see {@link versionCards}. */
+export const CARD_STATUSES = ["summarized", "skipped"] as const;
+/** Why a version has no model summary. */
+export const CARD_SKIP_REASONS = [
+  "no-text",
+  "flagged",
+  "budget",
+  "no-provider",
+  "model-output",
+  "refused",
+  "bad-response",
+  "too-large",
+  "unavailable",
+] as const;
+/** The most characters a stored summary keeps (100 words, with room for long words). */
+export const MAX_CARD_SUMMARY_CHARS = 2_000;
+/** Where a model provider runs (core/policy ProviderKind): the AI trust scale. */
+export const PROVIDER_KINDS = ["local", "commercial", "consumer"] as const;
+
+/**
+ * A version's model card (T-405): the summary a model wrote from the version's extracted text,
+ * and which provider wrote it, one row per version. The summary is content (the content in
+ * other words): core/catalog shows it only on cards whose exposure lets the client have the
+ * content, and only while the file's exposure still allows the provider that wrote it.
+ *
+ * - `summarized`: `summary` (at most 100 words, filtered), `provider_id`, `provider_kind`,
+ *   `model`, `prompt_version`, token counts.
+ * - `skipped`: no model ran, and `reason` says why: `no-text` (nothing extracted), `flagged`
+ *   (the injection detector flagged the file, T-408), `budget` (the tenant's daily token budget
+ *   was spent), `no-provider` (no configured provider may have this file's content); or a
+ *   model ran and gave nothing usable: `model-output` (its answer failed the card schema twice),
+ *   `refused` (the provider refused the request: a content filter, a bad key or model),
+ *   `bad-response` (not the API's shape), `too-large` (over the answer cap), `unavailable`
+ *   (rate-limited, down or slow through the job's last retry).
+ *
+ * Written only by enrichment's summarize step (core/jobs), through its guarded write, upserted:
+ * running it again rewrites the row. It goes with its version when the object is purged.
+ */
+export const versionCards = pgTable(
+  "version_cards",
+  {
+    tenantId: text("tenant_id").notNull(),
+    versionId: text("version_id").notNull(),
+    objectId: text("object_id").notNull(),
+    status: text("status", { enum: CARD_STATUSES }).notNull(),
+    reason: text("reason", { enum: CARD_SKIP_REASONS }),
+    summary: text("summary").notNull().default(""),
+    providerId: text("provider_id"),
+    providerKind: text("provider_kind", { enum: PROVIDER_KINDS }),
+    model: text("model"),
+    promptVersion: text("prompt_version").notNull(),
+    /** Sentences, tags or titles the output filter took out of the model's answer. */
+    filtered: integer("filtered").notNull().default(0),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.versionId] }),
+    foreignKey({
+      name: "version_cards_version_fk",
+      columns: [t.tenantId, t.objectId, t.versionId],
+      foreignColumns: [versions.tenantId, versions.objectId, versions.id],
+    }).onDelete("cascade"),
+    index("version_cards_object_idx").on(t.tenantId, t.objectId),
+    check("version_cards_status_valid", sql.raw(`status in (${quoted(CARD_STATUSES)})`)),
+    check(
+      "version_cards_reason_valid",
+      sql.raw(
+        `(status = 'skipped') = (reason is not null) and (reason is null or reason in (${quoted(CARD_SKIP_REASONS)}))`,
+      ),
+    ),
+    check(
+      "version_cards_provider_when_summarized",
+      sql`(status = 'summarized') = (provider_id is not null and provider_kind is not null and model is not null)`,
+    ),
+    check(
+      "version_cards_provider_kind_valid",
+      sql.raw(`provider_kind is null or provider_kind in (${quoted(PROVIDER_KINDS)})`),
+    ),
+    check(
+      "version_cards_provider_id_format",
+      sql`provider_id is null or provider_id ~ '^[a-z0-9][a-z0-9-]{0,62}$'`,
+    ),
+    check("version_cards_model_length", sql`model is null or char_length(model) between 1 and 200`),
+    check("version_cards_summary_only_summarized", sql`status = 'summarized' or summary = ''`),
+    check(
+      "version_cards_summary_size",
+      sql.raw(`char_length(summary) <= ${MAX_CARD_SUMMARY_CHARS}`),
+    ),
+    check(
+      "version_cards_prompt_version_format",
+      sql`prompt_version ~ '^[a-z0-9][a-z0-9./-]{0,63}$'`,
+    ),
+    check("version_cards_counts", sql`filtered >= 0 and input_tokens >= 0 and output_tokens >= 0`),
+  ],
+);
+
+/**
+ * "Reviewed: not a prompt injection" (T-408): a tenant admin looked at a file the injection
+ * detector flagged (or would flag) and decided it is fine, for the content they looked at. Not
+ * the owner: the owner is who an insider attack would come from. One row per object, for the
+ * version reviewed and its content (`blob_id`): the detector leaves the object alone (and takes
+ * its own flag off) while its current version has that content; a new version with other
+ * content is judged again. `reviewed_by` is the admin (`user:…`); core/catalog
+ * markNotInjection() checks they are one and appends the audit record in the same transaction.
+ * Removing the row gives the detector back its say.
+ */
+export const injectionReviews = pgTable(
+  "injection_reviews",
+  {
+    tenantId: text("tenant_id").notNull(),
+    objectId: text("object_id").notNull(),
+    /** The version the admin reviewed. */
+    versionId: text("version_id").notNull(),
+    /** Its content: the decision holds for any version with these bytes. */
+    blobId: text("blob_id").notNull(),
+    reviewedBy: text("reviewed_by").notNull(),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.objectId] }),
+    foreignKey({
+      name: "injection_reviews_object_fk",
+      columns: [t.tenantId, t.objectId],
+      foreignColumns: [objects.tenantId, objects.id],
+    }).onDelete("cascade"),
+    foreignKey({
+      name: "injection_reviews_version_fk",
+      columns: [t.tenantId, t.objectId, t.versionId],
+      foreignColumns: [versions.tenantId, versions.objectId, versions.id],
+    }).onDelete("cascade"),
+    check("injection_reviews_by_user", sql`reviewed_by ~ '^user:usr_[0-9a-hjkmnp-tv-z]{26}$'`),
+    check("injection_reviews_blob_format", sql`blob_id ~ '^b3t:[0-9a-f]{64}$'`),
+  ],
+);
+
+/**
+ * Tokens spent on models per tenant and UTC day (T-404), for the daily budget. A call reserves
+ * its most (input estimate plus the output cap) before it is sent, under the budget or not at
+ * all, and settles to what the provider reported after; so concurrent jobs, in any process,
+ * never spend past the budget together. Kept small: one row per tenant per day.
+ */
+export const modelUsage = pgTable(
+  "model_usage",
+  {
+    tenantId: text("tenant_id").notNull(),
+    /** The UTC day, `YYYY-MM-DD`. */
+    day: text("day").notNull(),
+    tokens: bigint("tokens", { mode: "number" }).notNull().default(0),
+    /** HTTP attempts made (retries and repairs each count), not model steps. */
+    calls: integer("calls").notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.day] }),
+    foreignKey({
+      name: "model_usage_tenant_fk",
+      columns: [t.tenantId],
+      foreignColumns: [tenants.id],
+    }),
+    check("model_usage_day_format", sql`day ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'`),
+    check("model_usage_counts", sql`tokens >= 0 and calls >= 0`),
+  ],
+);
+
 /** Where a source's sync stands: crawling (from a checkpoint), or following deltas. */
 export const SYNC_PHASES = ["crawl", "delta"] as const;
 /** Longest checkpoint token or cursor kept, in characters (the SDK's LIMITS.token). */
@@ -1551,6 +1717,9 @@ export const tables = {
   apiKeys,
   activityEvents,
   versionExtracts,
+  versionCards,
+  modelUsage,
+  injectionReviews,
   sourceSyncs,
   sessions,
   oauthClients,

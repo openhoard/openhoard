@@ -25,6 +25,7 @@ export {
 } from "./primary.js";
 export {
   applyRuleTags,
+  BUILTIN_RULE_PREFIX,
   evaluateRules,
   globMatch,
   validateRules,
@@ -103,6 +104,29 @@ export {
   type ActivityType,
   type WithheldContent,
 } from "./activity.js";
+export {
+  cardSkipCounts,
+  modelVocabulary,
+  readCard,
+  saveCard,
+  skippedVersions,
+  type CardSkipReason,
+  type CardStatus,
+  type VersionCard,
+} from "./cards.js";
+export {
+  applyInjectionFlag,
+  clearInjectionReview,
+  hasInjectionFlag,
+  INJECTION_DETECTOR,
+  INJECTION_TAG,
+  injectionReviewOf,
+  InjectionReviewError,
+  markNotInjection,
+  reviewedNotInjection,
+  type FlagChange,
+  type InjectionReview,
+} from "./risk.js";
 export {
   contentRef,
   readExtract,

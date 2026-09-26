@@ -135,6 +135,29 @@ describe("decideRead", () => {
     wantsContent: true,
   } as const;
 
+  it("gives a non-reader whose read a policy forbids a metadata-only card of a readable file", () => {
+    for (const clientTrust of ["first-party", "local", "consumer"] as const) {
+      expect(
+        decideRead({
+          ...base,
+          clientTrust,
+          canRead: false,
+          readForbidden: true,
+          wantsContent: false,
+        }),
+      ).toMatchObject({ shape: "card", metadataOnly: true });
+      expect(
+        decideRead({
+          ...base,
+          clientTrust,
+          canRead: false,
+          readForbidden: false,
+          wantsContent: false,
+        }),
+      ).toMatchObject({ shape: "card", metadataOnly: false });
+    }
+  });
+
   it("non-readers see according to visibility", () => {
     expect(decideRead({ ...base, canRead: false, visibility: "hidden" }).shape).toBe("none");
     expect(decideRead({ ...base, canRead: false, visibility: "discoverable" }).shape).toBe(

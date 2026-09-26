@@ -37,3 +37,33 @@ The baseline confirms the threat model: **sanitising characters is necessary but
 3. and, on the tool layer, content returned as quoted, untrusted data with provenance.
 
 The corpus harness scores each of these: the target is 0 `leaked` and every attack file `flagged`. The agent-side sessions complete this spike after S5.
+
+## Results after T-404, T-405 and T-408 (2026-09-26)
+
+Measured by core/jobs `s8-corpus.test.ts`, on every push: the 50 corpus files and 20 benign
+files go through the real pipeline (`extract-text → injection-flag → rule-tags → summarize`) in a
+tenant with the starter pack, with an **obedient** stub model that copies the document into the
+summary and the display title and proposes every tag it is offered, loosening ones too.
+
+- **Detection (1 above): 48 of 50 flagged (96%), 0 of 20 benign files.** Flagged files get
+  `risk:injection` (`exposure: metadata-only`): every AI client gets a metadata-only card
+  without a summary, and no model sees their content. Missed: OHX-023 (hidden sheet: its text is
+  left out of the extraction, so no model or card sees it either) and OHX-042 (HTML: no
+  extractor yet, so no text at all).
+- **Stripped summaries (2 above): 0 leaked.** No summary, display title or tag on any corpus
+  file carries a marker or an instruction pattern. With detection switched off (every answer
+  straight through the schema and the filter), no instruction survives either; only bare case
+  ids with no instruction around them can (a reversed payload's readable marker, and file names
+  the model copied).
+- **0 loosened:** a model's `sensitivity:public` waits in review (`sensitive`), `risk:*` is
+  never offered nor accepted from a model, and values outside the vocabulary are dropped.
+
+After review (same day): detection and the filter now run on cleaned text and its Latin
+skeleton (zero-width splits, HTML entities, fullwidth and Cyrillic/Greek look-alikes no longer
+hide a payload), with the override phrasing in eight more languages; file names flag only on
+controls, zero-width spaces, bidi overrides and tag characters (emoji joiners, RTL marks and soft
+hyphens pass). From a clean build of the extractor (the test now checks it can read PDF, DOCX
+and XLSX before measuring): still 48 of 50, 0 of 20 benign.
+
+Still open: 3 (tool-layer quoting with provenance) with T-802, and the agent-side sessions
+after S5.

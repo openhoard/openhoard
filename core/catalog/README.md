@@ -10,6 +10,9 @@ Part of the OpenHoard trusted core. See [../README.md](../README.md) and
 - [`tagging.ts`](src/tagging.ts): applying tags and the review inbox (T-406).
 - [`visibility.ts`](src/visibility.ts): visibility levels, display titles and what non-readers
   see (T-603).
+- [`cards.ts`](src/cards.ts): model cards per version (`version_cards`: the summary and which
+  provider wrote it, or why none did) and the vocabulary a model may propose from (T-405).
+- [`risk.ts`](src/risk.ts): the injection detector's `risk:injection` flag (T-408).
 - [`explain.ts`](src/explain.ts): "why can X see this?" (T-606).
 - [`packs.ts`](src/packs.ts): declarative packs, planned as a reviewed diff and applied only if
   their tests pass (T-607); see [packs/](../../packs/README.md).
@@ -55,6 +58,43 @@ queries against it, a match may only count for someone the file's levels let rea
 (and, for an AI client, whose trust its exposure allows): a hit on extracted text must never
 surface, rank or even count a file for someone who may only see its title or nothing. Summaries
 (T-405) send it to a model only as the exposure allows.
+
+## Model cards and risk flags
+
+`saveCard()` stores a version's model card, one row per version in `version_cards`, upserted:
+`summarized` (the filtered summary, the provider's id and kind, the model, the prompt version,
+token counts) or `skipped` with a reason (`no-text`, `flagged`, `budget`, `no-provider`).
+Enrichment's summarize step (core/jobs) writes it through its guarded write. `viewObjects()`
+puts the current version's summary on a card (`CardView.summary`) only when the card isn't
+metadata only and the file's exposure still allows the provider's kind (core/policy
+`mayProcess()`): a file tightened to local-only after a commercial model summarized it shows no
+summary, to anyone. `modelVocabulary()` is the approved vocabulary a model may propose from,
+without the `risk` facet.
+
+`applyInjectionFlag()` puts `risk:injection` on an object, or takes the detector's own flag off,
+as `rule:builtin/injection-detector` (source `rule`: trusted). `applyRuleTags()` leaves every
+`rule:builtin/…` tag alone (pack rule ids can't contain `/`). The value is built-in vocabulary
+(core/db `ensureBuiltInVocabulary()`, run by createTenant(), migration 0046 and before every
+flag): approved, `exposure: metadata-only`, whatever packs or admins did to it. A flag a person
+or a pack put on is never cleared by the detector.
+
+`markNotInjection()` records a tenant admin's decision that an object is not an injection (never
+the owner's: an insider attack would come from the owner). It is for the version and content
+reviewed (`injection_reviews`: version and blob): while the object's current version has that
+content, the detector's flag comes off, the detector doesn't flag it again, and the summarize
+step summarizes it; a new version with other content is judged again. It checks the admin
+(core/identity `isAdmin()`) and appends the `injection.review` audit record itself, in the same
+transaction; `clearInjectionReview()` (audited as `injection.review-withdrawn`) gives the
+detector back its say. The database refuses any change to `risk:injection`'s levels or its
+removal, whoever tries (migration 0050); a pack that lists it differently is refused at
+validation.
+
+`cardSkipCounts()` counts the tenant's current versions without a summary by reason (for a
+health view); `skippedVersions()` lists them, paged, for core/jobs `resummarize()`.
+
+A non-reader's card of a `readable` file carries the summary as the exposure allows, unless a
+policy forbids them `read` (a Cedar forbid, or an evaluation error, not merely no permit): then
+the card is metadata only (core/policy `decideRead()`'s `readForbidden`).
 
 ## Ingest
 

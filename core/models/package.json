@@ -1,0 +1,32 @@
+{
+  "name": "@openhoard/core-models",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Model providers (stub, OpenAI-compatible, Anthropic, Ollama), routing by exposure, and the daily token budget.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rimraf dist coverage"
+  },
+  "dependencies": {
+    "@openhoard/core-db": "workspace:^",
+    "@openhoard/core-policy": "workspace:^",
+    "drizzle-orm": "^0.45.3"
+  },
+  "devDependencies": {
+    "@openhoard/config": "workspace:*"
+  },
+  "license": "Apache-2.0"
+}

@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@noble/hashes": "^2.4.0",
+    "@openhoard/core-audit": "workspace:^",
     "@openhoard/core-db": "workspace:^",
     "@openhoard/core-identity": "workspace:^",
     "@openhoard/core-policy": "workspace:^",

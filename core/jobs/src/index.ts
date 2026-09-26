@@ -6,6 +6,7 @@ export {
   needsEnrichment,
   ruleTagStep,
   StaleTargetError,
+  stepProviders,
   type EnrichContext,
   type EnrichOutcome,
   type EnrichPayload,
@@ -15,6 +16,9 @@ export {
   type WithheldStep,
 } from "./enrich.js";
 export { extractsZone, extractStep, type ExtractStepOptions } from "./extract.js";
+export { RESUMMARIZABLE, resummarize } from "./resummarize.js";
+export { injectionFlagStep, scoreVersion, type FlagStepOptions } from "./flag.js";
+export { SUMMARIZE_BUDGET_MS, summarizeStep, type SummarizeStepOptions } from "./summarize.js";
 export {
   deadLetteredVersions,
   DEFAULT_MAINTENANCE_CRON,

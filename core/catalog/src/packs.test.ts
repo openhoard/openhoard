@@ -79,6 +79,27 @@ const small = (patch: Partial<Pack> = {}): Pack => ({
   ...patch,
 });
 
+describe("built-in vocabulary in packs", () => {
+  it("refuses a pack that changes risk:injection's levels, and allows it as it is", () => {
+    const withRisk = (value: Record<string, unknown>) =>
+      small({
+        facets: [
+          { key: "risk", label: "Risk", values: [{ value: "injection", label: "x", ...value }] },
+        ] as NonNullable<Pack["facets"]>,
+      });
+    for (const levels of [
+      {},
+      { exposure: "full" },
+      { exposure: "metadata-only", visibility: "hidden" },
+    ]) {
+      expect(validatePack(withRisk(levels)).join("\n"), JSON.stringify(levels)).toContain(
+        "risk:injection is built-in vocabulary",
+      );
+    }
+    expect(validatePack(withRisk({ exposure: "metadata-only" }))).toEqual([]);
+  });
+});
+
 describe("the general business starter pack", () => {
   it("is a valid pack whose tests all pass", () => {
     expect(validatePack(STARTER)).toEqual([]);
@@ -89,10 +110,10 @@ describe("the general business starter pack", () => {
 
   it("applies with its reviewed diff, loosening flagged", async () => {
     const p = await plan(STARTER);
-    expect(p).toMatchObject({ name: "general-business", version: "1.1.0", previous: null });
+    expect(p).toMatchObject({ name: "general-business", version: "1.2.0", previous: null });
     const kinds = p.changes.map((c) => c.kind);
     expect(kinds).toContain("set-defaults");
-    expect(kinds.filter((k) => k === "add-value").length).toBe(22);
+    expect(kinds.filter((k) => k === "add-value").length).toBe(23);
     expect(p.warnings).toEqual(
       expect.arrayContaining([
         "tenant default goes from hidden/metadata-only to discoverable/commercial-only",
@@ -143,7 +164,7 @@ describe("the general business starter pack", () => {
     // Planning the same pack again finds nothing to do.
     const again = await plan(STARTER);
     expect(again.changes).toEqual([]);
-    expect(again.previous).toBe("1.1.0");
+    expect(again.previous).toBe("1.2.0");
   });
 });
 

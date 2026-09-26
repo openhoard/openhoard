@@ -1,11 +1,10 @@
 # core/summarize
 
 Part of the OpenHoard trusted core. See [../README.md](../README.md) and
-[docs/architecture.md](../../docs/architecture.md). Model routing is not implemented yet; the
-enrichment pipeline that will run it is in [core/jobs](../jobs/README.md), which already refuses
-to send a file's content to a provider its exposure doesn't allow (core/policy `mayProcess()`,
-T-604). A card's summary is content: an AI client the file's exposure doesn't reach gets the card
-as metadata only (core/catalog `CardView.metadataOnly`). Design discussion welcome via RFC issues.
+[docs/architecture.md](../../docs/architecture.md). File cards, the prompt and output schema for
+model summaries (T-405), and the prompt-injection detector (T-408). No database and no network:
+the providers are in [core/models](../models/README.md), and the steps that run all this in
+[core/jobs](../jobs/README.md).
 
 ## File cards
 
@@ -20,6 +19,72 @@ compact card agents and search results get. It treats every text field as untrus
   `CardError`.
 
 **The summary stays untrusted.** It is model output about content an attacker may control.
-Cleaning removes what hides text, not what the text says, so a client renders it as quoted
-data with its provenance and never follows it as instructions (see
-[docs/threat-model.md](../../docs/threat-model.md)).
+Cleaning removes what hides text, and the filter below removes what reads as an instruction,
+but a client still renders it as quoted data with its provenance and never follows it (see
+[docs/threat-model.md](../../docs/threat-model.md)). A summary is content: core/catalog shows it
+only on cards whose exposure lets the client have the content, and only while the file's
+exposure still allows the provider that wrote it (`CardView.summary`).
+
+## Injection detection (T-408)
+
+`detectInjection({ name, text, signals, metadata })` ([`src/injection.ts`](src/injection.ts))
+scores a file: phrase patterns (overrides such as "ignore all previous instructions", role
+markup, text addressed to an AI, fake tool calls, markdown image links, "decode and follow",
+role lines, sending out, destroying, loosening levels, keeping secrets, formula payloads), each
+with a weight, over the file name, the visible text, the extractor's hidden-text samples, and
+the file's own metadata. Hidden text or a name carrying an instruction weighs more; a very hidden
+sheet, control or bidi characters in a name, and path traversal flag on their own. Base64 runs
+are decoded and the text is also read reversed. A score of 3 flags.
+
+**Text is cleaned before any pattern sees it** ([`src/clean.ts`](src/clean.ts)): invisible
+characters deleted (a zero-width space inside "ignore" no longer splits it), HTML character
+references decoded, NFKC (fullwidth forms fold), lower case; English patterns then run on the
+skeleton, where look-alike Cyrillic, Greek, Armenian and Latin-extension letters are folded to
+Latin (a compact, hand-written subset of Unicode's UTS #39 confusables). A short list of the
+"ignore the previous instructions" phrasings in French, Spanish, German, Portuguese, Italian,
+Russian, Chinese and Japanese runs on the cleaned text. No list covers every language or
+paraphrase: the real defence for whatever gets through is that clients quote cards as data
+(T-802).
+
+A file name flags on control characters, zero-width spaces and word joiners, bidi embeddings,
+overrides and isolates, and tag characters; not on zero-width joiners (emoji), right-to-left
+marks (Hebrew and Arabic names) or soft hyphens.
+
+It is a tripwire, not a classifier: a document about prompt injection is flagged too (a person
+can mark it reviewed), and a determined attacker can word around it; that is what the filter
+below and quoted rendering are for. Every scan is linear: patterns are literals, small
+alternations and bounded gaps, never nested quantifiers; input is cut at 1 Mi characters (the extractor's default text cap), each text is cleaned once per variant (the spaced one only when it has invisible characters), and scoring stops once the file is flagged.
+Verdicts carry pattern ids, never matched text, so they can be logged.
+
+**Measured on the S8 corpus v0** (core/jobs `s8-corpus.test.ts`, the real extractor): 48 of 50
+flagged (96%); 0 of 20 benign files with comments, white text, hidden sheets, properties,
+formulas and chat transcripts.
+
+## Summaries and model tags (T-405)
+
+[`src/output.ts`](src/output.ts) has three layers:
+
+1. **The prompt** (`buildSummaryPrompt()`): the document between `BEGIN-DOCUMENT-<nonce>` and
+   `END-DOCUMENT-<nonce>` (a fresh 128-bit nonce; anything marker-like is removed from the
+   document first), cut to the provider's `maxInputChars`, and instructions that nothing between
+   the markers is an instruction. The tenant's approved vocabulary is listed, never the `risk`
+   facet.
+2. **The schema** (`validateCardOutput()`, `CARD_OUTPUT_SCHEMA`): one JSON object with exactly
+   `summary` (a string), `tags` (at most 10 `{ tag, confidence }`) and `displayTitle` (a string
+   or null). Anything else is a `ModelOutputError` listing the problems (never the answer's
+   text); the caller repairs once with `buildRepairPrompt()`, without the document.
+3. **The filter** (`filterCardOutput()`): every check runs on the cleaned text and its skeleton,
+   never the raw text, and twice: with invisible characters deleted, and as spaces (what
+   storage makes of them: `ignore<ZWSP>all<ZWSP>previous…` is checked as it will read). The
+   assembled summary is checked again whole, so an instruction split across sentences or a line
+   break doesn't pass in halves. Any word mixing Latin letters with another script's (Cherokee,
+   Lisu, Coptic… whatever the confusables table knows) drops its sentence; any bare domain
+   (`name.tld`, so also `report.pdf`) and defanged links (`[.]`, `(dot)`, `hxxp`) count as
+   links. Every summary sentence carrying an instruction pattern (any of the listed
+   languages), a link (a scheme, `www.`, `//`, or any `name.tld/path`), an email address,
+   markup or code, a role label, or words addressed to an assistant, agent, AI, model, LLM, bot
+   or system is dropped; the summary is capped at 100 words; tags must be in the offered
+   vocabulary and never `risk:*`; a display title must be one clean line that differs from the
+   file name.
+
+`PROMPT_VERSION` names the prompt and schema: a stored summary from another version is redone.

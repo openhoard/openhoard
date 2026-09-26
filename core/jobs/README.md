@@ -95,10 +95,85 @@ start alone, so a failing version keeps its backoff and doesn't spend a retry ev
 **Steps.** An `EnrichStep` has a `name` and `run({ target, read, write, signal })`. Steps run in
 order, each after the one before succeeded. `target` is the version as the job read it when it
 started: tenant, object, version, seq, title, media type, blob. The default set,
-`defaultEnrichSteps()`, is the rule tagger (`ruleTagStep`, core/catalog T-403), first so rule
-tags are on a file before any model sees it, then, when the server passes `content` (where
-versions' bytes are read: core/storage `blobContentSource()`, connectors' sources), text
-extraction (`extractStep`, below). Model steps (T-404, T-405) join the list later.
+`defaultEnrichSteps()`, runs in this order:
+
+```text
+extract-text → injection-flag → rule-tags → summarize
+```
+
+- `extract-text` (`extractStep`, below, T-402), when the server passes `content` (where
+  versions' bytes are read: core/storage `blobContentSource()`, connectors' sources);
+- `injection-flag` (`injectionFlagStep`, [flag.ts](src/flag.ts), T-408), always;
+- `rule-tags` (`ruleTagStep`, core/catalog T-403), so rule tags are on a file before any model
+  sees it;
+- `summarize` (`summarizeStep`, [summarize.ts](src/summarize.ts), T-405), only with `content`
+  and `summarize: { router, budget }` (core/models): no model runs unless an admin configures
+  one (the PRD's cost guard: nothing reads the whole corpus through a model by default).
+
+**Injection flagging** (`injection-flag`, T-408). The step scores the version with core/summarize
+`detectInjection()`: the file name, the extracted text, the extractor's hidden-text signals
+(white, tiny, off-page and invisible text, hidden sheets and slides, comments, annotations,
+document properties, defined names, HTML comments, invisible characters, formulas) and the
+file's own metadata (title, sheet names). Flagged, it puts the trusted `risk:injection` tag on
+the object (core/catalog `applyInjectionFlag()`, applied by `rule:builtin/injection-detector`,
+which the rule tagger leaves alone); the starter pack's value sets `exposure: metadata-only`, so
+AI clients get metadata-only cards and no content, and every model step after it is withheld by
+the pipeline (people in OpenHoard's own apps still read the file). Not flagged, it takes its own
+flag off again (a clean new version). Without an extraction it scores the name alone (this runs
+in the server today, without a content source). `risk:injection` is built-in vocabulary (core/db
+`ensureBuiltInVocabulary()`: every tenant has it, and it is put back before a flag), so a flag
+never waits on an admin and never leaves a file hidden. A person's "not an injection" decision
+(core/catalog `markNotInjection()`) stops the detector flagging that object, across edits. Only
+pattern ids and a score reach logs.
+
+On the S8 corpus v0 through the real extractor ([s8-corpus.test.ts](src/s8-corpus.test.ts)),
+48 of 50 attack files are flagged (96%) and none of 20 benign files with the same kinds of
+hidden parts. The two misses: a hidden sheet (its text is left out of the extraction, so no
+model sees it either) and an HTML file (no extractor for HTML yet, so no text at all).
+
+**Summaries and model tags** (`summarize`, T-405). For each version with extracted text, once
+per version and prompt version (`PROMPT_VERSION`), the step:
+
+1. records `skipped` (core/catalog `saveCard()`) when there is no text (`no-text`), when the
+   detector flags it (`flagged`, checked again here), or when no provider may have it
+   (`no-provider`);
+2. picks a provider through the router (core/models, below), asking `context.mayProcess` for
+   each candidate in order;
+3. reserves tokens (call plus one repair, each at its output cap) from the tenant's daily
+   budget; a spent budget records `skipped` / `budget`, logs a warning, and the version is still
+   processed (it just has no summary until a later run);
+4. sends the prompt (core/summarize `buildSummaryPrompt()`: the document as data between
+   nonce-carrying markers, the tenant's approved vocabulary without the `risk` facet); the
+   provider's client asks `mayProcess` again right before every HTTP attempt;
+5. validates the answer against the strict card schema, repairs once, and records `skipped` /
+   `model-output` if the repair fails too;
+6. filters it (`filterCardOutput()`: sentences with instructions, links, emails, markup or role
+   labels go; tags outside the vocabulary and in `risk` go) and writes in one guarded
+   transaction: the settled token count, the card (`version_cards`), the model's tags through
+   `proposeTag()` (unreviewed; anything with levels or grants waits in review) and a display
+   title proposal (`proposeDisplayTitle()`: non-readers see `Document` until the owner
+   confirms).
+
+What a model can't do is recorded, not retried at a cost: an answer that fails the schema twice
+(`model-output`), a refusal (`refused`: a content filter's 400, a wrong key, a blocked address),
+an answer of the wrong shape (`bad-response`) or over the cap (`too-large`) is stored as
+`skipped` with that reason and a warning, and the version is processed without a summary.
+Transient errors (rate-limited, 5xx, timeouts, network) fail the step so the job retries with its
+backoff; on the job's last attempt (`context.finalAttempt`, from pg-boss's retry count) they are
+recorded as `unavailable` instead, so no version is dead-lettered and left hidden for want of a
+summary. Errors name the provider and the status, never the key or the content. Reported usage
+is clamped (whole, not negative, at most the call's share of the reservation) and the
+reservation is always settled, with the HTTP requests that went out counted in `calls`.
+
+`resummarize(db, jobs, tenant, reasons)` re-enqueues the tenant's current versions skipped as
+`refused`, `unavailable` or `budget` (after an admin fixed a key or raised the budget; the API
+authorizes and audits it); core/catalog `cardSkipCounts()` gives the counts per reason.
+
+**Known gap: a job whose lease expires on its last attempt.** The model step's own time budget
+(8 minutes, enforced with an abort) keeps it inside the lease, so a lease expiry means the
+extract step or the host; but if one happens on a job's last attempt, the job is dead-lettered
+and the version stays unprocessed (hidden) until an operator redrives it. Recording the optional
+model step as `unavailable` from the dead-letter path is a follow-up.
 
 **Text extraction** (`extract-text`, [extract.ts](src/extract.ts), T-402). The step reads the
 version's bytes through the `ContentSource` (core/catalog), extracts them in a limited child
@@ -130,10 +205,19 @@ indexedZones: true } })` opts indexed zones in (their bytes come from the custom
 local-only and code zones are never read on the server. `extract.limits` and
 `extract.budgetMs` (13 minutes, under the job's lease) tune the rest.
 
-**The job's lease** (`enrich.expireInSeconds`, 15 minutes) covers every step of one job: the
-extract step's budget is sized to fit it alone. When model steps (T-404, T-405) join the same
-job, the lease must grow by their time (or the extract budget shrink), or a slow file's job
-expires mid-run and is retried from the first step.
+**The job's lease** (`enrich.expireInSeconds`, 25 minutes) covers every step of one job:
+
+| Step             | Time budget                                                                 |
+| ---------------- | --------------------------------------------------------------------------- |
+| `extract-text`   | 13 minutes (`extract.budgetMs`), both attempts together                     |
+| `injection-flag` | milliseconds (linear scans of at most 1 Mi characters)                      |
+| `rule-tags`      | milliseconds                                                                |
+| `summarize`      | 8 minutes (`summarize.budgetMs`): two calls of 60 s per attempt, 2 retries, |
+|                  | backoff up to 30 s each                                                     |
+| margin           | about 4 minutes for the transactions and a slow host                        |
+
+A step past its budget aborts (and fails the job, which retries), so a slow file's job doesn't
+outlive its lease and run twice. Raise the lease with the budgets if you raise either.
 
 The step names no provider: the content goes to OpenHoard's own process on the same machine and
 nowhere else, so it runs whatever the file's exposure, `metadata-only` included; what reads the
@@ -177,8 +261,10 @@ trusted tags decide, the rest only tighten, else the tenant default; not the unp
   (a rule's, a pack's, a person's, or a reviewed model tag) decides from then on, `full`
   included.
 
-A step without a provider (the rule tagger, a text extractor) sends nothing out; one that does
-must declare it (T-404 adds the providers).
+A step without a provider (the rule tagger, a text extractor, the injection flag) sends nothing
+out; one that does must declare it: `provider` for one, or `providers` for a step that routes
+(the summarize step lists every provider it may pick; the pipeline runs it if the exposure
+allows at least one, and the step's client asks again before each send).
 
 **Short transactions.** A step does its slow work (extracting, calling a model) outside any
 transaction. A transaction held open blocks the embedded database for everyone, and pins a
@@ -210,7 +296,7 @@ version, and a version that was replaced never becomes current again.
 **Retries and dead letters.** A step that throws fails the job (`EnrichStepError`, naming the
 step). It runs again after `retryDelaySeconds` (default 30), doubling each time up to
 `retryDelayMaxSeconds` (default 1 hour), at most `retryLimit` more times (default 5). A job that
-runs longer than `expireInSeconds` (default 15 minutes), because its worker died, is put back
+runs longer than `expireInSeconds` (default 25 minutes), because its worker died, is put back
 for a retry by the next supervisor pass (`superviseIntervalSeconds`, default 60). A job that runs
 out of retries goes to `enrich-failed`, the dead letter queue (in a partition of its own), which
 nothing works: an operator looks at it and redrives it (`jobs.boss.redrive()`). Its version

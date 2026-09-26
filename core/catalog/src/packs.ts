@@ -254,6 +254,16 @@ export function validatePack(input: unknown): string[] {
       if (value.exposure !== undefined && !isExposure(value.exposure)) {
         bad(`${vat}: unknown exposure`);
       }
+      // Built-in vocabulary (core/db ensureBuiltInVocabulary()): a pack may list it, as it is.
+      if (
+        facet.key === "risk" &&
+        value.value === "injection" &&
+        (value.exposure !== "metadata-only" || value.visibility !== undefined)
+      ) {
+        bad(
+          `${vat}: risk:injection is built-in vocabulary: exposure metadata-only, no visibility, and it can't be changed`,
+        );
+      }
     }
   }
 

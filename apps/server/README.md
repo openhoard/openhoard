@@ -29,6 +29,31 @@ running jobs get 5 s to finish, then any still running are failed (retried later
 stop, with up to 2 s more for their handlers to return. Then it closes the database, all within
 the 10 s after which it forces an exit.
 
+## Models (T-404, T-405)
+
+Off by default: with no `models.providers`, enrichment runs no model. Each provider has an id, a
+kind (`local`, `commercial`, `consumer`: which files' content it may have), an adapter
+(`ollama`, `openai` for OpenAI, Azure OpenAI, LM Studio and vLLM, `anthropic`, or `stub`), a base
+URL and models, and optional timeouts, retries, caps and concurrency. See
+[core/models](../../core/models/README.md) for every setting and an example.
+
+```json
+{
+  "models": {
+    "providers": [
+      { "id": "ollama", "kind": "local", "adapter": "ollama", "chatModel": "llama3.2" },
+      { "id": "claude", "kind": "commercial", "adapter": "anthropic" }
+    ],
+    "dailyTokenBudget": 2000000
+  }
+}
+```
+
+API keys come only from the environment, `OPENHOARD_MODEL_<ID>_API_KEY` (here
+`OPENHOARD_MODEL_CLAUDE_API_KEY`); the configuration file has no field for one, and a missing
+one stops the server naming the variable. Summaries run only where the server also reads
+versions' bytes (managed zones); local-only content only ever reaches a `local` provider.
+
 ## Signing in (T-102)
 
 People sign in with OpenID Connect, using the authorization code flow with PKCE, through the

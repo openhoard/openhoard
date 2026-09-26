@@ -33,7 +33,13 @@ const SURFACE = {
     "viewObjects",
   ],
   write: [
+    // Enrichment's injection-flag step, through its guarded write (T-408).
+    "applyInjectionFlag",
     "applyPack",
+    // A tenant admin's "not an injection" decision and its withdrawal (T-408): checks the admin
+    // and appends the audit record itself.
+    "clearInjectionReview",
+    "markNotInjection",
     "applyRuleTags",
     "approveReview",
     "clearPrimaryTag",
@@ -53,6 +59,8 @@ const SURFACE = {
     "removePack",
     // Enrichment's extract step, through its guarded write (T-402).
     "saveExtract",
+    // Enrichment's summarize step, through its guarded write (T-405).
+    "saveCard",
     "setDisplayTitle",
     "setPrimaryTag",
     "writeActivity",
@@ -60,19 +68,32 @@ const SURFACE = {
   trusted: [
     // For enrichment (core/jobs): where a version's bytes are, to extract them (T-402).
     "contentRef",
+    // For an admin's health view (T-405): how many versions have no summary, and why.
+    "cardSkipCounts",
+    // For resummarize() (core/jobs): versions skipped for reasons worth another try.
+    "skippedVersions",
     // For enrichment (core/jobs): the exposure its tags give a file, before it is processed.
     "enrichmentExposure",
     "explainAccess",
+    // For enrichment (core/jobs): whether a file carries the injection flag (T-408).
+    "hasInjectionFlag",
+    "injectionReviewOf",
+    "reviewedNotInjection",
     "explainLevels",
     "levelsFor",
     "listActivity",
     "listOpenReviews",
+    // For enrichment (core/jobs): the approved vocabulary a model may propose from (T-405).
+    "modelVocabulary",
     "planPack",
     "planPackRemoval",
     "primaryTagOf",
     // Extracted text is content: for pipeline steps (search T-501, summaries T-405) only;
     // whatever shows it to someone gates it as content first.
     "readExtract",
+    // A version's model card, for the summarize step; readers get the summary through
+    // viewObjects(), gated by exposure (T-405).
+    "readCard",
     "sourceItemState",
     "tenantPolicies",
     "tenantRules",
@@ -98,11 +119,15 @@ const SURFACE = {
     "ACTIVITY_PAGE",
     "ActivityBuffer",
     "APPLY_TRANSACTION",
+    "BUILTIN_RULE_PREFIX",
     "DEFAULT_MIN_CONFIDENCE",
     "ExplainError",
     "GENERIC_TITLE",
     "INGEST_LIMITS",
+    "INJECTION_DETECTOR",
+    "INJECTION_TAG",
     "IngestError",
+    "InjectionReviewError",
     "MAX_OBJECT_IDS",
     "PackError",
     "REPEAT_WINDOW_MS",

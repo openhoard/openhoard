@@ -21,6 +21,13 @@ export interface ReadRequest {
   clientTrust: "first-party" | ClientTrust;
   /** Whether the caller asked for file content (vs. a card). */
   wantsContent: boolean;
+  /**
+   * A policy forbids this caller `read` (a Cedar forbid, or an evaluation error), as opposed to
+   * no rule granting it. A non-reader's card of a `readable` file then carries nothing derived
+   * from the content (metadata only): a forbid takes away what the content says, summaries
+   * included, even where the level would show them to everyone else.
+   */
+  readForbidden?: boolean;
 }
 
 export interface ReadDecision {
@@ -76,7 +83,16 @@ export function decideRead(req: ReadRequest): ReadDecision {
     }
     // `readable` visibility is for tenant-public material: non-readers get the card (with its
     // summary, as exposure allows the client) but never the file content.
-    if (req.visibility === "readable") return card("readable visibility: card without content");
+    if (req.visibility === "readable") {
+      if (req.readForbidden === true) {
+        return {
+          shape: "card",
+          metadataOnly: true,
+          reason: "readable visibility, but read is forbidden: metadata only",
+        };
+      }
+      return card("readable visibility: card without content");
+    }
     // Anything else (bad data from storage) shows nothing.
     return { shape: "none", metadataOnly: false, reason: "unknown visibility" };
   }

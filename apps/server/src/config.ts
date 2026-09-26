@@ -237,6 +237,85 @@ export function adminGroupOf(
   return (tenantId) => groups.get(tenantId);
 }
 
+/**
+ * A model provider (T-404). Its API key never comes from this file: the server reads
+ * OPENHOARD_MODEL_<ID>_API_KEY (id upper-cased, `-` as `_`) from the environment, and the
+ * schema has no field for it, so a key pasted into config.json fails loudly.
+ */
+export const ModelProviderSchema = z
+  .object({
+    id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, "a lower-case slug"),
+    /** Where it runs, which decides which files' content it may have (core/policy mayProcess). */
+    kind: z.enum(["local", "commercial", "consumer"]),
+    /** stub (tests, CI, trials), openai (OpenAI, Azure OpenAI, LM Studio, vLLM), anthropic, ollama. */
+    adapter: z.enum(["stub", "openai", "anthropic", "ollama"]),
+    /** Defaults: anthropic https://api.anthropic.com, ollama http://localhost:11434. */
+    baseUrl: z.url().optional(),
+    /** Default for anthropic: claude-haiku-4-5 (Haiku class); required for openai and ollama. */
+    chatModel: z.string().min(1).max(200).optional(),
+    embedModel: z.string().min(1).max(200).optional(),
+    timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
+    maxRetries: z.number().int().min(0).max(10).optional(),
+    maxRetryAfterMs: z.number().int().min(0).max(600_000).optional(),
+    maxInputChars: z.number().int().min(1_000).max(2_000_000).optional(),
+    maxOutputTokens: z.number().int().min(64).max(32_000).optional(),
+    maxResponseBytes: z
+      .number()
+      .int()
+      .min(4_096)
+      .max(64 * 1024 * 1024)
+      .optional(),
+    concurrency: z.number().int().min(1).max(64).optional(),
+    /** openai only: `api-key` for Azure OpenAI. */
+    auth: z.enum(["bearer", "api-key"]).optional(),
+    /** openai only: `max_completion_tokens` for OpenAI's reasoning models. */
+    maxTokensField: z.enum(["max_tokens", "max_completion_tokens"]).optional(),
+    /** openai only: send `response_format: json_object` (default true). */
+    jsonMode: z.boolean().optional(),
+  })
+  .strict();
+
+/** Models for enrichment (T-404, T-405). Off unless providers are listed. */
+export const ModelsSchema = z
+  .object({
+    providers: z.array(ModelProviderSchema).max(32).default([]),
+    /**
+     * Providers per task, in preference order, by id. Default: every provider, local first,
+     * then commercial, then consumer. A file only ever reaches a provider its exposure allows.
+     */
+    tasks: z
+      .object({
+        summarize: z.array(z.string()).max(32).optional(),
+        embed: z.array(z.string()).max(32).optional(),
+      })
+      .strict()
+      .prefault({}),
+    /** Tokens a tenant may spend on models per UTC day, all providers together. */
+    dailyTokenBudget: z.number().int().min(0).default(5_000_000),
+    /** Budgets for particular tenants, by tenant id, over dailyTokenBudget. */
+    tenantBudgets: z
+      .record(
+        z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
+        z.number().int().min(0),
+      )
+      .default({}),
+    summarize: z
+      .object({
+        /** The summarize step's time for its model calls, in ms (under the job's lease). */
+        budgetMs: z
+          .number()
+          .int()
+          .min(10_000)
+          .max(15 * 60_000)
+          .optional(),
+        /** Vocabulary entries offered to the model at most. */
+        vocabularyLimit: z.number().int().min(0).max(5_000).optional(),
+      })
+      .strict()
+      .prefault({}),
+  })
+  .strict();
+
 export const ConfigSchema = z
   .object({
     host: z.string().default("127.0.0.1"),
@@ -262,6 +341,7 @@ export const ConfigSchema = z
       })
       .strict()
       .prefault({}),
+    models: ModelsSchema.prefault({}),
     auth: AuthSchema.optional(),
     /**
      * The SCIM 2.0 endpoint (T-103) at /scim/v2, where each tenant's identity provider

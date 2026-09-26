@@ -502,6 +502,7 @@ describe("the worker", () => {
       write: (work) => db.withTenant(t.tenantId, work),
       mayProcess: () => Promise.resolve(false),
       signal: new AbortController().signal,
+      finalAttempt: false,
     });
     // Another worker's supervisor finds the expired lease and puts the job back for a retry.
     const jobs = await start({ enrich, superviseIntervalSeconds: 1 });

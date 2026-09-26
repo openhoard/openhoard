@@ -309,6 +309,55 @@
       "when": 1790420668546,
       "tag": "0043_source_syncs_delta_deletes",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1790439737855,
+      "tag": "0044_version_cards",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1790439744156,
+      "tag": "0045_version_cards_rls",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1790444220709,
+      "tag": "0046_built_in_vocabulary",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1790444286782,
+      "tag": "0047_injection_reviews",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1790444293135,
+      "tag": "0048_injection_reviews_rls",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1790446953053,
+      "tag": "0049_injection_reviews_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1790446964380,
+      "tag": "0050_built_in_vocabulary_guard",
+      "breakpoints": true
     }
   ]
 }

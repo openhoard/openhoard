@@ -13,6 +13,8 @@ import { isId, objects, versions, type Database, type Tx } from "@openhoard/core
 import { mayProcess, type Exposure, type ProviderKind } from "@openhoard/core-policy";
 import { and, eq, max } from "drizzle-orm";
 import { extractStep, type ExtractStepOptions } from "./extract.js";
+import { injectionFlagStep } from "./flag.js";
+import { summarizeStep, type SummarizeStepOptions } from "./summarize.js";
 
 /*
  * The enrichment pipeline (T-401): what happens to a version after ingest records it, until
@@ -51,8 +53,8 @@ import { extractStep, type ExtractStepOptions } from "./extract.js";
  * tags decide, the rest only tighten, else the tenant default; not the unprocessed file's
  * `metadata-only`, which would stop every model). A step the exposure doesn't let through is
  * skipped, and the job's output and the log say so; `local-only` content reaches local providers
- * only, `metadata-only` content none. The rule tagger runs first, so its tags count before any
- * model sees the file. For a file no trusted tag has given an exposure, the tenant default
+ * only, `metadata-only` content none. The injection flag and the rule tagger run before any
+ * model step, so their tags count before any model sees the file. For a file no trusted tag has given an exposure, the tenant default
  * decides, capped at `commercial-only`: an unclassified file never goes to a consumer provider.
  */
 
@@ -91,6 +93,12 @@ export interface EnrichContext {
   mayProcess(provider: ModelProvider): Promise<boolean>;
   /** Aborted when the job's lease expires or the worker stops: stop, and throw. */
   readonly signal: AbortSignal;
+  /**
+   * No retry is left after this run: a step that fails now dead-letters the job and leaves the
+   * version unprocessed (hidden). A step whose failure is only a missing extra (a summary)
+   * records it and returns instead.
+   */
+  readonly finalAttempt: boolean;
 }
 
 /**
@@ -119,6 +127,13 @@ export interface EnrichStep {
    * text extractor) sends nothing out.
    */
   readonly provider?: ModelProvider;
+  /**
+   * For a step that routes (T-404): every provider it may send the content to, in its order of
+   * preference. The pipeline runs the step only if the file's exposure allows at least one of
+   * them, and skips it otherwise; the step then picks one with `context.mayProcess` and the
+   * provider's client asks it again right before each send. Not with `provider`.
+   */
+  readonly providers?: readonly ModelProvider[];
   /**
    * Does this step's work for one version. It may run more than once for the same version, so
    * everything it writes must be keyed: a second run changes nothing. It writes only through
@@ -151,15 +166,33 @@ export const ruleTagStep: EnrichStep = {
 };
 
 /**
- * The steps a server runs unless told otherwise: the rule tagger, then, when the server has
- * somewhere to read versions' bytes from (`content`), text extraction (T-402, extract.ts).
- * Model steps (T-404, T-405) join here.
+ * The steps a server runs unless told otherwise, in this order:
+ *
+ *   extract-text → injection-flag → rule-tags → summarize
+ *
+ * - extract-text (T-402, extract.ts), when the server has somewhere to read versions' bytes
+ *   from (`content`);
+ * - injection-flag (T-408, flag.ts), always: without an extraction it scores the name alone;
+ * - rule-tags (T-403), before any model sees the file;
+ * - summarize (T-405, summarize.ts), when models are configured (`summarize.router` with a
+ *   provider for summaries) and there is extracted text. Off by default: the cost guard says no
+ *   model runs across a corpus unless an admin configures one.
  */
 export function defaultEnrichSteps(
-  options: { content?: ContentSource; extract?: Omit<ExtractStepOptions, "content"> } = {},
+  options: {
+    content?: ContentSource;
+    extract?: Omit<ExtractStepOptions, "content">;
+    summarize?: SummarizeStepOptions;
+  } = {},
 ): EnrichStep[] {
-  const { content, extract } = options;
-  return content ? [ruleTagStep, extractStep({ ...extract, content })] : [ruleTagStep];
+  const { content, extract, summarize } = options;
+  const steps: EnrichStep[] = [];
+  if (content) steps.push(extractStep({ ...extract, content }));
+  steps.push(injectionFlagStep(), ruleTagStep);
+  if (content && summarize && summarize.router.candidates("summarize").length > 0) {
+    steps.push(summarizeStep(summarize));
+  }
+  return steps;
 }
 
 /** A step the pipeline skipped: the file's exposure keeps its content from the step's provider. */
@@ -236,6 +269,8 @@ export async function enrichVersion(
   payload: unknown,
   options: {
     signal: AbortSignal;
+    /** No retry is left after this run (the worker knows from pg-boss). Default false. */
+    finalAttempt?: boolean;
     requeue: (payload: EnrichPayload) => Promise<unknown>;
     /** A step skipped because the file's exposure keeps its content from the step's provider. */
     onWithheld?: (withheld: WithheldStep) => void;
@@ -279,15 +314,21 @@ export async function enrichVersion(
       return done.value as Awaited<ReturnType<typeof work>>;
     },
     signal: options.signal,
+    finalAttempt: options.finalAttempt === true,
   };
   for (const step of steps) {
     options.signal.throwIfAborted();
-    if (step.provider !== undefined) {
+    const providers = stepProviders(step);
+    if (providers.length > 0) {
       // Content goes to a provider only as far as the file's exposure lets it (T-604): a step
-      // whose provider it doesn't reach is skipped, and the rest of the pipeline runs on.
+      // none of whose providers it reaches is skipped, and the rest of the pipeline runs on.
       const level = await exposure();
-      if (level === null || !mayProcess(level, step.provider.kind)) {
-        options.onWithheld?.({ step: step.name, provider: step.provider, exposure: level });
+      if (level === null || !providers.some((p) => mayProcess(level, p.kind))) {
+        options.onWithheld?.({
+          step: step.name,
+          provider: providers[0] as ModelProvider,
+          exposure: level,
+        });
         continue;
       }
     }
@@ -311,6 +352,12 @@ export async function enrichVersion(
   return standing === "current"
     ? "already-processed"
     : finish(db, payload, standing, options.requeue);
+}
+
+/** The providers a step names: its `provider`, or its `providers`. */
+export function stepProviders(step: EnrichStep): readonly ModelProvider[] {
+  if (step.provider !== undefined) return [step.provider];
+  return step.providers ?? [];
 }
 
 /** Ends a job whose target went stale: superseded before renamed, so it never re-enqueues. */
