@@ -14,6 +14,7 @@ export {
   type ModelProvider,
   type WithheldStep,
 } from "./enrich.js";
+export { extractStep, type ExtractStepOptions } from "./extract.js";
 export {
   deadLetteredVersions,
   DEFAULT_MAINTENANCE_CRON,

@@ -88,7 +88,7 @@ jobs:
       - run: >-
           pnpm --filter "@openhoard/core-audit^..." --filter "@openhoard/core-catalog^..."
           --filter "@openhoard/core-identity^..." --filter "@openhoard/core-jobs^..."
-          --filter "@openhoard/server^..." run build
+          --filter "@openhoard/server^..." --filter "@openhoard/enricher-extract^..." run build
       - run: pnpm --filter @openhoard/core-db run test:coverage
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
@@ -107,6 +107,9 @@ jobs:
       - run: pnpm --filter @openhoard/server run test:coverage
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
+      # T-402's done-when: a 1 GiB CSV streams through the extractor's child process with flat
+      # memory and an exact row count (about a minute; the node jobs run it at 32 MiB).
+      - run: pnpm --filter @openhoard/enricher-extract run test:slow
 
   python-cli:
     runs-on: ubuntu-latest

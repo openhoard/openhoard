@@ -1,4 +1,4 @@
-import type { IngestResult } from "@openhoard/core-catalog";
+import type { ContentSource, IngestResult } from "@openhoard/core-catalog";
 import { insideWithTenant, isId, NestedWorkError, type Database } from "@openhoard/core-db";
 import { queueConnectionOf } from "@openhoard/core-db/queue";
 import { PgBoss, type ConstructorOptions, type Job, type Queue } from "pg-boss";
@@ -86,8 +86,16 @@ export interface JobsOptions {
    * process that only ingests and enqueues sets false.
    */
   worker?: boolean;
-  /** The enrichment steps, in order. Default defaultEnrichSteps(): the rule tagger. */
+  /**
+   * The enrichment steps, in order. Default defaultEnrichSteps(): the rule tagger, and text
+   * extraction when `content` is given.
+   */
   steps?: readonly EnrichStep[];
+  /**
+   * Where the default steps read versions' bytes (core/storage blobContentSource(), a
+   * connector's source): with it, they extract text (T-402). Ignored when `steps` is given.
+   */
+  content?: ContentSource;
   enrich?: EnrichQueueOptions;
   /** Scheduled maintenance, or false for none. */
   maintenance?: (MaintenanceOptions & { cron?: string }) | false;
@@ -146,7 +154,10 @@ export interface Jobs {
 export async function startJobs(db: Database, options: JobsOptions = {}): Promise<Jobs> {
   if (insideWithTenant()) throw new NestedWorkError("startJobs()");
   const worker = options.worker !== false;
-  const steps = [...(options.steps ?? defaultEnrichSteps())];
+  const steps = [
+    ...(options.steps ??
+      defaultEnrichSteps(options.content === undefined ? {} : { content: options.content })),
+  ];
   const names = new Set<string>();
   for (const step of steps) {
     if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(step.name) || names.has(step.name)) {

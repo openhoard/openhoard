@@ -93,8 +93,30 @@ start alone, so a failing version keeps its backoff and doesn't spend a retry ev
 order, each after the one before succeeded. `target` is the version as the job read it when it
 started: tenant, object, version, seq, title, media type, blob. The default set,
 `defaultEnrichSteps()`, is the rule tagger (`ruleTagStep`, core/catalog T-403), first so rule
-tags are on a file before any model sees it. Extractors (T-402) and model steps (T-404, T-405)
-join the list later.
+tags are on a file before any model sees it, then, when the server passes `content` (where
+versions' bytes are read: core/storage `blobContentSource()`, connectors' sources), text
+extraction (`extractStep`, below). Model steps (T-404, T-405) join the list later.
+
+**Text extraction** (`extract-text`, [extract.ts](src/extract.ts), T-402). The step reads the
+version's bytes through the `ContentSource` (core/catalog), extracts them in a limited child
+process ([@openhoard/enricher-extract](../../enrichers/extract/README.md)), and stores the result
+per version with core/catalog `saveExtract()` through `write`:
+
+| The extractor answers                                       | Stored        | The job           |
+| ----------------------------------------------------------- | ------------- | ----------------- |
+| text and metadata                                           | `extracted`   | goes on           |
+| a type it doesn't read (checked before any byte is read)    | `unsupported` | goes on           |
+| no source reaches the bytes (an indexed zone before T-301)  | `unavailable` | goes on           |
+| the file's own failure: malformed, encrypted, a zip bomb, a | `failed`      | goes on           |
+| timeout, out of memory, a crash                             |               |                   |
+| the source failed part way, or no process could start       | nothing       | fails and retries |
+
+So a hostile file costs one child process once, never the job's retries, and its version is
+processed like any other. The step names no provider: the content goes to OpenHoard's own
+process on the same machine and nowhere else, so it runs whatever the file's exposure,
+`metadata-only` included; what reads the stored text later (a model step) is what exposure
+gates. It runs after the rule tagger: rules decide from the title and media type, and nothing
+they match on comes from the content yet.
 
 **Writes only for the current version.** A step writes only through `write(tx => …)`. It opens a
 short transaction, takes the object's lock and checks, with core/catalog `lockCurrentVersion()`,
@@ -222,16 +244,17 @@ transaction that returns ids. The work itself goes through `withTenant()`, one t
 
 `startJobs(db, options)`:
 
-| Option                     | Default                | What                                                      |
-| -------------------------- | ---------------------- | --------------------------------------------------------- |
-| `worker`                   | true                   | work the queues and keep the schedule in this process     |
-| `steps`                    | `defaultEnrichSteps()` | the enrichment steps, in order                            |
-| `enrich`                   | see above              | concurrency (2, or 1 on PGlite), retries, expiry          |
-| `maintenance`              | the defaults above     | or false                                                  |
-| `pollingIntervalSeconds`   | 2                      | how often an idle worker looks for jobs                   |
-| `superviseIntervalSeconds` | 60                     | how often expired jobs are put back                       |
-| `poolSize`                 | 4                      | pg-boss's connections on PostgreSQL                       |
-| `log`                      | none                   | a pino-style logger; pg-boss errors and warnings go to it |
+| Option                     | Default                | What                                                                |
+| -------------------------- | ---------------------- | ------------------------------------------------------------------- |
+| `worker`                   | true                   | work the queues and keep the schedule in this process               |
+| `steps`                    | `defaultEnrichSteps()` | the enrichment steps, in order                                      |
+| `content`                  | none                   | where versions' bytes are read; the default steps then extract text |
+| `enrich`                   | see above              | concurrency (2, or 1 on PGlite), retries, expiry                    |
+| `maintenance`              | the defaults above     | or false                                                            |
+| `pollingIntervalSeconds`   | 2                      | how often an idle worker looks for jobs                             |
+| `superviseIntervalSeconds` | 60                     | how often expired jobs are put back                                 |
+| `poolSize`                 | 4                      | pg-boss's connections on PostgreSQL                                 |
+| `log`                      | none                   | a pino-style logger; pg-boss errors and warnings go to it           |
 
 Every process that ingests can enqueue; `worker: false` suits one that should only serve
 requests. Several workers share the queues through the database, and pg-boss makes sure one
@@ -253,4 +276,8 @@ instead of doubled, retries after a failing step, re-running a completed job and
 without duplicates, `markProcessed` and what non-readers see afterwards, the rename race, a slow
 job for a replaced version that must not overwrite the newer one's tags, superseded and
 dead-lettered versions, the maintenance fan-out, the sweep paging past dead letters, the
-schedule left alone, pg-boss's session settings on PostgreSQL, and a graceful stop.
+schedule left alone, pg-boss's session settings on PostgreSQL, and a graceful stop. The extract
+step's tests (extract.test.ts) store an extraction and re-run it into the same row, record
+broken files as `failed` without a retry, store unsupported and unreachable content, retry when
+the source fails, store nothing for a version replaced mid-extraction, and run from
+`startJobs({ content })`.
