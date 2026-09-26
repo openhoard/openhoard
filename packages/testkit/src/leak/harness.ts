@@ -16,6 +16,24 @@ export interface LeakHarnessOptions {
   sampleUsers?: number;
   /** Extra free-text queries to scan, on top of every canary token. */
   queries?: readonly string[];
+  /**
+   * Tokens planted only in files' content (extracted text, summaries), never in a name or a
+   * label: what full-text, vector and hybrid search may match only for a caller who may have
+   * the content (T-501..T-503, T-604).
+   */
+  contentCanaries?: readonly ContentCanary[];
+  /**
+   * Whether `userId`, through the engine under test, may be matched on `item`'s content.
+   * Default: whenever they may read it. An AI client whose trust a file's exposure doesn't
+   * reach, or a file flagged as a prompt injection, gets metadata only: pass that here.
+   */
+  contentVisible?: (userId: string, item: FakeItem) => boolean;
+}
+
+/** A token planted in one file's content. */
+export interface ContentCanary {
+  itemId: string;
+  token: string;
 }
 
 /** Queries every user runs besides the canary tokens: broad words that match many files. */
@@ -54,16 +72,30 @@ export async function runLeakHarness(options: LeakHarnessOptions): Promise<LeakR
   const queries = [...DEFAULT_QUERIES, ...(options.queries ?? [])];
   const byId = new Map(tenant.items.map((i) => [i.id, i]));
   const controls = controlTokens(tenant, canaries);
+  const content = (options.contentCanaries ?? []).map((c) => {
+    const item = byId.get(c.itemId);
+    if (!item) throw new RangeError(`unknown item ${c.itemId}`);
+    return { ...c, item };
+  });
+  const contentControls = contentControlTokens(tenant, content);
+  const contentVisible =
+    options.contentVisible ?? ((userId: string, item: FakeItem) => access.canRead(userId, item));
   const leaks: Leak[] = [];
   let probes = 0;
   let readableCanaryProbes = 0;
   let found = 0;
+  let readableContentProbes = 0;
+  let contentFound = 0;
 
   for (const userId of users) {
     const caller: Caller = { userId, principals: access.principalsOf(userId) };
-    const forbidden = new Map(
+    const forbidden = new Map<string, FakeItem>(
       canaries.filter((c) => !access.canRead(userId, c)).map((c) => [c.canary, c]),
     );
+    // Content tokens the caller may not match: they must not surface anywhere either.
+    for (const c of content) {
+      if (!contentVisible(userId, c.item)) forbidden.set(c.token, c.item);
+    }
     const leak = (probe: string, surface: Leak["surface"], itemId: string, detail: string) =>
       leaks.push({ userId, probe, surface, itemId, detail });
 
@@ -110,6 +142,42 @@ export async function runLeakHarness(options: LeakHarnessOptions): Promise<LeakR
         );
       }
     }
+    // A content token finds its file only for a caller who may have the content; for anyone
+    // else it finds nothing a never-planted token wouldn't (no hit, no count, no facet).
+    for (const c of content) {
+      probes++;
+      const response = await target.search({ ...caller, query: c.token });
+      inspect(c.token, response);
+      if (contentVisible(userId, c.item)) {
+        readableContentProbes++;
+        if (response.hits.some((h) => h.id === c.itemId)) contentFound++;
+        continue;
+      }
+      if (response.hits.some((h) => h.id === c.itemId)) {
+        leak(c.token, "results", c.itemId, "matched on content the caller may not have");
+      }
+      probes++;
+      const control = await target.search({
+        ...caller,
+        query: contentControls.get(c.token) as string,
+      });
+      if (response.total > control.total) {
+        leak(
+          c.token,
+          "total",
+          c.itemId,
+          `total ${response.total}, but ${control.total} for a never-planted token`,
+        );
+      }
+      if (facetSum(response) > facetSum(control)) {
+        leak(
+          c.token,
+          "facets",
+          c.itemId,
+          `facet counts sum to ${facetSum(response)}, but ${facetSum(control)} for a never-planted token`,
+        );
+      }
+    }
     for (const query of queries) {
       probes++;
       inspect(query, await target.search({ ...caller, query, limit: 100 }));
@@ -134,6 +202,8 @@ export async function runLeakHarness(options: LeakHarnessOptions): Promise<LeakR
     canaries: canaries.length,
     readableCanaryProbes,
     found,
+    readableContentProbes,
+    contentFound,
     leaks,
   };
 }
@@ -165,6 +235,12 @@ export function assertNoLeaks(report: LeakReport): void {
     throw new Error(
       `the engine returned none of the ${report.readableCanaryProbes} canaries the callers may read; ` +
         "check the principal format and the index before trusting a leak-free result",
+    );
+  }
+  if ((report.readableContentProbes ?? 0) > 0 && report.contentFound === 0) {
+    throw new Error(
+      `the engine matched none of the ${report.readableContentProbes} content tokens the callers may match; ` +
+        "check that content is indexed before trusting a leak-free result",
     );
   }
   if (report.leaks.length === 0) return;
@@ -204,6 +280,26 @@ function controlTokens(tenant: FakeTenant, canaries: readonly Canary[]): Map<str
   return out;
 }
 
+/** A never-planted token of the same shape (`<prefix>-xxxxxxxx`) per content token. */
+function contentControlTokens(
+  tenant: FakeTenant,
+  content: readonly ContentCanary[],
+): Map<string, string> {
+  const planted = new Set(content.map((c) => c.token));
+  const rng = new Random(`${tenant.seed}:leak-content-controls`);
+  const out = new Map<string, string>();
+  for (const { token } of content) {
+    const at = token.lastIndexOf("-");
+    const prefix = at > 0 ? token.slice(0, at) : "control";
+    let control: string;
+    do
+      control = `${prefix}-${Array.from({ length: 8 }, () => rng.int(0, 15).toString(16)).join("")}`;
+    while (planted.has(control));
+    out.set(token, control);
+  }
+  return out;
+}
+
 function facetSum(response: SearchResponse): number {
   return Object.values(response.facets ?? {})
     .flatMap((f) => Object.values(f))
@@ -215,6 +311,5 @@ function scanText(
   forbidden: ReadonlyMap<string, FakeItem>,
   report: (item: FakeItem, token: string) => void,
 ): void {
-  if (!text.includes("canary-")) return;
   for (const [token, item] of forbidden) if (text.includes(token)) report(item, token);
 }

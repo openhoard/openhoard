@@ -61,5 +61,9 @@ export interface LeakReport {
   readableCanaryProbes: number;
   /** How many of those returned the file. Zero suggests a broken integration. */
   found: number;
+  /** Content-token searches by a caller who may match that file's content. */
+  readableContentProbes: number;
+  /** How many of those returned the file. Zero, with content tokens planted, is broken. */
+  contentFound: number;
   leaks: Leak[];
 }

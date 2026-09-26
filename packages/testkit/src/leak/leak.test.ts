@@ -130,6 +130,74 @@ describe("runLeakHarness", () => {
   });
 });
 
+describe("content canaries (T-501..T-503)", () => {
+  /** Content tokens on the first 30 files; the even ones are "metadata only" to the caller. */
+  const planted = () =>
+    tenant.items
+      .filter((i) => i.kind === "file")
+      .slice(0, 30)
+      .map((item, n) => ({ itemId: item.id, token: `secret-${(n + 0x10000000).toString(16)}` }));
+  const metadataOnly = (itemId: string) =>
+    planted().findIndex((c) => c.itemId === itemId) % 2 === 0;
+  const visible = (userId: string, item: { id: string }) =>
+    new AccessModel(tenant).canRead(userId, tenant.items.find((i) => i.id === item.id) as never) &&
+    !metadataOnly(item.id);
+  /** The reference, plus content tokens matched for whoever `allowed` lets. */
+  const withContent = (allowed: (userId: string, itemId: string) => boolean): SearchUnderTest => ({
+    search: async (r) => {
+      const c = planted().find((p) => p.token === r.query);
+      if (!c) return reference.search(r);
+      const hit = allowed(r.userId, c.itemId) ? [{ id: c.itemId }] : [];
+      return { hits: hit, total: hit.length, facets: {} };
+    },
+  });
+
+  it("passes an engine that matches content only for callers who may have it", async () => {
+    const report = await runLeakHarness({
+      tenant,
+      target: withContent((u, id) => visible(u, { id })),
+      contentCanaries: planted(),
+      contentVisible: visible,
+    });
+    assertNoLeaks(report);
+    expect(report.readableContentProbes).toBeGreaterThan(0);
+    expect(report.contentFound).toBe(report.readableContentProbes);
+  });
+
+  it("catches an engine that matches a metadata-only card on its content", async () => {
+    const access = new AccessModel(tenant);
+    const report = await runLeakHarness({
+      tenant,
+      target: withContent((u, id) =>
+        access.canRead(u, tenant.items.find((i) => i.id === id) as never),
+      ),
+      contentCanaries: planted(),
+      contentVisible: visible,
+    });
+    expect(report.leaks.some((l) => l.surface === "results")).toBe(true);
+    expect(report.leaks.some((l) => l.surface === "total")).toBe(true);
+    expect(() => assertNoLeaks(report)).toThrow(/permission leak/);
+  });
+
+  it("refuses an engine that matches no content at all", async () => {
+    const report = await runLeakHarness({
+      tenant,
+      target: reference,
+      contentCanaries: planted(),
+      contentVisible: visible,
+    });
+    expect(report.contentFound).toBe(0);
+    expect(() => assertNoLeaks(report)).toThrow(/none of the .* content tokens/);
+    await expect(
+      runLeakHarness({
+        tenant,
+        target: reference,
+        contentCanaries: [{ itemId: "nope", token: "x" }],
+      }),
+    ).rejects.toThrow(/unknown item/);
+  });
+});
+
 describe("checkPair", () => {
   it("reports only leaks of the owner's files to the other user", async () => {
     const access = new AccessModel(tenant);

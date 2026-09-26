@@ -35,6 +35,8 @@ Totals and facet counts for a forbidden canary are compared with a never-planted
 
 The harness also counts canaries the caller _can_ read that the engine didn't return. `assertNoLeaks` fails when the engine found none of them, because an engine that returns nothing can't leak, but it isn't working either.
 
+**Content canaries (T-501..T-503).** Full-text, vector and hybrid search match files on their content, which a caller may have only when they read the file _and_ the client's trust reaches its exposure (T-604: a metadata-only card is matched on its title and trusted tags only). `contentCanaries` lists tokens planted only in files' content (extracted text, summaries); `contentVisible(userId, item)` says who may match on them (default: whoever may read the file). A caller who may not must get no hit for the file, no trace of the token, and no more in the total or facets than for a never-planted token of the same shape; one who may must find it, and `assertNoLeaks` fails when an engine matched no content token at all. `leak/catalog-search.test.ts` runs core/catalog's search this way as OpenHoard's own app, as commercial and consumer AI clients (local-only, commercial-only and injection-flagged files mixed in), on the HNSW path, and under a pack that forbids reading some files.
+
 Probing as someone who has left is refused. `checkPair(tenant, target, ownerId, otherId)` pins a regression for one pair of accounts.
 
 `InMemorySearch` is a small, correct reference engine that filters before matching, counting, faceting and suggesting. The tests prove the harness catches an engine that leaks through each surface.
