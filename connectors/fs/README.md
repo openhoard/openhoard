@@ -24,7 +24,8 @@ const connector = fsConnector({
 - **delta()** walks again and compares with the snapshot its cursor names (kept in `stateDir`,
   named by its hash): new, changed, renamed, moved and deleted items, deletes first. It writes
   the new snapshot before yielding, and checkpoints every `checkpointEvery` changes (naming both
-  snapshots and how far it got), so a long delta can stop and resume without walking again. No
+  snapshots and how far it got), so a long delta can stop and resume without walking again (a
+  resumed delta reports the first attempt's warnings again). No
   file system watcher: comparing can't miss what happened while nothing was watching. Tokens
   stay small however large the folder; losing `stateDir` means a `resync` (a crawl from the
   start).
@@ -44,10 +45,16 @@ const connector = fsConnector({
 - **redirect()**: the item's `file:` URL, for the local agent to open natively (FR-20).
 - **identity()**: the root's inode, birth time and file system type (`r1:…`), never its device
   number, which Linux and macOS give anew on a remount or a reboot (network and FUSE file
-  systems, tmpfs, btrfs, overlays, external disks). Where the file system keeps no birth time and
-  the answer changed, the connector looks at a sample of the files its last snapshot recorded:
-  if at least three in four are still there (same inode, and same birth time or size), it is the
-  same folder and it answers what was recorded. The sync runner records the answer outside the
+  systems, tmpfs, btrfs, overlays, external disks). Where the file system keeps no birth time,
+  those numbers alone can't tell two disks of the same type apart (a fresh disk's root often has
+  the same inode), so the connector always looks at a sample of the files its last snapshot
+  recorded: if at least three in four are still there (same inode, and the same birth time where
+  one is kept), it is the same folder and it answers what was recorded; otherwise it answers
+  another identity, even when the numbers read the same. A folder whose last snapshot holds no
+  files is accepted (there is nothing to compare). A crawl from the beginning drops the old
+  snapshots, so the next check is against what it found. The check guards against accidents (a
+  drive not mounted, another disk at the path), not against someone who controls the folder and
+  can make its files look like the recorded ones. The sync runner records the answer outside the
   connector's state folder (core/jobs `source_syncs`) and refuses a sync, a crawl included, when
   another folder is at the root's path, until an admin accepts it. A delta and a resumed crawl
   make the same check against their own snapshot or journal.
@@ -100,8 +107,9 @@ messages name the OS error code, never the path.
 - Without birth times (some Linux file systems), a file renamed and edited between two deltas is
   reported deleted and created.
 - Names that aren't valid Unicode (possible on Linux) can't be read back reliably.
-- A name with a backslash (allowed on Linux) gives a `file:` URL the core refuses (`%5C`): the
-  item is indexed without a URL, so enrichment can't read its content back, and it can't be
-  opened natively.
+- A name with a backslash (allowed on Linux), or a root whose first folder isn't plain ASCII
+  (`/Données/…`), gives a `file:` URL the core refuses (`%5C`; a first folder that is neither a
+  drive nor ASCII): the item is indexed without a URL, so enrichment can't read its content
+  back, and it can't be opened natively.
 - Snapshots are whole-folder JSON: fine for hundreds of thousands of entries, not for tens of
   millions.

@@ -33,10 +33,13 @@ author, `etag` (changes when anything reported changes, the path included: movin
 changes everything in it) and `contentVersion` (changes when the bytes do; what `read()` is
 asked for). An item's `url`, like what `redirect()` returns, is `https:` or a declared scheme,
 never `javascript:`, `data:`, `vbscript:` or `blob:`, never with credentials, and a `file:` URL
-can only mean a local path: no host, no path starting with `//`, no backslash, no `%5C` or `%2F`
-(opening `file://server/…`, or any spelling a browser or the Windows shell reads as one, makes
-Windows authenticate to that server). What is kept is `canonicalUrl()`'s text, the parser's,
-never the connector's.
+can only mean a local path: no host, no path starting with `//`, no backslash, no `%5C` or `%2F`,
+no query or fragment (nor `?` or `%3F` starting the path: `file:///?/UNC/…`), and a first path
+segment that is a drive (`/C:/`) or plain ASCII (not a look-alike slash such as U+2215 or U+FF0F).
+Opening `file://server/…`, or any spelling a browser or the Windows shell reads as one, makes
+Windows authenticate to that server. What is kept is `canonicalUrl()`'s text, the parser's,
+never the connector's; `acceptRedirect()` checks what `redirect()` returned and gives that text
+(the open-in-native-app path, FR-20 and T-802, must hand out only its result).
 
 **Events** (`SyncEvent`), in the source's order: `item`, `deleted` (every item of a deleted
 folder too), `checkpoint` (everything before it may be considered applied once the token is

@@ -185,19 +185,28 @@ export function fsConnector(options: FsConnectorOptions): Connector {
   }
 
   /**
-   * Whether the folder at the root is the one `recorded` names: the same answer, or, when either
-   * answer lacks a birth time, the files `entries` recorded still there (same inode, and same
-   * birth time or size) for at least three in four of a sample.
+   * Whether the folder at the root is the one `recorded` names, as far as `entries` (what the
+   * last snapshot or journal recorded) can tell:
+   *
+   * - both answers with a birth time: the same inode, birth time and file system type;
+   * - either without one: the numbers say nothing (every ext4 root is inode 2, every FAT or FUSE
+   *   root inode 1, every XFS root 128), so always the files: at least three in four of a sample
+   *   still at their path with the same inode (and birth time, where kept). A folder whose
+   *   snapshot has no files passes: there is nothing a mistake could delete.
+   *
+   * It guards against accidents (a disk not mounted, another one mounted at the path), not an
+   * attacker who controls the folder, who could put back files with the same numbers.
    */
   async function sameRoot(ctx: Context, recorded: string, entries: readonly Rec[]) {
     const [a, b] = [parseIdentity(recorded), parseIdentity(ctx.identity)];
     if (!a || !b) return false;
     // A file system type of 0 means statfs() couldn't say: not a difference.
     const sameType = a.type === b.type || a.type === "0" || b.type === "0";
-    if (a.ino === b.ino && a.birth === b.birth && sameType) return true;
-    if (a.birth !== "0" && b.birth !== "0") return false;
+    if (a.birth !== "0" && b.birth !== "0") {
+      return a.ino === b.ino && a.birth === b.birth && sameType;
+    }
     const files = entries.filter((r) => r.k === "f");
-    if (files.length === 0) return false;
+    if (files.length === 0) return true;
     const step = Math.max(1, Math.floor(files.length / SAMPLE));
     const sample = files.filter((_, n) => n % step === 0).slice(0, SAMPLE);
     let same = 0;
@@ -205,7 +214,7 @@ export function fsConnector(options: FsConnectorOptions): Connector {
       const st = await lstat(join(ctx.root, ...r.p), { bigint: true }).catch(() => null);
       if (!st || `${st.ino}` !== r.i) continue;
       const birth = st.birthtimeNs > 0n ? `${st.birthtimeNs}` : "0";
-      if (r.b !== "0" && birth !== "0" ? birth === r.b : `${st.size}` === r.s) same++;
+      if (r.b === "0" || birth === "0" || birth === r.b) same++;
     }
     return same * 4 >= sample.length * 3;
   }
@@ -243,7 +252,9 @@ export function fsConnector(options: FsConnectorOptions): Connector {
     let recs: Rec[] = [];
     if (checkpoint === null) {
       run = state.newRun();
-      await state.prune({ journals: { keep: run } });
+      // A crawl from the beginning: no earlier snapshot will be asked for again, and none may
+      // stand for the folder in identity() while this one isn't done.
+      await state.prune({ journals: { keep: run }, snapshots: { keep: [] } });
       const header = state.header(run, ctx.identity);
       await writeNew(state.journal(run), header);
       bytes = Buffer.byteLength(header);
@@ -333,6 +344,14 @@ export function fsConnector(options: FsConnectorOptions): Connector {
       from = Number(resumed[3]);
       next = (await state.readSnapshot(nextDigest)).entries;
       await state.prune({ snapshots: { keep: [oldDigest, nextDigest] } });
+      // What the first attempt warned of, given again: the report keeps them.
+      for (const w of await state.readWarnings(nextDigest)) {
+        warnings.push(
+          w.externalId === undefined
+            ? { type: "warning", code: w.code }
+            : { type: "warning", code: w.code, externalId: w.externalId },
+        );
+      }
     } else {
       // Only this cursor (and what this delta writes) can be asked for from now on.
       await state.prune({ snapshots: { keep: [oldDigest] } });
@@ -340,6 +359,12 @@ export function fsConnector(options: FsConnectorOptions): Connector {
       next = walked.next;
       warnings.push(...walked.warnings);
       nextDigest = await state.writeSnapshot({ v: 1, root: ctx.identity, entries: next });
+      await state.writeWarnings(
+        nextDigest,
+        warnings.map((w) =>
+          w.type === "warning" ? { code: w.code, externalId: w.externalId } : w,
+        ),
+      );
     }
     const changes = diff(ctx, before.entries, next);
     for (let n = from; n < changes.length; n++) {
@@ -530,12 +555,12 @@ export function fsConnector(options: FsConnectorOptions): Connector {
     async identity(signal, recorded) {
       signal.throwIfAborted();
       const ctx = await context();
-      if (recorded === undefined || recorded === ctx.identity) return ctx.identity;
-      // A changed answer: still this folder if its files are (see sameRoot()).
+      if (recorded === undefined) return ctx.identity;
+      // Checked against the files, not only the numbers (see sameRoot()).
       const snapshot = await state.latestSnapshot();
-      return snapshot && (await sameRoot(ctx, recorded, snapshot.entries))
-        ? recorded
-        : ctx.identity;
+      if (await sameRoot(ctx, recorded, snapshot?.entries ?? [])) return recorded;
+      // Another folder, even when its numbers read the same.
+      return ctx.identity === recorded ? `${ctx.identity}:other` : ctx.identity;
     },
     async aclImport(ref, signal) {
       signal.throwIfAborted();

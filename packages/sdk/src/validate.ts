@@ -380,8 +380,10 @@ export function acceptAcl(acl: unknown): ItemAcl {
  *   authenticates to that server (NTLM), so a connector could make people's machines send their
  *   credentials anywhere, and browsers and the Windows shell find a server in more spellings than
  *   the URL parser does: `file:////server/…`, `file://localhost//server/…`, backslashes
- *   (`file:\\\\server\\…`, `file:///\\\\server`), and encoded slashes. So a `file:` URL has no host,
- *   no path starting with `//`, no backslash anywhere, and no `%5C` or `%2F`.
+ *   (`file:\\\\server\\…`, `file:///\\\\server`), encoded slashes, `file:///?/UNC/…`, and slashes
+ *   that only look like one (U+2215, U+FF0F). So a `file:` URL has no host, no path starting
+ *   with `//`, no backslash anywhere, no `%5C` or `%2F`, no query or fragment (and no `?` or
+ *   `%3F` starting the path), and a first path segment that is a drive (`/C:/`) or plain ASCII.
  *
  * Whatever passes is kept and used as {@link canonicalUrl} gives it (the parser's own text),
  * never as the connector wrote it.
@@ -404,6 +406,20 @@ export function checkUrl(url: unknown, description?: ConnectorDescription): stri
     if (url.includes("\\")) return "a file: URL must not hold a backslash";
     if (parsed.pathname.startsWith("//")) return "a file: URL's path must not name a host";
     if (/%(5c|2f)/i.test(parsed.pathname)) return "a file: URL must not encode a slash";
+    if (parsed.search !== "" || parsed.hash !== "" || /[?#]/.test(url)) {
+      return "a file: URL must not have a query or fragment";
+    }
+    if (/^\/(\?|%3f)/i.test(parsed.pathname)) return "a file: URL's path must not start with ?";
+    const first = parsed.pathname.split("/")[1] ?? "";
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(first);
+    } catch {
+      return "a file: URL's path must decode";
+    }
+    if (!/^[A-Za-z]:$/.test(decoded) && !/^[\x20-\x7e]*$/.test(decoded)) {
+      return "a file: URL's first folder must be a drive or plain ASCII";
+    }
   }
   if ([...parsed.href].length > LIMITS.url) return "a URL must be at most 4,096 characters";
   return null;
@@ -420,4 +436,15 @@ export function canonicalUrl(url: string): string {
 /** What is wrong with a URL redirect() returned, or null: {@link checkUrl}. */
 export function checkRedirect(url: unknown, description: ConnectorDescription): string | null {
   return checkUrl(url, description);
+}
+
+/**
+ * A URL redirect() returned, checked and as the parser writes it: what may be handed to anyone
+ * (the open-in-native-app path, FR-20 and T-802, must use this, never the connector's text).
+ * Throws TypeError for a URL {@link checkUrl} refuses.
+ */
+export function acceptRedirect(url: unknown, description: ConnectorDescription): string {
+  const problem = checkUrl(url, description);
+  if (problem !== null) throw new TypeError(`refused redirect URL: ${problem}`);
+  return canonicalUrl(url as string);
 }

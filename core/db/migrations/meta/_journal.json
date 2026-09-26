@@ -302,6 +302,13 @@
       "when": 1790418338978,
       "tag": "0042_source_syncs_deferred",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1790420668546,
+      "tag": "0043_source_syncs_delta_deletes",
+      "breakpoints": true
     }
   ]
 }

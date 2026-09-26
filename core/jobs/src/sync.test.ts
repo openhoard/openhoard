@@ -987,6 +987,95 @@ describe("runSync's safeguards", () => {
     expect(await live("mem")).toHaveLength(6);
   });
 
+  it("holds a delta that would delete everything, applies none of it, and goes on once confirmed", async () => {
+    // What the identity check can't see (another disk whose numbers read the same, for a
+    // connector with no better way to tell): its delta reports every item deleted.
+    const mem = memorySource();
+    for (let i = 0; i < 60; i++) await mem.write([`f${i}.txt`], enc.encode(`${i}`));
+    await sync(mem.connector, { source: "mem" });
+    for (let i = 0; i < 60; i++) await mem.remove([`f${i}.txt`]);
+    const held = await sync(mem.connector, { source: "mem" });
+    expect(held).toMatchObject({
+      status: "failed",
+      phase: "delta",
+      error: "delete-guard",
+      reconcileHeld: 60,
+      counts: { deleted: 0 },
+    });
+    expect(await live("mem")).toHaveLength(60);
+    // Every run holds it again, until an admin confirms.
+    expect(await sync(mem.connector, { source: "mem" })).toMatchObject({ error: "delete-guard" });
+    expect(await admin((tx) => confirmReconcile(tx, t.tenantId, "mem"))).toBe(60);
+    expect(await sync(mem.connector, { source: "mem" })).toMatchObject({
+      status: "done",
+      counts: { deleted: 60 },
+    });
+    expect(await live("mem")).toHaveLength(0);
+    expect(await syncState("mem")).toMatchObject({
+      reconcileHeld: null,
+      reconcileConfirmed: null,
+      deltaDeletes: 0,
+    });
+  });
+
+  it("stops a checkpointed delta at the checkpoint where its deletes cross the guard", async () => {
+    const mem = memorySource();
+    for (let i = 0; i < 60; i++) await mem.write([`f${i}.txt`], enc.encode(`${i}`));
+    await sync(mem.connector, { source: "mem" });
+    const ids = (await catalog("mem")).map((r) => r.externalId);
+    // Ten deletes between checkpoints: 10 and 20 pass; at 30 of 60 (half) it holds, and the
+    // third ten are not applied.
+    const deleting: Connector = {
+      ...mem.connector,
+      delta: async function* () {
+        for (let i = 0; i < 60; i++) {
+          yield { type: "deleted", externalId: ids[i] as string };
+          if ((i + 1) % 10 === 0) yield { type: "checkpoint", token: `delta:x${i + 1}` };
+        }
+        yield { type: "done", cursor: "delta:end" };
+      },
+    };
+    const report = await sync(deleting, { source: "mem" });
+    expect(report).toMatchObject({
+      error: "delete-guard",
+      reconcileHeld: 30,
+      counts: { deleted: 20 },
+    });
+    expect(await live("mem")).toHaveLength(40);
+    expect(await syncState("mem")).toMatchObject({ token: "delta:x20", deltaDeletes: 20 });
+    // Discarded: nothing more removed, and a clean crawl; the source still has its 60 files.
+    expect(await admin((tx) => discardReconcile(tx, t.tenantId, "mem"))).toBe(true);
+    expect(await syncState("mem")).toMatchObject({ deltaDeletes: 0, phase: "crawl" });
+    await sync(mem.connector, { source: "mem" });
+    expect(await live("mem")).toHaveLength(60);
+  });
+
+  it("lets routine deletions of one or two items through in a small source", async () => {
+    const mem = memorySource();
+    for (let i = 0; i < 2; i++) await mem.write([`f${i}.txt`], enc.encode(`${i}`));
+    await sync(mem.connector, { source: "mem" });
+    await mem.remove(["f0.txt"]);
+    expect(await sync(mem.connector, { source: "mem" })).toMatchObject({
+      status: "done",
+      counts: { deleted: 1 },
+    });
+    // Without delta, every sync is a crawl whose reconcile removes it: let through too.
+    const tiny = memorySource();
+    for (let i = 0; i < 2; i++) await tiny.write([`f${i}.txt`], enc.encode(`${i}`));
+    const d = tiny.connector.describe();
+    const noDelta: Connector = {
+      describe: () => ({ ...d, capabilities: { ...d.capabilities, delta: false } }),
+      crawl: tiny.connector.crawl,
+      read: tiny.connector.read,
+    };
+    await sync(noDelta, { source: "tiny" });
+    await tiny.remove(["f1.txt"]);
+    expect(await sync(noDelta, { source: "tiny" })).toMatchObject({
+      status: "done",
+      counts: { reconciled: 1 },
+    });
+  });
+
   it("holds a small source emptied but for one file, and one whose connector stops early", async () => {
     // Probe 1: the state is lost and the folder holds one placeholder: 40 of 41 would go.
     for (let i = 0; i < 40; i++) await put([`file-${i}.txt`], `file ${i}\n`);

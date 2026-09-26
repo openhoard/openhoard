@@ -181,9 +181,12 @@ describe("fs connector: delta checkpoints", () => {
     for (let i = 0; i < 7; i++) await src.write([`f${i}.txt`], enc.encode(`${i}`));
     const cursor = cursorOf(await events(connector.crawl(null, signal())));
     for (let i = 0; i < 7; i++) await src.write([`f${i}.txt`], enc.encode(`changed ${i}`));
+    await link(join(src.root, "f0.txt"), join(src.root, "linked.txt"));
     const full = await events(need(connector.delta)(cursor, signal()));
+    const warned = full.filter((e) => e.type === "warning");
+    expect(warned.map((w) => (w as { code: string }).code)).toEqual(["hard-link", "hard-link"]);
     const changed = itemsOf(full).map((i) => i.externalId);
-    expect(changed).toHaveLength(7);
+    expect(changed).toHaveLength(8);
     expect(full.filter((e) => e.type === "checkpoint").length).toBeGreaterThan(1);
 
     // Stopped at the first checkpoint; the folder changes again meanwhile.
@@ -199,8 +202,10 @@ describe("fs connector: delta checkpoints", () => {
     expect(token).toMatch(/^fs1d\./);
     await src.write(["late.txt"], enc.encode("late"));
     const after = await events(need(connector.delta)(token as string, signal()));
-    // The rest of the same difference: nothing twice, nothing missing, late.txt not yet.
+    // The rest of the same difference: nothing twice, nothing missing, late.txt not yet; and
+    // the first attempt's warnings, given again.
     expect([...itemsOf(before), ...itemsOf(after)].map((i) => i.externalId)).toEqual(changed);
+    expect(after.filter((e) => e.type === "warning")).toEqual(warned);
     const next = await events(need(connector.delta)(cursorOf(after), signal()));
     expect(itemsOf(next).map((i) => i.path.join("/"))).toEqual(["late.txt"]);
     expect(

@@ -249,6 +249,38 @@ export class StateDir {
   }
 
   /**
+   * The warnings a delta gave when it wrote snapshot `digest`, kept beside it so a delta resumed
+   * from its checkpoint gives them again (nothing is walked then).
+   */
+  async writeWarnings(digest: string, warnings: readonly unknown[]): Promise<void> {
+    if (!DIGEST.test(digest) || warnings.length === 0) return;
+    const file = join(this.dir, `warn-${digest}.json`);
+    const tmp = `${file}.${randomBytes(6).toString("hex")}.tmp`;
+    await writeFile(tmp, JSON.stringify(warnings));
+    await rename(tmp, file);
+  }
+
+  /** What writeWarnings() kept for `digest`; none when there is no file, or a damaged one. */
+  async readWarnings(digest: string): Promise<{ code: string; externalId?: string }[]> {
+    if (!DIGEST.test(digest)) return [];
+    try {
+      const list = JSON.parse(
+        await readFile(join(this.dir, `warn-${digest}.json`), "utf8"),
+      ) as unknown;
+      if (!Array.isArray(list)) return [];
+      return list.filter(
+        (w): w is { code: string; externalId?: string } =>
+          typeof w === "object" &&
+          w !== null &&
+          typeof (w as { code?: unknown }).code === "string" &&
+          ["undefined", "string"].includes(typeof (w as { externalId?: unknown }).externalId),
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * The newest snapshot there is (the cursor the runner holds, as far as the connector can tell),
    * or null: what identity() compares the folder with.
    */
@@ -279,7 +311,9 @@ export class StateDir {
       return;
     }
     for (const name of names) {
-      const snap = /^snap-([0-9a-f]{64})\.json\.gz(\.[0-9a-f]{12}\.tmp)?$/.exec(name);
+      const snap =
+        /^snap-([0-9a-f]{64})\.json\.gz(\.[0-9a-f]{12}\.tmp)?$/.exec(name) ??
+        /^warn-([0-9a-f]{64})\.json(\.[0-9a-f]{12}\.tmp)?$/.exec(name);
       const crawl = /^crawl-([0-9a-f]{16})\.jsonl$/.exec(name);
       const drop = snap
         ? options.snapshots !== undefined &&

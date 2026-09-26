@@ -39,7 +39,7 @@ import {
   type SourceUser,
   type SyncEvent,
 } from "@openhoard/sdk";
-import { and, asc, eq, isNull, lt, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { JobsLogger } from "./jobs.js";
 
 /*
@@ -76,6 +76,11 @@ import type { JobsLogger } from "./jobs.js";
  *   how many it would have (`reconcile_held`) and fails (`reconcile-guard`), every run, deltas
  *   included, until an admin confirms that many (`admin source confirm-reconcile`) or discards
  *   it (`admin source discard-reconcile`: a clean crawl from the beginning, guarded again).
+ *   Up to 2 always pass (routine deletions in a small source).
+ * - A delta can't either: its items and deletes are applied a checkpoint at a time, once the
+ *   deletes among them, with those it made before, are counted against the same guard. Past
+ *   it, nothing since the last checkpoint is applied and the run fails (`delete-guard`), held
+ *   the same way (`delta_deletes` keeps the count across runs until the delta is done).
  * - A crawl that met a place it couldn't read (a `warning` `unreadable`) removes nothing: its
  *   reconcile is deferred (`reconcile_deferred`, said in every report) to the next crawl from the
  *   beginning, which the runner can't narrow to the readable part (it keeps no tree).
@@ -166,12 +171,15 @@ export interface SyncReport {
    * `permanent`, `resync`) or the runner's: `invalid-connector`, `unknown-zone`, `zone-kind` (not an
    * indexed zone, or one the connector can't serve), `zone-mismatch` and `connector-mismatch` (the
    * source was synced into another zone, or by another connector), `source-identity` (the
-   * source is not the one first synced), `reconcile-guard` (see `reconcileHeld`),
-   * `invalid-token`, `incomplete` (a stream ended without `done`), `database`, `enqueue`
+   * source is not the one first synced), `reconcile-guard` and `delete-guard` (see
+   * `reconcileHeld`), `invalid-token`, `incomplete` (a stream ended without `done`), `database`, `enqueue`
    * (enqueueing enrichment kept failing: the committed items wait for the sweep).
    */
   error?: string;
-  /** `reconcile-guard`: how many items the reconcile would have removed, held for an admin. */
+  /**
+   * `reconcile-guard` and `delete-guard`: how many items the reconcile or the delta would have
+   * removed, held for an admin.
+   */
   reconcileHeld?: number;
   counts: {
     /** File events seen. */
@@ -262,6 +270,8 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
   let applied = 0;
   /** A crawl from the beginning is running: record every item it yields. */
   let reconciling = false;
+  /** How many of the source's items the delta now running has removed (source_syncs). */
+  let deltaDeletes = 0;
   let description: ConnectorDescription | undefined;
   let key: Promise<Uint8Array> | undefined;
   const tenantKey = () => (key ??= Promise.resolve(options.tenantKey(tenantId)));
@@ -298,11 +308,19 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     }
   };
   const where = () => and(eq(sourceSyncs.tenantId, tenantId), eq(sourceSyncs.source, source));
-  const save = (phase: Phase, token: string) =>
+  /** Saves a checkpoint or cursor, and how many items the delta has removed so far. */
+  const save = (phase: Phase, token: string, ended = false) =>
     transaction((tx) =>
       tx
         .update(sourceSyncs)
-        .set({ phase, token, updatedAt: sql`now()` })
+        .set({
+          phase,
+          token,
+          deltaDeletes: phase === "delta" && !ended ? deltaDeletes : 0,
+          // A delta at its end is past what its guard held.
+          ...(ended && phase === "delta" ? { reconcileHeld: null, reconcileConfirmed: null } : {}),
+          updatedAt: sql`now()`,
+        })
         .where(where()),
     );
   /** Starts a crawl from the beginning, noting when, for the reconcile after it. */
@@ -310,10 +328,17 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     await transaction((tx) =>
       tx
         .update(sourceSyncs)
-        .set({ phase: "crawl", token: null, reconcileFrom: sql`now()`, updatedAt: sql`now()` })
+        .set({
+          phase: "crawl",
+          token: null,
+          reconcileFrom: sql`now()`,
+          deltaDeletes: 0,
+          updatedAt: sql`now()`,
+        })
         .where(where()),
     );
     reconciling = true;
+    deltaDeletes = 0;
   };
 
   try {
@@ -383,6 +408,7 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     let phase: Phase = state.phase;
     let token = state.token;
     reconciling = phase === "crawl" && state.reconcileFrom !== null;
+    deltaDeletes = phase === "delta" ? state.deltaDeletes : 0;
     // Said every run until a crawl from the beginning reconciles.
     if (state.reconcileDeferred) warn("reconcile-deferred");
     // A run that stopped between a crawl's `done` and the end of its reconcile finishes it.
@@ -425,10 +451,52 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     throw e;
   }
 
-  /** Applies a stream's events in order: null when it reached `done`, else why it stopped. */
+  /**
+   * Applies a stream's events in order: null when it reached `done`, else why it stopped.
+   *
+   * A delta's items and deletes wait until its next checkpoint (or `done`): the deletes among
+   * them are counted first, with those the delta already made, and when they would remove more
+   * of the source than the guard allows, nothing since the last checkpoint is applied and the
+   * run is held (`delete-guard`) like a reconcile. A connector that never checkpoints a delta
+   * has the whole delta counted before anything of it is applied.
+   */
   async function follow(stream: AsyncIterable<SyncEvent>, phase: Phase): Promise<Stop | null> {
     const events = stream[Symbol.asyncIterator]();
+    const pending: SyncEvent[] = [];
     let finished = false;
+    /** Applies what waits, unless the guard holds it. */
+    const flush = async (): Promise<Stop | null> => {
+      const deletes = pending.flatMap((e) => (e.type === "deleted" ? [e.externalId] : []));
+      if (deletes.length > 0) {
+        const removing = await liveAmong(deletes);
+        const total = deltaDeletes + removing;
+        // The source as it was when the delta began: what is live now and what it removed.
+        const size = (await liveItems()) + deltaDeletes;
+        if (removing > 0 && tooManyGone(total, size)) {
+          const [row] = await transaction((tx) =>
+            tx
+              .select({ confirmed: sourceSyncs.reconcileConfirmed })
+              .from(sourceSyncs)
+              .where(where()),
+          );
+          const confirmed = row?.confirmed ?? null;
+          if (!(confirmed !== null && total <= confirmed)) {
+            await transaction((tx) =>
+              tx
+                .update(sourceSyncs)
+                .set({ reconcileHeld: total, updatedAt: sql`now()` })
+                .where(where()),
+            );
+            report.reconcileHeld = total;
+            log.warn?.({ tenantId, source, held: total, size }, "sync: delta deletes held");
+            return new Stop("failed", "delete-guard");
+          }
+        }
+        deltaDeletes = total;
+      }
+      for (const event of pending.splice(0)) await applyEvent(event);
+      return null;
+    };
     try {
       for (;;) {
         let next: IteratorResult<SyncEvent>;
@@ -453,20 +521,15 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
           if (id !== undefined && type === "item") await seen(id);
           continue;
         }
-        if (event.type === "item" || event.type === "deleted") applied++;
         switch (event.type) {
           case "item":
-            if (event.item.kind === "folder") report.counts.folders++;
-            else await apply(event.item);
+          case "deleted":
+            if (phase === "delta") pending.push(event);
+            else await applyEvent(event);
             break;
-          case "deleted": {
-            const removed = await transaction((tx) =>
-              removeFromSource(tx, tenantId, source, event.externalId),
-            );
-            if (removed !== null) report.counts.deleted++;
-            break;
-          }
-          case "checkpoint":
+          case "checkpoint": {
+            const held = await flush();
+            if (held) return held;
             await save(phase, event.token);
             if (
               (options.budgetMs !== undefined && Date.now() - started >= options.budgetMs) ||
@@ -475,6 +538,7 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
               return new Stop("partial");
             }
             break;
+          }
           case "warning":
             warn(event.code, event.externalId);
             if (event.code === "unreadable" && reconciling) {
@@ -491,16 +555,95 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
               warn("reconcile-deferred");
             }
             break;
-          case "done":
-            await save("delta", event.cursor);
+          case "done": {
+            const held = await flush();
+            if (held) return held;
+            await save("delta", event.cursor, phase === "delta");
+            deltaDeletes = 0;
             if (reconciling) await reconcile();
             return null;
+          }
         }
       }
     } finally {
       // Stopped early: let the connector close what it holds.
       if (!finished) await events.return?.().catch(() => undefined);
     }
+  }
+
+  /** Applies one item or delete. */
+  async function applyEvent(event: SyncEvent): Promise<void> {
+    if (event.type === "item") {
+      applied++;
+      if (event.item.kind === "folder") report.counts.folders++;
+      else await apply(event.item);
+    } else if (event.type === "deleted") {
+      applied++;
+      const removed = await transaction((tx) =>
+        removeFromSource(tx, tenantId, source, event.externalId),
+      );
+      if (removed !== null) report.counts.deleted++;
+    }
+  }
+
+  /**
+   * Whether removing `gone` of a source of `size` items is more than the guard lets through
+   * without an admin: more than `maxFraction` of it, and either more than `minItems` or half of
+   * it. Up to 2 always pass: routine deletions in a small source.
+   */
+  function tooManyGone(gone: number, size: number): boolean {
+    return (
+      gone > 2 && gone > guard.maxFraction * size && (gone > guard.minItems || gone >= 0.5 * size)
+    );
+  }
+
+  /** How many of the source's items are live (not removed). */
+  async function liveItems(): Promise<number> {
+    const [row] = await transaction((tx) =>
+      tx
+        .select({ n: sql<number>`count(*)::int` })
+        .from(sourceRefs)
+        .innerJoin(
+          objects,
+          and(eq(objects.tenantId, sourceRefs.tenantId), eq(objects.id, sourceRefs.objectId)),
+        )
+        .where(
+          and(
+            eq(sourceRefs.tenantId, tenantId),
+            eq(sourceRefs.source, source),
+            isNull(objects.deletedAt),
+          ),
+        ),
+    );
+    return Number(row?.n ?? 0);
+  }
+
+  /** How many of these external ids are live items of the source. */
+  async function liveAmong(externalIds: readonly string[]): Promise<number> {
+    const ids = [...new Set(externalIds)];
+    let n = 0;
+    for (let at = 0; at < ids.length; at += 1_000) {
+      const chunk = ids.slice(at, at + 1_000);
+      const [row] = await transaction((tx) =>
+        tx
+          .select({ n: sql<number>`count(*)::int` })
+          .from(sourceRefs)
+          .innerJoin(
+            objects,
+            and(eq(objects.tenantId, sourceRefs.tenantId), eq(objects.id, sourceRefs.objectId)),
+          )
+          .where(
+            and(
+              eq(sourceRefs.tenantId, tenantId),
+              eq(sourceRefs.source, source),
+              inArray(sourceRefs.externalId, chunk),
+              isNull(objects.deletedAt),
+            ),
+          ),
+      );
+      n += Number(row?.n ?? 0);
+    }
+    return n;
   }
 
   /** Records one file, or skips it (see the header). */
@@ -680,12 +823,9 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     const stale = Number(counts?.stale ?? 0);
     const live = Number(counts?.live ?? 0);
     const confirmed = counts?.confirmed == null ? null : Number(counts.confirmed);
-    // Held when the crawl mentioned nothing, or when it would take more than `maxFraction` of
-    // the source and either more than `minItems` or half of it: a small source emptied by a
-    // lost state (one placeholder file left) is held as surely as a large one.
-    const tooMany =
-      Number(counts?.seen ?? 0) === 0 ||
-      (stale > guard.maxFraction * live && (stale > guard.minItems || stale >= 0.5 * live));
+    // Held when the crawl mentioned nothing, or past the guard (tooManyGone()): a small source
+    // emptied by a lost state (one placeholder file left) is held as surely as a large one.
+    const tooMany = Number(counts?.seen ?? 0) === 0 || tooManyGone(stale, live);
     if (stale > 0 && tooMany && !(confirmed !== null && stale <= confirmed)) {
       await transaction((tx) =>
         tx

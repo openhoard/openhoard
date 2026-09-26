@@ -525,7 +525,9 @@ node apps/server/dist/main.js admin source accept-identity --tenant ten_… --so
   change and reconcile state (held, deferred, running). A crawl from the beginning that would
   remove a large part of a source (over 25% of it and either over 50 items or half of it, by
   default; or anything when it found nothing) is held, and **while it is held the source doesn't
-  sync at all**, deltas included. After checking the source (is the drive mounted? the right
+  sync at all**, deltas included. A delta that would remove as much (counted checkpoint by
+  checkpoint) is held the same way (`delete-guard`), with nothing past its last checkpoint
+  applied; confirm and discard work on it alike. After checking the source (is the drive mounted? the right
   folder?), either `source confirm-reconcile` (the next sync removes up to the count it held) or
   `source discard-reconcile` (nothing is removed; the source is crawled afresh, and that crawl's
   reconcile is guarded again). `discard-reconcile` also runs a reconcile deferred because a crawl

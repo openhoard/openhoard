@@ -261,8 +261,8 @@ crawl (from the start, or a checkpoint) ── done ──▶ delta, delta, delt
   anything when the crawl mentioned no item at all, removes nothing. Allowed: at most
   `maxFraction` (25%) of the source's items, or more only when that is at most `minItems` (50)
   items and less than half the source; per source, from its connection's configuration. So a
-  small source emptied but for a placeholder (40 of 41) is held as surely as a large one. It
-  records the count (`reconcile_held`), fails with `reconcile-guard` (`reconcileHeld` in the
+  small source emptied but for a placeholder (40 of 41) is held as surely as a large one; up to
+  2 items always pass, so routine deletions in a small source (1 of 3) go through. It records the count (`reconcile_held`), fails with `reconcile-guard` (`reconcileHeld` in the
   report), and does so every run: **while a reconcile is held, the source's deltas are held
   too**. A folder not mounted, a lost state, an admin's reset or a connector that says `done`
   too soon can't empty a source. Once an admin has checked the source:
@@ -273,6 +273,16 @@ crawl (from the start, or a checkpoint) ── done ──▶ delta, delta, delt
     also runs a deferred reconcile);
   - `openhoard admin source accept-identity`: for a source that is now another one (below).
     All three are audited.
+- **The delta delete guard.** A delta could empty a source too (a connector whose delta says
+  everything was deleted). So a delta's items and deletes wait for its next checkpoint (or
+  `done`); the deletes among them that remove a live item, with those the delta already made
+  (`delta_deletes`, kept across runs until the delta is done), are counted against the same
+  guard, over the source as it was when the delta began. Past it, nothing since the last
+  checkpoint is applied: the run fails with `delete-guard` and records the count
+  (`reconcile_held`, `reconcileHeld` in the report), every run, until an admin confirms it (the
+  next run applies up to that many) or discards it (a clean crawl from the beginning, as above).
+  What earlier checkpoints applied stays. A connector that never checkpoints a delta has it
+  counted whole before any of it is applied.
 - **The source's identity.** A connector with `identity()` (fs: the root's inode, birth time and
   file system type; never a device number, which a remount changes) binds the source to its
   answer, recorded in `source_syncs` on the first sync, outside the connector's own state. The

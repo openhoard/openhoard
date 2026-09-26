@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ConnectorDescription, SourceItem } from "./connector.js";
 import {
   acceptAcl,
+  acceptRedirect,
   canonicalUrl,
   checkAcl,
   checkDescription,
@@ -349,6 +350,44 @@ describe("checkRedirect", () => {
     // Most of these parse with an empty host; browsers and the shell see a server in each.
     expect(checkRedirect(url, description)).not.toBeNull();
     expect(checkItem({ ...file, url }, description)).toMatch(/^url: /);
+  });
+
+  it.each([
+    ["a query", "file:///srv/a.txt?x=1"],
+    ["a fragment", "file:///srv/a.txt#x"],
+    ["an empty query", "file:///srv/a.txt?"],
+    ["a question mark starting the path", "file:///?/UNC/evil.example/share/x"],
+    ["an encoded one", "file:///%3f/UNC/evil.example/share/x"],
+    ["a division slash for slashes", `file:///${String.fromCharCode(0x2215).repeat(2)}evil/share`],
+    [
+      "a fullwidth solidus for slashes",
+      `file:///${String.fromCharCode(0xff0f).repeat(2)}evil/share`,
+    ],
+    ["a first folder that isn't plain ASCII", "file:///Donn%C3%A9es/x.txt"],
+  ])("refuses a file: URL with %s", (_label, url) => {
+    expect(checkRedirect(url, description)).not.toBeNull();
+  });
+
+  it("accepts drives, plain first folders, and anything later in the path", () => {
+    for (const url of [
+      "file:///C:/Users/ann/plan.docx",
+      "file:///z:/Shares/x.txt",
+      "file:///home/Jos%C3%A9/r%C3%A9sum%C3%A9.txt",
+      "file:///Users/ann/a%20b.txt",
+      "file:///",
+    ]) {
+      expect(checkRedirect(url, description), url).toBeNull();
+    }
+    expect(checkRedirect("file:///%E0%A4%A/x", description)).toMatch(/decode/);
+  });
+
+  it("hands out a redirect only checked and as the parser writes it", () => {
+    expect(acceptRedirect("FILE:///srv/A%20b.txt", description)).toBe("file:///srv/A%20b.txt");
+    expect(acceptRedirect("HTTPS://Contoso.SharePoint.com/x", description)).toBe(
+      "https://contoso.sharepoint.com/x",
+    );
+    expect(() => acceptRedirect("file:////evil/share", description)).toThrow(TypeError);
+    expect(() => acceptRedirect("javascript:alert(1)", description)).toThrow(TypeError);
   });
 
   it("gives the parser's own text to keep, not the connector's", () => {

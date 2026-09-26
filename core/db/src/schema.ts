@@ -1232,6 +1232,12 @@ export const sourceSyncs = pgTable(
      * crawl from the beginning must (0042). Cleared when one does.
      */
     reconcileDeferred: boolean("reconcile_deferred").notNull().default(false),
+    /**
+     * How many of the source's items the delta now running has removed so far (0043): the
+     * guard counts a delta's deletes across its checkpoints and runs, not one batch at a time.
+     * Back to 0 when the delta reaches its end.
+     */
+    deltaDeletes: integer("delta_deletes").notNull().default(0),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -1257,6 +1263,7 @@ export const sourceSyncs = pgTable(
       "source_syncs_reconcile_counts",
       sql`(reconcile_held is null or reconcile_held >= 0) and (reconcile_confirmed is null or reconcile_confirmed >= 0)`,
     ),
+    check("source_syncs_delta_deletes", sql`delta_deletes >= 0`),
   ],
 );
 
