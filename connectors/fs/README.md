@@ -39,10 +39,22 @@ const connector = fsConnector({
   accounts, not the organization's people). Every item gets the connection's `defaultAcl`
   (basis `configured`), or, without one, nothing (`owner-only`).
 - **redirect()**: the item's `file:` URL, for the local agent to open natively (FR-20).
+- **identity()**: the root's device and inode. The sync runner records it outside the
+  connector's state folder (core/jobs `source_syncs`) and refuses a sync, a crawl included, when
+  another folder is at the root's path, until an admin accepts it.
+- **Unreadable is not gone.** A folder it may not list, or an entry it may not stat (EACCES,
+  EPERM), is reported with a `warning` `unreadable`: a delta keeps what the snapshot had there
+  (reporting nothing for it), and a crawl that met one doesn't reconcile. Only ENOENT and ENOTDIR
+  mean gone; other failures (a busy or unreachable disk) fail the sync.
+- **Hard links** (a file with more than one name): with `hardLinks: "index"` (default) each name
+  is its own item, flagged with a `hard-link` warning (the bytes can change through another name,
+  perhaps outside the root); with `"skip"` they are left out.
 
 ## Safety
 
-Nothing outside the root is read. Symbolic links and junctions are never followed, inside or
+Nothing outside the root is read. A root on a network share path (UNC, `\\server\share`) is
+refused: its `file:` URLs would name a host, and opening one makes Windows authenticate to that
+server; map a drive letter instead. Symbolic links and junctions are never followed, inside or
 outside the root (a link's target inside the root is crawled where it is); other file systems
 mounted inside the root are left out. `read`, `aclImport` and `redirect` accept only a location
 inside the root with no link on the way, and the opened file must be the crawled inode. A root
@@ -64,8 +76,11 @@ messages name the OS error code, never the path.
 
 ## Limits
 
-- Entries it may not read (EACCES), sockets, pipes and devices, and anything deeper than 256
-  folders are left out.
+- Sockets, pipes and devices, and anything deeper than 256 folders, are left out.
+- Cloud placeholders (OneDrive or iCloud files not downloaded: Windows'
+  FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS or OFFLINE, macOS dataless files) can't be told apart
+  from Node, which exposes neither attributes nor file flags: reading one downloads it. Point the
+  connector at folders kept on the device, or turn "files on demand" off for them.
 - Without birth times (some Linux file systems), a file renamed and edited between two deltas is
   reported deleted and created.
 - Names that aren't valid Unicode (possible on Linux) can't be read back reliably.

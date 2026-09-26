@@ -15,12 +15,15 @@ import { fsError } from "./errors.js";
  * - anything on another file system mounted inside the folder (its device differs): a mount can
  *   come and go, and its inode numbers aren't the folder's;
  * - anything that isn't a regular file or a folder (sockets, pipes, devices);
- * - entries the connector may not read (EACCES, EPERM), and entries that vanish while it looks
- *   (ENOENT): as far as the connector can tell, they aren't in the folder;
- * - anything deeper than MAX_DEPTH folders, or whose path the OS refuses as too long.
+ * - with `hardLinks: "skip"`, files with more than one link;
+ * - anything deeper than MAX_DEPTH folders.
  *
- * Anything else that fails (a busy or unreachable disk) throws: a walk never reports a folder
- * as emptier than it is because reading it failed.
+ * Gone and unreadable are not the same. An entry that vanishes while the walk looks (ENOENT,
+ * ENOTDIR) is gone. One the connector may not stat, or a folder it may not list (EACCES, EPERM,
+ * a path the OS refuses as too long), is `unreadable`: the walk says so, and the caller treats
+ * what was there before as still there (a delta keeps it, a crawl doesn't reconcile). Anything
+ * else that fails (a busy or unreachable disk) throws: a walk never reports a folder as emptier
+ * than it is because reading it failed.
  */
 
 /** Deepest folder level walked. */
@@ -36,6 +39,18 @@ export interface Entry {
   size: bigint;
   mtimeNs: bigint;
   ctimeNs: bigint;
+  /** How many names the file has (hard links); 1 for folders. */
+  links: bigint;
+}
+
+/**
+ * A place the walk couldn't see into: the entry at `path` (it couldn't stat it), or, with
+ * `contents`, what is in the folder at `path` (it couldn't list it).
+ */
+export interface Unreadable {
+  kind: "unreadable";
+  path: string[];
+  contents: boolean;
 }
 
 /** Compares two paths in walk order: a folder before what is in it, names by code unit. */
@@ -49,36 +64,56 @@ export function compareWalk(a: readonly string[], b: readonly string[]): number 
   return a.length - b.length;
 }
 
-function isPrefix(prefix: readonly string[], path: readonly string[]): boolean {
+export function isPrefix(prefix: readonly string[], path: readonly string[]): boolean {
   return prefix.length <= path.length && prefix.every((name, i) => path[i] === name);
 }
 
-/** Codes that mean "not there, or not ours to read": the entry is left out. */
-const SKIP = new Set(["ENOENT", "ENOTDIR", "EACCES", "EPERM", "ENAMETOOLONG", "ELOOP"]);
+/** Codes that mean the entry is gone. */
+const GONE = new Set(["ENOENT", "ENOTDIR"]);
+/** Codes that mean the entry is there, but not for the connector to see. */
+const UNREADABLE = new Set(["EACCES", "EPERM", "ENAMETOOLONG", "ELOOP"]);
 
-const codeOf = (e: unknown) => (e as { code?: unknown } | null)?.code;
+const codeOf = (e: unknown) => {
+  const code = (e as { code?: unknown } | null)?.code;
+  return typeof code === "string" ? code : "";
+};
+
+export interface WalkOptions {
+  /** Resume after this path (a crawl's checkpoint). */
+  after?: readonly string[];
+  /** Leave out files with more than one link. Default false. */
+  skipHardLinks?: boolean;
+}
 
 /**
- * The entries under `root` (not `root` itself), in walk order, after `after` when given (a
- * resumed crawl). `dev` is the root's device: other file systems are left out.
+ * The entries under `root` (not `root` itself), in walk order, and where it couldn't see.
+ * `dev` is the root's device: other file systems are left out.
  */
 export async function* walk(
   root: string,
   dev: bigint,
   signal: AbortSignal,
-  after?: readonly string[],
-): AsyncGenerator<Entry> {
+  options: WalkOptions = {},
+): AsyncGenerator<Entry | Unreadable> {
+  const { after, skipHardLinks = false } = options;
   yield* visit(root, [], 0);
 
-  async function* visit(dir: string, rel: string[], depth: number): AsyncGenerator<Entry> {
+  async function* visit(
+    dir: string,
+    rel: string[],
+    depth: number,
+  ): AsyncGenerator<Entry | Unreadable> {
     signal.throwIfAborted();
     let names: string[];
     try {
       names = await readdir(dir);
     } catch (e) {
-      // The root itself must be readable; below it, a folder that went or that we may not
-      // list is left out.
-      if (depth > 0 && SKIP.has(codeOf(e) as string)) return;
+      // The root itself must be readable.
+      if (depth > 0 && GONE.has(codeOf(e))) return;
+      if (depth > 0 && UNREADABLE.has(codeOf(e))) {
+        yield { kind: "unreadable", path: rel, contents: true };
+        return;
+      }
       throw fsError(e);
     }
     names.sort();
@@ -89,17 +124,21 @@ export async function* walk(
       if (after && compareWalk(path, after) <= 0 && !isPrefix(path, after)) continue;
       signal.throwIfAborted();
       const abs = join(dir, name);
+      const fresh = !after || compareWalk(path, after) > 0;
       let st: BigIntStats;
       try {
         st = await lstat(abs, { bigint: true });
       } catch (e) {
-        if (SKIP.has(codeOf(e) as string)) continue;
+        if (GONE.has(codeOf(e))) continue;
+        if (UNREADABLE.has(codeOf(e))) {
+          if (fresh) yield { kind: "unreadable", path, contents: false };
+          continue;
+        }
         throw fsError(e);
       }
       if (st.isSymbolicLink() || st.dev !== dev) continue;
-      const fresh = !after || compareWalk(path, after) > 0;
       if (st.isFile()) {
-        if (fresh) yield entry(path, "file", st);
+        if (fresh && !(skipHardLinks && st.nlink > 1n)) yield entry(path, "file", st);
       } else if (st.isDirectory()) {
         if (fresh) yield entry(path, "folder", st);
         if (depth + 1 < MAX_DEPTH) yield* visit(abs, path, depth + 1);
@@ -117,5 +156,6 @@ export function entry(path: string[], kind: Entry["kind"], st: BigIntStats): Ent
     size: kind === "file" ? st.size : 0n,
     mtimeNs: st.mtimeNs,
     ctimeNs: st.ctimeNs,
+    links: kind === "file" ? st.nlink : 1n,
   };
 }

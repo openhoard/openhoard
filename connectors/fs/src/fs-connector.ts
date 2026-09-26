@@ -25,7 +25,7 @@ import {
 import { fsError } from "./errors.js";
 import { mediaTypeOf } from "./media.js";
 import { assignIds, entryOf, firstSightId, pathKey, recOf, StateDir, type Rec } from "./state.js";
-import { entry, walk, type Entry } from "./walk.js";
+import { compareWalk, entry, isPrefix, walk, type Entry, type Unreadable } from "./walk.js";
 
 /*
  * The local folder connector (T-301): a folder indexed in place, on Windows, macOS and Linux.
@@ -73,6 +73,12 @@ export interface FsConnectorOptions {
   checkpointEvery?: number;
   /** Bytes per chunk read() returns. Default 64 KiB. */
   chunkSize?: number;
+  /**
+   * Files with more than one name (hard links). `index` (default): indexed, each name its own
+   * item, with a `hard-link` warning: the same bytes can change through another name, perhaps
+   * one outside the root. `skip`: left out (reported deleted if they were indexed before).
+   */
+  hardLinks?: "index" | "skip";
 }
 
 interface Context {
@@ -90,6 +96,9 @@ export function fsConnector(options: FsConnectorOptions): Connector {
   const chunkSize = options.chunkSize ?? 64 * 1024;
   if (!Number.isSafeInteger(every) || every < 1) throw new RangeError("checkpointEvery");
   if (!Number.isSafeInteger(chunkSize) || chunkSize < 1) throw new RangeError("chunkSize");
+  const hardLinks = options.hardLinks ?? "index";
+  if (hardLinks !== "index" && hardLinks !== "skip") throw new RangeError("hardLinks");
+  const walkOptions = { skipHardLinks: hardLinks === "skip" };
   const acl: ItemAcl =
     options.defaultAcl && options.defaultAcl.length > 0
       ? { basis: "configured", entries: normalizeAcl(options.defaultAcl) }
@@ -119,6 +128,11 @@ export function fsConnector(options: FsConnectorOptions): Connector {
       throw err.code === "not-found" ? retryableError("the folder can't be reached") : err;
     }
     if (!st.isDirectory()) throw permanentError("the root is not a folder");
+    // A UNC root (a network share path) gives file: URLs with a host, which opening would make
+    // Windows authenticate to: refused, as the core refuses such URLs. Map a drive instead.
+    if (pathToFileURL(root).host !== "") {
+      throw permanentError("a root on a network share path (UNC) isn't supported");
+    }
     // Made again if someone removed it: the tokens it held are then refused (`resync`).
     await state.ensure().catch((e: unknown) => {
       throw fsError(e);
@@ -192,7 +206,14 @@ export function fsConnector(options: FsConnectorOptions): Connector {
     );
     try {
       let since = 0;
-      for await (const e of walk(ctx.root, ctx.dev, signal, after)) {
+      for await (const e of walk(ctx.root, ctx.dev, signal, {
+        ...walkOptions,
+        ...(after ? { after } : {}),
+      })) {
+        if (e.kind === "unreadable") {
+          yield unreadableWarning(e.contents ? idAt.get(pathKey(e.path)) : undefined);
+          continue;
+        }
         const parentId = e.path.length === 1 ? null : idAt.get(pathKey(e.path.slice(0, -1)));
         // Its folder isn't in the journal (a damaged one): the next delta finds it.
         if (parentId === undefined) continue;
@@ -202,6 +223,7 @@ export function fsConnector(options: FsConnectorOptions): Connector {
         await journal.write(line);
         bytes += Buffer.byteLength(line);
         yield { type: "item", item: itemOf(ctx, id, parentId, e) };
+        if (e.links > 1n) yield { type: "warning", code: "hard-link", externalId: id };
         if (++since >= every) {
           since = 0;
           yield { type: "checkpoint", token: `fs1c.${run}.${bytes}` };
@@ -233,19 +255,33 @@ export function fsConnector(options: FsConnectorOptions): Connector {
     // Only this cursor (and what this delta writes) can be asked for from now on.
     await state.prune({ snapshots: { keep: digest } });
     const entries: Entry[] = [];
+    const unreadable: Unreadable[] = [];
     try {
-      for await (const e of walk(ctx.root, ctx.dev, signal)) entries.push(e);
+      for await (const e of walk(ctx.root, ctx.dev, signal, walkOptions)) {
+        if (e.kind === "unreadable") unreadable.push(e);
+        else entries.push(e);
+      }
     } catch (e) {
       throw fsError(e);
     }
     const ids = assignIds(entries, before.entries);
+    const alive = new Set(ids);
+    // Unknown is not gone: what the snapshot had where the walk couldn't see stays as it was,
+    // unreported (a file moved out of there is found elsewhere by its inode, and not kept).
+    const hidden = (r: Rec) =>
+      unreadable.some((u) =>
+        u.contents ? r.p.length > u.path.length && isPrefix(u.path, r.p) : isPrefix(u.path, r.p),
+      );
+    const kept = before.entries.filter((r) => !alive.has(r.id) && hidden(r));
+    const keptIds = new Set(kept.map((r) => r.id));
     const recs = entries.map((e, n) => recOf(ids[n] as string, e));
     const idAt = new Map(recs.map((r) => [pathKey(r.p), r.id]));
     const was = new Map(before.entries.map((r) => [r.id, etagOf(r.id, entryOf(r))]));
-    const alive = new Set(ids);
     const events: SyncEvent[] = [];
     for (const r of [...before.entries].reverse()) {
-      if (!alive.has(r.id)) events.push({ type: "deleted", externalId: r.id });
+      if (!alive.has(r.id) && !keptIds.has(r.id)) {
+        events.push({ type: "deleted", externalId: r.id });
+      }
     }
     entries.forEach((e, n) => {
       const id = ids[n] as string;
@@ -253,8 +289,21 @@ export function fsConnector(options: FsConnectorOptions): Connector {
       const parentId =
         e.path.length === 1 ? null : (idAt.get(pathKey(e.path.slice(0, -1))) ?? null);
       events.push({ type: "item", item: itemOf(ctx, id, parentId, e) });
+      if (e.links > 1n) events.push({ type: "warning", code: "hard-link", externalId: id });
     });
-    const next = await state.writeSnapshot({ v: 1, root: ctx.identity, entries: recs });
+    for (const u of unreadable) {
+      const at = pathKey(u.path);
+      events.push(
+        unreadableWarning(
+          u.contents ? idAt.get(at) : before.entries.find((r) => pathKey(r.p) === at)?.id,
+        ),
+      );
+    }
+    const next = await state.writeSnapshot({
+      v: 1,
+      root: ctx.identity,
+      entries: [...recs, ...kept].sort((a, b) => compareWalk(a.p, b.p)),
+    });
     for (const e of events) {
       signal.throwIfAborted();
       yield e;
@@ -371,6 +420,10 @@ export function fsConnector(options: FsConnectorOptions): Connector {
     crawl,
     delta,
     read,
+    async identity(signal) {
+      signal.throwIfAborted();
+      return (await context()).identity;
+    },
     async aclImport(ref, signal) {
       signal.throwIfAborted();
       const ctx = await context();
@@ -385,6 +438,13 @@ export function fsConnector(options: FsConnectorOptions): Connector {
       return pathToFileURL(abs).href;
     },
   };
+}
+
+/** Part of the folder couldn't be seen: the runner mustn't take it as gone. */
+function unreadableWarning(externalId: string | undefined): SyncEvent {
+  return externalId === undefined
+    ? { type: "warning", code: "unreadable" }
+    : { type: "warning", code: "unreadable", externalId };
 }
 
 /** An item's eTag: everything the connector reports about it, its path included. */

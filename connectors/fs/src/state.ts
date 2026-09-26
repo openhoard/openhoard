@@ -57,6 +57,7 @@ export const entryOf = (r: Rec): Entry => ({
   size: BigInt(r.s),
   mtimeNs: BigInt(r.m),
   ctimeNs: BigInt(r.c),
+  links: 1n,
 });
 
 const DIGITS = /^-?\d{1,30}$/;

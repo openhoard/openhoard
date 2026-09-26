@@ -179,19 +179,27 @@ describe("fs connector: state", () => {
 describe("fs connector: never outside the root", () => {
   it("never follows links, to files or folders, inside or outside the root", async () => {
     await src.write(["real.txt"], enc.encode("real"));
-    let linked = true;
-    try {
-      await symlink(
+    // A junction needs no privilege on Windows; a file symlink does (developer mode or admin),
+    // so without it that part is skipped.
+    const made = async (work: () => Promise<void>) => {
+      try {
+        await work();
+        return true;
+      } catch (e) {
+        if ((e as { code?: string }).code !== "EPERM") throw e;
+        return false;
+      }
+    };
+    await made(() =>
+      symlink(
         outside,
         join(src.root, "link-dir"),
         process.platform === "win32" ? "junction" : "dir",
-      );
-      await symlink(join(outside, "secret.txt"), join(src.root, "link.txt"), "file");
-    } catch (e) {
-      // Windows without the symlink privilege: the junction may exist, the file link not.
-      if ((e as { code?: string }).code !== "EPERM") throw e;
-      linked = false;
-    }
+      ),
+    );
+    const linked = await made(() =>
+      symlink(join(outside, "secret.txt"), join(src.root, "link.txt"), "file"),
+    );
     const items = itemsOf(await events(connector.crawl(null, signal())));
     expect(items.map((i) => i.path.join("/"))).toEqual(["real.txt"]);
     const secret = { externalId: "x", contentVersion: "v1.10.0.0.1" };
@@ -263,6 +271,39 @@ describe("fs connector: identity", () => {
     expect((byPath(items, "b.txt") as SourceItem).externalId).toBe(pathId(["b.txt"]));
   });
 
+  it("flags hard-linked files, or leaves them out when asked", async () => {
+    await src.write(["a.txt"], enc.encode("shared"));
+    await src.write(["single.txt"], enc.encode("one name"));
+    const crawl = await events(connector.crawl(null, signal()));
+    expect(crawl.filter((e) => e.type === "warning")).toEqual([]);
+    await link(join(src.root, "a.txt"), join(src.root, "b.txt"));
+    const changes = await events(need(connector.delta)(cursorOf(crawl), signal()));
+    const warned = changes.flatMap((e) => (e.type === "warning" ? [e] : []));
+    expect(warned.map((w) => w.code)).toEqual(["hard-link", "hard-link"]);
+
+    const skipping = fsConnector({
+      root: src.root,
+      stateDir: join(outside, "state"),
+      hardLinks: "skip",
+    });
+    const items = itemsOf(await events(skipping.crawl(null, signal())));
+    expect(items.map((i) => i.path.join("/"))).toEqual(["single.txt"]);
+    expect(() =>
+      fsConnector({ root: src.root, stateDir: src.stateDir, hardLinks: "x" as never }),
+    ).toThrow(RangeError);
+  });
+
+  it("names the root by its device and inode, the same every time", async () => {
+    const identity = await need(connector.identity)(signal());
+    expect(identity).toMatch(/^\d+:\d+$/);
+    await src.write(["a.txt"], enc.encode("a"));
+    expect(await need(connector.identity)(signal())).toBe(identity);
+    await rename(src.root, `${src.root}-old`);
+    await mkdir(src.root);
+    expect(await need(connector.identity)(signal())).not.toBe(identity);
+    await rm(`${src.root}-old`, { recursive: true });
+  });
+
   it("assigns ids by inode, then by path, and never hands out an old one", () => {
     const e = (path: string[], ino: bigint, birthNs: bigint, mtimeNs = 1n, size = 1n): Entry => ({
       path,
@@ -272,6 +313,7 @@ describe("fs connector: identity", () => {
       size,
       mtimeNs,
       ctimeNs: 1n,
+      links: 1n,
     });
     const rec = (id: string, x: Entry) => ({
       id,
