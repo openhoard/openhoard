@@ -64,7 +64,10 @@ export interface ContractFixture {
   checkpointEvery: number;
   /** The connector's plugin manifest (openhoard.plugin.json), checked against describe(). */
   manifest?: unknown;
-  /** Per-test timeout in milliseconds. Default 30,000. */
+  /**
+   * Per-test (and per-hook) timeout in milliseconds. Default 30,000. A slow platform can be
+   * given more here.
+   */
   timeoutMs?: number;
 }
 
@@ -73,6 +76,9 @@ const enc = new TextEncoder();
 /** Declares the contract suite for one connector. Call it at the top level of a test file. */
 export function connectorContract(name: string, fixture: ContractFixture): void {
   const timeout = fixture.timeoutMs ?? 30_000;
+  if (!(Number.isSafeInteger(timeout) && timeout > 0)) {
+    throw new RangeError("timeoutMs");
+  }
   const every = fixture.checkpointEvery;
   if (!Number.isSafeInteger(every) || every < 1) throw new RangeError("checkpointEvery");
 

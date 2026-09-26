@@ -108,9 +108,14 @@ export interface FsConnectorOptions {
   otherDevices?: "keep" | "skip";
 }
 
-interface Context {
+/** Where the root is: what read(), aclImport() and redirect() need. */
+interface Place {
   root: string;
   dev: bigint;
+}
+
+/** What a crawl, a delta and identity() need besides. */
+interface Context extends Place {
   /** What the root folder is: see identityOf(). */
   identity: string;
 }
@@ -151,8 +156,13 @@ export function fsConnector(options: FsConnectorOptions): Connector {
   const configuredRoot = resolve(options.root);
 
   let prepared: Promise<void> | undefined;
-  /** The root as it is now; the state folder checked once. */
-  async function context(): Promise<Context> {
+  /**
+   * The root as it is now, checked: there, a folder, not a network share, the state folder
+   * (checked once) outside it. All a single item's call needs: those run once per item, and on a
+   * busy Windows machine every system call counts, so they don't make the state folder again or
+   * ask the file system its type, as a crawl or a delta does (context()).
+   */
+  async function place(): Promise<Place & { st: BigIntStats }> {
     // A network share path (UNC), or a device path (\\?\, \\.\), gives file: URLs with a host,
     // which opening would make Windows authenticate to: refused, as the core refuses such URLs.
     if (pathToFileURL(configuredRoot).host !== "" || /^[\\/]{2}/.test(configuredRoot)) {
@@ -167,11 +177,8 @@ export function fsConnector(options: FsConnectorOptions): Connector {
       throw err.code === "not-found" ? retryableError("the folder can't be reached") : err;
     }
     if (!st.isDirectory()) throw permanentError("the root is not a folder");
-    // Made again if someone removed it: the tokens it held are then refused (`resync`).
-    await state.ensure().catch((e: unknown) => {
-      throw fsError(e);
-    });
     prepared ??= (async () => {
+      await state.ensure();
       // Both as realpath() writes them, so a link or a mapped drive can't hide the state folder
       // inside the root.
       const [real, dir] = await Promise.all([realpath(configuredRoot), realpath(options.stateDir)]);
@@ -181,7 +188,19 @@ export function fsConnector(options: FsConnectorOptions): Connector {
       throw fsError(e);
     });
     await prepared;
-    return { root: configuredRoot, dev: st.dev, identity: await identityOf(configuredRoot, st) };
+    return { root: configuredRoot, dev: st.dev, st };
+  }
+
+  /**
+   * The root, its state folder (made again if someone removed it: the tokens it held are then
+   * refused, `resync`) and what the root is.
+   */
+  async function context(): Promise<Context> {
+    const { root, dev, st } = await place();
+    await state.ensure().catch((e: unknown) => {
+      throw fsError(e);
+    });
+    return { root, dev, identity: await identityOf(root, st) };
   }
 
   /**
@@ -448,7 +467,7 @@ export function fsConnector(options: FsConnectorOptions): Connector {
    * Nothing outside the root, and no link on the way (each folder above it is a real folder on
    * the root's device). Never trusted beyond that: the caller checks what it finds there.
    */
-  async function locate(ctx: Context, ref: ItemRef): Promise<string> {
+  async function locate(ctx: Place, ref: ItemRef): Promise<string> {
     let abs: string;
     if (ref.url !== undefined) {
       try {
@@ -475,7 +494,7 @@ export function fsConnector(options: FsConnectorOptions): Connector {
   }
 
   /** The item's own entry, not following a link: `not-found` for a link or nothing. */
-  async function lstatItem(ctx: Context, abs: string): Promise<BigIntStats> {
+  async function lstatItem(ctx: Place, abs: string): Promise<BigIntStats> {
     const st = await lstat(abs, { bigint: true }).catch((e: unknown) => {
       throw fsError(e);
     });
@@ -487,7 +506,7 @@ export function fsConnector(options: FsConnectorOptions): Connector {
 
   async function read(ref: ItemRef, signal: AbortSignal): Promise<ReadResult> {
     signal.throwIfAborted();
-    const ctx = await context();
+    const ctx = await place();
     const version = ref.contentVersion;
     if (version === undefined) throw permanentError("read() needs the contentVersion to read");
     const abs = await locate(ctx, ref);
@@ -503,7 +522,7 @@ export function fsConnector(options: FsConnectorOptions): Connector {
    * opened file must still be the version asked for, and still be after the last byte.
    */
   async function* body(
-    ctx: Context,
+    ctx: Place,
     abs: string,
     version: string,
     size: number,
@@ -564,13 +583,13 @@ export function fsConnector(options: FsConnectorOptions): Connector {
     },
     async aclImport(ref, signal) {
       signal.throwIfAborted();
-      const ctx = await context();
+      const ctx = await place();
       await lstatItem(ctx, await locate(ctx, ref));
       return structuredClone(acl);
     },
     async redirect(ref, signal) {
       signal.throwIfAborted();
-      const ctx = await context();
+      const ctx = await place();
       const abs = await locate(ctx, ref);
       await lstatItem(ctx, abs);
       return pathToFileURL(abs).href;

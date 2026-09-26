@@ -49,7 +49,20 @@ connectorContract("memory", {
 
 connectorContract("memory, ids by path", {
   checkpointEvery: 4,
+  timeoutMs: 20_000,
   open: async () => memorySource({ checkpointEvery: 4, stableIds: false }),
+});
+
+describe("connectorContract", () => {
+  it("refuses a timeout or checkpoint interval that isn't a positive whole number", () => {
+    const open = async () => memorySource();
+    for (const timeoutMs of [0, -1, 1.5, Number.NaN]) {
+      expect(() => connectorContract("x", { checkpointEvery: 3, timeoutMs, open })).toThrow(
+        RangeError,
+      );
+    }
+    expect(() => connectorContract("x", { checkpointEvery: 0, open })).toThrow(RangeError);
+  });
 });
 
 describe("memorySource", () => {

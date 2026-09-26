@@ -12,10 +12,18 @@ const manifest = JSON.parse(
   readFileSync(fileURLToPath(new URL("../openhoard.plugin.json", import.meta.url)), "utf8"),
 ) as unknown;
 
-connectorContract("fs", { checkpointEvery: 5, manifest, open: () => fsSource() });
+/*
+ * Windows runners in CI stall on file system calls (the same test took 0.1 s in one suite below
+ * and 26 s in the other), so a test there gets longer before it counts as hung. The fixture never
+ * waits: its later modification times are set with utimes(), not slept for.
+ */
+const timeoutMs = process.platform === "win32" ? 120_000 : 30_000;
+
+connectorContract("fs", { checkpointEvery: 5, manifest, timeoutMs, open: () => fsSource() });
 
 connectorContract("fs, with a default ACL", {
   checkpointEvery: 7,
+  timeoutMs,
   open: () =>
     fsSource({
       checkpointEvery: 7,

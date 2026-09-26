@@ -83,6 +83,26 @@ const LOGIN_TTL = 600;
 const SNAPSHOT = { isolationLevel: "repeatable read", accessMode: "read only" } as const;
 const SCOPE = "openid profile email";
 const FAILED = { error: "sign-in failed" } as const;
+const DISCOVERY_RETRY_MS = 250;
+
+/**
+ * Whether discovery failed in a way worth one more try: the request never got an answer (fetch's
+ * TypeError: reset, refused, DNS), timed out, or got a 5xx. A 4xx, a malformed document or an
+ * issuer that doesn't match won't change a moment later.
+ */
+export function transientDiscoveryError(err: unknown): boolean {
+  if (err instanceof TypeError) {
+    // openid-client's own argument errors are TypeErrors too, with an ERR_ code.
+    const code = (err as { code?: unknown }).code;
+    return typeof code !== "string" || !code.startsWith("ERR_");
+  }
+  if (!(err instanceof oidc.ClientError)) return false;
+  if (err.code === "OAUTH_TIMEOUT") return true;
+  const cause: unknown = err.cause;
+  return (
+    err.code === "OAUTH_RESPONSE_IS_NOT_CONFORM" && cause instanceof Response && cause.status >= 500
+  );
+}
 
 export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
   const { auth, db, log } = deps;
@@ -101,19 +121,30 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
   const cache = new PrincipalCache({ adminGroupId: adminGroupOf(auth) });
   const discovered = new Map<string, Promise<oidc.Configuration>>();
 
-  /** The provider's configuration, discovered once (and again after a failure). */
+  /**
+   * The provider's configuration, discovered once (and again after a failure). A transient
+   * failure (the connection dropped or refused, no answer in 10 s, a 5xx) is tried once more
+   * after a moment, so one lost request doesn't turn a sign-in away.
+   */
   const configFor = (p: ProviderConfig): Promise<oidc.Configuration> => {
     let found = discovered.get(p.id);
     if (!found) {
       const insecure = new URL(p.issuer).protocol === "http:";
-      found = oidc
-        .discovery(
+      const discover = () =>
+        oidc.discovery(
           new URL(p.issuer),
           p.clientId,
           undefined,
           p.clientSecret === undefined ? oidc.None() : oidc.ClientSecretPost(p.clientSecret),
           insecure ? { execute: [oidc.allowInsecureRequests], timeout: 10 } : { timeout: 10 },
-        )
+        );
+      found = discover()
+        .catch(async (err: unknown) => {
+          if (!transientDiscoveryError(err)) throw err;
+          log?.warn({ err, provider: p.id }, "provider discovery failed; trying once more");
+          await new Promise((r) => setTimeout(r, DISCOVERY_RETRY_MS));
+          return discover();
+        })
         .catch((err: unknown) => {
           discovered.delete(p.id);
           throw err;

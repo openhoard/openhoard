@@ -1,12 +1,15 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { exportAudit } from "@openhoard/core-audit";
 import { sessions, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { createUser, lockUser, unlockUser, type User } from "@openhoard/core-identity";
 import { generateTenant, startDevOidc, type DevOidc, type FakeUser } from "@openhoard/testkit";
 import type { Hono } from "hono";
+import * as oidc from "openid-client";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
-import type { AuthEnv } from "./auth.js";
+import { transientDiscoveryError, type AuthEnv } from "./auth.js";
 import { ConfigSchema, loadConfig, type Config } from "./config.js";
 import { loginKey, openLogin, sealLogin, type LoginState } from "./login-state.js";
 
@@ -387,6 +390,77 @@ describe("the sign-in round trip is bound to its browser", () => {
       { db },
     );
     expect((await down.request(`${PUBLIC}/auth/login/down`)).status).toBe(503);
+  });
+
+  it("tries discovery once more after a dropped connection or a 5xx, never after a 4xx", async () => {
+    // A provider whose first discovery request fails as `first` says, and whose later ones work.
+    const flaky = async (first: "drop" | 503 | 404) => {
+      let asked = 0;
+      const server = createServer((req, res) => {
+        asked++;
+        if (asked === 1) {
+          if (first === "drop") req.socket.destroy();
+          else res.writeHead(first).end();
+          return;
+        }
+        const issuer = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+        res.writeHead(200, { "content-type": "application/json" }).end(
+          JSON.stringify({
+            issuer,
+            authorization_endpoint: `${issuer}/authorize`,
+            token_endpoint: `${issuer}/token`,
+            jwks_uri: `${issuer}/jwks`,
+            response_types_supported: ["code"],
+          }),
+        );
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const issuer = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      try {
+        const flakyApp = createApp(
+          ConfigSchema.parse({
+            dataDir: "/tmp/unused",
+            auth: {
+              publicUrl: PUBLIC,
+              providers: [
+                { id: "f", kind: "generic", tenantId: t.tenantId, issuer, clientId: "x" },
+              ],
+            },
+          }),
+          undefined,
+          { db },
+        );
+        const res = await flakyApp.request(`${PUBLIC}/auth/login/f`);
+        return { status: res.status, to: res.headers.get("location") ?? "", asked };
+      } finally {
+        server.closeAllConnections();
+        await new Promise((resolve) => server.close(resolve));
+      }
+    };
+    const dropped = await flaky("drop");
+    expect(dropped).toMatchObject({ status: 302, asked: 2 });
+    expect(dropped.to).toContain("/authorize?");
+    expect(await flaky(503)).toMatchObject({ status: 302, asked: 2 });
+    expect(await flaky(404)).toMatchObject({ status: 503, asked: 1 });
+  });
+
+  it("tells a transient discovery failure from one that won't change", () => {
+    expect(transientDiscoveryError(new TypeError("fetch failed"))).toBe(true);
+    const coded = (message: string, code: string) =>
+      Object.assign(new oidc.ClientError(message), { code });
+    expect(transientDiscoveryError(coded("timed out", "OAUTH_TIMEOUT"))).toBe(true);
+    const fiveHundred = Object.assign(coded("status", "OAUTH_RESPONSE_IS_NOT_CONFORM"), {
+      cause: new Response(null, { status: 502 }),
+    });
+    expect(transientDiscoveryError(fiveHundred)).toBe(true);
+    const argument = Object.assign(new TypeError("bad"), { code: "ERR_INVALID_ARG_TYPE" });
+    expect(transientDiscoveryError(argument)).toBe(false);
+    expect(transientDiscoveryError(new Error("other"))).toBe(false);
+    expect(transientDiscoveryError(coded("issuer", "OAUTH_JSON_ATTRIBUTE_COMPARISON"))).toBe(false);
+    const notFound = Object.assign(coded("status", "OAUTH_RESPONSE_IS_NOT_CONFORM"), {
+      cause: new Response(null, { status: 404 }),
+    });
+    expect(transientDiscoveryError(notFound)).toBe(false);
   });
 });
 

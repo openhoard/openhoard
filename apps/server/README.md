@@ -60,6 +60,11 @@ works too.
 
 **Redirect URI.** Register `<publicUrl>/auth/callback/<id>` with the provider.
 
+**Discovery.** The server reads the provider's OpenID configuration on the first sign-in and keeps
+it. A transient failure (the connection dropped or refused, no answer in 10 seconds, a 5xx) is
+tried once more a moment later; if that fails too, or the answer is wrong (a 4xx, another
+issuer), sign-in answers 503 "sign-in is unavailable", logs why, and tries again on the next one.
+
 **Provider kinds:**
 
 | Kind      | Issuer                                                                   | A first sign-in is matched by            |

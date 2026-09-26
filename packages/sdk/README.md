@@ -74,6 +74,7 @@ connectorContract("my-source", {
   checkpointEvery: 5, // what the connector is configured with for the test
   manifest, // its openhoard.plugin.json, checked against describe()
   open: async () => fixture(), // a fresh, empty source per test, and the connector over it
+  timeoutMs: 120_000, // optional: per test and hook; default 30,000
 });
 ```
 

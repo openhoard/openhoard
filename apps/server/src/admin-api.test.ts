@@ -14,6 +14,7 @@ import {
 import { generateTenant, startDevOidc, type DevOidc, type FakeUser } from "@openhoard/testkit";
 import { eq, sql } from "drizzle-orm";
 import type { Hono } from "hono";
+import { pino } from "pino";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import type { AuthEnv } from "./auth.js";
@@ -52,7 +53,10 @@ let admin: User;
 let member: User;
 let third: User;
 let app: Hono<AuthEnv>;
+/** What the server logged at warn and above: says why, when a sign-in in a test fails. */
+let logged: string[] = [];
 beforeEach(async () => {
+  logged = [];
   db = await openTestDatabase();
   t = await seedTenant(db, 1);
   const scimUser = (p: FakeUser) =>
@@ -92,7 +96,8 @@ function build(auth: Record<string, unknown> = {}): Hono<AuthEnv> {
       ...auth,
     },
   });
-  return createApp(config, undefined, {
+  const log = pino({ level: "warn" }, { write: (line: string) => void logged.push(line) });
+  return createApp(config, log, {
     db,
     fetchMetadata: (url) =>
       url.href === CLIENT_ID
@@ -172,7 +177,7 @@ class Browser {
 async function signedIn(p: FakeUser): Promise<Browser> {
   const b = new Browser();
   const res = await b.follow(`${PUBLIC}/auth/sign-in?return_to=%2F`, p.upn);
-  expect(res.status).toBe(200);
+  expect(res.status, logged.join("")).toBe(200);
   return b;
 }
 

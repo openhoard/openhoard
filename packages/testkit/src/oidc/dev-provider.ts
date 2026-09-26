@@ -63,6 +63,11 @@ export async function startDevOidc(options: DevOidcOptions): Promise<DevOidc> {
   };
 
   const server = createServer();
+  // Idle connections stay open a minute, not Node's 5 s: fetch reuses one only until shortly
+  // before the server's announced timeout, and a test process stalled by its database around the
+  // 5 s mark can send a request on a socket this side is closing (a reset). Gaps between sign-ins
+  // in tests are seconds, rarely a minute. close() ends them all anyway.
+  server.keepAliveTimeout = 60_000;
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject); // e.g. EADDRINUSE
     server.listen(options.port ?? 0, "127.0.0.1", resolve);
