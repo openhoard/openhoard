@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { getConnInfo } from "@hono/node-server/conninfo";
-import { appendAudit } from "@openhoard/core-audit";
+import { appendAudit, type AuditRecord } from "@openhoard/core-audit";
 import { getTenant, lockPrincipals, type Database, type Tx } from "@openhoard/core-db";
 import {
   checkScimToken,
+  membersOf,
   parseScimToken,
   scimActor,
   touchScimToken,
@@ -33,6 +34,7 @@ import {
   replaceScimGroup,
   scimGroup,
 } from "./groups.js";
+import { retrying } from "../retry.js";
 import { field, isObject, parseBody, requireSchema, type Json } from "./json.js";
 import { addressKey, clientAddress, trustedSet } from "./address.js";
 import { FailureLimiter, RecentTokens, RefusalSummary } from "./limiter.js";
@@ -75,6 +77,11 @@ import {
  *   principal lock first (core/db lockPrincipals(), lock order step 0), so SCIM writes to one
  *   tenant run one at a time and its uniqueness checks hold; the directory's triggers invalidate
  *   the principal cache.
+ * - A transaction that fails as a deadlock or a serialization failure runs again, whole, a few
+ *   times (retry.ts): a disable or delete ends sessions and grants, and may meet an OAuth
+ *   request or an admin's decision locking the same rows.
+ * - A change to the members of the tenant's admin group (config `auth.adminGroups`, T-106) adds
+ *   an `admin.group.join` or `admin.group.leave` record per person to the request's audit.
  * - A request's work runs in a savepoint: a refusal (4xx) undoes whatever it had done, and the
  *   refusal is still audited. Nothing internal reaches the caller: an unexpected error is a
  *   plain 500 with a request id, logged here and audited in a transaction of its own.
@@ -100,6 +107,12 @@ export interface ScimDeps {
   /** Where clients reach this server (the Tenant URL is `<publicUrl>/scim/v2`). */
   publicUrl?: string;
   options?: ScimOptions;
+  /**
+   * Each tenant's admin group id (config `auth.adminGroups`, T-106): a change to its members
+   * makes or unmakes admins, which the request's audit records person by person
+   * (`admin.group.join`, `admin.group.leave`).
+   */
+  adminGroup?: (tenantId: string) => string | undefined;
 }
 
 const CONTENT_TYPE = "application/scim+json";
@@ -122,6 +135,8 @@ interface Done {
   body?: Json;
   location?: string;
   detail?: Record<string, string | number | boolean>;
+  /** More audit records, appended after the request's own (admins made or unmade). */
+  audits?: AuditRecord[];
 }
 
 /** What the server calls at shutdown, before closing the database. */
@@ -279,39 +294,46 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): ScimHand
     const target = targetOf(c.req.param("id"));
     let outcome: { refused: true } | { done: Done } | { error: ScimError };
     try {
-      outcome = await db.withTenant(tenantId, async (tx) => {
-        // Again, in the transaction that acts: a token revoked a moment ago acts no more.
-        const check = await checkScimToken(tx, tenantId, token);
-        if (!check.ok) {
-          if (check.refused) await auditRefusal(tx, tenantId, check.refused, c.req.method);
-          return { refused: true as const };
-        }
-        if (access === "write") await lockPrincipals(tx, tenantId);
-        if (check.stale) await touchScimToken(tx, tenantId, check.tokenId);
-        let result: { done: Done } | { error: ScimError };
-        try {
-          result = { done: await tx.transaction((sp) => work(sp as Tx, check.actor)) };
-        } catch (e) {
-          if (!(e instanceof ScimError)) throw e;
-          result = { error: e };
-        }
-        const said =
-          "done" in result
-            ? { decision: "allow" as const, status: result.done.status, ...result.done.detail }
-            : {
-                decision: "deny" as const,
-                status: result.error.status,
-                reason: result.error.scimType ?? "refused",
-              };
-        const { decision, ...detail } = said;
-        await appendAudit(tx, tenantId, {
-          actor: check.actor,
-          action,
-          decision,
-          detail: { ...detail, ...target },
-        });
-        return result;
-      });
+      // A deadlock or serialization failure rolls it all back, audit record included: run it
+      // again (a disable or delete meeting a transaction that locks in another order).
+      outcome = await retrying(() =>
+        db.withTenant(tenantId, async (tx) => {
+          // Again, in the transaction that acts: a token revoked a moment ago acts no more.
+          const check = await checkScimToken(tx, tenantId, token);
+          if (!check.ok) {
+            if (check.refused) await auditRefusal(tx, tenantId, check.refused, c.req.method);
+            return { refused: true as const };
+          }
+          if (access === "write") await lockPrincipals(tx, tenantId);
+          if (check.stale) await touchScimToken(tx, tenantId, check.tokenId);
+          let result: { done: Done } | { error: ScimError };
+          try {
+            result = { done: await tx.transaction((sp) => work(sp as Tx, check.actor)) };
+          } catch (e) {
+            if (!(e instanceof ScimError)) throw e;
+            result = { error: e };
+          }
+          const said =
+            "done" in result
+              ? { decision: "allow" as const, status: result.done.status, ...result.done.detail }
+              : {
+                  decision: "deny" as const,
+                  status: result.error.status,
+                  reason: result.error.scimType ?? "refused",
+                };
+          const { decision, ...detail } = said;
+          await appendAudit(tx, tenantId, {
+            actor: check.actor,
+            action,
+            decision,
+            detail: { ...detail, ...target },
+          });
+          if ("done" in result) {
+            for (const record of result.done.audits ?? []) await appendAudit(tx, tenantId, record);
+          }
+          return result;
+        }),
+      );
     } catch (err) {
       // The transaction rolled back, audit record and all: record the failure in one of its own,
       // as well as it can, under an id the log and the caller share.
@@ -505,30 +527,83 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): ScimHand
     });
   });
 
+  /** The ids of a group's members. */
+  const memberIds = async (tx: Tx, tenantId: string, groupId: string) => {
+    const ids = new Set<string>();
+    let after: string | undefined;
+    for (;;) {
+      const page = await membersOf(tx, tenantId, groupId, {
+        limit: 5000,
+        ...(after === undefined ? {} : { after }),
+      });
+      for (const u of page) ids.add(u.id);
+      if (page.length < 5000) return ids;
+      after = page[page.length - 1]?.id;
+    }
+  };
+
+  /**
+   * Runs a change to a group; when it is the tenant's admin group (T-106), the request's audit
+   * gets a record for each person who joined or left it, and so became or stopped being an
+   * admin through it (while an active member). A new group is never the admin group: the config
+   * names it by an id the group already has.
+   */
+  const watchingAdmins = async (
+    tx: Tx,
+    tenantId: string,
+    groupId: string,
+    actor: string,
+    work: () => Promise<Done>,
+  ): Promise<Done> => {
+    if (deps.adminGroup?.(tenantId) !== groupId) return work();
+    const before = await memberIds(tx, tenantId, groupId);
+    const done = await work();
+    const after = await memberIds(tx, tenantId, groupId);
+    const record = (action: string, user: string): AuditRecord => ({
+      actor,
+      action,
+      decision: "allow",
+      detail: { user, group: groupId },
+    });
+    return {
+      ...done,
+      audits: [
+        ...[...after].filter((u) => !before.has(u)).map((u) => record("admin.group.join", u)),
+        ...[...before].filter((u) => !after.has(u)).map((u) => record("admin.group.leave", u)),
+      ],
+    };
+  };
+
   scim.put("/Groups/:id", async (c) => {
     const body = await bodyOf(c);
-    return run(c, "scim.group.replace", "write", async (tx) => {
-      const g = await replaceScimGroup(tx, tenantOf(c), c.req.param("id"), body());
-      const members = await loadMembers(tx, tenantOf(c), g.id, { left: MAX_MEMBERS_RETURNED });
-      return { status: 200, body: groupResource(g, base(c), members) };
-    });
+    return run(c, "scim.group.replace", "write", (tx, actor) =>
+      watchingAdmins(tx, tenantOf(c), c.req.param("id"), actor, async () => {
+        const g = await replaceScimGroup(tx, tenantOf(c), c.req.param("id"), body());
+        const members = await loadMembers(tx, tenantOf(c), g.id, { left: MAX_MEMBERS_RETURNED });
+        return { status: 200, body: groupResource(g, base(c), members) };
+      }),
+    );
   });
 
   scim.patch("/Groups/:id", async (c) => {
     const body = await bodyOf(c);
-    return run(c, "scim.group.patch", "write", async (tx) => {
-      const ops = patchOps(body());
-      await patchScimGroup(tx, tenantOf(c), c.req.param("id"), ops);
-      // Entra expects no body back; the members of a large group would be a large one.
-      return { status: 204 };
-    });
+    return run(c, "scim.group.patch", "write", (tx, actor) =>
+      watchingAdmins(tx, tenantOf(c), c.req.param("id"), actor, async () => {
+        const ops = patchOps(body());
+        await patchScimGroup(tx, tenantOf(c), c.req.param("id"), ops);
+        // Entra expects no body back; the members of a large group would be a large one.
+        return { status: 204 };
+      }),
+    );
   });
 
   scim.delete("/Groups/:id", (c) =>
-    run(c, "scim.group.delete", "write", async (tx, actor) => {
-      await deleteScimGroup(tx, tenantOf(c), c.req.param("id"), actor);
-      return { status: 204 };
-    }),
+    run(c, "scim.group.delete", "write", (tx, actor) =>
+      watchingAdmins(tx, tenantOf(c), c.req.param("id"), actor, async () => {
+        await deleteScimGroup(tx, tenantOf(c), c.req.param("id"), actor);
+        return { status: 204 };
+      }),
+    ),
   );
 
   // Anything else under /scim/v2, for an authenticated caller: a SCIM 404 (or 501 for Bulk,

@@ -183,7 +183,7 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
           externalId: "entra-cy",
         });
         await addMember(tx, tenantId, g.id, cy.id, "scim");
-        return { ana, bo, guest, cy };
+        return { ana, bo, guest, cy, group: g };
       }),
     );
     const none = await admin("user", "list-admins", "--tenant", tenantId);
@@ -244,16 +244,20 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
     expect(removed.code, removed.err).toBe(0);
     expect(removed.err).toContain("no longer an admin");
 
-    // With the tenant's admin group in the config, its members count and stay the provider's.
-    writeFileSync(
-      join(dir, "config.json"),
-      JSON.stringify({
-        auth: {
-          publicUrl: "https://hoard.example.com",
-          adminGroups: [{ tenantId, externalId: "entra-admins" }],
-        },
-      }),
-    );
+    // The operator finds the group's id, and names it in the config: its members count and stay
+    // the provider's.
+    const groups = await admin("group", "list", "--tenant", tenantId);
+    expect(groups.code, groups.err).toBe(0);
+    expect(groups.out).toBe(`${people.group.id}\tscim\t1\tentra-admins\tAdmins\n`);
+    const config = (groupId: string) =>
+      writeFileSync(
+        join(dir, "config.json"),
+        JSON.stringify({
+          auth: { publicUrl: "https://hoard.example.com", adminGroups: [{ tenantId, groupId }] },
+        }),
+      );
+    config(people.group.id);
+    expect((await admin("group", "list", "--tenant", tenantId)).out).toContain("\tadmin group\n");
     const withGroup = await admin("user", "list-admins", "--tenant", tenantId);
     expect(withGroup.out).toContain(`${people.cy.id}\tgroup\tactive\t`);
     const cy = await admin("user", "revoke-admin", "--tenant", tenantId, "--user", people.cy.id);
@@ -263,8 +267,14 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
     expect(
       (await admin("user", "revoke-admin", "--tenant", tenantId, "--user", people.bo.id)).code,
     ).toBe(0);
+    // A group that isn't there makes nobody an admin, and the listing says so.
+    config("grp_" + "0".repeat(26));
+    const gone = await admin("user", "list-admins", "--tenant", tenantId);
+    expect(gone.out).not.toContain(people.cy.id);
+    expect(gone.err).toContain("doesn't exist: it makes nobody an admin");
     const unknown = "ten_" + "0".repeat(26);
     expect((await admin("user", "list-admins", "--tenant", unknown)).code).toBe(1);
+    expect((await admin("group", "list", "--tenant", unknown)).code).toBe(1);
     expect((await admin("user", "grant-admin", "--tenant", unknown, "--user", "x")).code).toBe(1);
     expect((await admin("user", "grant-admin", "--tenant", tenantId)).code).toBe(2);
 

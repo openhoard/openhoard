@@ -899,9 +899,7 @@ export async function renameGroup(
 
 /**
  * Changes a group's name or external id, as the source that manages it. Another group's external
- * id is a `conflict`, and the transaction stays usable. An external id can make a group the
- * tenant's admin group (T-106), so changing one is a principal change: it takes the principal
- * lock first, and bumps the epoch (core/db migration 0036).
+ * id is a `conflict`, and the transaction stays usable.
  */
 export async function updateGroup(
   tx: Tx,
@@ -910,7 +908,6 @@ export async function updateGroup(
   changes: { name?: string; externalId?: string | null },
   as: IdentitySource,
 ): Promise<Group> {
-  if (changes.externalId !== undefined) await lockPrincipals(tx, tenantId);
   const current = await ownedGroup(tx, tenantId, groupId, as);
   const set: Partial<typeof groups.$inferInsert> = {};
   if (changes.name !== undefined) set.name = checkName("name", changes.name);
@@ -1157,6 +1154,15 @@ export async function groupsOf(tx: Tx, tenantId: string, userId: string): Promis
   return rows.map((r) => toGroup(r.group));
 }
 
+/** How many members a group has (0 for an unknown group). */
+export async function memberCount(tx: Tx, tenantId: string, groupId: string): Promise<number> {
+  const [row] = await tx
+    .select({ n: count() })
+    .from(groupMembers)
+    .where(and(eq(groupMembers.tenantId, tenantId), eq(groupMembers.groupId, groupId)));
+  return Number(row?.n ?? 0);
+}
+
 /**
  * A page of a group's members, in id order: up to `limit` (default 500) after the id `after`.
  * Groups can be huge (an "everyone" group), so this pages instead of loading them all.
@@ -1201,11 +1207,11 @@ export async function membersOf(
  * held then?", not "what could they see then?".
  *
  * The principal says whether the user is an admin (T-106, admins.ts): an active member with the
- * admin role, or in the tenant's admin group (`options.adminGroup`, the SCIM externalId the
- * server's config names). It is for administration only; authorize() never reads it.
+ * admin role, or in the tenant's admin group (`options.adminGroupId`, the SCIM group the server's
+ * config names by id). It is for administration only; authorize() never reads it.
  *
  * Uncached; principal-cache.ts caches it. Every change this reads (memberships, grants, the
- * user's stops, kind and admin role, a group's external id) bumps the tenant's principal epoch,
+ * user's stops, kind and admin role, a group's source) bumps the tenant's principal epoch,
  * by trigger (core/db migrations 0021 and 0036), which is what invalidates the cache: a new
  * column read here needs its trigger too.
  */
@@ -1222,10 +1228,11 @@ export async function resolvePrincipal(
 /** What resolving a principal needs besides the database. */
 export interface PrincipalOptions {
   /**
-   * The SCIM externalId of the identity provider's group whose members are the tenant's admins
-   * (the server's config, T-106), if there is one.
+   * The id (`grp_…`) of the SCIM group whose members are the tenant's admins (the server's config,
+   * T-106), if there is one. Never an externalId, which the SCIM token chooses. A group that
+   * isn't there, or isn't a SCIM group, makes nobody an admin.
    */
-  adminGroup?: string | undefined;
+  adminGroupId?: string | undefined;
 }
 
 /** resolvePrincipal(), and when the soonest of the grants it counted expires (null: none do). */
@@ -1245,14 +1252,12 @@ export async function resolveWithExpiry(
     .where(and(eq(groupMembers.tenantId, tenantId), eq(groupMembers.userId, userId)))
     .orderBy(asc(groupMembers.groupId));
   const groupIds = memberships.map((m) => m.groupId);
-  const adminGroup =
-    options.adminGroup === undefined
-      ? null
-      : await findGroupByExternalId(tx, tenantId, options.adminGroup);
-  const admin =
-    user.active &&
-    user.kind === "member" &&
-    (user.adminRole !== null || (adminGroup !== null && groupIds.includes(adminGroup.id)));
+  const groupId = options.adminGroupId;
+  const inAdminGroup =
+    groupId !== undefined &&
+    groupIds.includes(groupId) &&
+    (await getGroup(tx, tenantId, groupId))?.source === "scim";
+  const admin = user.active && user.kind === "member" && (user.adminRole !== null || inAdminGroup);
   const live = await liveGrants(
     tx,
     tenantId,

@@ -108,15 +108,17 @@ export const ApprovedClientSchema = z
 export type ApprovedClient = z.infer<typeof ApprovedClientSchema>;
 
 /**
- * A tenant's admin group (T-106): the identity provider group whose members are the tenant's
- * admins, named by its SCIM externalId (Entra: the group's object id, as provisioned). The
- * identity provider decides who is in it, so its admins can't be removed in the app. Optional:
- * admins are also made with the admin CLI and the admin API.
+ * A tenant's admin group (T-106): the SCIM group whose members are the tenant's admins, named by
+ * its OpenHoard id (`grp_…`: `admin group list` shows them), never by the identity provider's
+ * externalId, which whoever holds the SCIM token chooses. The identity provider decides who is
+ * in it, so its admins can't be removed in the app: the SCIM token and the group's owners
+ * upstream are admin-grade. A group that is missing, deleted or not provisioned over SCIM makes
+ * nobody an admin. Optional: admins are also made with the admin CLI and the admin API.
  */
 export const AdminGroupSchema = z
   .object({
     tenantId: z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
-    externalId: z.string().min(1).max(512),
+    groupId: z.string().regex(/^grp_[0-9a-hjkmnp-tv-z]{26}$/, "a group id (grp_…)"),
   })
   .strict();
 
@@ -227,11 +229,11 @@ export const AuthSchema = z
 
 export type AuthConfig = z.infer<typeof AuthSchema>;
 
-/** Each tenant's admin group, by SCIM externalId, as the config names it (T-106). */
+/** Each tenant's admin group id (`grp_…`), as the config names it (T-106). */
 export function adminGroupOf(
   auth: Pick<AuthConfig, "adminGroups"> | undefined,
 ): (tenantId: string) => string | undefined {
-  const groups = new Map((auth?.adminGroups ?? []).map((g) => [g.tenantId, g.externalId]));
+  const groups = new Map((auth?.adminGroups ?? []).map((g) => [g.tenantId, g.groupId]));
   return (tenantId) => groups.get(tenantId);
 }
 

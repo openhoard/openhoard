@@ -96,7 +96,7 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
   }
   const providers = new Map(auth.providers.map((p) => [p.id, p]));
   // The admin group each tenant's config names is part of who its people are (T-106).
-  const cache = new PrincipalCache({ adminGroup: adminGroupOf(auth) });
+  const cache = new PrincipalCache({ adminGroupId: adminGroupOf(auth) });
   const discovered = new Map<string, Promise<oidc.Configuration>>();
 
   /** The provider's configuration, discovered once (and again after a failure). */

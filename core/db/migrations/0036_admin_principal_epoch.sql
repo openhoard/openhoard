@@ -3,9 +3,10 @@
 -- (0021_principal_epoch_triggers.sql):
 --
 -- - a user's own role (admin_at), besides the columns that make them active or a guest;
--- - which group is the tenant's admin group: the server's config names it by SCIM externalId,
---   so a group taking or losing that id changes who is an admin. Membership changes bump
---   already (group_members), and a deleted group's memberships go with it by cascade.
+-- - the tenant's admin group, which the server's config names by id (never by external id, which
+--   the SCIM token chooses): its members count only while it is a SCIM group, so a change of
+--   source bumps too. Membership changes bump already (group_members), and a deleted group's
+--   memberships go with it by cascade.
 DROP TRIGGER users_principal_epoch ON users;
 --> statement-breakpoint
 CREATE TRIGGER users_principal_epoch
@@ -13,5 +14,5 @@ CREATE TRIGGER users_principal_epoch
   FOR EACH ROW EXECUTE FUNCTION bump_principal_epoch();
 --> statement-breakpoint
 CREATE TRIGGER groups_principal_epoch
-  AFTER UPDATE OF external_id, source ON groups
+  AFTER UPDATE OF source ON groups
   FOR EACH ROW EXECUTE FUNCTION bump_principal_epoch();

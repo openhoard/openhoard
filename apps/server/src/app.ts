@@ -5,7 +5,7 @@ import type { Database } from "@openhoard/core-db";
 import type { Logger } from "pino";
 import { mountAdminApi } from "./admin-api.js";
 import { mountAuth, type AuthEnv } from "./auth.js";
-import type { Config } from "./config.js";
+import { adminGroupOf, type Config } from "./config.js";
 import { loginKey } from "./login-state.js";
 import { mountMcp, type McpTool } from "./mcp.js";
 import type { MetadataFetcher } from "./oauth/clients.js";
@@ -70,7 +70,9 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
     const scim = mountScim(app, {
       db: deps.db,
       ...(log ? { log } : {}),
-      ...(config.auth ? { publicUrl: config.auth.publicUrl } : {}),
+      ...(config.auth
+        ? { publicUrl: config.auth.publicUrl, adminGroup: adminGroupOf(config.auth) }
+        : {}),
       options: { trustedProxies: config.scim.trustedProxies, ...deps.scim },
     });
     closers.set(app, [() => scim.close()]);

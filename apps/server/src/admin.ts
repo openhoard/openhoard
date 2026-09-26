@@ -11,11 +11,15 @@ import {
 import {
   findUserByEmail,
   findUserByUserName,
+  getGroup,
   getUser,
   grantAdmin,
   IdentityError,
   issueScimToken,
   listAdmins,
+  listGroups,
+  MAX_LIST,
+  memberCount,
   listScimTokens,
   revokeAdmin,
   revokeScimToken,
@@ -23,6 +27,7 @@ import {
   type User,
 } from "@openhoard/core-identity";
 import { adminGroupOf, ensureDataDir, loadConfig, type Config } from "./config.js";
+import { retrying } from "./retry.js";
 
 /*
  * `openhoard admin …` (T-103, T-106): what an operator needs before there is an admin UI, to
@@ -36,6 +41,7 @@ import { adminGroupOf, ensureDataDir, loadConfig, type Config } from "./config.j
  *   admin user grant-admin  --tenant ten_… --user <usr_… | email | userName>
  *   admin user revoke-admin --tenant ten_… --user <usr_… | email | userName>
  *   admin user list-admins  --tenant ten_…
+ *   admin group list        --tenant ten_…
  *
  * It reads the server's configuration (and `--data-dir`, as the server does) and opens the same
  * database. The embedded database (PGlite) belongs to one process at a time, so while the
@@ -89,6 +95,8 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
   user revoke-admin --tenant <ten_…> --user <usr_…|email|userName>
                                                    take the admin role away
   user list-admins --tenant <ten_…>                list the tenant's admins
+  group list --tenant <ten_…>                      list the tenant's groups (the grp_… id
+                                                   names the admin group in auth.adminGroups)
 `;
 
 class UsageError extends Error {}
@@ -130,6 +138,7 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "user grant-admin",
     "user revoke-admin",
     "user list-admins",
+    "group list",
   ];
   if (!known.includes(command)) {
     io.err(`unknown command: ${command}\n\n${USAGE}`);
@@ -191,6 +200,8 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         );
       case "user list-admins":
         return await adminList(db, config, tenantArg(values.tenant), io);
+      case "group list":
+        return await groupList(db, config, tenantArg(values.tenant), io);
       default:
         return await tokenRevoke(db, tenantArg(values.tenant), need(values.id, "--id"), io);
     }
@@ -443,29 +454,32 @@ async function adminChange(
   }
   const adminGroup = adminGroupOf(config.auth)(tenantId);
   try {
-    const outcome = await db.withTenant(tenantId, async (tx) => {
-      const done =
-        change === "grant"
-          ? { changed: await grantAdmin(tx, tenantId, user.id, ADMIN_ACTOR), byGroup: false }
-          : await revokeAdmin(
-              tx,
-              tenantId,
-              user.id,
-              ADMIN_ACTOR,
-              adminGroup === undefined ? {} : { adminGroup },
-            ).then((r) => ({ changed: r.revoked, byGroup: r.stillAdminByGroup }));
-      await appendAudit(tx, tenantId, {
-        actor: ADMIN_ACTOR,
-        action,
-        decision: "allow",
-        detail: {
-          user: user.id,
-          ...(done.changed ? {} : { unchanged: true }),
-          ...(done.byGroup ? { stillAdminByGroup: true } : {}),
-        },
-      });
-      return done;
-    });
+    // Run again after a deadlock or serialization failure (beside a running server on Postgres).
+    const outcome = await retrying(() =>
+      db.withTenant(tenantId, async (tx) => {
+        const done =
+          change === "grant"
+            ? { changed: await grantAdmin(tx, tenantId, user.id, ADMIN_ACTOR), byGroup: false }
+            : await revokeAdmin(
+                tx,
+                tenantId,
+                user.id,
+                ADMIN_ACTOR,
+                adminGroup === undefined ? {} : { adminGroupId: adminGroup },
+              ).then((r) => ({ changed: r.revoked, byGroup: r.stillAdminByGroup }));
+        await appendAudit(tx, tenantId, {
+          actor: ADMIN_ACTOR,
+          action,
+          decision: "allow",
+          detail: {
+            user: user.id,
+            ...(done.changed ? {} : { unchanged: true }),
+            ...(done.byGroup ? { stillAdminByGroup: true } : {}),
+          },
+        });
+        return done;
+      }),
+    );
     const who = `${user.displayName} (${user.id})`;
     if (change === "grant") {
       io.err(outcome.changed ? `${who} is an admin now.\n` : `${who} was an admin already.\n`);
@@ -496,7 +510,7 @@ async function adminList(
   const adminGroup = adminGroupOf(config.auth)(tenantId);
   const admins = await db.withTenant(tenantId, async (tx) =>
     (await getTenant(tx, tenantId))
-      ? listAdmins(tx, tenantId, adminGroup === undefined ? {} : { adminGroup })
+      ? listAdmins(tx, tenantId, adminGroup === undefined ? {} : { adminGroupId: adminGroup })
       : null,
   );
   if (!admins) {
@@ -520,5 +534,48 @@ async function adminList(
       `tenant ${tenantId} has no admin: openhoard admin user grant-admin --tenant ${tenantId} --user <email>\n`,
     );
   }
+  if (adminGroup !== undefined) {
+    const group = await db.withTenant(tenantId, (tx) => getGroup(tx, tenantId, adminGroup));
+    if (group?.source !== "scim") {
+      io.err(
+        `the configured admin group ${adminGroup} ${group ? "isn't a SCIM group" : "doesn't exist"}: it makes nobody an admin\n`,
+      );
+    }
+  }
+  return 0;
+}
+
+/**
+ * The tenant's groups, a page of 1,000 at a time: id, name, external id, source and how many
+ * members, and which one the config names as the admin group. `auth.adminGroups` names a group
+ * by the id this prints, never by its external id (which the SCIM token chooses).
+ */
+async function groupList(
+  db: Database,
+  config: Config,
+  tenantId: string,
+  io: AdminIo,
+): Promise<number> {
+  const adminGroup = adminGroupOf(config.auth)(tenantId);
+  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  let shown = 0;
+  for (let offset = 0; ; offset += MAX_LIST) {
+    const rows = await db.withTenant(tenantId, async (tx) => {
+      const page = await listGroups(tx, tenantId, {}, { offset, limit: MAX_LIST });
+      const out = [];
+      for (const g of page.groups) out.push({ g, members: await memberCount(tx, tenantId, g.id) });
+      return out;
+    });
+    for (const { g, members } of rows) {
+      const mark = g.id === adminGroup ? "\tadmin group" : "";
+      io.out(`${g.id}\t${g.source}\t${members}\t${g.externalId ?? ""}\t${g.name}${mark}\n`);
+    }
+    shown += rows.length;
+    if (rows.length < MAX_LIST) break;
+  }
+  if (shown === 0) io.err(`tenant ${tenantId} has no groups\n`);
   return 0;
 }

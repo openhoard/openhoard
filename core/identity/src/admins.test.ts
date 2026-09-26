@@ -8,6 +8,7 @@ import {
   createGroup,
   createServiceAccount,
   createUser,
+  deleteGroup,
   getUser,
   IdentityError,
   lockUser,
@@ -53,9 +54,9 @@ function person(name: string, source: "scim" | "local" = "scim"): Promise<User> 
 }
 const grant = (userId: string, by = "system:admin-cli") =>
   write((tx) => grantAdmin(tx, t.tenantId, userId, by));
-const revoke = (userId: string, adminGroup?: string) =>
+const revoke = (userId: string, adminGroupId?: string) =>
   write((tx) =>
-    revokeAdmin(tx, t.tenantId, userId, "user:someone", adminGroup ? { adminGroup } : {}),
+    revokeAdmin(tx, t.tenantId, userId, "user:someone", adminGroupId ? { adminGroupId } : {}),
   );
 const code = async (p: Promise<unknown>) => {
   try {
@@ -143,42 +144,74 @@ describe("the admin role", () => {
 
 describe("the admin group", () => {
   it("makes its members admins while the config names it, and they can't be removed here", async () => {
-    await scimGroup(GROUP, [ana]);
-    const options = { adminGroup: GROUP };
+    const g = await scimGroup(GROUP, [ana]);
+    const options = { adminGroupId: g.id };
     expect(await read((tx) => isAdmin(tx, t.tenantId, ana.id))).toBe(false);
     expect(await read((tx) => isAdmin(tx, t.tenantId, ana.id, options))).toBe(true);
     expect(
       await read((tx) => resolvePrincipal(tx, t.tenantId, ana.id, undefined, options)),
     ).toMatchObject({ admin: true });
     // The identity provider owns that membership.
-    expect(await code(revoke(ana.id, GROUP))).toBe("wrong-source");
+    expect(await code(revoke(ana.id, g.id))).toBe("wrong-source");
     // Without the config's group, she simply isn't one.
     expect(await revoke(ana.id)).toEqual({ revoked: false, stillAdminByGroup: false });
-    // A local group can't be the admin group: only SCIM groups have external ids.
     expect(await read((tx) => listAdmins(tx, t.tenantId, options))).toEqual([
       expect.objectContaining({ user: expect.objectContaining({ id: ana.id }), via: ["group"] }),
     ]);
   });
 
-  it("reaches cached principals as soon as its members or its external id change", async () => {
+  it("is named by id: no external id, and no local group, makes anyone an admin", async () => {
+    const g = await scimGroup(GROUP, [ana]);
+    // Another SCIM group taking any external id (the admin group's too, once it lets go of it)
+    // is still another group.
+    await write((tx) => updateGroup(tx, t.tenantId, g.id, { externalId: "moved" }, "scim"));
+    const other = await scimGroup(GROUP, [bo]);
+    const options = { adminGroupId: g.id };
+    const admin = async (u: User, o: { adminGroupId?: string } = options) =>
+      (await read((tx) => resolvePrincipal(tx, t.tenantId, u.id, undefined, o)))?.admin === true;
+    expect(await admin(ana)).toBe(true);
+    expect(await admin(bo)).toBe(false);
+    expect(await read((tx) => isAdmin(tx, t.tenantId, bo.id, options))).toBe(false);
+    // An external id where the config expects an id names nothing.
+    expect(await admin(bo, { adminGroupId: GROUP })).toBe(false);
+    expect(await admin(bo, { adminGroupId: other.externalId as string })).toBe(false);
+    // A local group named as the admin group makes nobody an admin (fail closed).
+    const cy = await person("cy", "local");
+    const local = await write(async (tx) => {
+      const l = await createGroup(tx, t.tenantId, { name: "Local", source: "local" });
+      await addMember(tx, t.tenantId, l.id, cy.id, "local");
+      return { group: l, cy };
+    });
+    expect(await admin(local.cy, { adminGroupId: local.group.id })).toBe(false);
+    expect(
+      await read((tx) => isAdmin(tx, t.tenantId, local.cy.id, { adminGroupId: local.group.id })),
+    ).toBe(false);
+    // Deleted, it makes nobody an admin, cached or not.
+    const cache = new PrincipalCache({ adminGroupId: () => g.id });
+    expect((await read((tx) => cache.resolve(tx, t.tenantId, ana.id)))?.admin).toBe(true);
+    await write((tx) => deleteGroup(tx, t.tenantId, g.id, "scim", "scim:tok"));
+    expect(await admin(ana)).toBe(false);
+    expect((await read((tx) => cache.resolve(tx, t.tenantId, ana.id)))?.admin).toBeUndefined();
+    expect(await read((tx) => listAdmins(tx, t.tenantId, options))).toEqual([]);
+  });
+
+  it("reaches cached principals as soon as its members change", async () => {
+    const g = await scimGroup(GROUP, [ana]);
     const cache = new PrincipalCache({
-      adminGroup: (id) => (id === t.tenantId ? GROUP : undefined),
+      adminGroupId: (id) => (id === t.tenantId ? g.id : undefined),
     });
     const cached = async (u: User) =>
       (await read((tx) => cache.resolve(tx, t.tenantId, u.id)))?.admin === true;
-    const g = await scimGroup("entra-group-other", [ana]);
-    expect(await cached(ana)).toBe(false);
-    expect(await cached(ana)).toBe(false);
+    expect(await cached(bo)).toBe(false);
+    expect(await cached(bo)).toBe(false);
     expect(cache.stats().hits).toBeGreaterThan(0);
-    // The group becomes the admin group: the next snapshot sees it.
-    await write((tx) => updateGroup(tx, t.tenantId, g.id, { externalId: GROUP }, "scim"));
-    expect(await cached(ana)).toBe(true);
     await write((tx) => addMember(tx, t.tenantId, g.id, bo.id, "scim"));
     expect(await cached(bo)).toBe(true);
     await write((tx) => removeMember(tx, t.tenantId, g.id, bo.id, "scim"));
     expect(await cached(bo)).toBe(false);
+    // Renaming it, or changing its external id, changes nothing.
     await write((tx) => updateGroup(tx, t.tenantId, g.id, { externalId: "renamed" }, "scim"));
-    expect(await cached(ana)).toBe(false);
+    expect(await cached(ana)).toBe(true);
     // The role, too.
     await grant(bo.id);
     expect(await cached(bo)).toBe(true);
@@ -206,12 +239,12 @@ describe("removing an admin", () => {
     expect(await revoke(bo.id)).toEqual({ revoked: true, stillAdminByGroup: false });
     // A group admin counts: Ana may go.
     const cy = await person("cy");
-    await scimGroup(GROUP, [cy]);
-    expect(await code(revoke(ana.id, GROUP))).toBe("no error");
+    const g = await scimGroup(GROUP, [cy]);
+    expect(await code(revoke(ana.id, g.id))).toBe("no error");
     // Someone with the role and the group loses the role and stays an admin, last or not.
     await grant(cy.id);
-    expect(await revoke(cy.id, GROUP)).toEqual({ revoked: true, stillAdminByGroup: true });
-    const listed = await read((tx) => listAdmins(tx, t.tenantId, { adminGroup: GROUP }));
+    expect(await revoke(cy.id, g.id)).toEqual({ revoked: true, stillAdminByGroup: true });
+    const listed = await read((tx) => listAdmins(tx, t.tenantId, { adminGroupId: g.id }));
     expect(listed.map((a) => [a.user.id, a.via, a.effective])).toEqual([[cy.id, ["group"], true]]);
   });
 

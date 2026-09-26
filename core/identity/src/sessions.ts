@@ -268,7 +268,7 @@ export async function checkSession(
   tx: Tx,
   tenantId: string,
   token: string,
-  options: { cache?: PrincipalCache; adminGroup?: string } = {},
+  options: { cache?: PrincipalCache; adminGroupId?: string } = {},
 ): Promise<SessionCheck> {
   const m = typeof token === "string" ? TOKEN.exec(token) : null;
   if (!m || m[1] !== tenantId) return { ok: false, refused: "unknown" };
@@ -304,7 +304,7 @@ export async function checkSession(
           tenantId,
           row.userId,
           undefined,
-          options.adminGroup === undefined ? {} : { adminGroup: options.adminGroup },
+          options.adminGroupId === undefined ? {} : { adminGroupId: options.adminGroupId },
         )
       )?.principal ?? null);
   if (!principal || !principal.active || principal.service === true) {

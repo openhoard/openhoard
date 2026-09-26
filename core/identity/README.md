@@ -97,9 +97,11 @@ admins). Administration only: an admin reads the files their grants allow, like 
 (core/policy `mayAdminister()` is the check; Cedar never sees admin).
 
 - Two ways to be one: the **admin role** held in OpenHoard (`users.admin_at`: `grantAdmin()`,
-  `revokeAdmin()`), or membership of the tenant's **admin group**, the SCIM group whose externalId
-  the server's config names (`adminGroup` options). The identity provider owns that membership,
-  so `revokeAdmin()` refuses a group admin (`wrong-source`).
+  `revokeAdmin()`), or membership of the tenant's **admin group**, the SCIM group the server's
+  config names by its id (`adminGroupId` options). Never by externalId, which the SCIM token
+  chooses: it could make a group of its own the admin group. A group that is gone, or isn't a
+  SCIM group, makes nobody an admin. The identity provider owns that membership, so
+  `revokeAdmin()` refuses a group admin (`wrong-source`).
 - It counts only for an active member (`isAdmin()`): a lock, a provider disable or the guest kind
   suspends it; retirement removes the role. `grantAdmin()` refuses guests and service accounts
   (the database refuses a service account's role too) and locked or disabled people.
@@ -108,9 +110,9 @@ admins). Administration only: an admin reads the files their grants allow, like 
   grants one.
 - Both take the principal lock first, which serializes the last-admin check. `listAdmins()` lists
   every holder with how (`role`, `group`) and whether it counts now.
-- The role is part of the principal, so its column bumps the principal epoch, and so does a
-  group's external id (it can make a group the admin group); core/db migration 0036.
-  `PrincipalCache` takes the config's admin group per tenant (`adminGroup`), and an OAuth access
+- The role is part of the principal, so its column bumps the principal epoch (core/db migration
+  0036), as memberships already do; so does a group's source, on which a group admin depends.
+  `PrincipalCache` takes the config's admin group per tenant (`adminGroupId`), and an OAuth access
   token's principal never carries admin: an AI client acting for an admin isn't one.
 
 ## OAuth for MCP clients
@@ -125,7 +127,15 @@ apps/server.
   unredeemed codes. `expect` makes it compare-and-set on the status the admin saw.
 - Code, token and refresh requests hold the client's row (`FOR SHARE`) while they use its
   approval, and a decision locks it first, so a grant made under an approval is always there for
-  the refusal that follows to revoke. Order: the person, the client, then its codes and grants.
+  the refusal that follows to revoke.
+- Lock order (oauth.ts header), for everything that uses or ends access: the principal lock (a
+  lock, disable, retirement, unlink, or a client's refusal take it first), the person, the
+  client, codes, then grants, and the audit append last. `redeemCode()` and `refreshGrant()` read
+  their row unlocked first to learn the person and client, then lock in that order. Each of
+  these once deadlocked against a lock; Postgres tests (oauth-locks.test.ts) run the
+  interleavings that did. A caller that ends access still retries a transaction that fails as a
+  deadlock or a serialization failure (core/db `isRetryable()`): the SCIM endpoint and the admin
+  API do.
 - `issueCode()` needs an approved client and an active person. `redeemCode()` checks the client,
   the redirect URI, the resource and PKCE (S256), and works once. A code presented again revokes
   its grant.
@@ -145,7 +155,7 @@ apps/server.
 Every request needs its caller's principal, so `PrincipalCache.resolve()` keeps them. It is
 invalidated by the database, so it holds across processes: every change `resolvePrincipal()`
 reads (grants, memberships, a user's kind, lock, provider disable, retirement or admin role, a
-group's external id) bumps the
+group's source) bumps the
 tenant's principal epoch in the writing transaction, by trigger. An entry is used only by a
 snapshot that sees the epoch it was resolved at, so a change reaches every process as soon as a
 snapshot shows it committed. Grants are resolved as of the moment the epoch is read, not the

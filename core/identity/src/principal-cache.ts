@@ -35,10 +35,10 @@ export interface PrincipalCacheOptions {
   /** Longest an entry lives, whatever changes. Default 60 s. */
   ttlMillis?: number;
   /**
-   * Each tenant's admin group, by SCIM externalId (the server's config, T-106): see
+   * Each tenant's admin group, by id (`grp_…`, the server's config, T-106): see
    * resolvePrincipal(). Fixed for the cache's life: a config change comes with a new process.
    */
-  adminGroup?: (tenantId: string) => string | undefined;
+  adminGroupId?: (tenantId: string) => string | undefined;
 }
 
 export interface PrincipalCacheStats {
@@ -60,13 +60,13 @@ export class PrincipalCache {
   readonly #entries = new Map<string, Entry>();
   readonly #max: number;
   readonly #ttl: number;
-  readonly #adminGroup: ((tenantId: string) => string | undefined) | undefined;
+  readonly #adminGroupId: ((tenantId: string) => string | undefined) | undefined;
   #stats = { hits: 0, misses: 0, bypassed: 0 };
 
   constructor(options: PrincipalCacheOptions = {}) {
     this.#max = options.maxEntries ?? 10_000;
     this.#ttl = options.ttlMillis ?? 60_000;
-    this.#adminGroup = options.adminGroup;
+    this.#adminGroupId = options.adminGroupId;
     if (!Number.isSafeInteger(this.#max) || this.#max < 1) {
       throw new RangeError("maxEntries must be a whole number of at least 1");
     }
@@ -136,8 +136,8 @@ export class PrincipalCache {
 
   /** What resolving a principal of this tenant needs besides the database. */
   options(tenantId: string): PrincipalOptions {
-    const adminGroup = this.#adminGroup?.(tenantId);
-    return adminGroup === undefined ? {} : { adminGroup };
+    const adminGroupId = this.#adminGroupId?.(tenantId);
+    return adminGroupId === undefined ? {} : { adminGroupId };
   }
 
   /** Forgets this process's entries: for one tenant, or all. The epoch makes this rarely needed. */

@@ -11,9 +11,13 @@ import { getUser, IdentityError, type User } from "./directory.js";
  *
  * - The admin role, held in OpenHoard (`users.admin_at`). The first is granted by an operator
  *   with the admin CLI (`admin user grant-admin`), later ones by admins (the admin API).
- * - Membership of the tenant's admin group, one identity provider group the server's config
- *   names by SCIM externalId (optional). The identity provider decides who is in it, so nobody
- *   can remove a group admin in OpenHoard: they leave the group upstream.
+ * - Membership of the tenant's admin group, one SCIM group the server's config names by its
+ *   OpenHoard id (`grp_…`, optional). The identity provider decides who is in it, so nobody can
+ *   remove a group admin in OpenHoard: they leave the group upstream. It is named by id, never by
+ *   externalId: the SCIM token chooses external ids, and could otherwise make any group of its
+ *   own the admin group. A group that is missing, deleted or not a SCIM group makes nobody an
+ *   admin (fail closed). With an admin group, the SCIM token and the group's owners upstream
+ *   decide who administers the tenant: treat them as admin-grade.
  *
  * Either way it counts only while the person is an active member: a lock, a provider disable or
  * a guest's kind suspends it, and retirement removes the role for good. A service account or a
@@ -34,8 +38,8 @@ import { getUser, IdentityError, type User } from "./directory.js";
 export type AdminVia = "role" | "group";
 
 export interface AdminOptions {
-  /** The SCIM externalId of the tenant's admin group (the server's config), if any. */
-  adminGroup?: string | undefined;
+  /** The id (`grp_…`) of the tenant's admin group (the server's config), if any. */
+  adminGroupId?: string | undefined;
 }
 
 export interface Admin {
@@ -61,18 +65,20 @@ function checkBy(by: string): void {
 const counts = sql`${users.retiredAt} is null and ${users.lockedAt} is null
   and ${users.providerDisabledAt} is null and ${users.kind} = 'member'`;
 
-/** The user row is in the tenant's admin group. */
-function inGroup(externalId: string): SQL {
+/** The user row is in the tenant's admin group, a SCIM group. */
+function inGroup(groupId: string): SQL {
   return sql`exists (select 1 from ${groupMembers} gm join ${groups} g
       on g.tenant_id = gm.tenant_id and g.id = gm.group_id
     where gm.tenant_id = ${users.tenantId} and gm.user_id = ${users.id}
-      and g.source = 'scim' and g.external_id = ${externalId})`;
+      and g.id = ${groupId} and g.source = 'scim')`;
 }
 
 /** Holds the role, or is in the admin group (when there is one). */
 function holds(options: AdminOptions): SQL {
   const role = isNotNull(users.adminAt);
-  return options.adminGroup === undefined ? role : (or(role, inGroup(options.adminGroup)) as SQL);
+  return options.adminGroupId === undefined
+    ? role
+    : (or(role, inGroup(options.adminGroupId)) as SQL);
 }
 
 /** Whether a user is an admin now: an active member with the role or in the admin group. */
@@ -99,7 +105,7 @@ export async function listAdmins(
   tenantId: string,
   options: AdminOptions = {},
 ): Promise<Admin[]> {
-  const group = options.adminGroup === undefined ? sql`false` : inGroup(options.adminGroup);
+  const group = options.adminGroupId === undefined ? sql`false` : inGroup(options.adminGroupId);
   const rows = await tx
     .select({
       id: users.id,
@@ -206,11 +212,11 @@ export async function revokeAdmin(
   await lockPrincipals(tx, tenantId);
   const row = await lockedUser(tx, tenantId, userId);
   const byGroup =
-    options.adminGroup !== undefined &&
+    options.adminGroupId !== undefined &&
     (await tx
       .select({ id: users.id })
       .from(users)
-      .where(and(eq(users.tenantId, tenantId), eq(users.id, userId), inGroup(options.adminGroup)))
+      .where(and(eq(users.tenantId, tenantId), eq(users.id, userId), inGroup(options.adminGroupId)))
       .then((r) => r.length > 0));
   if (row.adminAt === null) {
     if (byGroup) {

@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   AI_CLIENT_TRUSTS,
   isId,
+  lockPrincipals,
   newId,
   OAUTH_SCOPES,
   oauthClients,
@@ -35,6 +36,17 @@ import type { PrincipalCache } from "./principal-cache.js";
  * - checkAccessToken() runs on every request: the token, its grant, its client (approved) and
  *   its person (active) must all hold. Locking, disabling or retiring a person revokes their
  *   grants (directory.ts).
+ *
+ * Lock order, for every transaction here and in directory.ts that ends access, so none waits on
+ * another crosswise (each was a deadlock once):
+ *
+ *   principal epoch (lockPrincipals(): lock, disable, retire, unlink, a client's refusal)
+ *     → the person (users row: FOR UPDATE to stop them, KEY SHARE to use them)
+ *     → the client (oauth_clients row: FOR UPDATE to decide, SHARE to use its approval)
+ *     → codes → grants (and their tokens) → the audit append (core/audit), last.
+ *
+ * redeemCode() and refreshGrant() read their code or grant unlocked first, to learn the person
+ * and the client to lock, then lock the row itself and read it again.
  */
 
 export type OAuthScope = (typeof OAUTH_SCOPES)[number];
@@ -300,7 +312,11 @@ export async function decideClient(
   if (decision.approve && !(AI_CLIENT_TRUSTS as readonly string[]).includes(decision.trust)) {
     throw new IdentityError("invalid", `trust is one of ${AI_CLIENT_TRUSTS.join(", ")}`);
   }
-  // The row first: code and token requests holding it (getClient(…, { lock: "share" })) finish
+  // A refusal ends people's access, like a lock: it takes the principal lock first (lock order
+  // step 0), so it runs after, never across, a lock, disable or retirement ending the same codes
+  // and grants.
+  if (!decision.approve) await lockPrincipals(tx, tenantId);
+  // The row next: code and token requests holding it (getClient(…, { lock: "share" })) finish
   // before this decides, so a grant they make is one the refusal below sees and revokes.
   const [current] = await tx
     .select({ status: oauthClients.status })
@@ -324,16 +340,10 @@ export async function decideClient(
     .returning();
   if (!row) throw new IdentityError("not-found", "no such client");
   if (!decision.approve) {
-    await tx
-      .update(oauthGrants)
-      .set({ revokedAt: sql`greatest(now(), ${oauthGrants.createdAt})`, revokedBy: by })
-      .where(
-        and(
-          eq(oauthGrants.tenantId, tenantId),
-          eq(oauthGrants.clientKey, clientKey),
-          isNull(oauthGrants.revokedAt),
-        ),
-      );
+    // Codes before grants, the order lockUser() and the others that end a person's access take
+    // them (directory.ts endSessions()): the other way round, a refusal and a lock each held the
+    // rows the other wanted (a deadlock).
+    //
     // A code not yet redeemed can't be any more: were the client approved again within its
     // minute, it would make a grant from consent given before the refusal.
     await tx
@@ -344,6 +354,16 @@ export async function decideClient(
           eq(oauthCodes.tenantId, tenantId),
           eq(oauthCodes.clientKey, clientKey),
           isNull(oauthCodes.usedAt),
+        ),
+      );
+    await tx
+      .update(oauthGrants)
+      .set({ revokedAt: sql`greatest(now(), ${oauthGrants.createdAt})`, revokedBy: by })
+      .where(
+        and(
+          eq(oauthGrants.tenantId, tenantId),
+          eq(oauthGrants.clientKey, clientKey),
+          isNull(oauthGrants.revokedAt),
         ),
       );
   }
@@ -518,17 +538,31 @@ export async function redeemCode(
     ...extra,
   });
   if (!m || m[1] !== tenantId) return refuse("unknown code");
-  // The client the request names, before the code: an admin's decision (decideClient()) locks
-  // the client, then the codes, so this order never waits on it crosswise.
+  const codeId = m[2] as string;
+  // Lock order (see the header): the person, the client, then the code. lockUser() holds the
+  // person and then uses up their codes, and an admin's decision (decideClient()) holds the
+  // client and then its codes, so neither waits on this crosswise. A code never changes person,
+  // so an unlocked read names the one to hold; everything is read again under the code's lock.
+  const [owner] = await tx
+    .select({ userId: oauthCodes.userId })
+    .from(oauthCodes)
+    .where(and(eq(oauthCodes.tenantId, tenantId), eq(oauthCodes.id, codeId)));
+  if (owner) {
+    await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.tenantId, tenantId), eq(users.id, owner.userId)))
+      .for("key share");
+  }
   const client = await getClient(tx, tenantId, given.clientKey, { lock: "share" });
   const [found] = await tx
     .select({ code: oauthCodes, live: sql<boolean>`${oauthCodes.expiresAt} > now()` })
     .from(oauthCodes)
-    .where(and(eq(oauthCodes.tenantId, tenantId), eq(oauthCodes.id, m[2] as string)))
+    .where(and(eq(oauthCodes.tenantId, tenantId), eq(oauthCodes.id, codeId)))
     .for("update");
   const row = found?.code;
   const same = matches(m[3] as string, row?.secretHash);
-  if (!found || !row || !same) return refuse("unknown code");
+  if (!found || !row || !same || row.userId !== owner?.userId) return refuse("unknown code");
   if (row.usedAt !== null) {
     // Replayed: whatever it made is suspect (RFC 6749 §4.1.2).
     if (row.grantId) await revokeGrantRow(tx, tenantId, row.grantId, "system:code-replay");

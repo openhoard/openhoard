@@ -1,19 +1,20 @@
 import { createHash, randomBytes } from "node:crypto";
 import { exportAudit } from "@openhoard/core-audit";
-import { oauthClients, sessions, type Database } from "@openhoard/core-db";
+import { newId, oauthClients, sessions, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import {
   addMember,
   createGroup,
   createUser,
   grantAdmin,
+  issueScimToken,
   lockUser,
   type User,
 } from "@openhoard/core-identity";
 import { generateTenant, startDevOidc, type DevOidc, type FakeUser } from "@openhoard/testkit";
 import { eq, sql } from "drizzle-orm";
 import type { Hono } from "hono";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import type { AuthEnv } from "./auth.js";
 import { ConfigSchema } from "./config.js";
@@ -491,6 +492,29 @@ describe("the admin API's gate", () => {
     ]);
   });
 
+  it("counts a sign-in exactly auth.adminSignInMinutes old as recent, a millisecond more not", async () => {
+    await connect(await signedIn(memberPerson));
+    const key = await clientKey();
+    const boss = await signedIn(adminPerson);
+    const [session] = await db.withTenant(t.tenantId, (tx) =>
+      tx.select().from(sessions).where(eq(sessions.userId, admin.id)),
+    );
+    const at = (session?.createdAt as Date).getTime();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(at + 15 * 60_000);
+      expect((await boss.api("POST", `/clients/${key}/approve`, { trust: "local" })).status).toBe(
+        200,
+      );
+      vi.setSystemTime(at + 15 * 60_000 + 1);
+      const late = await boss.api("POST", `/clients/${key}/approve`, { trust: "commercial" });
+      expect(late.status).toBe(403);
+      expect(await late.json()).toMatchObject({ signIn: "/auth/sign-in" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("checks again in the change's own transaction: a removed admin can't act", async () => {
     await connect(await signedIn(memberPerson));
     const key = await clientKey();
@@ -562,16 +586,56 @@ describe("admins (T-106)", () => {
     expect((await boss.api("DELETE", "/admins/usr_nope")).status).toBe(404);
   });
 
-  it("counts the identity provider's admin group, whose members can't be removed here", async () => {
-    await db.withTenant(t.tenantId, async (tx) => {
-      const g = await createGroup(tx, t.tenantId, {
+  /** The tenant's admin group, a SCIM group with Third in it, named in the config by id. */
+  async function adminGroup(): Promise<string> {
+    const g = await db.withTenant(t.tenantId, async (tx) => {
+      const made = await createGroup(tx, t.tenantId, {
         name: "OpenHoard admins",
         source: "scim",
         externalId: ADMIN_GROUP,
       });
-      await addMember(tx, t.tenantId, g.id, third.id, "scim");
+      await addMember(tx, t.tenantId, made.id, third.id, "scim");
+      return made;
     });
-    app = build({ adminGroups: [{ tenantId: t.tenantId, externalId: ADMIN_GROUP }] });
+    app = build({ adminGroups: [{ tenantId: t.tenantId, groupId: g.id }] });
+    return g.id;
+  }
+
+  /** A SCIM request with the tenant's SCIM token. */
+  async function scimCall(token: string, method: string, path: string, body?: unknown) {
+    const res = await app.request(`${PUBLIC}/scim/v2${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(body === undefined ? {} : { "content-type": "application/scim+json" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const text = await res.text();
+    return {
+      status: res.status,
+      body: (text === "" ? {} : JSON.parse(text)) as Record<string, unknown>,
+    };
+  }
+  const scimToken = async () =>
+    (
+      await db.withTenant(t.tenantId, (tx) =>
+        issueScimToken(tx, t.tenantId, { name: "Entra", days: 30, by: "system:test" }),
+      )
+    ).token;
+  const PATCH_OP = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
+  const GROUP_SCHEMA = "urn:ietf:params:scim:schemas:core:2.0:Group";
+  const members = (op: "add" | "remove", userId: string) => ({
+    schemas: [PATCH_OP],
+    Operations: [
+      op === "add"
+        ? { op, path: "members", value: [{ value: userId }] }
+        : { op, path: `members[value eq "${userId}"]` },
+    ],
+  });
+
+  it("counts the identity provider's admin group, whose members can't be removed here", async () => {
+    const groupId = await adminGroup();
     const viaGroup = await signedIn(thirdPerson);
     const admins = await list(viaGroup);
     expect(admins.map((a) => [a.userId, a.via])).toEqual(
@@ -580,6 +644,8 @@ describe("admins (T-106)", () => {
         [third.id, ["group"]],
       ]),
     );
+    const listed = (await (await viaGroup.api("GET", "/admins")).json()) as Record<string, unknown>;
+    expect(listed.adminGroup).toEqual({ groupId, name: "OpenHoard admins", usable: true });
     const res = await viaGroup.api("DELETE", `/admins/${third.id}`);
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ error: expect.stringContaining("identity provider") });
@@ -587,14 +653,90 @@ describe("admins (T-106)", () => {
     expect((await viaGroup.api("DELETE", `/admins/${admin.id}`)).status).toBe(200);
   });
 
-  it("refuses a config naming two admin groups for one tenant", () => {
+  it("never makes an admin of a group the SCIM token names or renames, whatever its external id", async () => {
+    const groupId = await adminGroup();
+    const token = await scimToken();
+    // The SCIM token frees the admin group's external id, and takes it for a group of its own
+    // with the member in it; another group takes any external id it likes.
+    expect(
+      (
+        await scimCall(token, "PATCH", `/Groups/${groupId}`, {
+          schemas: [PATCH_OP],
+          Operations: [{ op: "replace", path: "externalId", value: "moved-away" }],
+        })
+      ).status,
+    ).toBe(204);
+    const created = await scimCall(token, "POST", "/Groups", {
+      schemas: [GROUP_SCHEMA],
+      displayName: "Look-alike",
+      externalId: ADMIN_GROUP,
+      members: [{ value: member.id }],
+    });
+    expect(created.status).toBe(201);
+    const other = await scimCall(token, "POST", "/Groups", {
+      schemas: [GROUP_SCHEMA],
+      displayName: "Other",
+      members: [{ value: member.id }],
+    });
+    expect(
+      (
+        await scimCall(token, "PATCH", `/Groups/${other.body.id as string}`, {
+          schemas: [PATCH_OP],
+          Operations: [{ op: "replace", path: "externalId", value: groupId }],
+        })
+      ).status,
+    ).toBe(204);
+    const person = await signedIn(memberPerson);
+    expect((await person.api("GET", "/admins")).status).toBe(403);
+    // The real admin group still decides.
+    expect((await (await signedIn(thirdPerson)).api("GET", "/admins")).status).toBe(200);
+  });
+
+  it("follows the admin group's members at once, and audits who became or stopped being an admin", async () => {
+    const groupId = await adminGroup();
+    const token = await scimToken();
+    const viaGroup = await signedIn(thirdPerson);
+    const person = await signedIn(memberPerson);
+    expect((await viaGroup.api("GET", "/admins")).status).toBe(200);
+    expect((await person.api("GET", "/admins")).status).toBe(403);
+    // The same sessions, the next request: the principal cache follows the epoch.
+    expect(
+      (await scimCall(token, "PATCH", `/Groups/${groupId}`, members("add", member.id))).status,
+    ).toBe(204);
+    expect((await person.api("GET", "/admins")).status).toBe(200);
+    expect(
+      (await scimCall(token, "PATCH", `/Groups/${groupId}`, members("remove", third.id))).status,
+    ).toBe(204);
+    expect((await viaGroup.api("GET", "/admins")).status).toBe(403);
+    // Deleted, the group makes nobody an admin; the listing says it is gone.
+    expect((await scimCall(token, "DELETE", `/Groups/${groupId}`)).status).toBe(204);
+    expect((await person.api("GET", "/admins")).status).toBe(403);
+    const boss = await signedIn(adminPerson);
+    const listed = (await (await boss.api("GET", "/admins")).json()) as Record<string, unknown>;
+    expect(listed.adminGroup).toEqual({ groupId, name: null, usable: false });
+    const log = (await auditLog()).filter((e) => e.action.startsWith("admin.group."));
+    expect(log.map((e) => [e.action, e.detail?.user, e.detail?.group])).toEqual([
+      ["admin.group.join", member.id, groupId],
+      ["admin.group.leave", third.id, groupId],
+      ["admin.group.leave", member.id, groupId],
+    ]);
+    expect(log.every((e) => e.actor.startsWith("scim:"))).toBe(true);
+  });
+
+  it("names the admin group by id in the config, one per tenant", () => {
     expect(() =>
       build({
         adminGroups: [
-          { tenantId: t.tenantId, externalId: "a" },
-          { tenantId: t.tenantId, externalId: "b" },
+          { tenantId: t.tenantId, groupId: newId("group") },
+          { tenantId: t.tenantId, groupId: newId("group") },
         ],
       }),
     ).toThrow(/one admin group per tenant/);
+    expect(() => build({ adminGroups: [{ tenantId: t.tenantId, groupId: ADMIN_GROUP }] })).toThrow(
+      /a group id/,
+    );
+    expect(() =>
+      build({ adminGroups: [{ tenantId: t.tenantId, externalId: ADMIN_GROUP }] }),
+    ).toThrow();
   });
 });

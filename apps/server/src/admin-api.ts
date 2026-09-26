@@ -6,6 +6,7 @@ import {
   findUserByEmail,
   findUserByUserName,
   getClient,
+  getGroup,
   getUser,
   grantAdmin,
   IdentityError,
@@ -25,6 +26,7 @@ import type { Logger } from "pino";
 import type { AuthEnv, SignedIn } from "./auth.js";
 import { adminGroupOf, type AuthConfig } from "./config.js";
 import { configuredTrust, listedIn } from "./oauth/allowlist.js";
+import { retrying } from "./retry.js";
 
 /*
  * The admin API (T-106): a tenant's admins decide which AI clients its people may connect, and
@@ -91,7 +93,7 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
   const adminGroup = adminGroupOf(auth);
   const groupOf = (tenantId: string) => {
     const g = adminGroup(tenantId);
-    return g === undefined ? {} : { adminGroup: g };
+    return g === undefined ? {} : { adminGroupId: g };
   };
   const audit = (tx: Tx, tenantId: string, record: AuditRecord) =>
     appendAudit(tx, tenantId, record);
@@ -165,15 +167,18 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
       return refuse(new Refusal(403, "sign-in-again", "sign in again to do this"));
     }
     try {
-      return await db.withTenant(tenantId, async (tx) => {
-        // The principal lock first: admin changes take it, and a removal of this admin that
-        // commits first is seen here.
-        await lockPrincipals(tx, tenantId);
-        if (!(await isAdmin(tx, tenantId, signedIn.principal.userId, groupOf(tenantId)))) {
-          throw new Refusal(403, "not-admin", "forbidden");
-        }
-        return work(tx, signedIn);
-      });
+      // Run again after a deadlock or serialization failure: the database rolled it back.
+      return await retrying(() =>
+        db.withTenant(tenantId, async (tx) => {
+          // The principal lock first: admin changes take it, and a removal of this admin that
+          // commits first is seen here.
+          await lockPrincipals(tx, tenantId);
+          if (!(await isAdmin(tx, tenantId, signedIn.principal.userId, groupOf(tenantId)))) {
+            throw new Refusal(403, "not-admin", "forbidden");
+          }
+          return work(tx, signedIn);
+        }),
+      );
     } catch (e) {
       if (e instanceof Refusal) return refuse(e);
       if (e instanceof IdentityError && options.identityErrors) {
@@ -272,9 +277,13 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
 
   app.get("/api/admin/admins", async (c) => {
     const { tenantId } = c.get("auth") as SignedIn;
-    const admins = await db.withTenant(
+    const groupId = adminGroup(tenantId);
+    const { admins, group } = await db.withTenant(
       tenantId,
-      (tx) => listAdmins(tx, tenantId, groupOf(tenantId)),
+      async (tx) => ({
+        admins: await listAdmins(tx, tenantId, groupOf(tenantId)),
+        group: groupId === undefined ? null : await getGroup(tx, tenantId, groupId),
+      }),
       { isolationLevel: "repeatable read", accessMode: "read only" },
     );
     return c.json({
@@ -285,7 +294,16 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
         grantedBy: a.user.adminRole?.by ?? null,
         grantedAt: a.user.adminRole?.at.toISOString() ?? null,
       })),
-      adminGroup: adminGroup(tenantId) ?? null,
+      // The config's admin group, and whether it makes anyone an admin: a group that is gone, or
+      // isn't a SCIM group, makes nobody one.
+      adminGroup:
+        groupId === undefined
+          ? null
+          : {
+              groupId,
+              name: group?.name ?? null,
+              usable: group?.source === "scim",
+            },
     });
   });
 

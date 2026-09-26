@@ -228,13 +228,27 @@ Someone is an admin two ways:
 
 - **The admin role**, held in OpenHoard. The first admin is made by the operator with the admin
   CLI (`admin user grant-admin`, below); admins make others in the app.
-- **The tenant's admin group** (optional): one identity provider group per tenant, named in the
-  config by its SCIM externalId (Entra: the group's object id). The provider decides who is in
-  it, so the app can't remove its members: they leave the group upstream.
+- **The tenant's admin group** (optional): one SCIM group per tenant, named in the config by its
+  OpenHoard id (`grp_…`; `admin group list` prints each group's id, source, member count,
+  external id and name). The provider decides who is in it, so the app can't remove its members:
+  they leave the group upstream.
 
   ```json
-  { "auth": { "adminGroups": [{ "tenantId": "ten_…", "externalId": "<group object id>" }] } }
+  { "auth": { "adminGroups": [{ "tenantId": "ten_…", "groupId": "grp_…" }] } }
   ```
+
+  - **Never by external id.** Whoever holds the SCIM token chooses external ids: naming the group
+    by one would let the token create or rename a group of its own into the admin group.
+    OpenHoard's ids aren't chosen by anyone.
+  - **Fail closed.** A group that is missing, deleted, or not provisioned over SCIM makes nobody
+    an admin (`GET /api/admin/admins` and `admin user list-admins` say so).
+  - **Admin-grade.** With an admin group, the tenant's SCIM token and whoever manages that group
+    in the identity provider decide who administers the tenant: guard them as you would an admin
+    account.
+  - **Audit.** A SCIM change to the admin group's members adds `admin.group.join` and
+    `admin.group.leave` records (one per person, actor `scim:<token id>`) to the request's
+    `scim.group.*` record. A person leaving it some other way (a SCIM user deleted, disabled or
+    made a guest) shows in that request's `scim.user.*` record only.
 
 Either way it counts only for an active member: locking, a provider disable or becoming a guest
 suspends it, retirement removes the role, and a guest or a service account is never made one.
@@ -482,14 +496,17 @@ node apps/server/dist/main.js admin scim-token revoke --tenant ten_… --id sct_
 node apps/server/dist/main.js admin user grant-admin --tenant ten_… --user <usr_… | email | userName>
 node apps/server/dist/main.js admin user revoke-admin --tenant ten_… --user <usr_… | email | userName>
 node apps/server/dist/main.js admin user list-admins --tenant ten_…
+node apps/server/dist/main.js admin group list --tenant ten_…
 ```
 
 - **Admins.** `user grant-admin` makes the tenant's first admin (the person must exist: provisioned
   over SCIM, or invited), and is the way back in when a tenant has none left. `--user` takes an
   id, or an email or userName exactly one current person has. `list-admins` prints each admin's
   id, how they are one (`role`, `group`, `role+group`), whether it counts now, email and name.
-  The admin group (config `auth.adminGroups`) is read from the same config. Removing the last
-  admin is refused here too.
+  The admin group (config `auth.adminGroups`) is read from the same config, and `list-admins`
+  warns when it makes nobody an admin. Removing the last admin is refused here too.
+- **Groups.** `group list` prints each group's id, source, member count, external id and name,
+  and marks the configured admin group: the id is what `auth.adminGroups` takes.
 
 - **Output.** The id or token goes to standard output, and messages go to standard error. The
   exit code is 0 for done, 1 for failed and 2 for misused.
@@ -586,10 +603,11 @@ example `cloudflared tunnel --url http://127.0.0.1:7420`), and use the tunnel's 
      sends DELETE, which retires them.
    - `node apps/server/dist/main.js admin scim-token list --tenant ten_…` shows when the token
      was last used.
-   - Make the test account the tenant's first admin (T-106): `admin user grant-admin --tenant
-ten_… --user <its UPN>` (server stopped, on PGlite), then `GET /api/admin/admins` after
-     signing in. Or name an Entra group in `auth.adminGroups` by its object id, assign it to the
-     app, and provision it: its members are admins.
+   - Make the test account the tenant's first admin (T-106) with
+     `admin user grant-admin --tenant ten_… --user <its UPN>` (server stopped, on PGlite), then
+     `GET /api/admin/admins` after signing in. Or assign an Entra group to the app, provision
+     it, find its `grp_…` id with `admin group list`, and name that in `auth.adminGroups`: its
+     members are admins.
    - The audit log has every request.
 
 Sources relied on for Entra's behaviour:
