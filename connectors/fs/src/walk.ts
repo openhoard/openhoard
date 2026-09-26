@@ -13,14 +13,18 @@ import { fsError } from "./errors.js";
  *   folder, inside the folder or outside it: following them could leave the folder, loop, or
  *   report one file twice. A link's target inside the folder is crawled where it is anyway;
  * - anything on another file system mounted inside the folder (its device differs): a mount can
- *   come and go, and its inode numbers aren't the folder's;
+ *   come and go, and its inode numbers aren't the folder's. By default a mount is reported as
+ *   `unreadable` (what was there is kept, and nothing is reconciled): a disk mounted over a
+ *   folder, or a subvolume appearing, must not make its files look deleted. With
+ *   `otherDevices: "skip"` it is left out as if it weren't there;
  * - anything that isn't a regular file or a folder (sockets, pipes, devices);
  * - with `hardLinks: "skip"`, files with more than one link;
  * - anything deeper than MAX_DEPTH folders.
  *
  * Gone and unreadable are not the same. An entry that vanishes while the walk looks (ENOENT,
  * ENOTDIR) is gone. One the connector may not stat, or a folder it may not list (EACCES, EPERM,
- * a path the OS refuses as too long), is `unreadable`: the walk says so, and the caller treats
+ * EBUSY as Windows answers for pagefile.sys, hiberfil.sys and the like, a path the OS refuses as
+ * too long), is `unreadable`: the walk says so, and the caller treats
  * what was there before as still there (a delta keeps it, a crawl doesn't reconcile). Anything
  * else that fails (a busy or unreachable disk) throws: a walk never reports a folder as emptier
  * than it is because reading it failed.
@@ -71,7 +75,7 @@ export function isPrefix(prefix: readonly string[], path: readonly string[]): bo
 /** Codes that mean the entry is gone. */
 const GONE = new Set(["ENOENT", "ENOTDIR"]);
 /** Codes that mean the entry is there, but not for the connector to see. */
-const UNREADABLE = new Set(["EACCES", "EPERM", "ENAMETOOLONG", "ELOOP"]);
+const UNREADABLE = new Set(["EACCES", "EPERM", "EBUSY", "ENAMETOOLONG", "ELOOP"]);
 
 const codeOf = (e: unknown) => {
   const code = (e as { code?: unknown } | null)?.code;
@@ -83,6 +87,8 @@ export interface WalkOptions {
   after?: readonly string[];
   /** Leave out files with more than one link. Default false. */
   skipHardLinks?: boolean;
+  /** Leave out what is on another device, as if it weren't there. Default false: unreadable. */
+  skipOtherDevices?: boolean;
 }
 
 /**
@@ -95,7 +101,7 @@ export async function* walk(
   signal: AbortSignal,
   options: WalkOptions = {},
 ): AsyncGenerator<Entry | Unreadable> {
-  const { after, skipHardLinks = false } = options;
+  const { after, skipHardLinks = false, skipOtherDevices = false } = options;
   yield* visit(root, [], 0);
 
   async function* visit(
@@ -136,7 +142,11 @@ export async function* walk(
         }
         throw fsError(e);
       }
-      if (st.isSymbolicLink() || st.dev !== dev) continue;
+      if (st.isSymbolicLink()) continue;
+      if (st.dev !== dev) {
+        if (fresh && !skipOtherDevices) yield { kind: "unreadable", path, contents: false };
+        continue;
+      }
       if (st.isFile()) {
         if (fresh && !(skipHardLinks && st.nlink > 1n)) yield entry(path, "file", st);
       } else if (st.isDirectory()) {

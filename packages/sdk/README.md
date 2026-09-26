@@ -25,7 +25,7 @@ A connector reaches files where they live and answers five questions; the core d
 | `read()`      | exactly the bytes of the version a crawl reported, or `changed`: never newer bytes             |
 | `aclImport()` | the item's permissions, normalized, by the source's own ids (optional)                         |
 | `redirect()`  | a URL that opens the item in its own app: `https:` or a declared scheme (optional)             |
-| `identity()`  | what the source is (a folder's device and inode): the runner refuses another later (optional)  |
+| `identity()`  | what the source is (a folder's inode and birth time): the runner refuses another (optional)    |
 
 **Items** (`SourceItem`): external id (stable across renames when `stableIds`), kind (file or
 folder), parent id, path (names, never joined), title, media type, size, modified time and
@@ -33,7 +33,10 @@ author, `etag` (changes when anything reported changes, the path included: movin
 changes everything in it) and `contentVersion` (changes when the bytes do; what `read()` is
 asked for). An item's `url`, like what `redirect()` returns, is `https:` or a declared scheme,
 never `javascript:`, `data:`, `vbscript:` or `blob:`, never with credentials, and a `file:` URL
-never names a host (opening `file://server/…` makes Windows authenticate to that server).
+can only mean a local path: no host, no path starting with `//`, no backslash, no `%5C` or `%2F`
+(opening `file://server/…`, or any spelling a browser or the Windows shell reads as one, makes
+Windows authenticate to that server). What is kept is `canonicalUrl()`'s text, the parser's,
+never the connector's.
 
 **Events** (`SyncEvent`), in the source's order: `item`, `deleted` (every item of a deleted
 folder too), `checkpoint` (everything before it may be considered applied once the token is

@@ -1,13 +1,22 @@
 import { createHash } from "node:crypto";
 import type { BigIntStats } from "node:fs";
 import { constants } from "node:fs";
-import { lstat, open, realpath, rm, stat, truncate, type FileHandle } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
+import {
+  lstat,
+  open,
+  realpath,
+  rm,
+  stat,
+  statfs,
+  truncate,
+  type FileHandle,
+} from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   CONNECTOR_API_VERSION,
   changedError,
-  LIMITS,
+  checkUrl,
   normalizeAcl,
   notFoundError,
   permanentError,
@@ -34,10 +43,12 @@ import { compareWalk, entry, isPrefix, walk, type Entry, type Unreadable } from 
  *   (walk.ts). Every item it yields goes to a journal in the state folder; a checkpoint names
  *   the journal's length, so a killed crawl resumes right after it, and its cursor still covers
  *   what was yielded before (state.ts).
- * - delta(): walks the folder again and compares it with the snapshot the cursor names: new,
- *   changed, renamed or moved (same id, see state.ts assignIds()) and deleted items, deletes
- *   first, deepest first. No file system watcher: comparing is simple, the same everywhere, and
- *   can't miss what happened while nothing was watching.
+ * - delta(): walks the folder again, compares it with the snapshot the cursor names (new,
+ *   changed, renamed or moved: same id, see state.ts assignIds(); deleted; deletes first,
+ *   deepest first), writes the new snapshot, and yields the difference with checkpoints: a
+ *   checkpoint names both snapshots and how far it got, so a stopped delta resumes from the
+ *   two snapshots without walking again. No file system watcher: comparing is simple, the same
+ *   everywhere, and can't miss what happened while nothing was watching.
  * - read(): the bytes, only while the file is the version crawled. A file's contentVersion is
  *   its size, modification time, change time and inode number: the change time catches a
  *   rewrite that put the old modification time back (tools that preserve times do), and the
@@ -48,19 +59,29 @@ import { compareWalk, entry, isPrefix, walk, type Entry, type Unreadable } from 
  *   So every item gets the connection's configured default (`defaultAcl`, basis `configured`),
  *   or, without one, nothing (`owner-only`): only its owner in OpenHoard sees it.
  * - redirect(): the item's `file:` URL, for the local agent to open natively (FR-20).
+ * - identity(): the root folder's inode, birth time and file system type. Not its device
+ *   number: Linux and macOS number devices anew on a remount or a reboot (network and FUSE file
+ *   systems, tmpfs, btrfs, overlays, external disks). Where the file system keeps no birth time,
+ *   a changed answer is checked against the folder itself: when the files the last snapshot
+ *   recorded are still there (same inode, and same birth time or size), it is the same folder.
  *
  * Safety: nothing outside the folder is ever read. Symbolic links and junctions are never
- * followed, other file systems mounted inside are left out (walk.ts), read() and the others
- * accept only a location inside the folder with no link on the way, and open the file without
- * following a link (O_NOFOLLOW where the OS has it; then the opened file's inode must be the
- * crawled one). A delta refuses to run when another folder has taken the root's path (a drive
+ * followed, other file systems mounted inside are reported unreadable (walk.ts), read() and the
+ * others accept only a location inside the folder with no link on the way, and open the file
+ * without following a link (O_NOFOLLOW where the OS has it; then the opened file's inode must be
+ * the crawled one). A delta refuses to run when another folder has taken the root's path (a drive
  * not mounted): it would report every file deleted.
+ *
+ * The root is used as configured (made absolute), never as realpath() writes it: on Windows that
+ * turns a mapped network drive (`Z:\`) into its share (`\\server\share`) and a mounted volume
+ * into `\\?\Volume{…}\`, whose file: URLs would name a host. A configured root that is itself
+ * such a path is refused.
  */
 
 export const FS_CONNECTOR_VERSION = "0.1.0";
 
 export interface FsConnectorOptions {
-  /** The folder to serve: an absolute path. */
+  /** The folder to serve: an absolute path (a local disk, or a mapped drive on Windows). */
   root: string;
   /**
    * An absolute path for the connector's own state (crawl journals, snapshots), outside `root`.
@@ -69,7 +90,7 @@ export interface FsConnectorOptions {
   stateDir: string;
   /** Permissions to report for every item (see above). Default: none, owner-only. */
   defaultAcl?: readonly AclEntry[];
-  /** A checkpoint after every this many items. Default 500. */
+  /** A checkpoint after every this many items (crawl) or changes (delta). Default 500. */
   checkpointEvery?: number;
   /** Bytes per chunk read() returns. Default 64 KiB. */
   chunkSize?: number;
@@ -79,14 +100,23 @@ export interface FsConnectorOptions {
    * one outside the root. `skip`: left out (reported deleted if they were indexed before).
    */
   hardLinks?: "index" | "skip";
+  /**
+   * What another file system mounted inside the root is. `keep` (default): unreadable (what was
+   * there stays, a warning says so, and a crawl doesn't reconcile). `skip`: not there at all, so
+   * what was indexed there is reported deleted.
+   */
+  otherDevices?: "keep" | "skip";
 }
 
 interface Context {
   root: string;
   dev: bigint;
-  /** The root folder's device and inode. */
+  /** What the root folder is: see identityOf(). */
   identity: string;
 }
+
+/** How many files identity() looks at when the root's own numbers changed. */
+const SAMPLE = 16;
 
 /** The local folder connector over `options.root`. */
 export function fsConnector(options: FsConnectorOptions): Connector {
@@ -98,7 +128,12 @@ export function fsConnector(options: FsConnectorOptions): Connector {
   if (!Number.isSafeInteger(chunkSize) || chunkSize < 1) throw new RangeError("chunkSize");
   const hardLinks = options.hardLinks ?? "index";
   if (hardLinks !== "index" && hardLinks !== "skip") throw new RangeError("hardLinks");
-  const walkOptions = { skipHardLinks: hardLinks === "skip" };
+  const otherDevices = options.otherDevices ?? "keep";
+  if (otherDevices !== "keep" && otherDevices !== "skip") throw new RangeError("otherDevices");
+  const walkOptions = {
+    skipHardLinks: hardLinks === "skip",
+    skipOtherDevices: otherDevices === "skip",
+  };
   const acl: ItemAcl =
     options.defaultAcl && options.defaultAcl.length > 0
       ? { basis: "configured", entries: normalizeAcl(options.defaultAcl) }
@@ -113,39 +148,66 @@ export function fsConnector(options: FsConnectorOptions): Connector {
     stableIds: true,
     redirectSchemes: ["file:"],
   };
+  const configuredRoot = resolve(options.root);
 
   let prepared: Promise<void> | undefined;
   /** The root as it is now; the state folder checked once. */
   async function context(): Promise<Context> {
-    let root: string;
+    // A network share path (UNC), or a device path (\\?\, \\.\), gives file: URLs with a host,
+    // which opening would make Windows authenticate to: refused, as the core refuses such URLs.
+    if (pathToFileURL(configuredRoot).host !== "" || /^[\\/]{2}/.test(configuredRoot)) {
+      throw permanentError("a root on a network share or device path isn't supported");
+    }
     let st: BigIntStats;
     try {
-      root = await realpath(options.root);
-      st = await stat(root, { bigint: true });
+      st = await stat(configuredRoot, { bigint: true });
     } catch (e) {
       // A root that isn't there may be a drive not mounted yet: never "empty", try later.
       const err = fsError(e) as { code?: string };
       throw err.code === "not-found" ? retryableError("the folder can't be reached") : err;
     }
     if (!st.isDirectory()) throw permanentError("the root is not a folder");
-    // A UNC root (a network share path) gives file: URLs with a host, which opening would make
-    // Windows authenticate to: refused, as the core refuses such URLs. Map a drive instead.
-    if (pathToFileURL(root).host !== "") {
-      throw permanentError("a root on a network share path (UNC) isn't supported");
-    }
     // Made again if someone removed it: the tokens it held are then refused (`resync`).
     await state.ensure().catch((e: unknown) => {
       throw fsError(e);
     });
     prepared ??= (async () => {
-      const dir = await realpath(options.stateDir);
-      if (within(root, dir)) throw permanentError("the state folder must be outside the root");
+      // Both as realpath() writes them, so a link or a mapped drive can't hide the state folder
+      // inside the root.
+      const [real, dir] = await Promise.all([realpath(configuredRoot), realpath(options.stateDir)]);
+      if (within(real, dir)) throw permanentError("the state folder must be outside the root");
     })().catch((e: unknown) => {
       prepared = undefined;
       throw fsError(e);
     });
     await prepared;
-    return { root, dev: st.dev, identity: `${st.dev}:${st.ino}` };
+    return { root: configuredRoot, dev: st.dev, identity: await identityOf(configuredRoot, st) };
+  }
+
+  /**
+   * Whether the folder at the root is the one `recorded` names: the same answer, or, when either
+   * answer lacks a birth time, the files `entries` recorded still there (same inode, and same
+   * birth time or size) for at least three in four of a sample.
+   */
+  async function sameRoot(ctx: Context, recorded: string, entries: readonly Rec[]) {
+    const [a, b] = [parseIdentity(recorded), parseIdentity(ctx.identity)];
+    if (!a || !b) return false;
+    // A file system type of 0 means statfs() couldn't say: not a difference.
+    const sameType = a.type === b.type || a.type === "0" || b.type === "0";
+    if (a.ino === b.ino && a.birth === b.birth && sameType) return true;
+    if (a.birth !== "0" && b.birth !== "0") return false;
+    const files = entries.filter((r) => r.k === "f");
+    if (files.length === 0) return false;
+    const step = Math.max(1, Math.floor(files.length / SAMPLE));
+    const sample = files.filter((_, n) => n % step === 0).slice(0, SAMPLE);
+    let same = 0;
+    for (const r of sample) {
+      const st = await lstat(join(ctx.root, ...r.p), { bigint: true }).catch(() => null);
+      if (!st || `${st.ino}` !== r.i) continue;
+      const birth = st.birthtimeNs > 0n ? `${st.birthtimeNs}` : "0";
+      if (r.b !== "0" && birth !== "0" ? birth === r.b : `${st.size}` === r.s) same++;
+    }
+    return same * 4 >= sample.length * 3;
   }
 
   function itemOf(ctx: Context, id: string, parentId: string | null, e: Entry): SourceItem {
@@ -157,8 +219,9 @@ export function fsConnector(options: FsConnectorOptions): Connector {
       parentId,
       path: e.path,
       etag: etagOf(id, e),
-      // A URL too long to keep is left out: read() finds the item by its path then.
-      ...([...url].length <= LIMITS.url ? { url } : {}),
+      // A URL the core would refuse (too long; a name with a backslash, which is allowed on
+      // Linux, encodes as %5C) is left out: read() finds the item by its path during a sync.
+      ...(checkUrl(url, description) === null ? { url } : {}),
     };
     if (e.kind === "folder") return base;
     const ms = Number(e.mtimeNs / 1_000_000n);
@@ -189,7 +252,10 @@ export function fsConnector(options: FsConnectorOptions): Connector {
       if (!m) throw resyncError();
       run = m[1] as string;
       bytes = Number(m[2]);
-      recs = await state.readJournal(run, bytes, ctx.identity);
+      const journal = await state.readJournal(run, bytes);
+      // Another folder at the root's path since: start again.
+      if (!(await sameRoot(ctx, journal.root, journal.recs))) throw resyncError();
+      recs = journal.recs;
       await state.prune({ journals: { keep: run } });
       // What was written after the checkpoint is yielded again.
       await truncate(state.journal(run), bytes).catch((e: unknown) => {
@@ -231,7 +297,7 @@ export function fsConnector(options: FsConnectorOptions): Connector {
       }
       await journal.close();
       journal = undefined;
-      const entries = await state.readJournal(run, bytes, ctx.identity);
+      const { recs: entries } = await state.readJournal(run, bytes);
       const digest = await state.writeSnapshot({ v: 1, root: ctx.identity, entries });
       await rm(state.journal(run), { force: true });
       yield { type: "done", cursor: `fs1.${digest}` };
@@ -242,18 +308,57 @@ export function fsConnector(options: FsConnectorOptions): Connector {
     }
   }
 
+  /**
+   * A delta: from a cursor (`fs1.<snapshot>`), walks the folder and writes the new snapshot; from
+   * one of its own checkpoints (`fs1d.<old>.<new>.<n>`), takes both snapshots as they are. Either
+   * way it yields the difference between the two, from the n-th change on.
+   */
   async function* delta(cursor: string, signal: AbortSignal): AsyncGenerator<SyncEvent> {
     signal.throwIfAborted();
     const ctx = await context();
-    const m = /^fs1\.([0-9a-f]{64})$/.exec(cursor);
-    if (!m) throw resyncError();
-    const digest = m[1] as string;
-    const before = await state.readSnapshot(digest);
-    if (before.root !== ctx.identity) {
+    const fresh = /^fs1\.([0-9a-f]{64})$/.exec(cursor);
+    const resumed = /^fs1d\.([0-9a-f]{64})\.([0-9a-f]{64})\.(\d{1,12})$/.exec(cursor);
+    if (!fresh && !resumed) throw resyncError();
+    const oldDigest = ((fresh ?? resumed) as RegExpExecArray)[1] as string;
+    const before = await state.readSnapshot(oldDigest);
+    if (!(await sameRoot(ctx, before.root, before.entries))) {
       throw permanentError("another folder is at the root's path (a drive not mounted?)");
     }
-    // Only this cursor (and what this delta writes) can be asked for from now on.
-    await state.prune({ snapshots: { keep: digest } });
+    let nextDigest: string;
+    let next: Rec[];
+    let from = 0;
+    const warnings: SyncEvent[] = [];
+    if (resumed) {
+      nextDigest = resumed[2] as string;
+      from = Number(resumed[3]);
+      next = (await state.readSnapshot(nextDigest)).entries;
+      await state.prune({ snapshots: { keep: [oldDigest, nextDigest] } });
+    } else {
+      // Only this cursor (and what this delta writes) can be asked for from now on.
+      await state.prune({ snapshots: { keep: [oldDigest] } });
+      const walked = await walkAgainst(ctx, before.entries, signal);
+      next = walked.next;
+      warnings.push(...walked.warnings);
+      nextDigest = await state.writeSnapshot({ v: 1, root: ctx.identity, entries: next });
+    }
+    const changes = diff(ctx, before.entries, next);
+    for (let n = from; n < changes.length; n++) {
+      signal.throwIfAborted();
+      yield changes[n] as SyncEvent;
+      if ((n + 1) % every === 0 && n + 1 < changes.length) {
+        yield { type: "checkpoint", token: `fs1d.${oldDigest}.${nextDigest}.${n + 1}` };
+      }
+    }
+    for (const w of warnings) yield w;
+    yield { type: "done", cursor: `fs1.${nextDigest}` };
+  }
+
+  /**
+   * The folder now, as a snapshot's entries (ids carried over from `old`), and its warnings: what
+   * the walk couldn't see keeps what `old` had there (unknown is not gone; a file moved out of
+   * there is found elsewhere by its inode, and not kept), and hard links are flagged.
+   */
+  async function walkAgainst(ctx: Context, old: readonly Rec[], signal: AbortSignal) {
     const entries: Entry[] = [];
     const unreadable: Unreadable[] = [];
     try {
@@ -264,51 +369,53 @@ export function fsConnector(options: FsConnectorOptions): Connector {
     } catch (e) {
       throw fsError(e);
     }
-    const ids = assignIds(entries, before.entries);
+    const ids = assignIds(entries, old);
     const alive = new Set(ids);
-    // Unknown is not gone: what the snapshot had where the walk couldn't see stays as it was,
-    // unreported (a file moved out of there is found elsewhere by its inode, and not kept).
     const hidden = (r: Rec) =>
       unreadable.some((u) =>
         u.contents ? r.p.length > u.path.length && isPrefix(u.path, r.p) : isPrefix(u.path, r.p),
       );
-    const kept = before.entries.filter((r) => !alive.has(r.id) && hidden(r));
-    const keptIds = new Set(kept.map((r) => r.id));
+    const kept = old.filter((r) => !alive.has(r.id) && hidden(r));
     const recs = entries.map((e, n) => recOf(ids[n] as string, e));
     const idAt = new Map(recs.map((r) => [pathKey(r.p), r.id]));
-    const was = new Map(before.entries.map((r) => [r.id, etagOf(r.id, entryOf(r))]));
-    const events: SyncEvent[] = [];
-    for (const r of [...before.entries].reverse()) {
-      if (!alive.has(r.id) && !keptIds.has(r.id)) {
-        events.push({ type: "deleted", externalId: r.id });
-      }
-    }
+    const was = new Map(old.map((r) => [r.id, etagOf(r.id, entryOf(r))]));
+    const warnings: SyncEvent[] = [];
     entries.forEach((e, n) => {
       const id = ids[n] as string;
-      if (was.get(id) === etagOf(id, e)) return;
-      const parentId =
-        e.path.length === 1 ? null : (idAt.get(pathKey(e.path.slice(0, -1))) ?? null);
-      events.push({ type: "item", item: itemOf(ctx, id, parentId, e) });
-      if (e.links > 1n) events.push({ type: "warning", code: "hard-link", externalId: id });
+      // Flagged when it changed, as the crawl flags it when it yields it.
+      if (e.links > 1n && was.get(id) !== etagOf(id, e)) {
+        warnings.push({ type: "warning", code: "hard-link", externalId: id });
+      }
     });
     for (const u of unreadable) {
       const at = pathKey(u.path);
-      events.push(
-        unreadableWarning(
-          u.contents ? idAt.get(at) : before.entries.find((r) => pathKey(r.p) === at)?.id,
-        ),
+      warnings.push(
+        unreadableWarning(u.contents ? idAt.get(at) : old.find((r) => pathKey(r.p) === at)?.id),
       );
     }
-    const next = await state.writeSnapshot({
-      v: 1,
-      root: ctx.identity,
-      entries: [...recs, ...kept].sort((a, b) => compareWalk(a.p, b.p)),
-    });
-    for (const e of events) {
-      signal.throwIfAborted();
-      yield e;
+    return { next: [...recs, ...kept].sort((a, b) => compareWalk(a.p, b.p)), warnings };
+  }
+
+  /**
+   * What changed from one snapshot to the next, in the order a delta yields it: deletes (deepest
+   * first), then what is new or changed (parents first). Deterministic, so a resumed delta counts
+   * the same list.
+   */
+  function diff(ctx: Context, old: readonly Rec[], next: readonly Rec[]): SyncEvent[] {
+    const alive = new Set(next.map((r) => r.id));
+    const idAt = new Map(next.map((r) => [pathKey(r.p), r.id]));
+    const was = new Map(old.map((r) => [r.id, etagOf(r.id, entryOf(r))]));
+    const events: SyncEvent[] = [];
+    for (const r of [...old].reverse()) {
+      if (!alive.has(r.id)) events.push({ type: "deleted", externalId: r.id });
     }
-    yield { type: "done", cursor: `fs1.${next}` };
+    for (const r of next) {
+      const e = entryOf(r);
+      if (was.get(r.id) === etagOf(r.id, e)) continue;
+      const parentId = r.p.length === 1 ? null : (idAt.get(pathKey(r.p.slice(0, -1))) ?? null);
+      events.push({ type: "item", item: itemOf(ctx, r.id, parentId, e) });
+    }
+    return events;
   }
 
   /**
@@ -420,9 +527,15 @@ export function fsConnector(options: FsConnectorOptions): Connector {
     crawl,
     delta,
     read,
-    async identity(signal) {
+    async identity(signal, recorded) {
       signal.throwIfAborted();
-      return (await context()).identity;
+      const ctx = await context();
+      if (recorded === undefined || recorded === ctx.identity) return ctx.identity;
+      // A changed answer: still this folder if its files are (see sameRoot()).
+      const snapshot = await state.latestSnapshot();
+      return snapshot && (await sameRoot(ctx, recorded, snapshot.entries))
+        ? recorded
+        : ctx.identity;
     },
     async aclImport(ref, signal) {
       signal.throwIfAborted();
@@ -438,6 +551,25 @@ export function fsConnector(options: FsConnectorOptions): Connector {
       return pathToFileURL(abs).href;
     },
   };
+}
+
+/**
+ * What a root folder is: `r1:<inode>:<birth time, ns, or 0>:<file system type, or 0>`. Never its
+ * device number, which Linux and macOS give anew on a remount or a reboot.
+ */
+async function identityOf(root: string, st: BigIntStats): Promise<string> {
+  let type = "0";
+  try {
+    type = `${(await statfs(root, { bigint: true })).type}`;
+  } catch {
+    // Not every platform or file system answers; the rest still says which folder it is.
+  }
+  return `r1:${st.ino}:${st.birthtimeNs > 0n ? st.birthtimeNs : 0n}:${type}`;
+}
+
+function parseIdentity(s: string): { ino: string; birth: string; type: string } | null {
+  const m = /^r1:(\d{1,40}):(\d{1,40}):(\d{1,40})$/.exec(s);
+  return m ? { ino: m[1] as string, birth: m[2] as string, type: m[3] as string } : null;
 }
 
 /** Part of the folder couldn't be seen: the runner mustn't take it as gone. */

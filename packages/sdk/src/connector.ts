@@ -244,8 +244,13 @@ export interface Connector {
    * What the source is, as a stable string (a folder's device and inode, a site's id): the runner
    * records it on the first sync and refuses a sync when it changes (another disk mounted at the
    * same path, a site recreated), until an admin accepts the new one. Optional.
+   *
+   * `recorded` is what the runner recorded. A connector whose answer can change for the same
+   * source (a number a remount gives anew) and that can tell it is still that source (its items
+   * are still there) returns `recorded`; otherwise, what the source is now. Answer something
+   * stable: a changed answer stops every sync until an admin acts.
    */
-  identity?(signal: AbortSignal): Promise<string>;
+  identity?(signal: AbortSignal, recorded?: string): Promise<string>;
   /** Releases what it holds (connections, files). Optional. */
   close?(): Promise<void>;
 }

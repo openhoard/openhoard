@@ -376,9 +376,15 @@ export function acceptAcl(acl: unknown): ItemAcl {
  *   code or carries content (`javascript:`, `data:`, `vbscript:`, `blob:`, `about:`), even
  *   declared;
  * - no user name or password;
- * - a `file:` URL without a host (`file:///…`; `localhost` parses to none): opening
- *   `file://server/share/…` on Windows authenticates to that server (NTLM), so a connector could
- *   make people's machines send their credentials anywhere.
+ * - a `file:` URL that can only mean a local path. Opening `file://server/share/…` on Windows
+ *   authenticates to that server (NTLM), so a connector could make people's machines send their
+ *   credentials anywhere, and browsers and the Windows shell find a server in more spellings than
+ *   the URL parser does: `file:////server/…`, `file://localhost//server/…`, backslashes
+ *   (`file:\\\\server\\…`, `file:///\\\\server`), and encoded slashes. So a `file:` URL has no host,
+ *   no path starting with `//`, no backslash anywhere, and no `%5C` or `%2F`.
+ *
+ * Whatever passes is kept and used as {@link canonicalUrl} gives it (the parser's own text),
+ * never as the connector wrote it.
  */
 export function checkUrl(url: unknown, description?: ConnectorDescription): string | null {
   if (!text(url, LIMITS.url)) return "a URL must be text of at most 4,096 characters";
@@ -393,8 +399,22 @@ export function checkUrl(url: unknown, description?: ConnectorDescription): stri
     return `scheme ${parsed.protocol} is not one the connector declared`;
   }
   if (parsed.username !== "" || parsed.password !== "") return "a URL must not carry credentials";
-  if (parsed.protocol === "file:" && parsed.host !== "") return "a file: URL must not name a host";
+  if (parsed.protocol === "file:") {
+    if (parsed.host !== "") return "a file: URL must not name a host";
+    if (url.includes("\\")) return "a file: URL must not hold a backslash";
+    if (parsed.pathname.startsWith("//")) return "a file: URL's path must not name a host";
+    if (/%(5c|2f)/i.test(parsed.pathname)) return "a file: URL must not encode a slash";
+  }
+  if ([...parsed.href].length > LIMITS.url) return "a URL must be at most 4,096 characters";
   return null;
+}
+
+/**
+ * The URL as the parser writes it (`new URL(url).href`): what is stored and handed out, so what
+ * was checked is what is used. Only for a URL {@link checkUrl} accepted.
+ */
+export function canonicalUrl(url: string): string {
+  return new URL(url).href;
 }
 
 /** What is wrong with a URL redirect() returned, or null: {@link checkUrl}. */

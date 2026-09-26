@@ -1,6 +1,7 @@
 import { basename } from "node:path";
 import { isConnectorError, type SourceItem, type SyncEvent } from "@openhoard/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fsConnector } from "./fs-connector.js";
 import { fsSource } from "./testing/fixture.js";
 
 /*
@@ -12,6 +13,8 @@ import { fsSource } from "./testing/fixture.js";
 const refuse = vi.hoisted(() => ({
   readdir: new Map<string, string>(),
   lstat: new Map<string, string>(),
+  /** Names lstat() reports on another device (a mount point). */
+  mounted: new Set<string>(),
 }));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -19,9 +22,15 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   const failing =
     (which: "readdir" | "lstat", original: (...args: never[]) => Promise<unknown>) =>
     async (...args: unknown[]) => {
-      const code = refuse[which].get(basename(String(args[0])));
+      const name = basename(String(args[0]));
+      const code = refuse[which].get(name);
       if (code !== undefined) throw Object.assign(new Error(`${code}: refused`), { code });
-      return (original as (...a: unknown[]) => Promise<unknown>)(...args);
+      const result = await (original as (...a: unknown[]) => Promise<unknown>)(...args);
+      const st = result as { dev?: unknown };
+      if (which === "lstat" && refuse.mounted.has(name) && typeof st.dev === "bigint") {
+        Object.assign(st, { dev: st.dev + 1n });
+      }
+      return result;
     };
   return {
     ...real,
@@ -54,6 +63,7 @@ const deltaOf = (cursor: string) => {
 beforeEach(async () => {
   refuse.readdir.clear();
   refuse.lstat.clear();
+  refuse.mounted.clear();
   src = await fsSource({ checkpointEvery: 100 });
   await src.write(["Locked", "a.txt"], enc.encode("a"));
   await src.write(["Locked", "b.txt"], enc.encode("b"));
@@ -63,6 +73,7 @@ beforeEach(async () => {
 afterEach(async () => {
   refuse.readdir.clear();
   refuse.lstat.clear();
+  refuse.mounted.clear();
   await src.close();
 });
 
@@ -128,5 +139,38 @@ describe("fs connector: places it can't see", () => {
     refuse.readdir.set("Locked", "ENOENT");
     const gone = await events(deltaOf(cursorOf(crawl)));
     expect(gone.filter((e) => e.type === "deleted")).toHaveLength(2);
+  });
+
+  it("takes a busy file (Windows' pagefile.sys and the like) as unreadable, not as a failure", async () => {
+    const crawl = await events(src.connector.crawl(null, signal()));
+    refuse.lstat.set("Hidden.txt", "EBUSY");
+    const busy = await events(deltaOf(cursorOf(crawl)));
+    expect(busy.filter((e) => e.type === "deleted")).toEqual([]);
+    expect(busy.filter((e) => e.type === "warning")).toEqual([
+      { type: "warning", code: "unreadable", externalId: idOf(itemsOf(crawl), "Hidden.txt") },
+    ]);
+  });
+
+  it("keeps what a mount over a folder hides, unless told to skip other devices", async () => {
+    const crawl = await events(src.connector.crawl(null, signal()));
+    const items = itemsOf(crawl);
+    refuse.mounted.add("Locked");
+    const hidden = await events(deltaOf(cursorOf(crawl)));
+    expect(hidden.filter((e) => e.type === "deleted")).toEqual([]);
+    expect(hidden.filter((e) => e.type === "warning")).toEqual([
+      { type: "warning", code: "unreadable", externalId: idOf(items, "Locked") },
+    ]);
+
+    const skipping = fsConnector({
+      root: src.root,
+      stateDir: src.stateDir,
+      otherDevices: "skip",
+    });
+    if (!skipping.delta) throw new Error("no delta");
+    const gone = await events(skipping.delta(cursorOf(hidden), signal()));
+    expect(gone.filter((e) => e.type === "deleted")).toHaveLength(3);
+    expect(() =>
+      fsConnector({ root: src.root, stateDir: src.stateDir, otherDevices: "x" as never }),
+    ).toThrow(RangeError);
   });
 });

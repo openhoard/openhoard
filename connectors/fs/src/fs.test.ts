@@ -176,6 +176,41 @@ describe("fs connector: state", () => {
   });
 });
 
+describe("fs connector: delta checkpoints", () => {
+  it("checkpoints a long delta, and resumes it without walking again", async () => {
+    for (let i = 0; i < 7; i++) await src.write([`f${i}.txt`], enc.encode(`${i}`));
+    const cursor = cursorOf(await events(connector.crawl(null, signal())));
+    for (let i = 0; i < 7; i++) await src.write([`f${i}.txt`], enc.encode(`changed ${i}`));
+    const full = await events(need(connector.delta)(cursor, signal()));
+    const changed = itemsOf(full).map((i) => i.externalId);
+    expect(changed).toHaveLength(7);
+    expect(full.filter((e) => e.type === "checkpoint").length).toBeGreaterThan(1);
+
+    // Stopped at the first checkpoint; the folder changes again meanwhile.
+    const before: SyncEvent[] = [];
+    let token: string | undefined;
+    for await (const e of need(connector.delta)(cursor, signal())) {
+      before.push(e);
+      if (e.type === "checkpoint") {
+        token = e.token;
+        break;
+      }
+    }
+    expect(token).toMatch(/^fs1d\./);
+    await src.write(["late.txt"], enc.encode("late"));
+    const after = await events(need(connector.delta)(token as string, signal()));
+    // The rest of the same difference: nothing twice, nothing missing, late.txt not yet.
+    expect([...itemsOf(before), ...itemsOf(after)].map((i) => i.externalId)).toEqual(changed);
+    const next = await events(need(connector.delta)(cursorOf(after), signal()));
+    expect(itemsOf(next).map((i) => i.path.join("/"))).toEqual(["late.txt"]);
+    expect(
+      await codeOf(
+        events(need(connector.delta)(`fs1d.${"0".repeat(64)}.${"1".repeat(64)}.2`, signal())),
+      ),
+    ).toBe("resync");
+  });
+});
+
 describe("fs connector: never outside the root", () => {
   it("never follows links, to files or folders, inside or outside the root", async () => {
     await src.write(["real.txt"], enc.encode("real"));
@@ -293,14 +328,15 @@ describe("fs connector: identity", () => {
     ).toThrow(RangeError);
   });
 
-  it("names the root by its device and inode, the same every time", async () => {
+  it("names the root by its inode, birth time and file system type, the same every time", async () => {
     const identity = await need(connector.identity)(signal());
-    expect(identity).toMatch(/^\d+:\d+$/);
+    expect(identity).toMatch(/^r1:\d+:\d+:\d+$/);
     await src.write(["a.txt"], enc.encode("a"));
     expect(await need(connector.identity)(signal())).toBe(identity);
     await rename(src.root, `${src.root}-old`);
     await mkdir(src.root);
-    expect(await need(connector.identity)(signal())).not.toBe(identity);
+    // Another folder at the path: another answer, even asked with the one recorded.
+    expect(await need(connector.identity)(signal(), identity)).not.toBe(identity);
     await rm(`${src.root}-old`, { recursive: true });
   });
 

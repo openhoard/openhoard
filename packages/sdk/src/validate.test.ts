@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { ConnectorDescription, SourceItem } from "./connector.js";
 import {
   acceptAcl,
+  canonicalUrl,
   checkAcl,
   checkDescription,
   checkEvent,
@@ -334,6 +335,27 @@ describe("checkRedirect", () => {
     expect(checkRedirect("file://localhost/srv/a.txt", description)).toBeNull();
     expect(checkRedirect("file://evil.example/share/a.txt", description)).toMatch(/host/);
     expect(checkRedirect("file://10.0.0.1/c$/a.txt", description)).toMatch(/host/);
+  });
+
+  it.each([
+    ["four slashes", "file:////attacker.example/share/x"],
+    ["localhost and two slashes", "file://localhost//evil/share/x"],
+    ["backslashes for slashes", "file:\\\\evil.example\\share\\x"],
+    ["backslashes after three slashes", "file:///\\\\evil\\share"],
+    ["a backslash in the path", "file:///C:/Users\\ann/x"],
+    ["an encoded backslash", "file:///%5C%5Cevil/share"],
+    ["an encoded slash, lower case", "file:///x/%2f%2fevil/share"],
+  ])("refuses a file: URL Windows would open as a share: %s", (_label, url) => {
+    // Most of these parse with an empty host; browsers and the shell see a server in each.
+    expect(checkRedirect(url, description)).not.toBeNull();
+    expect(checkItem({ ...file, url }, description)).toMatch(/^url: /);
+  });
+
+  it("gives the parser's own text to keep, not the connector's", () => {
+    expect(canonicalUrl("FILE://LOCALHOST/srv/a%20b.txt")).toBe("file:///srv/a%20b.txt");
+    expect(canonicalUrl("HTTPS://Contoso.SharePoint.com/a b")).toBe(
+      "https://contoso.sharepoint.com/a%20b",
+    );
   });
 });
 

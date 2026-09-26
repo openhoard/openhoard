@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { resyncError } from "@openhoard/sdk";
@@ -186,7 +186,7 @@ export class StateDir {
    * The entries a crawl had yielded by a checkpoint: its journal's first `bytes`, after the
    * header. Refused (`resync`) when the journal is gone, shorter, damaged, or of another root.
    */
-  async readJournal(run: string, bytes: number, root: string): Promise<Rec[]> {
+  async readJournal(run: string, bytes: number): Promise<{ root: string; recs: Rec[] }> {
     let buf: Buffer;
     try {
       buf = await readFile(this.journal(run));
@@ -203,15 +203,16 @@ export class StateDir {
       typeof header !== "object" ||
       header === null ||
       (header as { run?: unknown }).run !== run ||
-      (header as { root?: unknown }).root !== root
+      typeof (header as { root?: unknown }).root !== "string"
     ) {
       throw resyncError();
     }
-    return rest.map((line) => {
+    const recs = rest.map((line) => {
       const rec = parse(line);
       if (!isRec(rec)) throw resyncError();
       return rec;
     });
+    return { root: (header as { root: string }).root, recs };
   }
 
   /** Writes a snapshot (atomically: a temporary file renamed into place); returns its digest. */
@@ -248,10 +249,29 @@ export class StateDir {
   }
 
   /**
-   * Removes what no token in use can name: with `snapshots`, every snapshot but that one (and
-   * any half-written one); with `journals`, every crawl journal but that run's.
+   * The newest snapshot there is (the cursor the runner holds, as far as the connector can tell),
+   * or null: what identity() compares the folder with.
    */
-  async prune(options: { snapshots?: { keep: string }; journals?: { keep: string } }) {
+  async latestSnapshot(): Promise<Snapshot | null> {
+    let newest: { digest: string; at: number } | undefined;
+    try {
+      for (const name of await readdir(this.dir)) {
+        const m = /^snap-([0-9a-f]{64})\.json\.gz$/.exec(name);
+        if (!m) continue;
+        const at = (await stat(join(this.dir, name))).mtimeMs;
+        if (!newest || at > newest.at) newest = { digest: m[1] as string, at };
+      }
+      return newest ? await this.readSnapshot(newest.digest) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Removes what no token in use can name: with `snapshots`, every snapshot but those (and any
+   * half-written one); with `journals`, every crawl journal but that run's.
+   */
+  async prune(options: { snapshots?: { keep: readonly string[] }; journals?: { keep: string } }) {
     let names: string[];
     try {
       names = await readdir(this.dir);
@@ -263,7 +283,7 @@ export class StateDir {
       const crawl = /^crawl-([0-9a-f]{16})\.jsonl$/.exec(name);
       const drop = snap
         ? options.snapshots !== undefined &&
-          (snap[2] !== undefined || snap[1] !== options.snapshots.keep)
+          (snap[2] !== undefined || !options.snapshots.keep.includes(snap[1] as string))
         : crawl
           ? options.journals !== undefined && crawl[1] !== options.journals.keep
           : false;

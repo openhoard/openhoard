@@ -208,6 +208,8 @@ export function connectorContract(name: string, fixture: ContractFixture): void 
         expect(storableText(identity) && identity.length > 0 && identity.length <= 1024).toBe(true);
         await seed();
         expect(await connector.identity(signal)).toBe(identity);
+        // Asked with what was recorded, an unchanged source answers the same.
+        expect(await connector.identity(signal, identity)).toBe(identity);
       },
       timeout,
     );
