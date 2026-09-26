@@ -257,6 +257,9 @@ importers:
       '@openhoard/core-jobs':
         specifier: workspace:^
         version: link:../../core/jobs
+      '@openhoard/core-models':
+        specifier: workspace:^
+        version: link:../../core/models
       '@openhoard/core-policy':
         specifier: workspace:^
         version: link:../../core/policy
@@ -389,9 +392,15 @@ importers:
       '@openhoard/core-identity':
         specifier: workspace:^
         version: link:../identity
+      '@openhoard/core-models':
+        specifier: workspace:^
+        version: link:../models
       '@openhoard/core-policy':
         specifier: workspace:^
         version: link:../policy
+      '@openhoard/core-summarize':
+        specifier: workspace:^
+        version: link:../summarize
       '@openhoard/enricher-extract':
         specifier: workspace:^
         version: link:../../enrichers/extract
@@ -414,6 +423,22 @@ importers:
       '@openhoard/testkit':
         specifier: workspace:*
         version: link:../../packages/testkit
+
+  core/models:
+    dependencies:
+      '@openhoard/core-db':
+        specifier: workspace:^
+        version: link:../db
+      '@openhoard/core-policy':
+        specifier: workspace:^
+        version: link:../policy
+      drizzle-orm:
+        specifier: ^0.45.3
+        version: 0.45.3(@electric-sql/pglite@0.5.8)(@types/pg@8.23.1)(pg@8.23.0)
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
 
   core/policy:
     dependencies:

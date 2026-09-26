@@ -27,6 +27,7 @@
     "@openhoard/core-db": "workspace:^",
     "@openhoard/core-identity": "workspace:^",
     "@openhoard/core-jobs": "workspace:^",
+    "@openhoard/core-models": "workspace:^",
     "@openhoard/core-policy": "workspace:^",
     "hono": "^4.8.0",
     "openid-client": "^6.8.8",
