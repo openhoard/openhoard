@@ -333,9 +333,36 @@ The **admin API** is JSON under `/api/admin`, for the admin UI to come and for s
   is `publicUrl`'s origin, this machine's (`localhost`, `127.0.0.1`, `[::1]`: the MCP
   Inspector), or listed in `auth.mcpOrigins`. That is the spec's defence against DNS rebinding.
   Only those origins get CORS headers. Hosted clients call from their servers, with no `Origin`.
-- **Tools:** `whoami` (the person, the client's id and trust, the scopes granted). `find`, `recent`
-  and `describe` come with T-802. A tool is an `McpTool` (src/mcp.ts): it runs with the request's
-  caller and an activity buffer.
+- **Tools** (src/tools/, T-802..T-806). Each is an `McpTool`: it runs with the request's caller,
+  its activity buffer and audit trail, the tenant's policies (its packs' Cedar rules, compiled
+  once per policy set) and the model the call reports (`_meta`).
+  - `whoami`: the person, the client's id and trust, the scopes granted.
+  - `find` (query, tags, kind, media type, modified range, limit, cursor): a top match and
+    alternatives as compact cards (id, title as shown, kind, modified, owner's name, tags,
+    summary where the card allows, and which channels matched: never a text snippet). Queries
+    are embedded by local providers only, when an embeddings model is configured.
+  - `recent` (period or from/to in an IANA `timeZone`, actions, kind, media type): the files the
+    person themself viewed, opened or edited, from the activity log (T-506). Reads no content.
+  - `describe` (id): one card and, for a reader, its versions.
+  - `open` (id, `link` or `content`): the source's web link, checked as it leaves (https only,
+    no credentials, canonical: @openhoard/sdk checkUrl/canonicalUrl), or the extracted text
+    when exposure allows, cut to the budget and wrapped between `BEGIN-FILE-TEXT-<nonce>` and
+    `END-FILE-TEXT-<nonce>` with a note that it is untrusted data.
+  - `tag` (id, facet:value; needs `files:tag`): a proposal in the review inbox (reason `agent`),
+    never applied; only approved values, never one that sets a visibility or exposure level or
+    has a live grant; the person must be allowed to tag the file; 30 per hour per person and
+    client (per process). An agent's write is thereby always a person's decision in
+    OpenHoard's app (T-605, for tags).
+  - `explain` (id, optional person): who has access and why, for the file's owner only.
+- **Budget and shapes.** Every answer fits a token budget (2,000 by default, `maxTokens` 500 to
+  8,000; estimated at a third of a token per ASCII character and two per other), and lists end
+  with a cursor. Output schemas are pinned (`src/tools/__snapshots__`): a changed shape fails CI
+  until the snapshot is updated on purpose.
+- **Audit (T-704).** Every tool call is audited as `mcp.tool` (tool, outcome, file, client, trust,
+  reported model; never its arguments). Every AI read is audited as `ai.read` with the client,
+  the reported model (`_meta["openhoard/model"]`, `_meta.model` or `_meta.clientInfo.model`,
+  else `unknown`), the file and the version: each content `open`, and each card with a summary.
+  Tag proposals are `tag.propose`. All are written with the activity, before the answer leaves.
 - **Activity (T-205).** Each request gets an `ActivityBuffer` that the tools' gated reads record
   into. It is written once the response is ready, and if that fails the answer is withheld (500):
   an AI read is never left unrecorded. Events keep the client's id and trust.

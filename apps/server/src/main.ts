@@ -46,9 +46,10 @@ log.info({ database: db.kind }, "database ready");
 // Background jobs (core/jobs on pg-boss, in the same database). Every node can enqueue; with
 // jobs.worker (the default) this one also runs enrichment and the maintenance schedule.
 let jobs: Jobs;
+let models: ReturnType<typeof createServerModels>;
 try {
   // Model providers (T-404) from `models`, keys from OPENHOARD_MODEL_<ID>_API_KEY; none, no model.
-  const models = createServerModels(config.models, process.env, log.child({ component: "models" }));
+  models = createServerModels(config.models, process.env, log.child({ component: "models" }));
   // The server passes no content source yet (M1 zones are index-only): say so, once.
   const warning = modelsStartupWarning(models, false);
   if (warning !== null) log.warn(warning);
@@ -79,7 +80,11 @@ try {
 }
 log.info({ worker: config.jobs.worker }, "job queue ready");
 
-const app = createApp(config, log, { db });
+// The MCP `find` tool embeds queries with the same providers (local ones only, by default).
+const app = createApp(config, log, {
+  db,
+  ...(models === null ? {} : { embed: { router: models.router, budget: models.budget } }),
+});
 const server = serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) =>
   log.info({ address: info.address, port: info.port, dataDir: config.dataDir }, "listening"),
 );

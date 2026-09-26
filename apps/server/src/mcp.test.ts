@@ -175,7 +175,7 @@ describe("the MCP server", () => {
     expect(client.getServerVersion()).toMatchObject({ name: "openhoard" });
     expect(transport.sessionId).toBeUndefined();
     const { tools } = await client.listTools();
-    expect(tools.map((x) => x.name)).toEqual(["whoami"]);
+    expect(tools.map((x) => x.name)).toEqual(TOOLS.map((x) => x.name));
     expect(tools[0]?.annotations).toMatchObject({ readOnlyHint: true });
     const result = await client.callTool({ name: "whoami", arguments: {} });
     expect(result.isError).toBeFalsy();
@@ -559,8 +559,16 @@ describe("tools", () => {
     return app;
   }
 
-  it("serves only whoami in T-801", () => {
-    expect(TOOLS.map((x) => x.name)).toEqual(["whoami"]);
+  it("serves whoami (T-801) and the file tools (T-802..T-806)", () => {
+    expect(TOOLS.map((x) => x.name)).toEqual([
+      "whoami",
+      "find",
+      "recent",
+      "describe",
+      "open",
+      "tag",
+      "explain",
+    ]);
   });
 });
 

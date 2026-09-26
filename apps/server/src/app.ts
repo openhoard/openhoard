@@ -7,7 +7,7 @@ import { mountAdminApi } from "./admin-api.js";
 import { mountAuth, type AuthEnv } from "./auth.js";
 import { adminGroupOf, type Config } from "./config.js";
 import { loginKey } from "./login-state.js";
-import { mountMcp, type McpTool } from "./mcp.js";
+import { mountMcp, type EmbedDeps, type McpTool } from "./mcp.js";
 import type { MetadataFetcher } from "./oauth/clients.js";
 import { mountOAuth } from "./oauth/routes.js";
 import { mountScim, type ScimOptions } from "./scim/routes.js";
@@ -23,6 +23,8 @@ export interface AppDeps {
   fetchMetadata?: MetadataFetcher;
   /** The MCP tools to serve; mcp.ts TOOLS by default. */
   mcpTools?: readonly McpTool[];
+  /** Query embeddings for the MCP `find` tool, when an embeddings model is configured. */
+  embed?: EmbedDeps;
   /** SCIM limits (tests lower or raise them). */
   scim?: ScimOptions;
 }
@@ -99,6 +101,7 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
       origins: config.auth.mcpOrigins,
       ...(log ? { log } : {}),
       ...(deps.mcpTools ? { tools: deps.mcpTools } : {}),
+      ...(deps.embed ? { embed: deps.embed } : {}),
     });
   }
 
