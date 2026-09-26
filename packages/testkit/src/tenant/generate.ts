@@ -1,6 +1,6 @@
-import type { SourceAcl } from "@openhoard/sdk";
 import { Random } from "../random.js";
 import type {
+  FakeAclEntry,
   FakeGroup,
   FakeItem,
   FakeSite,
@@ -287,7 +287,7 @@ class ItemBuilder {
     rng: Random,
     site: FakeSite,
     parent: FakeItem | undefined,
-    rootAcl: SourceAcl[],
+    rootAcl: FakeAclEntry[],
     base: string,
   ): FakeItem {
     const item = this.newItem(rng, site, parent, "folder", base);
@@ -301,7 +301,7 @@ class ItemBuilder {
     rng: Random,
     site: FakeSite,
     parent: FakeItem | undefined,
-    rootAcl: SourceAcl[],
+    rootAcl: FakeAclEntry[],
     opts: { forceName?: string },
   ): FakeItem {
     const type = rng.pick(DOC_TYPES);
@@ -439,7 +439,7 @@ class ItemBuilder {
   }
 
   /** Breaks inheritance: a few named people from the site, plus the creator as owner. */
-  private uniqueAcl(rng: Random, site: FakeSite, item: FakeItem): SourceAcl[] {
+  private uniqueAcl(rng: Random, site: FakeSite, item: FakeItem): FakeAclEntry[] {
     const readers = site.readerGroups.flatMap((g) => this.groups.get(g)?.members ?? []);
     const chosen = rng.sample(
       readers.filter((u) => u !== item.createdBy),
@@ -447,7 +447,7 @@ class ItemBuilder {
     );
     return [
       { externalId: item.id, principal: `user:${item.createdBy}`, role: "owner", inherited: false },
-      ...chosen.sort().map((u): SourceAcl => ({
+      ...chosen.sort().map((u): FakeAclEntry => ({
         externalId: item.id,
         principal: `user:${u}`,
         role: rng.chance(0.3) ? "write" : "read",
@@ -471,10 +471,10 @@ class ItemBuilder {
 }
 
 /** The entries every item in a site inherits unless it breaks inheritance. */
-export function siteAcl(site: FakeSite): SourceAcl[] {
+export function siteAcl(site: FakeSite): FakeAclEntry[] {
   const writers = new Set(site.writerGroups);
   return [
-    ...site.writerGroups.map((g): SourceAcl => ({
+    ...site.writerGroups.map((g): FakeAclEntry => ({
       externalId: site.id,
       principal: `group:${g}`,
       role: "write",
@@ -482,7 +482,7 @@ export function siteAcl(site: FakeSite): SourceAcl[] {
     })),
     ...site.readerGroups
       .filter((g) => !writers.has(g))
-      .map((g): SourceAcl => ({
+      .map((g): FakeAclEntry => ({
         externalId: site.id,
         principal: `group:${g}`,
         role: "read",
@@ -492,7 +492,7 @@ export function siteAcl(site: FakeSite): SourceAcl[] {
 }
 
 /** Copies a parent's entries onto a child. Explicit shares (links, guests) do not propagate. */
-export function inheritAcl(parentAcl: readonly SourceAcl[], itemId: string): SourceAcl[] {
+export function inheritAcl(parentAcl: readonly FakeAclEntry[], itemId: string): FakeAclEntry[] {
   return parentAcl
     .filter((a) => a.principal !== "anyone-with-link" && !a.principal.startsWith("guest:"))
     .map((a) => ({ externalId: itemId, principal: a.principal, role: a.role, inherited: true }));

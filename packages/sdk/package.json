@@ -2,12 +2,16 @@
   "name": "@openhoard/sdk",
   "version": "0.0.0",
   "private": true,
-  "description": "Plugin SDK: connector and enricher interfaces.",
+  "description": "Plugin SDK: the connector and enricher interfaces, and the connector contract kit.",
   "type": "module",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
     }
   },
   "files": [
@@ -24,8 +28,17 @@
     "@openhoard/schemas": "workspace:^",
     "@openhoard/core-policy": "workspace:^"
   },
+  "peerDependencies": {
+    "vitest": "^5.0.1"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
+  },
   "devDependencies": {
-    "@openhoard/config": "workspace:*"
+    "@openhoard/config": "workspace:*",
+    "vitest": "^5.0.1"
   },
   "license": "Apache-2.0"
 }

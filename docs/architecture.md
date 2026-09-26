@@ -52,13 +52,13 @@ v1 engine: Postgres full-text search + pgvector, fused with reciprocal rank fusi
 
 ## Extension points
 
-| Type      | Interface (v1)                                                    | Runs in                                       |
-| --------- | ----------------------------------------------------------------- | --------------------------------------------- |
-| Connector | `crawl`, `delta`, `read`, `write`, `acl_import`, `redirect`       | Sandbox with a network allowlist              |
-| Enricher  | `accepts` → `extract` → `propose_tags`, `fields`, `summary_hints` | WASM or container; no network by default      |
-| Pack      | Declarative facets, values, defaults, Cedar policies + tests      | Data only                                     |
-| Skill     | SKILL.md using core MCP tools                                     | The user's agent, with the user's permissions |
-| Client    | Gateway REST/MCP + webhooks                                       | Outside the core, allowlisted OAuth client    |
+| Type      | Interface (v1)                                                     | Runs in                                       |
+| --------- | ------------------------------------------------------------------ | --------------------------------------------- |
+| Connector | `describe`, `crawl`, `delta`, `read`, `aclImport`, `redirect` (v1) | Sandbox with a network allowlist              |
+| Enricher  | `accepts` → `extract` → `propose_tags`, `fields`, `summary_hints`  | WASM or container; no network by default      |
+| Pack      | Declarative facets, values, defaults, Cedar policies + tests       | Data only                                     |
+| Skill     | SKILL.md using core MCP tools                                      | The user's agent, with the user's permissions |
+| Client    | Gateway REST/MCP + webhooks                                        | Outside the core, allowlisted OAuth client    |
 
 Manifest schema: [`schemas/plugin-manifest.v1.schema.json`](../schemas/plugin-manifest.v1.schema.json).
 

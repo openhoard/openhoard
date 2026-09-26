@@ -1,4 +1,15 @@
-import type { SourceAcl } from "@openhoard/sdk";
+/**
+ * One permission on a fake item, as the fake tenant keeps it (the ground truth the fake Graph
+ * serves as `permission` resources). A connector reports permissions in the SDK's normalized form
+ * (`AclEntry`); this is the source side.
+ */
+export interface FakeAclEntry {
+  externalId: string;
+  principal: string; // "user:…", "group:…", "anyone-with-link", "guest:…"
+  role: "read" | "write" | "owner";
+  expiresAt?: string;
+  inherited: boolean;
+}
 
 /** A person in the fake tenant. Guests are external people invited to a site or file. */
 export interface FakeUser {
@@ -62,7 +73,7 @@ export interface FakeItem {
    * or a parent folder carry `inherited: true`. Items that break inheritance carry only their
    * own entries.
    */
-  acl: SourceAcl[];
+  acl: FakeAclEntry[];
   /** A unique token planted in the name and content of restricted files (leak harness). */
   canary?: string;
 }

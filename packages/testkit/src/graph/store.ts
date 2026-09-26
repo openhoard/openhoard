@@ -1,4 +1,4 @@
-import type { SourceAcl } from "@openhoard/sdk";
+import type { FakeAclEntry } from "../tenant/types.js";
 import { inheritAcl, siteAcl } from "../tenant/generate.js";
 import type { FakeItem, FakeTenant } from "../tenant/types.js";
 
@@ -115,7 +115,7 @@ export class TenantStore {
    * Replaces an item's permissions with its own entries (breaking inheritance). Descendants
    * that inherit are updated too, and each shows up as changed in the next delta.
    */
-  setAcl(id: string, acl: Omit<SourceAcl, "externalId" | "inherited">[]): StoredItem {
+  setAcl(id: string, acl: Omit<FakeAclEntry, "externalId" | "inherited">[]): StoredItem {
     const item = this.require(id);
     item.acl = acl.map((a) => ({ ...a, externalId: id, inherited: false }));
     this.touch(item, "updated");

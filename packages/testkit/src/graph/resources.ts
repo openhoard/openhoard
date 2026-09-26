@@ -1,5 +1,4 @@
-import type { SourceAcl } from "@openhoard/sdk";
-import type { FakeSite, FakeTenant, FakeUser } from "../tenant/types.js";
+import type { FakeAclEntry, FakeSite, FakeTenant, FakeUser } from "../tenant/types.js";
 import type { StoredItem, Tombstone } from "./store.js";
 
 /*
@@ -85,7 +84,7 @@ export function deletedItem(t: Tombstone) {
 
 /** One Graph permission per ACL entry. Inherited entries name where they come from. */
 export function permissionResource(
-  entry: SourceAcl,
+  entry: FakeAclEntry,
   index: number,
   item: StoredItem,
   tenant: FakeTenant,

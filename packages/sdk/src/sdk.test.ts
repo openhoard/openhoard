@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { defineConnector, defineEnricher, readUpTo } from "./index.js";
+import {
+  CONNECTOR_API_VERSION,
+  defineConnector,
+  defineEnricher,
+  manifestCapabilities,
+  readUpTo,
+  type ConnectorDescription,
+} from "./index.js";
 
 const manifest = {
   manifest_version: 1 as const,
@@ -22,16 +29,37 @@ function streamOf(...parts: string[]): ReadableStream<Uint8Array> {
 }
 
 describe("SDK helpers", () => {
+  const description: ConnectorDescription = {
+    apiVersion: CONNECTOR_API_VERSION,
+    id: "example",
+    version: "0.0.1",
+    zoneKinds: ["indexed"],
+    capabilities: { delta: false, aclImport: false, redirect: false },
+    stableIds: true,
+  };
+
   it("defineConnector returns the connector unchanged", async () => {
     const c = defineConnector({
-      manifest,
-      crawl: async () => ({ items: [] }),
-      delta: async () => ({ changed: [], deleted: [], token: "t1" }),
-      read: async () => streamOf(),
+      describe: () => description,
+      async *crawl(_checkpoint: string | null, _signal: AbortSignal) {
+        yield { type: "done" as const, cursor: "c1" };
+      },
+      read: async () => ({ contentVersion: "1", size: 0, body: (async function* () {})() }),
     });
-    expect((await c.crawl()).items).toEqual([]);
-    expect((await c.delta()).token).toBe("t1");
-    expect(await c.read("x")).toBeInstanceOf(ReadableStream);
+    const events = [];
+    for await (const e of c.crawl(null, new AbortController().signal)) events.push(e);
+    expect(events).toEqual([{ type: "done", cursor: "c1" }]);
+    expect(c.describe().id).toBe("example");
+  });
+
+  it("names the manifest capabilities a connector needs", () => {
+    expect(manifestCapabilities(description)).toEqual(["source:crawl", "read:content"]);
+    expect(
+      manifestCapabilities({
+        ...description,
+        capabilities: { delta: true, aclImport: true, redirect: true },
+      }),
+    ).toEqual(["source:crawl", "read:content", "source:delta", "import:acl", "source:redirect"]);
   });
 
   it("defineEnricher returns the enricher unchanged and works on streams", async () => {
