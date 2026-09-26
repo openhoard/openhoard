@@ -8,3 +8,7 @@ and hint summaries.
 
 Enrichers _propose_; the core validates against the tag vocabulary and exposure rules.
 All enrichers must pass the prompt-injection red-team suite.
+
+| Package                | What                                                                                                       |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------- |
+| [`extract/`](extract/) | Text, Markdown, CSV, Word, Excel, PowerPoint and PDF text and metadata, in a limited child process (T-402) |

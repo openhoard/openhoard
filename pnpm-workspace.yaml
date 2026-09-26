@@ -8,6 +8,10 @@ packages:
   - "!packages/cli-py"
 allowBuilds:
   esbuild: true
+# pdfjs-dist (enrichers/extract) offers a native canvas addon for rendering. Extraction only reads
+# text, and the extractor child process refuses native addons, so it is never installed.
+ignoredOptionalDependencies:
+  - "@napi-rs/canvas"
 overrides:
   # drizzle-kit (dev only) pulls esbuild 0.18 through the deprecated @esbuild-kit loader.
   # GHSA-67mh-4wv8-2f99 affects esbuild's dev server, which nothing here runs, but the

@@ -1,0 +1,30 @@
+{
+  "kind": "xlsx",
+  "text": "Data\nName\tPaid\nTokyo\tTRUE\t2",
+  "truncated": false,
+  "metadata": {
+    "sheets": [
+      {
+        "name": "Data",
+        "state": "visible"
+      },
+      {
+        "name": "Chart",
+        "state": "visible"
+      }
+    ]
+  },
+  "signals": [
+    {
+      "kind": "comment",
+      "count": 1,
+      "sample": "Check this"
+    },
+    {
+      "kind": "formula",
+      "count": 1,
+      "sample": "1+1"
+    }
+  ],
+  "warnings": []
+}

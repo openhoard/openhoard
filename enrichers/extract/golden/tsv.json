@@ -1,0 +1,25 @@
+{
+  "kind": "csv",
+  "text": "a\tb\n1\t2\n3\t4",
+  "truncated": false,
+  "metadata": {
+    "encoding": "utf-8",
+    "csv": {
+      "delimiter": "\t",
+      "header": true,
+      "columns": [
+        {
+          "name": "a",
+          "type": "integer"
+        },
+        {
+          "name": "b",
+          "type": "integer"
+        }
+      ],
+      "rows": 2
+    }
+  },
+  "signals": [],
+  "warnings": []
+}

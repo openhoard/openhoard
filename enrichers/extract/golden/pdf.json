@@ -1,0 +1,43 @@
+{
+  "kind": "pdf",
+  "text": "Invoice 42\nTotal due: 100 EUR\nwhite words\ntiny words\nghost words",
+  "truncated": false,
+  "metadata": {
+    "pages": 1,
+    "title": "Invoice",
+    "author": "Dee Biller"
+  },
+  "signals": [
+    {
+      "kind": "invisible-text",
+      "count": 2,
+      "sample": "ghost words"
+    },
+    {
+      "kind": "white-text",
+      "count": 1,
+      "sample": "white words"
+    },
+    {
+      "kind": "tiny-text",
+      "count": 1,
+      "sample": "tiny words"
+    },
+    {
+      "kind": "off-page-text",
+      "count": 1,
+      "sample": "far away"
+    },
+    {
+      "kind": "annotation",
+      "count": 1,
+      "sample": "a sticky note"
+    },
+    {
+      "kind": "document-properties",
+      "count": 1,
+      "sample": "Subject: pay now"
+    }
+  ],
+  "warnings": []
+}

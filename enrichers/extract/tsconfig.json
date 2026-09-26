@@ -1,0 +1,14 @@
+{
+  "extends": "@openhoard/config/tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    // The extractor's child process runs from src/ in this package's tests, through Node's type
+    // stripping: imports name the .ts files, and only erasable syntax is allowed.
+    "rewriteRelativeImportExtensions": true,
+    // String.prototype.toWellFormed (Node 20+).
+    "lib": ["ES2024"],
+    "erasableSyntaxOnly": true
+  },
+  "include": ["src"]
+}

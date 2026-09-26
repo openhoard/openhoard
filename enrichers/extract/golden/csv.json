@@ -1,0 +1,55 @@
+{
+  "kind": "csv",
+  "text": "id\tname\tamount\tpaid\tday\twhen\tnote\n1\tSmith, Ann\t12.50\ttrue\t2026-01-02\t2026-01-02T10:00:00Z\t\n2\tBo\t-3\tfalse\t2026-02-28\t2026-02-28 09:30\tmulti\nline\n3\tCy\t1e3\tTRUE\t2026-03-01\t2026-03-01T00:00\t=HYPERLINK(\"http://x.test\")\n4\tDi\t7\tfalse\t2026-13-01\t2026-03-01T00:00\textra\tcells",
+  "truncated": false,
+  "metadata": {
+    "encoding": "utf-8",
+    "csv": {
+      "delimiter": ",",
+      "header": true,
+      "columns": [
+        {
+          "name": "id",
+          "type": "integer"
+        },
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "amount",
+          "type": "number"
+        },
+        {
+          "name": "paid",
+          "type": "boolean"
+        },
+        {
+          "name": "day",
+          "type": "string"
+        },
+        {
+          "name": "when",
+          "type": "datetime"
+        },
+        {
+          "name": "note",
+          "type": "string"
+        },
+        {
+          "name": "column_8",
+          "type": "string"
+        }
+      ],
+      "rows": 4
+    }
+  },
+  "signals": [
+    {
+      "kind": "formula",
+      "count": 1,
+      "sample": "=HYPERLINK(\"http://x.test\")"
+    }
+  ],
+  "warnings": []
+}

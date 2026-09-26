@@ -19,4 +19,7 @@ Part of the OpenHoard trusted core. See [../README.md](../README.md) and
 
 Running plugins (WASM through Extism/Wasmtime, or isolated OS processes, with resource and
 network limits; no containers) and package signing are not implemented yet. Design discussion
-welcome via RFC issues.
+welcome via RFC issues. The first-party text extractor already runs in such a process (Node's
+permission model, memory and time limits, a checked answer):
+[enrichers/extract](../../enrichers/extract/README.md#the-sandbox) is a starting point for the
+process runtime.

@@ -1,0 +1,36 @@
+{
+  "name": "@openhoard/enricher-extract",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Text extraction for plain text, Markdown, Office (docx, xlsx, pptx), PDF and CSV, run in a limited child process.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rimraf dist coverage",
+    "test:slow": "vitest run src/csv-scale.test.ts"
+  },
+  "dependencies": {
+    "csv-parse": "7.0.2",
+    "pdfjs-dist": "6.3.289",
+    "saxes": "6.0.0",
+    "yauzl": "3.4.0"
+  },
+  "devDependencies": {
+    "@openhoard/config": "workspace:*",
+    "@openhoard/testkit": "workspace:*",
+    "@types/yauzl": "3.4.0"
+  },
+  "license": "Apache-2.0"
+}

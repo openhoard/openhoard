@@ -1,0 +1,15 @@
+{
+  "kind": "text",
+  "text": "Meeting notes\n\nAttendees: Ann, Bob\nAction items:\nship it\neviltxt.exe and hidden tags\nCafé in Zürich — 😀",
+  "truncated": false,
+  "metadata": {
+    "encoding": "utf-8"
+  },
+  "signals": [
+    {
+      "kind": "invisible-characters",
+      "count": 4
+    }
+  ],
+  "warnings": []
+}

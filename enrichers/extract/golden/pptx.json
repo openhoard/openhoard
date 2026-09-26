@@ -1,0 +1,33 @@
+{
+  "kind": "pptx",
+  "text": "Roadmap 2027\nShip the extractor\nSay it slowly\n\nThankswhite\ntiny",
+  "truncated": false,
+  "metadata": {
+    "title": "Roadmap",
+    "author": "Bo Presenter",
+    "slides": 3
+  },
+  "signals": [
+    {
+      "kind": "white-text",
+      "count": 1,
+      "sample": "white"
+    },
+    {
+      "kind": "tiny-text",
+      "count": 1,
+      "sample": "tiny"
+    },
+    {
+      "kind": "hidden-slide",
+      "count": 1,
+      "sample": "Secret plan"
+    },
+    {
+      "kind": "comment",
+      "count": 1,
+      "sample": "Nice slide"
+    }
+  ],
+  "warnings": []
+}
