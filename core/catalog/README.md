@@ -31,8 +31,9 @@ the text is content, so whatever shows it to someone gates it as content first (
 exposure), never as metadata.
 
 A `ContentSource` returns a version's bytes, or null when it can't reach them. core/storage's
-`blobContentSource()` reads what OpenHoard holds (managed zones). Connectors (T-301) provide
-the source for indexed zones, and it must return exactly the bytes of the version's blob:
+`blobContentSource()` reads what OpenHoard holds (managed zones). Connectors provide the source
+for indexed zones (core/jobs `connectorContentSource()`, T-301, which asks the connector for
+the version's source marker), and it must return exactly the bytes of the version's blob:
 when the item changed at the source since the crawl that made the version (eTag or version
 marker differs), it refuses (throws, or returns null) rather than hand over newer bytes, which
 belong to the next version and its own job. It throws when the source is unreachable for now,

@@ -395,6 +395,9 @@ importers:
       '@openhoard/enricher-extract':
         specifier: workspace:^
         version: link:../../enrichers/extract
+      '@openhoard/sdk':
+        specifier: workspace:^
+        version: link:../../packages/sdk
       drizzle-orm:
         specifier: ^0.45.3
         version: 0.45.3(@electric-sql/pglite@0.5.8)(@types/pg@8.23.1)(pg@8.23.0)
@@ -405,6 +408,9 @@ importers:
       '@openhoard/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@openhoard/connector-fs':
+        specifier: workspace:*
+        version: link:../../connectors/fs
       '@openhoard/testkit':
         specifier: workspace:*
         version: link:../../packages/testkit

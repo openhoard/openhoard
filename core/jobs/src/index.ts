@@ -34,3 +34,15 @@ export {
   type MaintenanceOptions,
   type TenantMaintenance,
 } from "./maintenance.js";
+export {
+  MAX_REPORTED_SKIPS,
+  runSync,
+  type SyncOptions,
+  type SyncReport,
+  type SyncStatus,
+} from "./sync.js";
+export {
+  connectorContentSource,
+  firstOf,
+  type ConnectorContentOptions,
+} from "./connector-content.js";

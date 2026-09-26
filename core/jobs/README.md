@@ -3,7 +3,7 @@
 Part of the OpenHoard trusted core. See [../README.md](../README.md) and
 [docs/architecture.md](../../docs/architecture.md). Background jobs on
 [pg-boss](https://github.com/timgit/pg-boss) ([ADR-0008](../../docs/adr/0008-job-queue.md)): the
-enrichment pipeline (T-401) and scheduled maintenance.
+enrichment pipeline (T-401), scheduled maintenance, and the connector sync runner (T-301).
 
 ```ts
 import { startJobs } from "@openhoard/core-jobs";
@@ -18,6 +18,9 @@ await jobs.stop(); // before db.close()
 - [`enrich.ts`](src/enrich.ts): the pipeline, its steps and what a job does.
 - [`maintenance.ts`](src/maintenance.ts): pruning and the sweep, per tenant, in bounded batches.
 - [`jobs.ts`](src/jobs.ts): pg-boss, the queues, the workers and the schedule.
+- [`sync.ts`](src/sync.ts): `runSync()`, one connector over one source into the catalog.
+- [`connector-content.ts`](src/connector-content.ts): `connectorContentSource()`, indexed
+  zones' bytes read through their connector for enrichment.
 
 **pg-boss is pinned to exactly 12.33.1.** It was the newest release more than a week old when
 this was written (2026-09-17), and jobs.ts depends on internals that aren't covered by pg-boss's
@@ -106,7 +109,7 @@ per version with core/catalog `saveExtract()` through `write`:
 | ---------------------------------------------------------------- | ------------- | ----------------- |
 | text and metadata                                                | `extracted`   | goes on           |
 | a type it doesn't read (checked before any byte is read)         | `unsupported` | goes on           |
-| no source reaches the bytes (an indexed zone before T-301)       | `unavailable` | goes on           |
+| no source reaches the bytes (no connector serves the source)     | `unavailable` | goes on           |
 | the file's own failure: malformed, encrypted, a zip bomb, out of | `failed`      | goes on           |
 | memory, a crash                                                  |               |                   |
 | a timeout, or killed by a signal nobody sent: tried once more    | the second    | goes on           |
@@ -217,6 +220,83 @@ Two known gaps. The rule tagger sees the title and media type, not the path or s
 stored yet, and a step must decide from stored facts only, or a re-run would take off tags the
 first run gave. And a rename doesn't change rule tags until the job that follows it runs.
 
+## Connector sync
+
+`runSync(db, { tenantId, source, zoneId, connector, ownerId, tenantKey, enqueue })` drives one
+connector ([@openhoard/sdk](../../packages/sdk/README.md) interface v1) over one source (a
+configured connection, the `source` of its items) into one zone, and keeps where it got to in
+`source_syncs` (core/db migrations 0039, 0040: one row per tenant and source, forced RLS):
+
+```text
+crawl (from the start, or a checkpoint) ── done ──▶ delta, delta, delta…
+     ▲                                                   │
+     └── resync: a token the connector can't use any more ┘
+```
+
+- **The ingest contract** (core/catalog): one item per transaction, in the source's order,
+  retried on 40P01/40001; slow work (reading, hashing) outside transactions. An item whose eTag
+  is the one recorded is skipped before anything is read (`sourceItemState()`); one whose eTag
+  changed but whose contentVersion didn't (a rename, a move) is ingested with the content it
+  already has, unread; new content is read, counted against the reported size, hashed with the
+  tenant's blob key and ingested. Deletes are soft (`removeFromSource()`). `enqueue`
+  (`jobs.enqueueAfterIngest`) runs after each ingest commits.
+- **Checkpoints and cursors** are saved only after everything before them committed. After a
+  kill, the items after the last checkpoint come again and are skipped as unchanged.
+- **Reconcile.** A crawl from the beginning records when it started (`reconcile_from`): a new
+  source, a `resync`, or any sync of a connector without delta. While it runs every item is
+  ingested (none skipped); when it is `done`, the source's items not synced since are removed
+  (they left the source while nobody followed its deltas), then `reconcile_from` is cleared. A
+  run that dies in between finishes the reconcile first next time. An item the crawl had to skip
+  (it changed while being read) is removed too, and restored by the next delta.
+- **Bindings.** A source stays with the zone and the connector it was first synced with
+  (`zone-mismatch`, `connector-mismatch`). It syncs indexed zones only, of a kind the
+  connector declares (`zone-kind`): it hashes bytes on the server and keeps no copy, so a managed
+  zone (which stores them first, M3) and a local-only zone (whose content never reaches the
+  server; the local agent syncs it) are refused.
+- **The connector is plugin code.** Every event is checked (`checkEvent()`); a bad item is
+  skipped and reported, a bad token fails the run. Its failures go by their code; anything else
+  it throws counts as retryable. A read that says it returned another version, or sends more or
+  fewer bytes than it reported, is `changed`.
+
+It returns a `SyncReport`, codes only (no messages): `status` and what to do next.
+
+| status      | means                                                        | the job then                    |
+| ----------- | ------------------------------------------------------------ | ------------------------------- |
+| `done`      | the crawl or delta reached its end                           | waits for the next schedule     |
+| `partial`   | stopped at a checkpoint after `budgetMs`                     | runs again now                  |
+| `retry`     | throttled or unreachable (`error`: the code)                 | runs again after `retryAfterMs` |
+| `failed`    | `auth`, `permanent`, or a configuration it refuses (`error`) | stops; an admin looks           |
+| `cancelled` | the signal aborted                                           | resumes next time               |
+
+Per item: `changed`, `not-found`, `permanent` and ingest refusals (`ingest-invalid`…) skip the
+item (reported, the first 100 with their ids); a throttle or a retryable failure is waited out in
+place up to `maxWaitMs` (30 s) and `attempts` (3), then the run stops with `retry`.
+`runSync()` throws only for its own failures (the database unreachable, a failing `enqueue`, a
+bug); an item ingested but not enqueued then waits for the sweep.
+
+**Reading indexed zones** (T-402): `connectorContentSource({ db, connectorFor, tenantKey,
+onStale })` is the `ContentSource` for versions whose bytes stay in their source. It asks the
+connector serving the version's source for exactly the version's source marker (its
+contentVersion when recorded), checks the size (and, with the key, the BLAKE3 blob id), and
+throws when the item changed or went since, so the enrichment job is retried after the next
+sync has recorded what happened; `onStale` hears of it. It answers null for what it can't read
+this way (a managed zone's bytes, a deleted object, a source no connector serves). Compose it
+with core/storage's `blobContentSource()` using `firstOf(blobs, connectors)`. Indexed zones are
+extracted only with `startJobs({ extract: { indexedZones: true } })`.
+
+**Scheduling it (T-303).** Not wired into `startJobs()` yet; the plan:
+
+- a `sync` queue, `stately`, keyed by tenant and source (one run per source at a time, which
+  `runSync()` relies on), with a lease (`expireInSeconds`) above the `budgetMs` it passes;
+- the server's connection config names each source's connector, root or site, zone, owner and
+  schedule; a per-source cron (pg-boss `schedule`) sends the job, and `onStale` sends one early;
+- the handler builds the connector and calls `runSync()` with the job's signal, then acts on the
+  status: `partial` sends the next job now, `retry` one after `retryAfterMs`, `failed` records
+  the error for admins (audited) and stops scheduling until they fix it;
+- out-of-process connectors (the local agent's folders) push the same events through an ingest
+  API instead, authenticated as the tenant's service account with a key scoped to their zones
+  (T-111; the `ingest` action is still to add).
+
 ## Maintenance
 
 With `worker` on, pg-boss's cron starts `maintenance` hourly (`17 * * * *` UTC;
@@ -301,4 +381,11 @@ schedule left alone, pg-boss's session settings on PostgreSQL, and a graceful st
 step's tests (extract.test.ts) store an extraction and re-run it into the same row, record
 broken files as `failed` without a retry, store unsupported and unreachable content, retry when
 the source fails, store nothing for a version replaced mid-extraction, and run from
-`startJobs({ content })`.
+`startJobs({ content })`. The sync tests (sync.test.ts) run the fs connector over temporary
+folders and the SDK's in-memory source for faults: first crawl, deltas skipping unchanged
+items, edits, renames and moves (unread when the content version stays), soft deletes and
+restores, a killed crawl resumed from its checkpoint without duplicates, simulated deadlocks
+retried, lost state (resync and reconcile), a reconcile finished after a crash, zone and
+connector bindings, throttles (waited out, or ending the run), refused credentials, a
+connector without delta, bad events and tokens, the time budget, and indexed zones read through
+the connector: exact bytes, changed ones refused, and text extracted by the pipeline.

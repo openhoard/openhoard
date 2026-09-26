@@ -26,11 +26,13 @@
     "@openhoard/core-identity": "workspace:^",
     "@openhoard/core-policy": "workspace:^",
     "@openhoard/enricher-extract": "workspace:^",
+    "@openhoard/sdk": "workspace:^",
     "drizzle-orm": "^0.45.3",
     "pg-boss": "12.33.1"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*",
+    "@openhoard/connector-fs": "workspace:*",
     "@openhoard/testkit": "workspace:*"
   },
   "license": "Apache-2.0"

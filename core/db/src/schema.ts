@@ -1187,6 +1187,54 @@ export const versionExtracts = pgTable(
   ],
 );
 
+/** Where a source's sync stands: crawling (from a checkpoint), or following deltas. */
+export const SYNC_PHASES = ["crawl", "delta"] as const;
+/** Longest checkpoint token or cursor kept, in characters (the SDK's LIMITS.token). */
+export const MAX_SYNC_TOKEN_CHARS = 65_536;
+
+/**
+ * Where each source's sync stands (T-301): the connector's checkpoint in a crawl, or its cursor
+ * for the next delta, so a sync killed at any point resumes where it was (T-303). One row per
+ * source, written only by the sync runner (core/jobs sync.ts), after the items before the token
+ * are committed.
+ *
+ * - `token` null: the crawl starts from the beginning. A delta always has its cursor.
+ * - `reconcile_from`: when the crawl now running started from the beginning. Once it is done,
+ *   the source's items not recorded since (source_refs.synced_at) are removed from the catalog:
+ *   they weren't in the source any more. Cleared after that.
+ * - `zone_id` and `connector` bind the source to one zone and one connector: a configuration
+ *   that points it elsewhere is refused, never applied to the items already recorded.
+ */
+export const sourceSyncs = pgTable(
+  "source_syncs",
+  {
+    tenantId: text("tenant_id").notNull(),
+    source: text("source").notNull(),
+    zoneId: text("zone_id").notNull(),
+    connector: text("connector").notNull(),
+    phase: text("phase", { enum: SYNC_PHASES }).notNull(),
+    token: text("token"),
+    reconcileFrom: timestamp("reconcile_from", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.source] }),
+    foreignKey({
+      name: "source_syncs_zone_fk",
+      columns: [t.tenantId, t.zoneId],
+      foreignColumns: [zones.tenantId, zones.id],
+    }),
+    check("source_syncs_source_format", sql`source ~ '^[a-z0-9][a-z0-9._-]{0,63}$'`),
+    check("source_syncs_connector_format", sql`connector ~ '^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$'`),
+    check("source_syncs_phase_valid", sql.raw(`phase in (${quoted(SYNC_PHASES)})`)),
+    check(
+      "source_syncs_token_length",
+      sql.raw(`token is null or char_length(token) between 1 and ${MAX_SYNC_TOKEN_CHARS}`),
+    ),
+    check("source_syncs_delta_cursor", sql`phase = 'crawl' or token is not null`),
+  ],
+);
+
 /** OAuth scopes an MCP client may ask for (T-105), and the policy actions each allows. */
 export const OAUTH_SCOPES = ["files:read", "files:tag"] as const;
 /** The trust an admin gives an approved AI client: every client trust but first-party. */
@@ -1471,6 +1519,7 @@ export const tables = {
   apiKeys,
   activityEvents,
   versionExtracts,
+  sourceSyncs,
   sessions,
   oauthClients,
   oauthCodes,

@@ -28,6 +28,7 @@ import {
   groups,
   objects,
   sourceRefs,
+  sourceSyncs,
   principalEpochs,
   tenantPacks,
   tenants,
@@ -212,6 +213,31 @@ describe("schema", () => {
       }),
     );
     expect(await sqlState(dup)).toBe(UNIQUE_VIOLATION);
+  });
+
+  it("keeps one sync state per source, bound to a zone of the tenant, a delta with its cursor", async () => {
+    const row = {
+      tenantId: t.tenantId,
+      source: "fs-main",
+      zoneId: t.zoneId,
+      connector: "connector-fs",
+      phase: "crawl" as const,
+    };
+    await inTenant((tx) => tx.insert(sourceSyncs).values(row));
+    expect(await sqlState(inTenant((tx) => tx.insert(sourceSyncs).values(row)))).toBe(
+      UNIQUE_VIOLATION,
+    );
+    const bad = (values: Partial<typeof sourceSyncs.$inferInsert>) =>
+      sqlState(
+        inTenant((tx) => tx.insert(sourceSyncs).values({ ...row, source: "other", ...values })),
+      );
+    expect(await bad({ phase: "delta" })).toBe(CHECK_VIOLATION);
+    expect(await bad({ token: "" })).toBe(CHECK_VIOLATION);
+    expect(await bad({ token: "x".repeat(65_537) })).toBe(CHECK_VIOLATION);
+    expect(await bad({ source: "Not A Slug" })).toBe(CHECK_VIOLATION);
+    expect(await bad({ connector: "fs" })).toBe(CHECK_VIOLATION);
+    expect(await bad({ zoneId: newId("zone") })).toBe(FOREIGN_KEY_VIOLATION);
+    expect(await bad({ phase: "delta", token: "cursor" })).toBe("no error");
   });
 
   it("deletes an object's versions and source refs with it, but keeps the blob", async () => {
