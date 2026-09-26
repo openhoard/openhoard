@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from "node:fs";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { chooseDelimiter, valueType } from "./csv.ts";
@@ -6,6 +7,7 @@ import { failureOf, ExtractError } from "./errors.ts";
 import { DEFAULT_LIMITS, resolveLimits } from "./limits.ts";
 import { isRefusedBuiltin } from "./lockdown.ts";
 import { resolveTarget } from "./ooxml.ts";
+import { dataFolder, pdfjsFolder } from "./pdf.ts";
 import { CommentStripper } from "./plain.ts";
 import { maxAnswerBytes, parseAnswer } from "./schema.ts";
 import { Sanitizer, sampleOf, Signals, TextSink, utf8Prefix } from "./text.ts";
@@ -215,6 +217,21 @@ describe("types, names and targets", () => {
     expect(failureOf(new ExtractError("encrypted"))).toBe("encrypted");
     expect(failureOf(new RangeError("Maximum call stack size exceeded"))).toBe("malformed");
     expect(failureOf(new RangeError("Array buffer allocation failed"))).toBe("memory-limit");
+  });
+});
+
+describe("pdf.js data folders", () => {
+  it("end in a slash and use forward slashes, on Windows paths too", () => {
+    expect(dataFolder("D:\\a\\pdfjs-dist", "cmaps", "\\")).toBe("D:/a/pdfjs-dist/cmaps/");
+    expect(dataFolder("/opt/pdfjs-dist", "standard_fonts", "/")).toBe(
+      "/opt/pdfjs-dist/standard_fonts/",
+    );
+  });
+
+  it("name folders that exist, readable by the path pdf.js builds", () => {
+    const cmaps = dataFolder(pdfjsFolder(), "cmaps");
+    expect(readFileSync(`${cmaps}Adobe-Japan1-UCS2.bcmap`).byteLength).toBeGreaterThan(0);
+    expect(existsSync(dataFolder(pdfjsFolder(), "standard_fonts"))).toBe(true);
   });
 });
 

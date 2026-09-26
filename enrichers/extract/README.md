@@ -112,7 +112,11 @@ macOS and Windows (the tests check each):
 - no `eval` or `new Function` (`--disallow-code-generation-from-strings`), no `__proto__`
   (`--disable-proto=delete`);
 - an environment with only its settings: none of the server's variables (no database URL, no
-  keys). On Windows, `SystemRoot` too, without which no process starts.
+  keys). The platform adds what it adds to every process: on macOS CoreFoundation's
+  `__CF_USER_TEXT_ENCODING`; on Windows libuv's required variables (`SYSTEMROOT`, `PATH`,
+  `TEMP`, `USERNAME`, `USERPROFILE`, `WINDIR`…), copied from the server's when missing: names,
+  paths and the user, never the application's settings. The tests check exactly that per
+  platform.
 
 **Built-ins: an allowlist.** Before any parser loads, the child's lockdown (`lockdown.ts`)
 lets it load only the built-ins the parsers use: `buffer`, `events`, `fs`, `fs/promises`,

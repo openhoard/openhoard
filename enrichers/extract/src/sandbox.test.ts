@@ -208,6 +208,24 @@ describe("extract() in a child process", () => {
   });
 });
 
+/**
+ * The variables libuv puts in every Windows child's environment, from the parent's when the
+ * environment given lacks them (uv_spawn's required variables).
+ */
+const WINDOWS_REQUIRED_ENV = [
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "LOGONSERVER",
+  "PATH",
+  "SYSTEMDRIVE",
+  "SYSTEMROOT",
+  "TEMP",
+  "USERDOMAIN",
+  "USERNAME",
+  "USERPROFILE",
+  "WINDIR",
+];
+
 describe("the child's confinement", () => {
   const dir = mkdtempSync(join(tmpdir(), "openhoard-extract-"));
   const secret = join(dir, "secret.txt");
@@ -217,6 +235,8 @@ describe("the child's confinement", () => {
   it("can't read outside its code, write, load refused built-ins, bind, open the network or eval", async () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const probe = join(here, "probe-child.fixtures.ts");
+    // A variable of the server's (a secret, say) that must not reach the child.
+    process.env.OPENHOARD_TEST_PARENT_SECRET = "hunter2";
     const child = spawn(process.execPath, childArguments(resolveLimits(), probe), {
       env: childEnvironment({
         PROBE_SECRET: secret,
@@ -229,7 +249,27 @@ describe("the child's confinement", () => {
     let out = "";
     child.stdout.on("data", (c: Buffer) => (out += c.toString()));
     await new Promise((resolve) => child.on("close", resolve));
+    delete process.env.OPENHOARD_TEST_PARENT_SECRET;
     const outcome = JSON.parse(out) as Record<string, string>;
+    // Only the probe's own variables, and what the platform adds to every process it starts:
+    // macOS, CoreFoundation's text encoding; Windows, libuv's required system variables
+    // (copied from the parent when missing; names, paths and the user, no application secrets).
+    const envKeys = (outcome["env-keys"] ?? "").split(",").filter((k) => k !== "");
+    delete outcome["env-keys"];
+    const platformKeys: Record<string, readonly string[]> = {
+      darwin: ["__CF_USER_TEXT_ENCODING"],
+      win32: WINDOWS_REQUIRED_ENV,
+    };
+    const allowed = new Set(
+      [
+        "PROBE_SECRET",
+        "PROBE_SIBLING",
+        "PROBE_PACKAGE_FILE",
+        ...(platformKeys[process.platform] ?? []),
+      ].map((k) => k.toUpperCase()),
+    );
+    expect(envKeys.filter((k) => !allowed.has(k.toUpperCase()))).toEqual([]);
+    expect(envKeys).toContain("PROBE_SECRET");
     const cjsRefused = [
       "cjs-require-vm",
       "cjs-require-http-client",
@@ -254,7 +294,6 @@ describe("the child's confinement", () => {
       "linked-binding": "BlockedModuleError",
       dlopen: "BlockedModuleError",
       eval: "EvalError",
-      env: "allowed",
       "cjs-register-hooks": "BlockedModuleError",
       "cjs-register": "BlockedModuleError",
       "cjs-require-fs": "allowed",

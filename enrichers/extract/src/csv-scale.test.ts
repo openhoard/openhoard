@@ -10,7 +10,7 @@ import { generatedCsv } from "./test.fixtures.ts";
  * The 1 GiB run takes about a minute on a Linux runner (the parent generates the text and
  * both sides stream it), several on Windows and macOS runners, so it is a slow test:
  * `pnpm --filter @openhoard/enricher-extract test:slow` (or OPENHOARD_TEST_SLOW=1), which CI
- * runs in its Linux PostgreSQL job. Every run does the same at 32 MiB.
+ * runs in its Linux PostgreSQL job. Every run does the same at 32 MiB (8 MiB on Windows).
  */
 
 const MiB = 1024 * 1024;
@@ -59,9 +59,12 @@ async function expectStreamed(targetBytes: number) {
 }
 
 describe("streaming a large CSV", () => {
-  it("counts every row of 32 MiB with flat memory", async () => {
-    await expectStreamed(32 * MiB);
-  });
+  // Windows runners stream through pipes several times slower: 8 MiB there keeps the test
+  // well inside its time; the 1 GiB run (Linux) is the real measure.
+  const everyRun = process.platform === "win32" ? 8 : 32;
+  it(`counts every row of ${everyRun} MiB with flat memory`, async () => {
+    await expectStreamed(everyRun * MiB);
+  }, 180_000);
 
   it.runIf(
     process.env.OPENHOARD_TEST_SLOW === "1" || process.env.npm_lifecycle_event === "test:slow",

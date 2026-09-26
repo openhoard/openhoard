@@ -1,4 +1,4 @@
-import { dirname, join, sep } from "node:path";
+import { dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtractContext } from "./context.ts";
 import { ExtractError } from "./errors.ts";
@@ -52,6 +52,15 @@ function matrixOf(value: unknown): Matrix | null {
     : null;
 }
 
+/**
+ * A pdf.js data folder as its options want it: ending in `/` (pdf.js refuses anything else),
+ * with forward slashes, which Node's fs reads on Windows too. Not a `file:` URL: in Node,
+ * pdf.js hands the string to fs.readFile(), which takes it as a path.
+ */
+export function dataFolder(folder: string, name: string, separator: string = sep): string {
+  return `${folder.split(separator).join("/")}/${name}/`;
+}
+
 /** 1 point or less: nobody reads it. */
 const TINY_POINTS = 1;
 
@@ -59,7 +68,7 @@ export async function extractPdf(context: ExtractContext): Promise<void> {
   const { limits, sink, signals, metadata, warnings } = context;
   const bytes = await context.input.readAll(limits.maxInputBytes);
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const folder = pdfjsFolder() + sep;
+  const folder = pdfjsFolder();
   const task = pdfjs.getDocument({
     data: bytes,
     disableFontFace: true,
@@ -75,9 +84,9 @@ export async function extractPdf(context: ExtractContext): Promise<void> {
     disableAutoFetch: true,
     stopAtErrors: false,
     verbosity: 0,
-    cMapUrl: join(folder, "cmaps") + sep,
+    cMapUrl: dataFolder(folder, "cmaps"),
     cMapPacked: true,
-    standardFontDataUrl: join(folder, "standard_fonts") + sep,
+    standardFontDataUrl: dataFolder(folder, "standard_fonts"),
   });
   let doc;
   try {

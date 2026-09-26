@@ -76,12 +76,8 @@ await attempt("binding", () => p.binding?.("tcp_wrap"));
 await attempt("linked-binding", () => p._linkedBinding?.("anything"));
 await attempt("dlopen", () => p.dlopen?.({ exports: {} }, "/nonexistent.node"));
 await attempt("eval", () => new Function("return 1")());
-await attempt("env", () => {
-  const expected = ["PROBE_SECRET", "PROBE_SIBLING", "PROBE_PACKAGE_FILE", "SystemRoot"];
-  if (Object.keys(process.env).some((k) => !expected.includes(k))) {
-    throw Object.assign(new Error("leaked"), { code: "LEAKED" });
-  }
-});
+// The environment's variable names, for the test to judge by platform.
+outcome["env-keys"] = Object.keys(process.env).sort().join(",");
 // Through a variable: TypeScript has no types for the .cjs probe, and needs none.
 const cjsProbe = "./probe-cjs.fixtures.cjs";
 const cjs = (await import(cjsProbe)) as {
