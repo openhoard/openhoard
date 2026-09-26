@@ -49,6 +49,7 @@ export {
 export {
   acceptSourceIdentity,
   confirmReconcile,
+  discardReconcile,
   listSourceSyncs,
   type SourceSyncState,
 } from "./sync-admin.js";

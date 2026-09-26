@@ -249,21 +249,37 @@ crawl (from the start, or a checkpoint) ── done ──▶ delta, delta, delt
   run that dies in between finishes the reconcile first next time. An item the crawl mentions but
   can't record (it changed while read, it can't be read, a field is refused, the event is
   malformed) is marked seen (core/catalog `markSourceItemSeen()`), so only items it never
-  mentioned count as gone. A crawl that meets a place it can't read (a `warning` `unreadable`)
-  doesn't reconcile at all (`reconcile-skipped` in the report): unknown is not gone.
-- **The reconcile guard.** A reconcile that would remove more than `reconcileGuard` allows (over
-  `maxFraction`, 25%, of the source's items and over `minItems`, 50, by default; per source,
-  from its connection's configuration), or anything when the crawl mentioned no item at all,
-  removes nothing: it records the count (`reconcile_held`), fails with `reconcile-guard`
-  (`reconcileHeld` in the report), and does so every run until an admin checks the source and
-  confirms that many (`openhoard admin source confirm-reconcile`, audited; a larger count is held
-  again). A folder not mounted, a lost state, an admin's reset or a connector that says `done`
-  too soon can't empty a source.
-- **The source's identity.** A connector with `identity()` (fs: the root's device and inode)
-  binds the source to its answer, recorded in `source_syncs` on the first sync, outside the
-  connector's own state. Another answer later fails the run (`source-identity`) until an admin
-  accepts it (`openhoard admin source accept-identity`, audited), which starts a crawl from the
-  beginning.
+  mentioned count as gone.
+- **Unknown is not gone.** A crawl that meets a place it can't read (a `warning` `unreadable`:
+  a folder it may not list, a busy file, another disk mounted inside) removes nothing: its
+  reconcile is deferred (`reconcile_deferred`, and `reconcile-deferred` in every report after)
+  to the next crawl from the beginning. That is the safer of the two ways: the runner keeps no
+  tree (paths aren't stored), so it can't reconcile everything but what is under the unreadable
+  place. The next crawl from the beginning comes by itself for a connector without delta, after
+  a `resync`, or when an admin asks for it (`discard-reconcile`, below).
+- **The reconcile guard.** A reconcile that would remove more than `reconcileGuard` allows, or
+  anything when the crawl mentioned no item at all, removes nothing. Allowed: at most
+  `maxFraction` (25%) of the source's items, or more only when that is at most `minItems` (50)
+  items and less than half the source; per source, from its connection's configuration. So a
+  small source emptied but for a placeholder (40 of 41) is held as surely as a large one. It
+  records the count (`reconcile_held`), fails with `reconcile-guard` (`reconcileHeld` in the
+  report), and does so every run: **while a reconcile is held, the source's deltas are held
+  too**. A folder not mounted, a lost state, an admin's reset or a connector that says `done`
+  too soon can't empty a source. Once an admin has checked the source:
+  - `openhoard admin source confirm-reconcile`: the next sync removes up to that many (a larger
+    count is held again);
+  - `openhoard admin source discard-reconcile`: nothing is removed, and the source is crawled
+    afresh from the beginning, from a clean state; that crawl's reconcile is guarded again (it
+    also runs a deferred reconcile);
+  - `openhoard admin source accept-identity`: for a source that is now another one (below).
+    All three are audited.
+- **The source's identity.** A connector with `identity()` (fs: the root's inode, birth time and
+  file system type; never a device number, which a remount changes) binds the source to its
+  answer, recorded in `source_syncs` on the first sync, outside the connector's own state. The
+  runner passes the recorded answer back, so a connector that can tell it is still the same
+  source (fs, without birth times: its files are still there) keeps it. Another answer fails
+  the run (`source-identity`) until an admin accepts it (`openhoard admin source
+accept-identity`, audited), which starts a crawl from the beginning.
 - **Bindings.** A source stays with the zone and the connector it was first synced with
   (`zone-mismatch`, `connector-mismatch`). It syncs indexed zones only, of a kind the
   connector declares (`zone-kind`): it hashes bytes on the server and keeps no copy, so a managed
@@ -276,25 +292,26 @@ crawl (from the start, or a checkpoint) ── done ──▶ delta, delta, delt
 
 It returns a `SyncReport`, codes only (no messages): `status` and what to do next.
 
-| status      | means                                                        | the job then                    |
-| ----------- | ------------------------------------------------------------ | ------------------------------- |
-| `done`      | the crawl or delta reached its end                           | waits for the next schedule     |
-| `partial`   | stopped at a checkpoint after `budgetMs`                     | runs again now                  |
-| `retry`     | throttled or unreachable (`error`: the code)                 | runs again after `retryAfterMs` |
-| `failed`    | `auth`, `permanent`, or a configuration it refuses (`error`) | stops; an admin looks           |
-| `cancelled` | the signal aborted                                           | resumes next time               |
+| status      | means                                                         | the job then                    |
+| ----------- | ------------------------------------------------------------- | ------------------------------- |
+| `done`      | the crawl or delta reached its end                            | waits for the next schedule     |
+| `partial`   | stopped at a checkpoint after `budgetMs` or `maxItems`        | runs again now                  |
+| `retry`     | throttled, unreachable, or the queue down (`error`: the code) | runs again after `retryAfterMs` |
+| `failed`    | `auth`, `permanent`, or a configuration it refuses (`error`)  | stops; an admin looks           |
+| `cancelled` | the signal aborted                                            | resumes next time               |
 
 Per item: `changed`, `not-found`, `permanent` and ingest refusals (`ingest-invalid`…) skip the
 item (reported, the first 100 with their ids); a throttle or a retryable failure is waited out in
 place up to `maxWaitMs` (30 s) and `attempts` (3), then the run stops with `retry`. An enqueue
 that fails after its ingest committed is tried again for the committed version (never a second
-ingest). `runSync()` throws only for its own failures (the database unreachable, an enqueue that
-kept failing, a bug); an item ingested but not enqueued then waits for the sweep. Connector
-warnings are listed in `warnings`.
+ingest); one that keeps failing ends the run with `retry` (`enqueue`), and the item, ingested
+but not enqueued, waits for the sweep. `runSync()` throws only for its own failures (the database
+unreachable, a bug). Connector warnings are listed in `warnings`.
 
 `budgetMs` and `maxItems` end a run at the first checkpoint after the time or the number of
 items (`partial`). Both can only stop at a checkpoint: a connector that never yields one runs
-until its stream ends, or until the job's signal aborts the run.
+until its stream ends, or until the job's signal aborts the run. The fs connector checkpoints
+deltas as well as crawls.
 
 **Reading indexed zones** (T-402): `connectorContentSource({ db, connectorFor, tenantKey,
 onStale })` is the `ContentSource` for versions whose bytes stay in their source. It asks the

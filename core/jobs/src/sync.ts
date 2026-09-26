@@ -21,6 +21,7 @@ import {
   type Tx,
 } from "@openhoard/core-db";
 import {
+  canonicalUrl,
   changedError,
   checkDescription,
   checkEvent,
@@ -70,19 +71,23 @@ import type { JobsLogger } from "./jobs.js";
  *   (markSourceItemSeen()), so only items it never mentioned count as gone.
  * - A reconcile can't empty a source by mistake (a folder not mounted, a lost state, a
  *   connector that says `done` too soon): when it would remove more than `reconcileGuard`
- *   allows (by default over 25% of the source's items and over 50 of them), or anything at all
- *   when the crawl mentioned no item, it removes nothing, records how many it would have
- *   (`reconcile_held`) and fails (`reconcile-guard`) until an admin confirms that many
- *   (`admin source confirm-reconcile`). A crawl that met a place it couldn't read (a `warning`
- *   `unreadable`) doesn't reconcile at all: unknown is not gone.
- * - A connector with identity() binds the source to what it answers (a folder's device and
- *   inode): another answer later (another disk mounted at the path) fails the run
+ *   allows (by default over 25% of the source's items and either over 50 of them or half the
+ *   source), or anything at all when the crawl mentioned no item, it removes nothing, records
+ *   how many it would have (`reconcile_held`) and fails (`reconcile-guard`), every run, deltas
+ *   included, until an admin confirms that many (`admin source confirm-reconcile`) or discards
+ *   it (`admin source discard-reconcile`: a clean crawl from the beginning, guarded again).
+ * - A crawl that met a place it couldn't read (a `warning` `unreadable`) removes nothing: its
+ *   reconcile is deferred (`reconcile_deferred`, said in every report) to the next crawl from the
+ *   beginning, which the runner can't narrow to the readable part (it keeps no tree).
+ * - A connector with identity() binds the source to what it answers (a folder's inode and birth
+ *   time): another answer later (another disk mounted at the path) fails the run
  *   (`source-identity`) until an admin accepts it, which starts a crawl from the beginning.
  *
  * The connector is plugin code: each event is checked (SDK checkEvent()) before the catalog sees
  * it, and a bad one skipped and reported. Its failures are sorted by their code (SDK errors.ts);
  * anything it throws that isn't a ConnectorError counts as retryable. Reports carry codes, never
- * messages. The runner throws only for its own failures (the database unreachable, a bug), for
+ * messages. An enqueue that keeps failing ends the run with `retry` (`enqueue`). The runner
+ * throws only for its own failures (the database unreachable, a bug), for
  * the job to retry.
  *
  * One run per source at a time: the job running it (T-303) is keyed by tenant and source. Two
@@ -162,7 +167,8 @@ export interface SyncReport {
    * indexed zone, or one the connector can't serve), `zone-mismatch` and `connector-mismatch` (the
    * source was synced into another zone, or by another connector), `source-identity` (the
    * source is not the one first synced), `reconcile-guard` (see `reconcileHeld`),
-   * `invalid-token`, `incomplete` (a stream ended without `done`), `database`.
+   * `invalid-token`, `incomplete` (a stream ended without `done`), `database`, `enqueue`
+   * (enqueueing enrichment kept failing: the committed items wait for the sweep).
    */
   error?: string;
   /** `reconcile-guard`: how many items the reconcile would have removed, held for an admin. */
@@ -187,7 +193,8 @@ export interface SyncReport {
   skipped: { externalId?: string; reason: string }[];
   /**
    * What the connector warned of (`unreadable`, `hard-link`…), and the runner's own
-   * (`reconcile-skipped`: a crawl met an unreadable place), the first {@link MAX_REPORTED_SKIPS}.
+   * (`reconcile-deferred`: a crawl met an unreadable place, so the source's reconcile waits for
+   * the next crawl from the beginning), the first {@link MAX_REPORTED_SKIPS}.
    */
   warnings: { code: string; externalId?: string }[];
 }
@@ -358,7 +365,7 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     if (connector.identity) {
       let identity: string;
       try {
-        identity = await connector.identity(signal);
+        identity = await connector.identity(signal, state.sourceIdentity ?? undefined);
       } catch (e) {
         throw fromConnector(e);
       }
@@ -376,6 +383,8 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     let phase: Phase = state.phase;
     let token = state.token;
     reconciling = phase === "crawl" && state.reconcileFrom !== null;
+    // Said every run until a crawl from the beginning reconciles.
+    if (state.reconcileDeferred) warn("reconcile-deferred");
     // A run that stopped between a crawl's `done` and the end of its reconcile finishes it.
     if (phase === "delta" && state.reconcileFrom !== null) await reconcile();
 
@@ -469,15 +478,17 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
           case "warning":
             warn(event.code, event.externalId);
             if (event.code === "unreadable" && reconciling) {
-              // Unknown is not gone: this crawl removes nothing.
+              // Unknown is not gone: this crawl removes nothing, and the next crawl from the
+              // beginning reconciles instead (the runner keeps no tree, so it can't reconcile
+              // all but what is under the unreadable place).
               await transaction((tx) =>
                 tx
                   .update(sourceSyncs)
-                  .set({ reconcileFrom: null, updatedAt: sql`now()` })
+                  .set({ reconcileFrom: null, reconcileDeferred: true, updatedAt: sql`now()` })
                   .where(where()),
               );
               reconciling = false;
-              warn("reconcile-skipped");
+              warn("reconcile-deferred");
             }
             break;
           case "done":
@@ -540,7 +551,14 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
         if (signal.aborted || e instanceof Stop) throw e;
         if (e instanceof EnqueueFailed) {
           // Committed, not enqueued: try the enqueue again; the sweep is the last resort.
-          if (attempt >= attempts) throw e.cause;
+          if (attempt >= attempts) {
+            log.warn?.({ tenantId, source }, "sync: enqueueing enrichment keeps failing");
+            throw new Stop(
+              "retry",
+              "enqueue",
+              retryDelayMs(e.cause, attempt, { maxMs: 3_600_000 }),
+            );
+          }
           await sleep(retryDelayMs(e.cause, attempt, { baseMs: 500, maxMs: maxWaitMs }), signal);
           continue;
         }
@@ -627,7 +645,8 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
       ...(at >= 0 && at < Date.UTC(10000, 0, 1) ? { modifiedAt: new Date(at) } : {}),
       ...(item.contentVersion === undefined ? {} : { sourceVersion: item.contentVersion }),
       etag: item.etag,
-      ...(item.url === undefined ? {} : { url: item.url }),
+      // The parser's text, which is what was checked, never the connector's.
+      ...(item.url === undefined ? {} : { url: canonicalUrl(item.url) }),
     };
   }
 
@@ -661,9 +680,12 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     const stale = Number(counts?.stale ?? 0);
     const live = Number(counts?.live ?? 0);
     const confirmed = counts?.confirmed == null ? null : Number(counts.confirmed);
+    // Held when the crawl mentioned nothing, or when it would take more than `maxFraction` of
+    // the source and either more than `minItems` or half of it: a small source emptied by a
+    // lost state (one placeholder file left) is held as surely as a large one.
     const tooMany =
       Number(counts?.seen ?? 0) === 0 ||
-      (stale > guard.minItems && stale > guard.maxFraction * live);
+      (stale > guard.maxFraction * live && (stale > guard.minItems || stale >= 0.5 * live));
     if (stale > 0 && tooMany && !(confirmed !== null && stale <= confirmed)) {
       await transaction((tx) =>
         tx
@@ -718,6 +740,7 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
           reconcileFrom: null,
           reconcileHeld: null,
           reconcileConfirmed: null,
+          reconcileDeferred: false,
           updatedAt: sql`now()`,
         })
         .where(where()),

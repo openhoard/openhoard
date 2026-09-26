@@ -29,7 +29,12 @@ import {
   type EndedAccess,
   type User,
 } from "@openhoard/core-identity";
-import { acceptSourceIdentity, confirmReconcile, listSourceSyncs } from "@openhoard/core-jobs";
+import {
+  acceptSourceIdentity,
+  confirmReconcile,
+  discardReconcile,
+  listSourceSyncs,
+} from "@openhoard/core-jobs";
 import { adminGroupOf, ensureDataDir, loadConfig, type Config } from "./config.js";
 import { retrying } from "./retry.js";
 
@@ -50,6 +55,7 @@ import { retrying } from "./retry.js";
  *   admin group list        --tenant ten_…
  *   admin source list             --tenant ten_…
  *   admin source confirm-reconcile --tenant ten_… --source <name>
+ *   admin source discard-reconcile --tenant ten_… --source <name>
  *   admin source accept-identity   --tenant ten_… --source <name>
  *
  * It reads the server's configuration (and `--data-dir`, as the server does) and opens the same
@@ -70,7 +76,8 @@ import { retrying } from "./retry.js";
  *
  * `source …` is about connector syncs (T-301). A crawl from the beginning that would remove a
  * large part of a source (a folder not mounted, a lost state) is held until an operator looks
- * and confirms it (`source.confirm-reconcile`, with the count); a source whose connector says it
+ * and confirms it (`source.confirm-reconcile`, with the count) or discards it and has the
+ * source crawled afresh (`source.discard-reconcile`); a source whose connector says it
  * is now another one (another disk at the path) syncs again only once accepted
  * (`source.accept-identity`), which starts a crawl from the beginning. Both are audited, refusals
  * too.
@@ -128,6 +135,9 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
   source list --tenant <ten_…>                     list the tenant's connector syncs
   source confirm-reconcile --tenant <ten_…> --source <name>
                                                    let a held reconcile remove what it counted
+  source discard-reconcile --tenant <ten_…> --source <name>
+                                                   drop a held or deferred reconcile, removing
+                                                   nothing, and crawl the source afresh
   source accept-identity --tenant <ten_…> --source <name>
                                                    accept that the source is now another one
                                                    (it is crawled again from the beginning)
@@ -178,6 +188,7 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "group list",
     "source list",
     "source confirm-reconcile",
+    "source discard-reconcile",
     "source accept-identity",
   ];
   if (!known.includes(command)) {
@@ -254,10 +265,11 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
       case "source list":
         return await sourceList(db, tenantArg(values.tenant), io);
       case "source confirm-reconcile":
+      case "source discard-reconcile":
       case "source accept-identity":
         return await sourceChange(
           db,
-          command === "source confirm-reconcile" ? "confirm-reconcile" : "accept-identity",
+          command.slice("source ".length) as SourceChange,
           tenantArg(values.tenant),
           sourceArg(values.source),
           io,
@@ -763,9 +775,11 @@ async function sourceList(db: Database, tenantId: string, io: AdminIo): Promise<
       s.reconcileHeld !== null
         ? `reconcile held: ${s.reconcileHeld} to remove` +
           (s.reconcileConfirmed !== null ? ` (confirmed ${s.reconcileConfirmed})` : "")
-        : s.reconciling
-          ? "reconciling"
-          : "";
+        : s.reconcileDeferred
+          ? "reconcile deferred: a place couldn't be read"
+          : s.reconciling
+            ? "reconciling"
+            : "";
     io.out(
       [s.source, s.connector, s.zoneId, s.phase, s.updatedAt.toISOString(), reconcile].join("\t") +
         "\n",
@@ -775,9 +789,11 @@ async function sourceList(db: Database, tenantId: string, io: AdminIo): Promise<
   return 0;
 }
 
+type SourceChange = "confirm-reconcile" | "discard-reconcile" | "accept-identity";
+
 async function sourceChange(
   db: Database,
-  change: "confirm-reconcile" | "accept-identity",
+  change: SourceChange,
   tenantId: string,
   source: string,
   io: AdminIo,
@@ -787,7 +803,11 @@ async function sourceChange(
     const done =
       change === "confirm-reconcile"
         ? await confirmReconcile(tx, tenantId, source)
-        : (await acceptSourceIdentity(tx, tenantId, source))
+        : (await (change === "discard-reconcile" ? discardReconcile : acceptSourceIdentity)(
+              tx,
+              tenantId,
+              source,
+            ))
           ? 0
           : null;
     await appendAudit(tx, tenantId, {
@@ -797,7 +817,7 @@ async function sourceChange(
       detail: {
         source,
         ...(done === null
-          ? { reason: change === "confirm-reconcile" ? "nothing-held" : "unknown-source" }
+          ? { reason: change === "accept-identity" ? "unknown-source" : "nothing-held" }
           : change === "confirm-reconcile"
             ? { confirmed: done }
             : {}),
@@ -811,16 +831,18 @@ async function sourceChange(
   }
   if (result === null) {
     io.err(
-      change === "confirm-reconcile"
-        ? `source ${source} has no reconcile held for confirmation\n`
-        : `tenant ${tenantId} has no source ${source}\n`,
+      change === "accept-identity"
+        ? `tenant ${tenantId} has no source ${source}\n`
+        : `source ${source} has no reconcile held${change === "discard-reconcile" ? " or deferred" : " for confirmation"}\n`,
     );
     return 1;
   }
   io.err(
     change === "confirm-reconcile"
       ? `Confirmed: the next sync of ${source} may remove up to ${result} items.\n`
-      : `Accepted: the next sync of ${source} records what it is now, and crawls it again.\n`,
+      : change === "discard-reconcile"
+        ? `Discarded: nothing was removed; the next sync crawls ${source} afresh, guarded again.\n`
+        : `Accepted: the next sync of ${source} records what it is now, and crawls it again.\n`,
   );
   return 0;
 }

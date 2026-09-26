@@ -501,6 +501,7 @@ node apps/server/dist/main.js admin user unlock --tenant ten_… --user <usr_…
 node apps/server/dist/main.js admin group list --tenant ten_…
 node apps/server/dist/main.js admin source list --tenant ten_…
 node apps/server/dist/main.js admin source confirm-reconcile --tenant ten_… --source <name>
+node apps/server/dist/main.js admin source discard-reconcile --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source accept-identity --tenant ten_… --source <name>
 ```
 
@@ -521,13 +522,17 @@ node apps/server/dist/main.js admin source accept-identity --tenant ten_… --so
 - **Groups.** `group list` prints each group's id, source, member count, external id and name,
   and marks the configured admin group: the id is what `auth.adminGroups` takes.
 - **Connector syncs (T-301).** `source list` prints each source's connector, zone, phase, last
-  change and reconcile state. A crawl from the beginning that would remove a large part of a
-  source (over 25% and over 50 items by default, or anything when it found nothing) is held;
-  after checking the source (is the drive mounted? the right folder?), `source
-confirm-reconcile` lets the next sync remove up to the count it held. A source whose connector
-  now says it is another one (another disk at the folder's path) stops syncing until `source
-accept-identity`, which starts a crawl from the beginning (its reconcile guarded the same way).
-  Both are audited (`source.confirm-reconcile`, `source.accept-identity`), refusals too.
+  change and reconcile state (held, deferred, running). A crawl from the beginning that would
+  remove a large part of a source (over 25% of it and either over 50 items or half of it, by
+  default; or anything when it found nothing) is held, and **while it is held the source doesn't
+  sync at all**, deltas included. After checking the source (is the drive mounted? the right
+  folder?), either `source confirm-reconcile` (the next sync removes up to the count it held) or
+  `source discard-reconcile` (nothing is removed; the source is crawled afresh, and that crawl's
+  reconcile is guarded again). `discard-reconcile` also runs a reconcile deferred because a crawl
+  met a place it couldn't read. A source whose connector now says it is another one (another
+  disk at the folder's path) stops syncing until `source accept-identity`, which starts a crawl
+  from the beginning (guarded the same way). All three are audited (`source.confirm-reconcile`,
+  `source.discard-reconcile`, `source.accept-identity`), refusals too.
 
 - **Output.** The id or token goes to standard output, and messages go to standard error. The
   exit code is 0 for done, 1 for failed and 2 for misused.

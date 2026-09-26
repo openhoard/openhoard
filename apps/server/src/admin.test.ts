@@ -353,6 +353,35 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
       "source nope has no reconcile held for confirmation\n",
     ]);
 
+    // Discarding drops the held reconcile, removes nothing, and has the source crawled afresh.
+    const discarded = await admin(
+      "source",
+      "discard-reconcile",
+      "--tenant",
+      tenantId,
+      "--source",
+      "fs-main",
+    );
+    expect(discarded.code, discarded.err).toBe(0);
+    expect(discarded.err).toContain("nothing was removed");
+    const [fresh] = await inspect((db) =>
+      db.withTenant(tenantId, (tx) => tx.select().from(sourceSyncs)),
+    );
+    expect(fresh).toMatchObject({ phase: "crawl", token: null, reconcileHeld: null });
+    expect(fresh?.reconcileFrom).toBeInstanceOf(Date);
+    const again = await admin(
+      "source",
+      "discard-reconcile",
+      "--tenant",
+      tenantId,
+      "--source",
+      "fs-main",
+    );
+    expect([again.code, again.err]).toEqual([
+      1,
+      "source fs-main has no reconcile held or deferred\n",
+    ]);
+
     const accepted = await admin(
       "source",
       "accept-identity",
@@ -397,6 +426,8 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
     ).toEqual([
       ["source.confirm-reconcile", "allow", { source: "fs-main", confirmed: 60 }],
       ["source.confirm-reconcile", "deny", { source: "nope", reason: "nothing-held" }],
+      ["source.discard-reconcile", "allow", { source: "fs-main" }],
+      ["source.discard-reconcile", "deny", { source: "fs-main", reason: "nothing-held" }],
       ["source.accept-identity", "allow", { source: "fs-main" }],
       ["source.accept-identity", "deny", { source: "nope", reason: "unknown-source" }],
     ]);

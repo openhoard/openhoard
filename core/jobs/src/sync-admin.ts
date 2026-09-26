@@ -1,5 +1,5 @@
 import { sourceSyncs, type Tx } from "@openhoard/core-db";
-import { and, asc, eq, isNotNull, sql } from "drizzle-orm";
+import { and, asc, eq, isNotNull, or, sql } from "drizzle-orm";
 
 /*
  * What an admin does about a source's sync (T-301): see where each source stands, confirm a
@@ -19,6 +19,8 @@ export interface SourceSyncState {
   reconcileHeld: number | null;
   /** How many removals an admin confirmed, if any. */
   reconcileConfirmed: number | null;
+  /** A crawl met a place it couldn't read: the next crawl from the beginning reconciles. */
+  reconcileDeferred: boolean;
   /** What the connector said the source is, when it says. */
   sourceIdentity: string | null;
   updatedAt: Date;
@@ -39,6 +41,7 @@ export async function listSourceSyncs(tx: Tx, tenantId: string): Promise<SourceS
     reconciling: r.reconcileFrom !== null,
     reconcileHeld: r.reconcileHeld,
     reconcileConfirmed: r.reconcileConfirmed,
+    reconcileDeferred: r.reconcileDeferred,
     sourceIdentity: r.sourceIdentity,
     updatedAt: r.updatedAt,
   }));
@@ -69,6 +72,36 @@ export async function confirmReconcile(
 }
 
 /**
+ * Discards a reconcile the guard held (or one deferred for an unreadable place) without removing
+ * anything: the source is crawled again from the beginning, from a clean state, and that crawl's
+ * reconcile is guarded like any other. For when the source is right after all (a drive mounted
+ * again, a folder restored) or its administrator wants a fresh look before confirming. Returns
+ * false when nothing is held or deferred (an unknown source included).
+ */
+export async function discardReconcile(tx: Tx, tenantId: string, source: string): Promise<boolean> {
+  const rows = await tx
+    .update(sourceSyncs)
+    .set({
+      phase: "crawl",
+      token: null,
+      reconcileFrom: sql`now()`,
+      reconcileHeld: null,
+      reconcileConfirmed: null,
+      reconcileDeferred: false,
+      updatedAt: sql`now()`,
+    })
+    .where(
+      and(
+        eq(sourceSyncs.tenantId, tenantId),
+        eq(sourceSyncs.source, source),
+        or(isNotNull(sourceSyncs.reconcileHeld), eq(sourceSyncs.reconcileDeferred, true)),
+      ),
+    )
+    .returning({ source: sourceSyncs.source });
+  return rows.length > 0;
+}
+
+/**
  * Accepts that the source is now what its connector says (another disk at the path, a site
  * recreated): forgets the recorded identity (the next sync records the new one) and starts a
  * crawl from the beginning, whose reconcile the guard watches as any other. Returns false for
@@ -88,6 +121,7 @@ export async function acceptSourceIdentity(
       reconcileFrom: sql`now()`,
       reconcileHeld: null,
       reconcileConfirmed: null,
+      reconcileDeferred: false,
       updatedAt: sql`now()`,
     })
     .where(and(eq(sourceSyncs.tenantId, tenantId), eq(sourceSyncs.source, source)))

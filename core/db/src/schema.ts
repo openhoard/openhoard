@@ -1227,6 +1227,11 @@ export const sourceSyncs = pgTable(
     reconcileHeld: integer("reconcile_held"),
     /** How many removals an admin confirmed (`admin source confirm-reconcile`). */
     reconcileConfirmed: integer("reconcile_confirmed"),
+    /**
+     * A crawl from the beginning met a place it couldn't read, so it reconciled nothing: the next
+     * crawl from the beginning must (0042). Cleared when one does.
+     */
+    reconcileDeferred: boolean("reconcile_deferred").notNull().default(false),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
