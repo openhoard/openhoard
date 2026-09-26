@@ -1,7 +1,7 @@
 {
   "pack_version": 1,
   "name": "general-business",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Sensitivity levels, departments and document kinds, with folder and file-type rules and two guardrail policies. A starting point: edit freely.",
   "defaults": {
     "visibility": "discoverable",
@@ -123,6 +123,17 @@
         {
           "value": "handbook",
           "label": "Handbook"
+        }
+      ]
+    },
+    {
+      "key": "risk",
+      "label": "Risk",
+      "values": [
+        {
+          "value": "injection",
+          "label": "Possible prompt injection",
+          "exposure": "metadata-only"
         }
       ]
     },
@@ -401,6 +412,14 @@
         "tags": ["sensitivity:public", "sensitivity:restricted"],
         "expect": {
           "visibility": "hidden",
+          "exposure": "metadata-only"
+        }
+      },
+      {
+        "name": "a file flagged as a possible prompt injection is metadata-only for AI, even when public",
+        "tags": ["sensitivity:public", "risk:injection"],
+        "expect": {
+          "visibility": "readable",
           "exposure": "metadata-only"
         }
       }

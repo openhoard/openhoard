@@ -83,6 +83,17 @@ export function evaluateRules(
     .sort((a, b) => (a.tag < b.tag ? -1 : a.tag > b.tag ? 1 : 0));
 }
 
+/**
+ * Whether a tag's `applied_by` isn't a built-in detector's (`rule:builtin/…`, risk.ts). Pack
+ * rule ids are slugs without `/`, so no pack rule can take that name.
+ */
+function notBuiltIn(appliedBy: typeof objectTags.appliedBy | typeof tagReviews.appliedBy) {
+  return sql`(${appliedBy} is null or ${appliedBy} not like ${`${BUILTIN_RULE_PREFIX}%`})`;
+}
+
+/** The prefix of built-in detectors' rule principals: `rule:builtin/injection-detector`. */
+export const BUILTIN_RULE_PREFIX = "rule:builtin/";
+
 /** What applyRuleTags() did. */
 export interface RuleTagSync {
   /** One per tag the rules give now, sorted by tag: applied, or waiting in review. */
@@ -146,6 +157,8 @@ export async function applyRuleTags(
         eq(objectTags.tenantId, tenantId),
         eq(objectTags.objectId, objectId),
         eq(objectTags.source, "rule"),
+        // Built-in detectors' tags (risk.ts) are theirs to keep or take off, not the rules'.
+        notBuiltIn(objectTags.appliedBy),
       ),
     );
   const stale = current.filter((r) => !wanted.has(tagOf(r.facet, r.value)));
@@ -154,6 +167,7 @@ export async function applyRuleTags(
       eq(objectTags.tenantId, tenantId),
       eq(objectTags.objectId, objectId),
       eq(objectTags.source, "rule"),
+      notBuiltIn(objectTags.appliedBy),
       or(...rows.map((r) => and(eq(objectTags.facet, r.facet), eq(objectTags.value, r.value)))),
     );
   const removed = stale.filter((r) => !r.model);
@@ -200,6 +214,7 @@ export async function applyRuleTags(
         eq(tagReviews.tenantId, tenantId),
         eq(tagReviews.objectId, objectId),
         eq(tagReviews.source, "rule"),
+        notBuiltIn(tagReviews.appliedBy),
         isNull(tagReviews.resolvedAt),
         wanted.size === 0
           ? undefined

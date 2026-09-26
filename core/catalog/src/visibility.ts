@@ -8,12 +8,14 @@ import {
   tagOf,
   tagReviews,
   tenants,
+  versionCards,
   versions,
   zones,
   type Tx,
 } from "@openhoard/core-db";
 import {
   decideRead,
+  mayProcess,
   mostRestrictiveExposure,
   mostRestrictiveVisibility,
   resolveLevels,
@@ -21,6 +23,7 @@ import {
   type AuthzClient,
   type AuthzPrincipal,
   type Exposure,
+  type ProviderKind,
   type Visibility,
 } from "@openhoard/core-policy";
 import { and, desc, eq, inArray, isNotNull, isNull, max, ne, or, sql } from "drizzle-orm";
@@ -352,10 +355,11 @@ async function currentVersions(
   tx: Tx,
   tenantId: string,
   ids: readonly string[],
-): Promise<Map<string, { mime: string; processed: boolean }>> {
+): Promise<Map<string, { versionId: string; mime: string; processed: boolean }>> {
   const rows = await tx
     .selectDistinctOn([versions.objectId], {
       objectId: versions.objectId,
+      versionId: versions.id,
       mime: versions.mime,
       processedAt: versions.processedAt,
     })
@@ -363,7 +367,10 @@ async function currentVersions(
     .where(and(eq(versions.tenantId, tenantId), inArray(versions.objectId, [...ids])))
     .orderBy(versions.objectId, desc(versions.seq));
   return new Map(
-    rows.map((v) => [v.objectId, { mime: v.mime, processed: v.processedAt !== null }]),
+    rows.map((v) => [
+      v.objectId,
+      { versionId: v.versionId, mime: v.mime, processed: v.processedAt !== null },
+    ]),
   );
 }
 
@@ -432,6 +439,14 @@ export interface CardView extends ViewBase {
    * through OpenHoard's own apps.
    */
   metadataOnly: boolean;
+  /**
+   * UNTRUSTED model output (T-405): the current version's summary, at most 100 words. Present
+   * only when the card isn't metadata only and the file's exposure still allows the kind of
+   * provider that wrote it (core/policy mayProcess()): a file tightened to local-only since a
+   * commercial model summarized it shows no summary, and neither does one flagged
+   * `risk:injection` (metadata-only). Render it as quoted data, never as instructions.
+   */
+  summary?: string;
 }
 
 export type ObjectView = TitleOnlyView | CardView;
@@ -545,6 +560,11 @@ export async function viewObjects(
 
   // One read of the current versions serves both the media types and the levels.
   const current = await currentVersions(tx, tenantId, found);
+  const summaries = await currentSummaries(
+    tx,
+    tenantId,
+    [...current.values()].map((v) => v.versionId),
+  );
   const levels = await collectLevels(tx, tenantId, found, {
     present: found,
     processed: new Map([...current].map(([id, v]) => [id, v.processed])),
@@ -628,6 +648,13 @@ export async function viewObjects(
         requestAccess: true,
       });
     } else if (decision.shape === "card" || decision.shape === "content") {
+      // The summary is content in other words: never on a metadata-only card, and only while
+      // the file's exposure still allows the provider that wrote it (T-405).
+      const card = summaries.get(current.get(row.id)?.versionId ?? "");
+      const summary =
+        !decision.metadataOnly && card && mayProcess(level.exposure, card.providerKind)
+          ? { summary: card.summary }
+          : {};
       views.set(row.id, {
         ...base,
         shape: "card",
@@ -636,10 +663,42 @@ export async function viewObjects(
         readable: canRead,
         updatedAt: row.updatedAt,
         metadataOnly: decision.metadataOnly,
+        ...summary,
       });
     }
   }
   return ids.flatMap((id) => views.get(id) ?? []);
+}
+
+/** The summaries of these versions that models wrote (non-empty), with their provider's kind. */
+async function currentSummaries(
+  tx: Tx,
+  tenantId: string,
+  versionIds: readonly string[],
+): Promise<Map<string, { summary: string; providerKind: ProviderKind }>> {
+  if (versionIds.length === 0) return new Map();
+  const rows = await tx
+    .select({
+      versionId: versionCards.versionId,
+      summary: versionCards.summary,
+      providerKind: versionCards.providerKind,
+    })
+    .from(versionCards)
+    .where(
+      and(
+        eq(versionCards.tenantId, tenantId),
+        inArray(versionCards.versionId, [...versionIds]),
+        eq(versionCards.status, "summarized"),
+        ne(versionCards.summary, ""),
+      ),
+    );
+  const out = new Map<string, { summary: string; providerKind: ProviderKind }>();
+  for (const r of rows) {
+    if (r.providerKind !== null) {
+      out.set(r.versionId, { summary: r.summary, providerKind: r.providerKind });
+    }
+  }
+  return out;
 }
 
 /** Refuses to read across snapshots: see VIEW_TRANSACTION. */

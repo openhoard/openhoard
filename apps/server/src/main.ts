@@ -6,6 +6,7 @@ import { adminArgument, runAdmin } from "./admin.js";
 import { closeApp, createApp } from "./app.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
+import { createServerModels } from "./models.js";
 
 // `main.js [options] admin …` runs an admin command (admin.ts) instead of the server, then exits.
 // `admin` is the first argument that isn't an option (`--data-dir x admin …` is admin too).
@@ -46,7 +47,22 @@ log.info({ database: db.kind }, "database ready");
 // jobs.worker (the default) this one also runs enrichment and the maintenance schedule.
 let jobs: Jobs;
 try {
-  jobs = await startJobs(db, { worker: config.jobs.worker, log: log.child({ component: "jobs" }) });
+  // Model providers (T-404) from `models`, keys from OPENHOARD_MODEL_<ID>_API_KEY; none, no model.
+  const models = createServerModels(config.models, process.env, log.child({ component: "models" }));
+  jobs = await startJobs(db, {
+    worker: config.jobs.worker,
+    log: log.child({ component: "jobs" }),
+    ...(models === null
+      ? {}
+      : {
+          summarize: {
+            router: models.router,
+            budget: models.budget,
+            log: log.child({ component: "summarize" }),
+            ...models.summarize,
+          },
+        }),
+  });
 } catch (err) {
   log.fatal({ err }, "cannot start the job queue");
   await db.close().catch(() => {});

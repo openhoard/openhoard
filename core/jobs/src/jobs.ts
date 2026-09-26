@@ -6,10 +6,12 @@ import {
   defaultEnrichSteps,
   enrichVersion,
   needsEnrichment,
+  stepProviders,
   type EnrichPayload,
   type EnrichStep,
 } from "./enrich.js";
 import type { ExtractStepOptions } from "./extract.js";
+import type { SummarizeStepOptions } from "./summarize.js";
 import {
   maintainTenant,
   maintenanceSettings,
@@ -77,7 +79,11 @@ export interface EnrichQueueOptions {
   retryDelayMaxSeconds?: number;
   /** Double the delay on each retry. Default true. */
   retryBackoff?: boolean;
-  /** How long a job may run before it counts as crashed and is retried, in seconds. Default 900. */
+  /**
+   * How long a job may run before it counts as crashed and is retried, in seconds. Default
+   * 1,500 (25 minutes): the extract step's 13 minutes, the summarize step's 8, and room for the
+   * rest (see the README's time budget).
+   */
   expireInSeconds?: number;
 }
 
@@ -88,8 +94,8 @@ export interface JobsOptions {
    */
   worker?: boolean;
   /**
-   * The enrichment steps, in order. Default defaultEnrichSteps(): the rule tagger, and text
-   * extraction when `content` is given.
+   * The enrichment steps, in order. Default defaultEnrichSteps(): text extraction when
+   * `content` is given, injection flagging, the rule tagger, and summaries when `summarize` is.
    */
   steps?: readonly EnrichStep[];
   /**
@@ -97,6 +103,11 @@ export interface JobsOptions {
    * connector's source): with it, they extract text (T-402). Ignored when `steps` is given.
    */
   content?: ContentSource;
+  /**
+   * Summaries and model tags (T-405) with these providers and budget, for the default steps
+   * with `content`. Without it, no model runs. Ignored when `steps` is given.
+   */
+  summarize?: SummarizeStepOptions;
   /**
    * The extract step's settings (with `content`): limits, and `indexedZones` to extract indexed
    * zones' content too (default off; managed zones always, local-only and code zones never).
@@ -165,6 +176,7 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
       defaultEnrichSteps({
         ...(options.content === undefined ? {} : { content: options.content }),
         ...(options.extract === undefined ? {} : { extract: options.extract }),
+        ...(options.summarize === undefined ? {} : { summarize: options.summarize }),
       })),
   ];
   const names = new Set<string>();
@@ -175,9 +187,13 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
     names.add(step.name);
     // A provider of a kind nobody knows would be skipped every time (mayProcess() refuses it):
     // said at start, not found missing in every job's output.
+    if (step.provider !== undefined && step.providers !== undefined) {
+      throw new TypeError(`enrichment step ${step.name}: provider or providers, not both`);
+    }
     if (
-      step.provider !== undefined &&
-      !["local", "commercial", "consumer"].includes(step.provider.kind as string)
+      stepProviders(step).some(
+        (p) => !["local", "commercial", "consumer"].includes(p.kind as string),
+      )
     ) {
       throw new TypeError(
         `enrichment step ${step.name}: a provider is local, commercial or consumer`,
@@ -447,7 +463,7 @@ function enrichQueue(options: EnrichQueueOptions = {}, kind: Database["kind"]) {
     retryDelaySeconds: options.retryDelaySeconds ?? 30,
     retryDelayMaxSeconds: options.retryDelayMaxSeconds ?? 3_600,
     retryBackoff: options.retryBackoff ?? true,
-    expireInSeconds: options.expireInSeconds ?? 900,
+    expireInSeconds: options.expireInSeconds ?? 1_500,
   };
   const whole = (key: keyof typeof o, min: number, max: number) => {
     const value = o[key];

@@ -299,12 +299,13 @@ describe("the extract step", () => {
   });
 
   it("runs from startJobs' default steps when the server gives a content source", async () => {
-    expect(defaultEnrichSteps().map((s) => s.name)).toEqual(["rule-tags"]);
+    expect(defaultEnrichSteps().map((s) => s.name)).toEqual(["injection-flag", "rule-tags"]);
     const file = await ingestFile("Notes.md", MIME.md, enc.encode("# Hi\n<!-- psst -->\nthere"));
     const { source } = memorySource();
     expect(defaultEnrichSteps({ content: source }).map((s) => [s.name, s.provider])).toEqual([
-      ["rule-tags", undefined],
       ["extract-text", undefined],
+      ["injection-flag", undefined],
+      ["rule-tags", undefined],
     ]);
     const jobs = await startJobs(db, {
       content: source,

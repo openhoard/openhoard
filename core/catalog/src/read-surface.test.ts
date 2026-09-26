@@ -33,6 +33,8 @@ const SURFACE = {
     "viewObjects",
   ],
   write: [
+    // Enrichment's injection-flag step, through its guarded write (T-408).
+    "applyInjectionFlag",
     "applyPack",
     "applyRuleTags",
     "approveReview",
@@ -53,6 +55,8 @@ const SURFACE = {
     "removePack",
     // Enrichment's extract step, through its guarded write (T-402).
     "saveExtract",
+    // Enrichment's summarize step, through its guarded write (T-405).
+    "saveCard",
     "setDisplayTitle",
     "setPrimaryTag",
     "writeActivity",
@@ -63,16 +67,23 @@ const SURFACE = {
     // For enrichment (core/jobs): the exposure its tags give a file, before it is processed.
     "enrichmentExposure",
     "explainAccess",
+    // For enrichment (core/jobs): whether a file carries the injection flag (T-408).
+    "hasInjectionFlag",
     "explainLevels",
     "levelsFor",
     "listActivity",
     "listOpenReviews",
+    // For enrichment (core/jobs): the approved vocabulary a model may propose from (T-405).
+    "modelVocabulary",
     "planPack",
     "planPackRemoval",
     "primaryTagOf",
     // Extracted text is content: for pipeline steps (search T-501, summaries T-405) only;
     // whatever shows it to someone gates it as content first.
     "readExtract",
+    // A version's model card, for the summarize step; readers get the summary through
+    // viewObjects(), gated by exposure (T-405).
+    "readCard",
     "sourceItemState",
     "tenantPolicies",
     "tenantRules",
@@ -98,14 +109,18 @@ const SURFACE = {
     "ACTIVITY_PAGE",
     "ActivityBuffer",
     "APPLY_TRANSACTION",
+    "BUILTIN_RULE_PREFIX",
     "DEFAULT_MIN_CONFIDENCE",
     "ExplainError",
     "GENERIC_TITLE",
     "INGEST_LIMITS",
+    "INJECTION_DETECTOR",
+    "INJECTION_TAG",
     "IngestError",
     "MAX_OBJECT_IDS",
     "PackError",
     "REPEAT_WINDOW_MS",
+    "RiskVocabularyError",
     "SEARCH_CANDIDATES",
     "TagError",
     "VIEW_TRANSACTION",

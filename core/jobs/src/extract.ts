@@ -68,8 +68,8 @@ export interface ExtractStepOptions {
   indexedZones?: boolean;
   /**
    * The most time the step spends on one version, both attempts together, in milliseconds.
-   * Default 13 minutes: under the enrichment job's 15-minute lease. A timeout is tried again
-   * with twice the time only when that fits.
+   * Default 13 minutes: with the summarize step's 8, under the enrichment job's 25-minute
+   * lease. A timeout is tried again with twice the time only when that fits.
    */
   budgetMs?: number;
   /** The extractor; tests replace it. Default: `extract` from @openhoard/enricher-extract. */
