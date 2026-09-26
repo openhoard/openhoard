@@ -18,6 +18,7 @@ import {
   ingest,
   IngestError,
   normalizeMime,
+  markSourceItemSeen,
   removeFromSource,
   sourceItemState,
   type IngestInput,
@@ -401,6 +402,36 @@ describe("removeFromSource", () => {
   it("knows nothing of unknown items", async () => {
     expect(await inTenant((tx) => removeFromSource(tx, t.tenantId, "sharepoint", "nope"))).toBe(
       null,
+    );
+  });
+});
+
+describe("markSourceItemSeen", () => {
+  it("moves only the sync time of a known item", async () => {
+    const r = await item("a", "x", { etag: "e1", sourceVersion: "c7" });
+    const syncedAt = async () =>
+      (
+        await inTenant((tx) =>
+          tx
+            .select({ at: sourceRefs.syncedAt })
+            .from(sourceRefs)
+            .where(and(eq(sourceRefs.source, "sharepoint"), eq(sourceRefs.externalId, "a"))),
+        )
+      )[0]?.at.getTime() ?? 0;
+    const before = await syncedAt();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(await inTenant((tx) => markSourceItemSeen(tx, t.tenantId, "sharepoint", "a"))).toBe(
+      true,
+    );
+    expect(await syncedAt()).toBeGreaterThan(before);
+    expect(await inTenant((tx) => sourceItemState(tx, t.tenantId, "sharepoint", "a"))).toEqual({
+      objectId: r.objectId,
+      etag: "e1",
+      deleted: false,
+      current: { seq: 1, sourceVersion: "c7", blobId: (await content("x")).blobId },
+    });
+    expect(await inTenant((tx) => markSourceItemSeen(tx, t.tenantId, "sharepoint", "nope"))).toBe(
+      false,
     );
   });
 });

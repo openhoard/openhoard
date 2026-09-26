@@ -382,6 +382,32 @@ export async function removeFromSource(
   return marked[0]?.id ?? null;
 }
 
+/**
+ * Records that the source still has an item without ingesting it (its source reference's sync
+ * time only): for an item a crawl met but couldn't record (it changed while read, it can't be
+ * read, a field is refused), so a reconcile after that crawl doesn't take it for gone. Returns
+ * whether the item is known. Its content, eTag and title stay as they were.
+ */
+export async function markSourceItemSeen(
+  tx: Tx,
+  tenantId: string,
+  source: string,
+  externalId: string,
+): Promise<boolean> {
+  const touched = await tx
+    .update(sourceRefs)
+    .set({ syncedAt: sql`now()` })
+    .where(
+      and(
+        eq(sourceRefs.tenantId, tenantId),
+        eq(sourceRefs.source, source),
+        eq(sourceRefs.externalId, externalId),
+      ),
+    )
+    .returning({ objectId: sourceRefs.objectId });
+  return touched.length > 0;
+}
+
 /** What a connector needs to skip an unchanged item before downloading it. */
 export interface SourceItemState {
   objectId: string;

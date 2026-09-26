@@ -2,6 +2,7 @@ import {
   blobIdOf,
   ingest,
   IngestError,
+  markSourceItemSeen,
   removeFromSource,
   sourceItemState,
   type IngestInput,
@@ -65,7 +66,18 @@ import type { JobsLogger } from "./jobs.js";
  *   source's items it didn't record since then are removed: they left the source while nobody
  *   followed its deltas (a first sync over items already known, a resync, a connector without
  *   delta, whose every sync is a crawl). While it runs, every item is recorded (nothing skipped
- *   as unchanged), so what it saw is what counts.
+ *   as unchanged), and every item it mentions but can't record (skipped, invalid) is marked seen
+ *   (markSourceItemSeen()), so only items it never mentioned count as gone.
+ * - A reconcile can't empty a source by mistake (a folder not mounted, a lost state, a
+ *   connector that says `done` too soon): when it would remove more than `reconcileGuard`
+ *   allows (by default over 25% of the source's items and over 50 of them), or anything at all
+ *   when the crawl mentioned no item, it removes nothing, records how many it would have
+ *   (`reconcile_held`) and fails (`reconcile-guard`) until an admin confirms that many
+ *   (`admin source confirm-reconcile`). A crawl that met a place it couldn't read (a `warning`
+ *   `unreadable`) doesn't reconcile at all: unknown is not gone.
+ * - A connector with identity() binds the source to what it answers (a folder's device and
+ *   inode): another answer later (another disk mounted at the path) fails the run
+ *   (`source-identity`) until an admin accepts it, which starts a crawl from the beginning.
  *
  * The connector is plugin code: each event is checked (SDK checkEvent()) before the catalog sees
  * it, and a bad one skipped and reported. Its failures are sorted by their code (SDK errors.ts);
@@ -109,6 +121,18 @@ export interface SyncOptions {
    * its job's lease; the next run goes on from there. Default: no limit.
    */
   budgetMs?: number;
+  /**
+   * Stops at the first checkpoint after this many items (and deletes) in one run, with status
+   * `partial`. Like `budgetMs`, it can only stop at a checkpoint: a connector that never yields
+   * one runs until its stream ends or the run's signal aborts. Default: no limit.
+   */
+  maxItems?: number;
+  /**
+   * When a reconcile is held for an admin (see the header): more than `maxFraction` (default
+   * 0.25) of the source's items and more than `minItems` (default 50). Per source, from its
+   * connection's configuration.
+   */
+  reconcileGuard?: { maxFraction?: number; minItems?: number };
   log?: JobsLogger;
   /** How the run waits; tests replace it. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -136,10 +160,13 @@ export interface SyncReport {
    * `retry` and `failed`: why, as a code. The connector's (`throttled`, `retryable`, `auth`,
    * `permanent`, `resync`) or the runner's: `invalid-connector`, `unknown-zone`, `zone-kind` (not an
    * indexed zone, or one the connector can't serve), `zone-mismatch` and `connector-mismatch` (the
-   * source was synced into another zone, or by another connector), `invalid-token`,
-   * `incomplete` (a stream ended without `done`), `database`.
+   * source was synced into another zone, or by another connector), `source-identity` (the
+   * source is not the one first synced), `reconcile-guard` (see `reconcileHeld`),
+   * `invalid-token`, `incomplete` (a stream ended without `done`), `database`.
    */
   error?: string;
+  /** `reconcile-guard`: how many items the reconcile would have removed, held for an admin. */
+  reconcileHeld?: number;
   counts: {
     /** File events seen. */
     files: number;
@@ -158,6 +185,11 @@ export interface SyncReport {
   };
   /** Items left out, and why (the first {@link MAX_REPORTED_SKIPS}). */
   skipped: { externalId?: string; reason: string }[];
+  /**
+   * What the connector warned of (`unreadable`, `hard-link`…), and the runner's own
+   * (`reconcile-skipped`: a crawl met an unreadable place), the first {@link MAX_REPORTED_SKIPS}.
+   */
+  warnings: { code: string; externalId?: string }[];
 }
 
 /** How many skipped items a report lists (it counts them all). */
@@ -205,9 +237,25 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
       reconciled: 0,
     },
     skipped: [],
+    warnings: [],
   };
+  const maxItems = options.maxItems ?? Infinity;
+  const guard = {
+    maxFraction: options.reconcileGuard?.maxFraction ?? 0.25,
+    minItems: options.reconcileGuard?.minItems ?? 50,
+  };
+  if (
+    !(guard.maxFraction >= 0 && guard.maxFraction <= 1) ||
+    !(guard.minItems >= 0) ||
+    !(maxItems >= 1)
+  ) {
+    throw new RangeError("runSync: reconcileGuard or maxItems out of range");
+  }
+  /** Items and deletes applied in this run. */
+  let applied = 0;
   /** A crawl from the beginning is running: record every item it yields. */
   let reconciling = false;
+  let description: ConnectorDescription | undefined;
   let key: Promise<Uint8Array> | undefined;
   const tenantKey = () => (key ??= Promise.resolve(options.tenantKey(tenantId)));
 
@@ -217,11 +265,16 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
       report.skipped.push(externalId === undefined ? { reason } : { externalId, reason });
     }
   };
+  const warn = (code: string, externalId?: string) => {
+    if (report.warnings.length < MAX_REPORTED_SKIPS) {
+      report.warnings.push(externalId === undefined ? { code } : { code, externalId });
+    }
+  };
   const end = (stop: Stop | null): SyncReport => {
     report.status = stop?.status ?? "done";
     if (stop?.error !== undefined) report.error = stop.error;
     if (stop?.retryAfterMs !== undefined) report.retryAfterMs = stop.retryAfterMs;
-    const { skipped: _list, ...summary } = report;
+    const { skipped: _list, warnings: _warnings, ...summary } = report;
     log.info?.({ tenantId, source, ...summary }, "sync ended");
     return report;
   };
@@ -258,7 +311,6 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
 
   try {
     // ── The connector, the zone, and where the source's sync stands ────────────────────────
-    let description: ConnectorDescription;
     try {
       description = connector.describe();
     } catch {
@@ -267,6 +319,7 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     if (checkDescription(description).length > 0) {
       return end(new Stop("failed", "invalid-connector"));
     }
+    const described: ConnectorDescription = description;
     const zone = await transaction(async (tx) => {
       const [row] = await tx
         .select({ kind: zones.kind })
@@ -290,7 +343,7 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
           tenantId,
           source,
           zoneId,
-          connector: description.id,
+          connector: described.id,
           phase: "crawl",
           token: null,
           reconcileFrom: sql`now()`,
@@ -302,6 +355,24 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     });
     if (state.zoneId !== zoneId) return end(new Stop("failed", "zone-mismatch"));
     if (state.connector !== description.id) return end(new Stop("failed", "connector-mismatch"));
+    if (connector.identity) {
+      let identity: string;
+      try {
+        identity = await connector.identity(signal);
+      } catch (e) {
+        throw fromConnector(e);
+      }
+      if (!storableText(identity) || identity.length === 0 || identity.length > 1024) {
+        return end(new Stop("failed", "invalid-connector"));
+      }
+      if (state.sourceIdentity === null) {
+        await transaction((tx) =>
+          tx.update(sourceSyncs).set({ sourceIdentity: identity }).where(where()),
+        );
+      } else if (state.sourceIdentity !== identity) {
+        return end(new Stop("failed", "source-identity"));
+      }
+    }
     let phase: Phase = state.phase;
     let token = state.token;
     reconciling = phase === "crawl" && state.reconcileFrom !== null;
@@ -365,12 +436,15 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
         }
         if (signal.aborted) return new Stop("cancelled");
         const event = next.value;
-        if (checkEvent(event) !== null) {
+        if (checkEvent(event, description) !== null) {
           const type = (event as { type?: unknown } | null)?.type;
           if (type === "checkpoint" || type === "done") return new Stop("failed", "invalid-token");
-          skip("invalid", idIn(event));
+          const id = idIn(event);
+          skip("invalid", id);
+          if (id !== undefined && type === "item") await seen(id);
           continue;
         }
+        if (event.type === "item" || event.type === "deleted") applied++;
         switch (event.type) {
           case "item":
             if (event.item.kind === "folder") report.counts.folders++;
@@ -385,8 +459,25 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
           }
           case "checkpoint":
             await save(phase, event.token);
-            if (options.budgetMs !== undefined && Date.now() - started >= options.budgetMs) {
+            if (
+              (options.budgetMs !== undefined && Date.now() - started >= options.budgetMs) ||
+              applied >= maxItems
+            ) {
               return new Stop("partial");
+            }
+            break;
+          case "warning":
+            warn(event.code, event.externalId);
+            if (event.code === "unreadable" && reconciling) {
+              // Unknown is not gone: this crawl removes nothing.
+              await transaction((tx) =>
+                tx
+                  .update(sourceSyncs)
+                  .set({ reconcileFrom: null, updatedAt: sql`now()` })
+                  .where(where()),
+              );
+              reconciling = false;
+              warn("reconcile-skipped");
             }
             break;
           case "done":
@@ -404,9 +495,19 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
   /** Records one file, or skips it (see the header). */
   async function apply(item: SourceItem): Promise<void> {
     report.counts.files++;
+    /** The ingest that committed: a retry after its enqueue failed only enqueues it again. */
+    let committed: IngestResult | undefined;
+    const skipSeen = async (reason: string) => {
+      skip(reason, item.externalId);
+      await seen(item.externalId);
+    };
     for (let attempt = 1; ; attempt++) {
       signal.throwIfAborted();
       try {
+        if (committed) {
+          await enqueue(committed);
+          return;
+        }
         const known = await transaction((tx) =>
           sourceItemState(tx, tenantId, source, item.externalId),
         );
@@ -431,11 +532,18 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
           result = await transaction((tx) => ingest(tx, tenantId, input(item, content)));
         }
         report.counts.ingested++;
-        await options.enqueue(tenantId, result);
+        committed = result;
+        await enqueue(result);
         return;
       } catch (e) {
-        if (e instanceof IngestError) return skip(`ingest-${e.code}`, item.externalId);
+        if (e instanceof IngestError) return skipSeen(`ingest-${e.code}`);
         if (signal.aborted || e instanceof Stop) throw e;
+        if (e instanceof EnqueueFailed) {
+          // Committed, not enqueued: try the enqueue again; the sweep is the last resort.
+          if (attempt >= attempts) throw e.cause;
+          await sleep(retryDelayMs(e.cause, attempt, { baseMs: 500, maxMs: maxWaitMs }), signal);
+          continue;
+        }
         if (!isConnectorError(e) && !isRetryable(e)) throw e;
         if (isConnectorError(e)) {
           switch (e.code) {
@@ -443,8 +551,9 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
             case "not-found":
             case "permanent":
             case "resync":
-              // Gone, changed or unreadable: the next delta reports it again if it is there.
-              return skip(e.code, item.externalId);
+              // Gone, changed or unreadable: the next delta reports it again if it is there, and
+              // a reconcile doesn't take it for gone meanwhile.
+              return skipSeen(e.code);
             case "auth":
               throw stopFor(e.code, e, attempt);
           }
@@ -457,6 +566,20 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
         await sleep(wait, signal);
       }
     }
+  }
+
+  async function enqueue(result: IngestResult): Promise<void> {
+    try {
+      await options.enqueue(tenantId, result);
+    } catch (e) {
+      throw new EnqueueFailed(e);
+    }
+  }
+
+  /** While reconciling, notes that the crawl mentioned an item it couldn't record. */
+  async function seen(externalId: string): Promise<void> {
+    if (!reconciling) return;
+    await transaction((tx) => markSourceItemSeen(tx, tenantId, source, externalId));
   }
 
   /** The item's bytes, read and hashed: exactly as many as it said it has. */
@@ -513,6 +636,45 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
    * started), then clears `reconcile_from`. Compared in SQL, the database's clock on both sides.
    */
   async function reconcile(): Promise<void> {
+    const joined = () =>
+      and(
+        eq(sourceRefs.tenantId, tenantId),
+        eq(sourceRefs.source, source),
+        eq(sourceSyncs.tenantId, sourceRefs.tenantId),
+        eq(sourceSyncs.source, sourceRefs.source),
+      );
+    const [counts] = await transaction((tx) =>
+      tx
+        .select({
+          live: sql<number>`(count(*) filter (where ${objects.deletedAt} is null))::int`,
+          stale: sql<number>`(count(*) filter (where ${objects.deletedAt} is null and ${sourceRefs.syncedAt} < ${sourceSyncs.reconcileFrom}))::int`,
+          seen: sql<number>`(count(*) filter (where ${sourceRefs.syncedAt} >= ${sourceSyncs.reconcileFrom}))::int`,
+          confirmed: sql<number | null>`max(${sourceSyncs.reconcileConfirmed})`,
+        })
+        .from(sourceRefs)
+        .innerJoin(
+          objects,
+          and(eq(objects.tenantId, sourceRefs.tenantId), eq(objects.id, sourceRefs.objectId)),
+        )
+        .innerJoin(sourceSyncs, joined()),
+    );
+    const stale = Number(counts?.stale ?? 0);
+    const live = Number(counts?.live ?? 0);
+    const confirmed = counts?.confirmed == null ? null : Number(counts.confirmed);
+    const tooMany =
+      Number(counts?.seen ?? 0) === 0 ||
+      (stale > guard.minItems && stale > guard.maxFraction * live);
+    if (stale > 0 && tooMany && !(confirmed !== null && stale <= confirmed)) {
+      await transaction((tx) =>
+        tx
+          .update(sourceSyncs)
+          .set({ reconcileHeld: stale, updatedAt: sql`now()` })
+          .where(where()),
+      );
+      report.reconcileHeld = stale;
+      log.warn?.({ tenantId, source, held: stale, live }, "sync: reconcile held for an admin");
+      throw new Stop("failed", "reconcile-guard");
+    }
     for (;;) {
       if (signal.aborted) throw new Stop("cancelled");
       const stale = await transaction((tx) =>
@@ -552,7 +714,12 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     await transaction((tx) =>
       tx
         .update(sourceSyncs)
-        .set({ reconcileFrom: null, updatedAt: sql`now()` })
+        .set({
+          reconcileFrom: null,
+          reconcileHeld: null,
+          reconcileConfirmed: null,
+          updatedAt: sql`now()`,
+        })
         .where(where()),
     );
     reconciling = false;
@@ -576,6 +743,13 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     if (isConnectorError(e) || e instanceof Stop || signal.aborted || isAbortError(e)) return e;
     log.warn?.({ tenantId, source }, "sync: the connector failed without a code");
     return new ConnectorError("retryable", "the connector failed");
+  }
+}
+
+/** The enqueue after a committed ingest failed: `cause` is why. */
+class EnqueueFailed extends Error {
+  constructor(override readonly cause: unknown) {
+    super("enqueueing enrichment failed");
   }
 }
 

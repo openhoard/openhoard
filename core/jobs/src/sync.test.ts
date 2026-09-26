@@ -33,6 +33,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { connectorContentSource, firstOf } from "./connector-content.js";
 import { needsEnrichment } from "./enrich.js";
 import { QUEUES, startJobs, type Jobs } from "./jobs.js";
+import { acceptSourceIdentity, confirmReconcile, listSourceSyncs } from "./sync-admin.js";
 import { runSync, type SyncOptions } from "./sync.js";
 
 /*
@@ -771,5 +772,228 @@ describe("reading indexed zones through connectors", () => {
     expect(jobsFor.length).toBeGreaterThan(0);
     // The folder itself is untouched.
     expect(await readFile(join(root, "Notes.md"), "utf8")).toBe("# Hello\nfrom the folder\n");
+  });
+});
+
+describe("runSync's safeguards", () => {
+  const admin = <T>(
+    work: (tx: Parameters<Parameters<Database["withTenant"]>[1]>[0]) => Promise<T>,
+  ) => db.withTenant(t.tenantId, work);
+  const live = async (source = SOURCE) => (await catalog(source)).filter((r) => !r.deleted);
+
+  it("holds a reconcile that would empty the source until an admin confirms it", async () => {
+    for (let i = 0; i < 60; i++) await put([`file-${i}.txt`], `file ${i}\n`);
+    await sync(folder({ checkpointEvery: 20 }));
+    expect(await live()).toHaveLength(60);
+    // The folder looks empty and the connector's state is gone: a crawl from the beginning
+    // reaches `done` having seen nothing.
+    for (let i = 0; i < 60; i++) await rm(join(root, `file-${i}.txt`));
+    await rm(stateDir, { recursive: true });
+
+    const held = await sync(folder());
+    expect(held).toMatchObject({
+      status: "failed",
+      error: "reconcile-guard",
+      reconcileHeld: 60,
+      counts: { reconciled: 0 },
+    });
+    expect(await live()).toHaveLength(60);
+    expect(await syncState()).toMatchObject({ reconcileHeld: 60, reconcileConfirmed: null });
+    // Every run holds it again, and says so.
+    expect(await sync(folder())).toMatchObject({ status: "failed", error: "reconcile-guard" });
+
+    expect((await admin((tx) => listSourceSyncs(tx, t.tenantId)))[0]).toMatchObject({
+      source: SOURCE,
+      reconciling: true,
+      reconcileHeld: 60,
+    });
+    expect(await admin((tx) => confirmReconcile(tx, t.tenantId, SOURCE))).toBe(60);
+    expect(await admin((tx) => confirmReconcile(tx, t.tenantId, "nope"))).toBeNull();
+    const confirmed = await sync(folder());
+    expect(confirmed).toMatchObject({ status: "done", counts: { reconciled: 60 } });
+    expect(await live()).toHaveLength(0);
+    expect(await syncState()).toMatchObject({
+      reconcileFrom: null,
+      reconcileHeld: null,
+      reconcileConfirmed: null,
+    });
+  });
+
+  it("holds any removal when the crawl mentioned nothing, however small the source", async () => {
+    const mem = memorySource();
+    for (let i = 0; i < 3; i++) await mem.write([`f${i}.txt`], enc.encode(`${i}`));
+    await sync(mem.connector, { source: "mem" });
+    // A connector that says `done` before anything else.
+    const early: Connector = {
+      ...mem.connector,
+      crawl: async function* () {
+        yield { type: "done", cursor: "delta:1" };
+      },
+    };
+    await admin((tx) =>
+      tx.update(sourceSyncs).set({ phase: "crawl", token: null, reconcileFrom: sql`now()` }),
+    );
+    expect(await sync(early, { source: "mem" })).toMatchObject({
+      status: "failed",
+      error: "reconcile-guard",
+      reconcileHeld: 3,
+    });
+    expect(await live("mem")).toHaveLength(3);
+  });
+
+  it("lets a reconcile under the threshold through, and a larger one with a lower threshold wait", async () => {
+    const mem = memorySource();
+    for (let i = 0; i < 10; i++) await mem.write([`f${i}.txt`], enc.encode(`${i}`));
+    await sync(mem.connector, { source: "mem" });
+    for (let i = 0; i < 4; i++) await mem.remove([`f${i}.txt`]);
+    await mem.close(); // its cursor is refused: a crawl from the beginning
+    expect(
+      await sync(mem.connector, {
+        source: "mem",
+        reconcileGuard: { minItems: 3, maxFraction: 0.3 },
+      }),
+    ).toMatchObject({ status: "failed", error: "reconcile-guard", reconcileHeld: 4 });
+    expect(await sync(mem.connector, { source: "mem" })).toMatchObject({
+      status: "done",
+      counts: { reconciled: 4 },
+    });
+    await expect(
+      sync(mem.connector, { source: "mem", reconcileGuard: { maxFraction: 2 } }),
+    ).rejects.toThrow(RangeError);
+  });
+
+  it("refuses a source that is now another one until an admin accepts it", async () => {
+    for (let i = 0; i < 3; i++) await put([`file-${i}.txt`], `file ${i}\n`);
+    await sync(folder());
+    const recorded = (await syncState())?.sourceIdentity;
+    expect(recorded).toMatch(/^\d+:\d+$/);
+    // Another folder at the root's path (a drive mounted there, a folder replaced).
+    await rename(root, `${root}-old`);
+    await mkdir(root);
+    await put(["new.txt"], "new\n");
+    await rm(stateDir, { recursive: true }); // even with the connector's own check gone
+
+    expect(await sync(folder())).toMatchObject({ status: "failed", error: "source-identity" });
+    expect(await live()).toHaveLength(3);
+
+    expect(await admin((tx) => acceptSourceIdentity(tx, t.tenantId, SOURCE))).toBe(true);
+    expect(await admin((tx) => acceptSourceIdentity(tx, t.tenantId, "nope"))).toBe(false);
+    // A crawl from the beginning of the new folder; a small source, under the guard's threshold.
+    expect(await sync(folder())).toMatchObject({ status: "done", counts: { reconciled: 3 } });
+    expect((await syncState())?.sourceIdentity).not.toBe(recorded);
+    expect((await live()).map((r) => r.title)).toEqual(["new.txt"]);
+  });
+
+  it("keeps items a reconciling crawl mentioned but couldn't record", async () => {
+    const mem = memorySource();
+    for (let i = 0; i < 4; i++) await mem.write([`f${i}.txt`], enc.encode(`${i}`));
+    await sync(mem.connector, { source: "mem" });
+    const ids = Object.fromEntries((await catalog("mem")).map((r) => [r.title, r.externalId]));
+    await mem.write(["f1.txt"], enc.encode("changed, and unreadable now"));
+    await mem.close(); // a crawl from the beginning
+    const items: SourceItem[] = [];
+    const tricky: Connector = {
+      ...mem.connector,
+      crawl: async function* (checkpoint, signal) {
+        for await (const e of mem.connector.crawl(checkpoint, signal)) {
+          // f2 arrives malformed; f1 can't be read.
+          if (e.type === "item" && e.item.externalId === ids["f2.txt"]) {
+            yield { type: "item", item: { ...e.item, size: -1 } };
+          } else yield e;
+          if (e.type === "item") items.push(e.item);
+        }
+      },
+      read: async (ref, signal) => {
+        if (ref.externalId === ids["f1.txt"]) throw permanentError("unreadable");
+        return mem.connector.read(ref, signal);
+      },
+    };
+    const report = await sync(tricky, { source: "mem" });
+    expect(report).toMatchObject({ status: "done", counts: { skipped: 2, reconciled: 0 } });
+    expect(await live("mem")).toHaveLength(4);
+    expect(items).toHaveLength(4);
+  });
+
+  it("doesn't reconcile a crawl that met a place it couldn't read, and reports the warnings", async () => {
+    const mem = memorySource();
+    for (let i = 0; i < 3; i++) await mem.write([`f${i}.txt`], enc.encode(`${i}`));
+    await sync(mem.connector, { source: "mem" });
+    await mem.remove(["f0.txt"]);
+    await mem.close();
+    const partly: Connector = {
+      ...mem.connector,
+      crawl: async function* (checkpoint, signal) {
+        yield { type: "warning", code: "unreadable" };
+        yield { type: "warning", code: "hard-link", externalId: "m9" };
+        yield* mem.connector.crawl(checkpoint, signal);
+      },
+    };
+    const report = await sync(partly, { source: "mem" });
+    expect(report).toMatchObject({ status: "done", counts: { reconciled: 0 } });
+    expect(report.warnings).toEqual([
+      { code: "unreadable" },
+      { code: "reconcile-skipped" },
+      { code: "hard-link", externalId: "m9" },
+    ]);
+    expect(await live("mem")).toHaveLength(3);
+    expect(await syncState("mem")).toMatchObject({ phase: "delta", reconcileFrom: null });
+  });
+
+  it("enqueues a committed version again when its enqueue failed, without ingesting it again", async () => {
+    await put(["a.txt"], "a\n");
+    let failures = 2;
+    const report = await sync(folder(), {
+      enqueue: async (_t, r) => {
+        if (failures-- > 0) throw new Error("queue unavailable");
+        enqueued.push(r);
+      },
+    });
+    expect(report).toMatchObject({ status: "done", counts: { ingested: 1 } });
+    expect(enqueued).toHaveLength(1);
+    expect((await catalog())[0]?.versions).toBe(1);
+
+    await put(["b.txt"], "b\n");
+    await expect(
+      sync(folder(), {
+        enqueue: async () => {
+          throw new Error("queue down");
+        },
+      }),
+    ).rejects.toThrow("queue down");
+  });
+
+  it("stops at a checkpoint after its item cap, and goes on from there", async () => {
+    const mem = memorySource({ checkpointEvery: 2 });
+    for (let i = 0; i < 7; i++) await mem.write([`f${i}.txt`], enc.encode(`${i}`));
+    const first = await sync(mem.connector, { source: "mem", maxItems: 3 });
+    expect(first).toMatchObject({ status: "partial", counts: { ingested: 4 } });
+    // The rest: two items to the next checkpoint (under the cap), then the end.
+    expect(await sync(mem.connector, { source: "mem", maxItems: 3 })).toMatchObject({
+      status: "done",
+      counts: { ingested: 3 },
+    });
+    expect(await live("mem")).toHaveLength(7);
+    await expect(sync(mem.connector, { source: "mem", maxItems: 0 })).rejects.toThrow(RangeError);
+  });
+
+  it("refuses item URLs that could run code or leak credentials", async () => {
+    const mem = memorySource();
+    await mem.write(["a.txt"], enc.encode("a"));
+    await mem.write(["b.txt"], enc.encode("b"));
+    const bad: Connector = {
+      ...mem.connector,
+      crawl: async function* (checkpoint, signal) {
+        for await (const e of mem.connector.crawl(checkpoint, signal)) {
+          if (e.type === "item" && e.item.path[0] === "a.txt") {
+            yield { type: "item", item: { ...e.item, url: "javascript:alert(1)" } };
+          } else if (e.type === "item") {
+            yield { type: "item", item: { ...e.item, url: "https://memory.example/b" } };
+          } else yield e;
+        }
+      },
+    };
+    const report = await sync(bad, { source: "mem" });
+    expect(report).toMatchObject({ counts: { ingested: 1, skipped: 1 } });
+    expect((await catalog("mem")).map((r) => r.url)).toEqual(["https://memory.example/b"]);
   });
 });

@@ -246,8 +246,24 @@ crawl (from the start, or a checkpoint) ── done ──▶ delta, delta, delt
   source, a `resync`, or any sync of a connector without delta. While it runs every item is
   ingested (none skipped); when it is `done`, the source's items not synced since are removed
   (they left the source while nobody followed its deltas), then `reconcile_from` is cleared. A
-  run that dies in between finishes the reconcile first next time. An item the crawl had to skip
-  (it changed while being read) is removed too, and restored by the next delta.
+  run that dies in between finishes the reconcile first next time. An item the crawl mentions but
+  can't record (it changed while read, it can't be read, a field is refused, the event is
+  malformed) is marked seen (core/catalog `markSourceItemSeen()`), so only items it never
+  mentioned count as gone. A crawl that meets a place it can't read (a `warning` `unreadable`)
+  doesn't reconcile at all (`reconcile-skipped` in the report): unknown is not gone.
+- **The reconcile guard.** A reconcile that would remove more than `reconcileGuard` allows (over
+  `maxFraction`, 25%, of the source's items and over `minItems`, 50, by default; per source,
+  from its connection's configuration), or anything when the crawl mentioned no item at all,
+  removes nothing: it records the count (`reconcile_held`), fails with `reconcile-guard`
+  (`reconcileHeld` in the report), and does so every run until an admin checks the source and
+  confirms that many (`openhoard admin source confirm-reconcile`, audited; a larger count is held
+  again). A folder not mounted, a lost state, an admin's reset or a connector that says `done`
+  too soon can't empty a source.
+- **The source's identity.** A connector with `identity()` (fs: the root's device and inode)
+  binds the source to its answer, recorded in `source_syncs` on the first sync, outside the
+  connector's own state. Another answer later fails the run (`source-identity`) until an admin
+  accepts it (`openhoard admin source accept-identity`, audited), which starts a crawl from the
+  beginning.
 - **Bindings.** A source stays with the zone and the connector it was first synced with
   (`zone-mismatch`, `connector-mismatch`). It syncs indexed zones only, of a kind the
   connector declares (`zone-kind`): it hashes bytes on the server and keeps no copy, so a managed
@@ -270,9 +286,15 @@ It returns a `SyncReport`, codes only (no messages): `status` and what to do nex
 
 Per item: `changed`, `not-found`, `permanent` and ingest refusals (`ingest-invalid`…) skip the
 item (reported, the first 100 with their ids); a throttle or a retryable failure is waited out in
-place up to `maxWaitMs` (30 s) and `attempts` (3), then the run stops with `retry`.
-`runSync()` throws only for its own failures (the database unreachable, a failing `enqueue`, a
-bug); an item ingested but not enqueued then waits for the sweep.
+place up to `maxWaitMs` (30 s) and `attempts` (3), then the run stops with `retry`. An enqueue
+that fails after its ingest committed is tried again for the committed version (never a second
+ingest). `runSync()` throws only for its own failures (the database unreachable, an enqueue that
+kept failing, a bug); an item ingested but not enqueued then waits for the sweep. Connector
+warnings are listed in `warnings`.
+
+`budgetMs` and `maxItems` end a run at the first checkpoint after the time or the number of
+items (`partial`). Both can only stop at a checkpoint: a connector that never yields one runs
+until its stream ends, or until the job's signal aborts the run.
 
 **Reading indexed zones** (T-402): `connectorContentSource({ db, connectorFor, tenantKey,
 onStale })` is the `ContentSource` for versions whose bytes stay in their source. It asks the

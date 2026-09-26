@@ -46,3 +46,9 @@ export {
   firstOf,
   type ConnectorContentOptions,
 } from "./connector-content.js";
+export {
+  acceptSourceIdentity,
+  confirmReconcile,
+  listSourceSyncs,
+  type SourceSyncState,
+} from "./sync-admin.js";

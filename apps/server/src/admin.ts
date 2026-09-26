@@ -29,6 +29,7 @@ import {
   type EndedAccess,
   type User,
 } from "@openhoard/core-identity";
+import { acceptSourceIdentity, confirmReconcile, listSourceSyncs } from "@openhoard/core-jobs";
 import { adminGroupOf, ensureDataDir, loadConfig, type Config } from "./config.js";
 import { retrying } from "./retry.js";
 
@@ -47,6 +48,9 @@ import { retrying } from "./retry.js";
  *   admin user lock         --tenant ten_… --user <usr_… | email | userName>
  *   admin user unlock       --tenant ten_… --user <usr_… | email | userName>
  *   admin group list        --tenant ten_…
+ *   admin source list             --tenant ten_…
+ *   admin source confirm-reconcile --tenant ten_… --source <name>
+ *   admin source accept-identity   --tenant ten_… --source <name>
  *
  * It reads the server's configuration (and `--data-dir`, as the server does) and opens the same
  * database. The embedded database (PGlite) belongs to one process at a time, so while the
@@ -63,6 +67,13 @@ import { retrying } from "./retry.js";
  * account's API keys stop until `user unlock`. Unlocking brings back none of what the lock ended,
  * and never lifts a provider disable. Both are audited (`user.lock`, `user.unlock`), with what
  * the lock ended.
+ *
+ * `source …` is about connector syncs (T-301). A crawl from the beginning that would remove a
+ * large part of a source (a folder not mounted, a lost state) is held until an operator looks
+ * and confirms it (`source.confirm-reconcile`, with the count); a source whose connector says it
+ * is now another one (another disk at the path) syncs again only once accepted
+ * (`source.accept-identity`), which starts a crawl from the beginning. Both are audited, refusals
+ * too.
  */
 
 export const ADMIN_ACTOR = "system:admin-cli";
@@ -114,6 +125,12 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
                                                    lift the lock (what it ended stays ended)
   group list --tenant <ten_…>                      list the tenant's groups (the grp_… id
                                                    names the admin group in auth.adminGroups)
+  source list --tenant <ten_…>                     list the tenant's connector syncs
+  source confirm-reconcile --tenant <ten_…> --source <name>
+                                                   let a held reconcile remove what it counted
+  source accept-identity --tenant <ten_…> --source <name>
+                                                   accept that the source is now another one
+                                                   (it is crawled again from the beginning)
 `;
 
 class UsageError extends Error {}
@@ -133,6 +150,7 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         id: { type: "string" },
         days: { type: "string" },
         user: { type: "string" },
+        source: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -158,6 +176,9 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "user lock",
     "user unlock",
     "group list",
+    "source list",
+    "source confirm-reconcile",
+    "source accept-identity",
   ];
   if (!known.includes(command)) {
     io.err(`unknown command: ${command}\n\n${USAGE}`);
@@ -230,6 +251,17 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         );
       case "group list":
         return await groupList(db, config, tenantArg(values.tenant), io);
+      case "source list":
+        return await sourceList(db, tenantArg(values.tenant), io);
+      case "source confirm-reconcile":
+      case "source accept-identity":
+        return await sourceChange(
+          db,
+          command === "source confirm-reconcile" ? "confirm-reconcile" : "accept-identity",
+          tenantArg(values.tenant),
+          sourceArg(values.source),
+          io,
+        );
       default:
         return await tokenRevoke(db, tenantArg(values.tenant), need(values.id, "--id"), io);
     }
@@ -248,6 +280,14 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
 function need(value: string | undefined, flag: string): string {
   if (value === undefined || value === "") throw new UsageError(`${flag} is required`);
   return value;
+}
+
+function sourceArg(value: string | undefined): string {
+  const source = need(value, "--source");
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(source)) {
+    throw new UsageError(`not a source name: ${source}`);
+  }
+  return source;
 }
 
 function tenantArg(value: string | undefined): string {
@@ -707,5 +747,80 @@ async function groupList(
     if (rows.length < MAX_LIST) break;
   }
   if (shown === 0) io.err(`tenant ${tenantId} has no groups\n`);
+  return 0;
+}
+
+async function sourceList(db: Database, tenantId: string, io: AdminIo): Promise<number> {
+  const syncs = await db.withTenant(tenantId, async (tx) =>
+    (await getTenant(tx, tenantId)) ? listSourceSyncs(tx, tenantId) : null,
+  );
+  if (!syncs) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  for (const s of syncs) {
+    const reconcile =
+      s.reconcileHeld !== null
+        ? `reconcile held: ${s.reconcileHeld} to remove` +
+          (s.reconcileConfirmed !== null ? ` (confirmed ${s.reconcileConfirmed})` : "")
+        : s.reconciling
+          ? "reconciling"
+          : "";
+    io.out(
+      [s.source, s.connector, s.zoneId, s.phase, s.updatedAt.toISOString(), reconcile].join("\t") +
+        "\n",
+    );
+  }
+  if (syncs.length === 0) io.err(`tenant ${tenantId} has no connector syncs\n`);
+  return 0;
+}
+
+async function sourceChange(
+  db: Database,
+  change: "confirm-reconcile" | "accept-identity",
+  tenantId: string,
+  source: string,
+  io: AdminIo,
+): Promise<number> {
+  const result = await db.withTenant(tenantId, async (tx) => {
+    if (!(await getTenant(tx, tenantId))) return "no-tenant" as const;
+    const done =
+      change === "confirm-reconcile"
+        ? await confirmReconcile(tx, tenantId, source)
+        : (await acceptSourceIdentity(tx, tenantId, source))
+          ? 0
+          : null;
+    await appendAudit(tx, tenantId, {
+      actor: ADMIN_ACTOR,
+      action: `source.${change}`,
+      decision: done === null ? "deny" : "allow",
+      detail: {
+        source,
+        ...(done === null
+          ? { reason: change === "confirm-reconcile" ? "nothing-held" : "unknown-source" }
+          : change === "confirm-reconcile"
+            ? { confirmed: done }
+            : {}),
+      },
+    });
+    return done;
+  });
+  if (result === "no-tenant") {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  if (result === null) {
+    io.err(
+      change === "confirm-reconcile"
+        ? `source ${source} has no reconcile held for confirmation\n`
+        : `tenant ${tenantId} has no source ${source}\n`,
+    );
+    return 1;
+  }
+  io.err(
+    change === "confirm-reconcile"
+      ? `Confirmed: the next sync of ${source} may remove up to ${result} items.\n`
+      : `Accepted: the next sync of ${source} records what it is now, and crawls it again.\n`,
+  );
   return 0;
 }

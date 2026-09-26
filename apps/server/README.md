@@ -499,6 +499,9 @@ node apps/server/dist/main.js admin user list-admins --tenant ten_…
 node apps/server/dist/main.js admin user lock --tenant ten_… --user <usr_… | email | userName>
 node apps/server/dist/main.js admin user unlock --tenant ten_… --user <usr_… | email | userName>
 node apps/server/dist/main.js admin group list --tenant ten_…
+node apps/server/dist/main.js admin source list --tenant ten_…
+node apps/server/dist/main.js admin source confirm-reconcile --tenant ten_… --source <name>
+node apps/server/dist/main.js admin source accept-identity --tenant ten_… --source <name>
 ```
 
 - **Admins.** `user grant-admin` makes the tenant's first admin (the person must exist: provisioned
@@ -517,6 +520,14 @@ node apps/server/dist/main.js admin group list --tenant ten_…
   what each deprovisioning step ends, and when.
 - **Groups.** `group list` prints each group's id, source, member count, external id and name,
   and marks the configured admin group: the id is what `auth.adminGroups` takes.
+- **Connector syncs (T-301).** `source list` prints each source's connector, zone, phase, last
+  change and reconcile state. A crawl from the beginning that would remove a large part of a
+  source (over 25% and over 50 items by default, or anything when it found nothing) is held;
+  after checking the source (is the drive mounted? the right folder?), `source
+confirm-reconcile` lets the next sync remove up to the count it held. A source whose connector
+  now says it is another one (another disk at the folder's path) stops syncing until `source
+accept-identity`, which starts a crawl from the beginning (its reconcile guarded the same way).
+  Both are audited (`source.confirm-reconcile`, `source.accept-identity`), refusals too.
 
 - **Output.** The id or token goes to standard output, and messages go to standard error. The
   exit code is 0 for done, 1 for failed and 2 for misused.

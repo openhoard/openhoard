@@ -40,6 +40,7 @@ export {
   INGEST_LIMITS,
   IngestError,
   normalizeMime,
+  markSourceItemSeen,
   removeFromSource,
   sourceItemState,
   type IngestInput,

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAudit } from "@openhoard/core-audit";
-import { openDatabase, type Database } from "@openhoard/core-db";
+import { newId, openDatabase, sourceSyncs, zones, type Database } from "@openhoard/core-db";
 import { openTestDatabase, TEST_POSTGRES_ENV } from "@openhoard/core-db/testing";
 import { addMember, createGroup, createUser } from "@openhoard/core-identity";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -304,6 +304,101 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
       "admin.revoke:allow:",
       "admin.revoke:deny:admin-group",
       "admin.revoke:allow:",
+    ]);
+  });
+
+  it("lists connector syncs, confirms a held reconcile and accepts a new identity, audited", async () => {
+    const tenantId = (await admin("tenant", "create", "--name", "Acme")).out.trim();
+    await inspect((db) =>
+      db.withTenant(tenantId, async (tx) => {
+        const zoneId = newId("zone");
+        await tx.insert(zones).values({ tenantId, id: zoneId, kind: "indexed", name: "Shares" });
+        await tx.insert(sourceSyncs).values({
+          tenantId,
+          source: "fs-main",
+          zoneId,
+          connector: "connector-fs",
+          phase: "delta",
+          token: "fs1.x",
+          reconcileFrom: new Date(),
+          reconcileHeld: 60,
+          sourceIdentity: "66306:1234",
+        });
+      }),
+    );
+    const listed = await admin("source", "list", "--tenant", tenantId);
+    expect(listed.out).toMatch(/^fs-main\tconnector-fs\tzon_\S+\tdelta\t\S+\treconcile held: 60/);
+
+    const confirmed = await admin(
+      "source",
+      "confirm-reconcile",
+      "--tenant",
+      tenantId,
+      "--source",
+      "fs-main",
+    );
+    expect(confirmed.code, confirmed.err).toBe(0);
+    expect(confirmed.err).toContain("up to 60 items");
+    expect((await admin("source", "list", "--tenant", tenantId)).out).toContain("(confirmed 60)");
+    const none = await admin(
+      "source",
+      "confirm-reconcile",
+      "--tenant",
+      tenantId,
+      "--source",
+      "nope",
+    );
+    expect([none.code, none.err]).toEqual([
+      1,
+      "source nope has no reconcile held for confirmation\n",
+    ]);
+
+    const accepted = await admin(
+      "source",
+      "accept-identity",
+      "--tenant",
+      tenantId,
+      "--source",
+      "fs-main",
+    );
+    expect(accepted.code, accepted.err).toBe(0);
+    const state = await inspect((db) =>
+      db.withTenant(tenantId, (tx) => tx.select().from(sourceSyncs)),
+    );
+    expect(state[0]).toMatchObject({
+      sourceIdentity: null,
+      phase: "crawl",
+      token: null,
+      reconcileHeld: null,
+    });
+    expect(
+      (await admin("source", "accept-identity", "--tenant", tenantId, "--source", "nope")).code,
+    ).toBe(1);
+    expect((await admin("source", "list", "--tenant", tenantId, "--source", "x")).code).toBe(0);
+    expect(
+      (await admin("source", "confirm-reconcile", "--tenant", tenantId, "--source", "Bad Name"))
+        .code,
+    ).toBe(2);
+    expect((await admin("source", "confirm-reconcile", "--tenant", tenantId)).code).toBe(2);
+
+    const events = await inspect(async (db) => {
+      const lines: string[] = [];
+      await exportAudit(db, tenantId, {}, "ndjson", (s: string) => void lines.push(s));
+      return lines
+        .join("")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { action: string; decision: string; detail?: object });
+    });
+    expect(
+      events
+        .filter((e) => e.action.startsWith("source."))
+        .map((e) => [e.action, e.decision, e.detail]),
+    ).toEqual([
+      ["source.confirm-reconcile", "allow", { source: "fs-main", confirmed: 60 }],
+      ["source.confirm-reconcile", "deny", { source: "nope", reason: "nothing-held" }],
+      ["source.accept-identity", "allow", { source: "fs-main" }],
+      ["source.accept-identity", "deny", { source: "nope", reason: "unknown-source" }],
     ]);
   });
 

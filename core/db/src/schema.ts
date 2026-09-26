@@ -1204,6 +1204,9 @@ export const MAX_SYNC_TOKEN_CHARS = 65_536;
  *   they weren't in the source any more. Cleared after that.
  * - `zone_id` and `connector` bind the source to one zone and one connector: a configuration
  *   that points it elsewhere is refused, never applied to the items already recorded.
+ * - `source_identity` binds it to what the connector says the source is (0041); a reconcile that
+ *   would remove too much is held (`reconcile_held`) until an admin confirms it
+ *   (`reconcile_confirmed`).
  */
 export const sourceSyncs = pgTable(
   "source_syncs",
@@ -1215,6 +1218,15 @@ export const sourceSyncs = pgTable(
     phase: text("phase", { enum: SYNC_PHASES }).notNull(),
     token: text("token"),
     reconcileFrom: timestamp("reconcile_from", { withTimezone: true }),
+    /**
+     * What the connector says the source is (a folder's device and inode): recorded on the first
+     * sync; a sync of a source that answers otherwise is refused until an admin accepts it.
+     */
+    sourceIdentity: text("source_identity"),
+    /** How many items the reconcile guard held back from removal, waiting for an admin. */
+    reconcileHeld: integer("reconcile_held"),
+    /** How many removals an admin confirmed (`admin source confirm-reconcile`). */
+    reconcileConfirmed: integer("reconcile_confirmed"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -1232,6 +1244,14 @@ export const sourceSyncs = pgTable(
       sql.raw(`token is null or char_length(token) between 1 and ${MAX_SYNC_TOKEN_CHARS}`),
     ),
     check("source_syncs_delta_cursor", sql`phase = 'crawl' or token is not null`),
+    check(
+      "source_syncs_identity_length",
+      sql`source_identity is null or char_length(source_identity) between 1 and 1024`,
+    ),
+    check(
+      "source_syncs_reconcile_counts",
+      sql`(reconcile_held is null or reconcile_held >= 0) and (reconcile_confirmed is null or reconcile_confirmed >= 0)`,
+    ),
   ],
 );
 
