@@ -61,6 +61,10 @@ switch (how) {
   case "hang.txt":
     setInterval(() => {}, 1000);
     break;
+  case "sigkill.txt":
+    // What the host's out-of-memory killer does.
+    process.kill(process.pid, "SIGKILL");
+    break;
   default:
     say({ v: 1, ok: true, extraction, stats });
 }

@@ -1,11 +1,12 @@
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { resolveLimits } from "./limits.ts";
-import { readableFolders } from "./paths.ts";
+import { readablePaths } from "./paths.ts";
 import { childArguments, childEnvironment, extract } from "./sandbox.ts";
 import {
   chunked,
@@ -124,6 +125,32 @@ describe("extract() in a child process", () => {
     expect(result).toEqual({ ok: false, failure: "input-failed", permanent: false });
   });
 
+  it("never answers for content shorter or longer than its size", async () => {
+    const bytes = enc.encode("a,b\n1,2\n3,4\n");
+    const short = await extract(chunked(bytes), { mime: "text/csv" }, { size: bytes.length + 5 });
+    const long = await extract(chunked(bytes, 4), { mime: "text/csv" }, { size: 6 });
+    const exact = await extract(chunked(bytes), { mime: "text/csv" }, { size: bytes.length });
+    expect(short).toEqual({ ok: false, failure: "input-failed", permanent: false });
+    expect(long).toEqual({ ok: false, failure: "input-failed", permanent: false });
+    expect(exact.ok && exact.extraction.metadata.csv?.rows).toBe(2);
+  });
+
+  it("destroys a stalled stream when time runs out", async () => {
+    const stalled = new Readable({ read() {} });
+    stalled.push(enc.encode("a,b\n"));
+    const result = await extract(stalled, { mime: "text/csv" }, { limits: { timeoutMs: 1_000 } });
+    expect(result).toEqual({ ok: false, failure: "input-failed", permanent: false });
+    expect(stalled.destroyed).toBe(true);
+  });
+
+  it("closes a stream the child stopped reading early", async () => {
+    const big = Readable.from(generatedCsv(1_000_000));
+    // Plain text stops at the text limit; the rest of the stream is never read.
+    const result = await extract(big, { mime: "text/plain" }, { limits: { maxTextBytes: 1000 } });
+    expect(result.ok && result.extraction.truncated).toBe(true);
+    expect(big.destroyed).toBe(true);
+  });
+
   it("rejects with the signal's reason when aborted, killing the child", async () => {
     const controller = new AbortController();
     const { state, source } = tracked(generatedCsv(50_000_000));
@@ -165,40 +192,64 @@ describe("the child's confinement", () => {
   writeFileSync(secret, "do not read");
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  it("can't read or write outside its code, open the network, start processes or eval", async () => {
-    const probe = join(dirname(fileURLToPath(import.meta.url)), "probe-child.fixtures.ts");
+  it("can't read outside its code, write, load refused built-ins, bind, open the network or eval", async () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const probe = join(here, "probe-child.fixtures.ts");
     const child = spawn(process.execPath, childArguments(resolveLimits(), probe), {
-      env: childEnvironment({ PROBE_SECRET: secret }),
+      env: childEnvironment({
+        PROBE_SECRET: secret,
+        // A workspace package linked into this package's node_modules, and a file beside src/.
+        PROBE_SIBLING: join(here, "..", "node_modules", "@openhoard", "testkit", "package.json"),
+        PROBE_PACKAGE_FILE: join(here, "..", "tsconfig.json"),
+      }),
       stdio: ["ignore", "pipe", "pipe"],
     });
     let out = "";
     child.stdout.on("data", (c: Buffer) => (out += c.toString()));
     await new Promise((resolve) => child.on("close", resolve));
-    expect(JSON.parse(out)).toEqual({
+    const outcome = JSON.parse(out) as Record<string, string>;
+    const cjsRefused = [
+      "cjs-require-vm",
+      "cjs-require-http-client",
+      "cjs-require-net",
+      "cjs-load-vm",
+      "cjs-load-tls-wrap",
+    ];
+    const refused = Object.entries(outcome).filter(
+      ([k]) => /^(import|require|builtin):/.test(k) || cjsRefused.includes(k),
+    );
+    expect(refused).toHaveLength(21 * 3 + cjsRefused.length);
+    for (const [name, result] of refused) expect(result, name).toBe("BlockedModuleError");
+    expect(outcome).toMatchObject({
       "read-outside": "ERR_ACCESS_DENIED",
+      "read-sibling-package": "ERR_ACCESS_DENIED",
+      "read-package-root": "ERR_ACCESS_DENIED",
       write: "ERR_ACCESS_DENIED",
-      "import-net": "BlockedModuleError",
-      "import-http": "BlockedModuleError",
-      "import-dns": "BlockedModuleError",
-      "builtin-tls": "BlockedModuleError",
-      "child-process": "BlockedModuleError",
-      worker: "BlockedModuleError",
+      "allowed:zlib": "allowed",
+      "allowed:require-stream": "allowed",
       fetch: "TypeError",
-      binding: "ERR_ACCESS_DENIED",
+      binding: "BlockedModuleError",
+      "linked-binding": "BlockedModuleError",
+      dlopen: "BlockedModuleError",
       eval: "EvalError",
       env: "allowed",
+      "cjs-register-hooks": "BlockedModuleError",
+      "cjs-register": "BlockedModuleError",
+      "cjs-require-fs": "allowed",
     });
     expect(existsSync(`${secret}.written`)).toBe(false);
   });
 
-  it("may read only its own package and its libraries' folders", () => {
-    const folders = readableFolders();
-    expect(folders.length).toBeGreaterThanOrEqual(2);
-    for (const folder of folders) {
-      expect(folder.endsWith("node_modules") || existsSync(join(folder, "package.json"))).toBe(
-        true,
-      );
+  it("may read only its code, its package.json and its libraries' folders", () => {
+    const paths = readablePaths();
+    const here = dirname(fileURLToPath(import.meta.url));
+    expect(paths).toContain(realpathSync(here));
+    expect(paths).toContain(realpathSync(join(here, "..", "package.json")));
+    expect(paths).not.toContain(realpathSync(join(here, "..")));
+    for (const path of paths) {
+      expect(path.endsWith("node_modules"), path).toBe(false);
+      expect(path.includes(`${sep}@openhoard${sep}`), path).toBe(false);
     }
-    expect(folders).not.toContain(tmpdir());
+    expect(paths).not.toContain(tmpdir());
   });
 });

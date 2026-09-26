@@ -58,10 +58,16 @@ layout (text under a shape, same colour as a shaded background).
 Permanent (the file's own; enrichment records `failed` and moves on): `unsupported`,
 `malformed`, `encrypted`, `binary`, `too-large`, `archive-limits`, `xml-limits`,
 `record-too-large`, `timeout`, `memory-limit`, `output-too-large`, `crashed`, `protocol`.
-Transient (enrichment retries): `spawn-failed`, `input-failed` (the source failed part way, or
-ran out the clock: the child waited on it and it sent nothing for half the time limit, at most
-30 s; the child is killed, never given a cut-off stream as the whole file). A source should
-also stop when the signal it is given aborts: a stalled one is only abandoned, not cancelled.
+Transient (enrichment retries): `spawn-failed`; `killed` (the child died of a signal the
+parent didn't send, such as the host's out-of-memory killer; enrichment tries once more, then
+takes it as the file's); `input-failed`: the source failed part way, ran out the clock (the child
+waited on it and it sent nothing for half the time limit, at most 30 s), or sent more or fewer
+bytes than the content's `size`. The child is then killed before it sees the end of its input,
+so it never answers for part of a file.
+
+However an extraction ends, the content is closed: its iterator is returned, and a stream with
+`destroy()` (a Node Readable) is destroyed, even one stalled mid-read. core/jobs also gives each
+attempt's ContentSource a signal it aborts when the attempt ends.
 
 ## The sandbox
 
@@ -83,27 +89,47 @@ sanitizer leaves it); anything else is `protocol`.
 What the child may do, per Node 24's permission model (`--permission`), the same on Linux,
 macOS and Windows (the tests check each):
 
-- read only its own package and its libraries' `node_modules` folders (`--allow-fs-read`, real
-  paths): no configuration, data folder, blob store, home or temp files; write nothing;
+- read only its code folder (`dist/`, or `src/` in this package's tests), this package's
+  `package.json`, and each library's own package folder with the paths Node's resolver looks
+  at to find it (`--allow-fs-read`; `paths.ts`): not the package root, not a whole
+  `node_modules` (in a hoisted npm install that is every package the server has), no
+  configuration, data folder, blob store, home or temp files; write nothing. Node's permission
+  model follows symbolic links, so every granted folder is walked once and a link that leads
+  outside the grant (a workspace package linked into `node_modules`, say) stops the sandbox
+  from starting: `extract()` rejects with UnsafeInstallError;
 - no child processes, worker threads, native addons (`--no-addons` too), WASI, inspector, or
-  `process.binding()`;
+  `process.binding()` (and the lockdown replaces `process.binding`, `_linkedBinding` and
+  `dlopen` with functions that throw);
 - no `eval` or `new Function` (`--disallow-code-generation-from-strings`), no `__proto__`
   (`--disable-proto=delete`);
 - an environment with only its settings: none of the server's variables (no database URL, no
   keys). On Windows, `SystemRoot` too, without which no process starts.
 
-**Network, best effort.** Node 24's permission model has no network switch (`--allow-net`
-comes in Node 25). The child's lockdown (`lockdown.ts`, before any parser loads) refuses to
-load `net`, `tls`, `dgram`, `dns`, `http`, `https`, `http2`, `child_process`, `cluster`,
-`worker_threads` and `inspector` by import, require or `process.getBuiltinModule()`, and
-removes `fetch`, `WebSocket` and `EventSource`. That leaves only what Node's own modules reach
-internally. For a hard boundary, run the service where it has no outbound network, or give its
-user a firewall rule. On Node 25 the child can be denied the network by the permission model
-itself (no `--allow-net`).
+**Built-ins: an allowlist.** Before any parser loads, the child's lockdown (`lockdown.ts`)
+lets it load only the built-ins the parsers use: `buffer`, `events`, `fs`, `fs/promises`,
+`path`, `stream`, `stream/promises`, `string_decoder`, `url`, `util`, `zlib`. Every other one is
+refused, by import, require (`module.constructor._load` included), a package's `imports` map
+or `process.getBuiltinModule()`: the network (`net`, `tls`, `dgram`, `dns`, `http`, `https`,
+`http2` and the `_http_*`, `_tls_*` internals), `vm` (which evaluates strings in a new context,
+past `--disallow-code-generation-from-strings`), `module` (whose registerHooks() could get
+ahead of the lockdown's hook; `Module.registerHooks` and `Module.register` are also replaced),
+`repl`, `sqlite`, `wasi`, `trace_events`, `inspector`, `child_process`, `worker_threads`,
+`cluster`, `v8`, `os`, `crypto`… `fetch`, `WebSocket` and `EventSource` are removed from the
+global scope. The tests try each of these in a real child.
 
-**Packaging.** The child runs from its own file (`dist/child.js`) and reads its libraries from
-disk, so this package ships as files: bundling it into one script breaks the sandbox (the
-child can't be found, or can read the whole bundle's folder).
+**Network, best effort.** Node 24's permission model has no network switch (`--allow-net`
+comes in Node 25), so the allowlist is what keeps the network out: what remains is only what
+Node's own allowed modules reach internally. For a hard boundary, run the service where it has
+no outbound network, or give its user a firewall rule. On Node 25 the permission model itself
+can deny the child the network.
+
+**Packaging.** Ship this package as files, as an external dependency of any bundle: never
+bundle it into one script (the `openhoard` CLI bundles the core packages, but not this one).
+The child runs from its own file (`dist/child.js`) and reads its libraries from their package
+folders, which the grant names one by one; bundled, the child can't be found, or the grant
+would have to cover the whole bundle. On an npm install, `--omit=optional` keeps pdf.js's
+optional native canvas (`@napi-rs/canvas`) off the disk; installed or not, it can never load in
+the child (`--no-addons`, and its folder isn't readable).
 
 ## Libraries
 
@@ -130,9 +156,12 @@ pnpm --filter @openhoard/enricher-extract test:slow   # the 1 GiB CSV (about a m
 - **Hostile files**: zip bombs (ratio, lying sizes, entry count, total size), encrypted
   entries, billion laughs and external entities, 100,000-deep XML, malformed XML, PDFs and
   archives, binary garbage, a CSV with no line breaks, wrong extensions, OLE containers.
-- **The sandbox**: timeouts, the memory cap, aborts, a failing source, a child that crashes,
-  hangs, says too much or answers the wrong shape, and a probe that checks the confinement
-  above in a real child.
+- **The sandbox**: timeouts, the memory cap, aborts, failing, stalling, short and long sources
+  (and the streams closed), a child that crashes, is killed by a signal, hangs, says too much or
+  answers the wrong shape, an install whose links would widen the grant, and a probe that tries
+  every refused built-in, binding, read and write above in a real child.
+- **Grants** (`paths.test.ts`): a simulated hoisted npm layout gets only the libraries' folders;
+  a pnpm-style link into the grant is followed; a link out of it is refused.
 - **1 GiB CSV** (T-402's done-when): generated as it streams, never stored; the row count is
   exact and the child's peak memory stays under 256 MiB (about 130 MiB measured). Every run
   does the same at 32 MiB; CI's Linux PostgreSQL job runs the 1 GiB one.

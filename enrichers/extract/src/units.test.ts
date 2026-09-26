@@ -4,7 +4,7 @@ import { chooseDelimiter, valueType } from "./csv.ts";
 import { declaredKind, mayExtract, sniff } from "./detect.ts";
 import { failureOf, ExtractError } from "./errors.ts";
 import { DEFAULT_LIMITS, resolveLimits } from "./limits.ts";
-import { isBlockedBuiltin } from "./lockdown.ts";
+import { isRefusedBuiltin } from "./lockdown.ts";
 import { resolveTarget } from "./ooxml.ts";
 import { CommentStripper } from "./plain.ts";
 import { maxAnswerBytes, parseAnswer } from "./schema.ts";
@@ -199,19 +199,16 @@ describe("types, names and targets", () => {
     expect(chooseDelimiter("a\tb\n")).toBe("\t");
   });
 
-  it("blocks network and process built-ins by any name", () => {
-    for (const m of [
-      "net",
-      "node:net",
-      "https",
-      "node:dns/promises",
-      "child_process",
-      "worker_threads",
-    ]) {
-      expect(isBlockedBuiltin(m), m).toBe(true);
+  it("refuses every built-in but the allowlist, by any name", () => {
+    for (const m of ["net", "node:net", "https", "node:dns/promises", "child_process", "vm"]) {
+      expect(isRefusedBuiltin(m), m).toBe(true);
     }
-    for (const m of ["fs", "node:zlib", "stream", "netmask"])
-      expect(isBlockedBuiltin(m), m).toBe(false);
+    for (const m of ["_http_client", "_tls_wrap", "node:sqlite", "module", "repl", "wasi", "v8"]) {
+      expect(isRefusedBuiltin(m), m).toBe(true);
+    }
+    for (const m of ["fs", "node:zlib", "stream", "node:stream/promises", "netmask", "./x.js"]) {
+      expect(isRefusedBuiltin(m), m).toBe(false);
+    }
   });
 
   it("maps errors to failures", () => {

@@ -180,8 +180,16 @@ export const PERMANENT_FAILURES = [
 export const TRANSIENT_FAILURES = [
   /** The extractor process could not start (out of processes or memory on the host). */
   "spawn-failed",
-  /** Reading the content failed (the store or the source was unreachable). */
+  /**
+   * Reading the content failed: the store or the source was unreachable, stalled, or sent more
+   * or fewer bytes than the content's size.
+   */
   "input-failed",
+  /**
+   * The extractor process was killed by a signal the extractor didn't send (the host's
+   * out-of-memory killer, say). Try once more; if it happens again, treat it as the file's.
+   */
+  "killed",
 ] as const;
 export type PermanentFailure = (typeof PERMANENT_FAILURES)[number];
 export type TransientFailure = (typeof TRANSIENT_FAILURES)[number];

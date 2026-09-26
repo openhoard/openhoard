@@ -5,7 +5,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { mayExtract } from "./detect.ts";
 import { resolveLimits } from "./limits.ts";
-import { childEntry, readableFolders } from "./paths.ts";
+import { childEntry, readablePaths } from "./paths.ts";
 import { maxAnswerBytes, parseAnswer } from "./schema.ts";
 import type { ExtractHint, ExtractLimits, ExtractResult, PermanentFailure } from "./types.ts";
 
@@ -23,12 +23,13 @@ import type { ExtractHint, ExtractLimits, ExtractResult, PermanentFailure } from
  * |             | reading /proc/<pid>/status every 250 ms and killing it past `memoryMb`     |
  * | output      | the parent reads at most maxAnswerBytes() of stdout, kills past that, and  |
  * |             | checks the answer field by field (schema.ts)                               |
- * | files       | `--permission` with `--allow-fs-read` for its own code and libraries only: |
- * |             | no other reads, no writes                                                  |
+ * | files       | `--permission`, `--allow-fs-read` for its code folder, its package.json    |
+ * |             | and each library's folder (paths.ts; no link may lead out): nothing else,  |
+ * |             | no writes                                                                  |
  * | processes   | `--permission`: no child processes, worker threads, addons, WASI,          |
  * |             | inspector; `--no-addons`                                                   |
- * | network     | Node 24 has no permission for it: the child's lockdown (lockdown.ts)       |
- * |             | blocks the networking modules and removes fetch/WebSocket (best effort)    |
+ * | built-ins   | an allowlist (lockdown.ts): no network modules, vm, module, repl, sqlite…; |
+ * |             | Node 24 has no network permission, so this is what keeps the network out  |
  * | code        | `--disallow-code-generation-from-strings` (no eval), `--disable-proto`     |
  * | environment | only its settings: none of the server's variables (no secrets)            |
  *
@@ -47,7 +48,11 @@ const STALL_MS = 30_000;
 export interface ExtractOptions {
   /** Changes to the default limits (DEFAULT_LIMITS). */
   limits?: Partial<ExtractLimits>;
-  /** The content's size in bytes, if known: the default time limit grows with it. */
+  /**
+   * The content's exact size in bytes, if known. The default time limit grows with it, and the
+   * content must be exactly this long: a source that ends early or runs long is `input-failed`,
+   * never an extraction of part of a file.
+   */
   size?: number;
   /** Stops the extraction: the child is killed and the call rejects with the signal's reason. */
   signal?: AbortSignal;
@@ -56,8 +61,13 @@ export interface ExtractOptions {
 /**
  * Extracts text and metadata from `content` in a limited child process. Resolves with a typed
  * result for everything the file can cause (see {@link ExtractResult}); rejects only when
- * `signal` aborts or the limits given are invalid. Content whose type has no extractor (an
- * image, a video) resolves `unsupported` without starting a process or reading a byte.
+ * `signal` aborts, the limits given are invalid, or the installation would widen the sandbox
+ * (UnsafeInstallError, paths.ts). Content whose type has no extractor (an image, a video)
+ * resolves `unsupported` without starting a process or reading a byte.
+ *
+ * However it ends, the content is closed: its iterator is returned, and a stream (anything with
+ * `destroy()`, such as a Node Readable) is destroyed, even one stalled mid-read, which an
+ * iterator's return() can't interrupt.
  */
 export async function extract(
   content: AsyncIterable<Uint8Array>,
@@ -67,15 +77,27 @@ export async function extract(
   const limits = resolveLimits(options.limits, options.size);
   const { signal } = options;
   signal?.throwIfAborted();
+  const close = () => {
+    const stream = content as { destroy?: unknown; destroyed?: boolean };
+    if (typeof stream.destroy === "function" && stream.destroyed !== true) stream.destroy();
+  };
   if (!mayExtract(hint)) {
     await content[Symbol.asyncIterator]().return?.();
+    close();
     return { ok: false, failure: "unsupported", permanent: true };
   }
 
   const entry = childEntry();
+  let args: string[];
+  try {
+    args = childArguments(limits, entry);
+  } catch (e) {
+    close();
+    throw e;
+  }
   let child: ChildProcessWithoutNullStreams;
   try {
-    child = spawn(process.execPath, childArguments(limits, entry), {
+    child = spawn(process.execPath, args, {
       cwd: dirname(entry),
       env: childEnvironment({
         OPENHOARD_EXTRACT: JSON.stringify({ hint: { mime: hint.mime, name: hint.name }, limits }),
@@ -85,6 +107,7 @@ export async function extract(
     });
   } catch {
     await content[Symbol.asyncIterator]().return?.();
+    close();
     return { ok: false, failure: "spawn-failed", permanent: false };
   }
 
@@ -98,7 +121,18 @@ export async function extract(
   // a cut-off stream for the whole file. `waitingSince` is set while the source is asked for
   // bytes and hasn't answered: a timeout while it has been silent a while is the source's.
   let sourceFailed = false;
+  let sourceDone = false;
   let waitingSince: number | null = null;
+  let sent = 0;
+  const expected = options.size;
+  /** The source failed, ended early or ran long: the child must not answer for this content. */
+  let settled = false;
+  const sourceFault = () => {
+    // Once the child has exited, closing the source below may make it fail: that isn't news.
+    if (settled) return;
+    sourceFailed = true;
+    child.kill("SIGKILL");
+  };
   async function* source(): AsyncGenerator<Uint8Array> {
     const iterator = content[Symbol.asyncIterator]();
     try {
@@ -108,13 +142,22 @@ export async function extract(
         try {
           step = await iterator.next();
         } catch {
-          sourceFailed = true;
-          child.kill("SIGKILL");
+          sourceFault();
           return;
         } finally {
           waitingSince = null;
         }
-        if (step.done) return;
+        if (step.done) {
+          sourceDone = true;
+          // Before the child sees the end of its input, so it never answers for a short file.
+          if (expected !== undefined && sent !== expected) sourceFault();
+          return;
+        }
+        sent += step.value.byteLength;
+        if (expected !== undefined && sent > expected) {
+          sourceFault();
+          return;
+        }
         yield step.value;
       }
     } finally {
@@ -161,10 +204,16 @@ export async function extract(
         }, 250)
       : undefined;
 
-  const exit = await new Promise<{ code: number | null; spawnError: boolean }>((resolve) => {
-    child.on("error", () => resolve({ code: null, spawnError: true }));
-    child.on("close", (code) => resolve({ code, spawnError: false }));
+  const exit = await new Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    spawnError: boolean;
+  }>((resolve) => {
+    child.on("error", () => resolve({ code: null, signal: null, spawnError: true }));
+    child.on("close", (code, signal) => resolve({ code, signal, spawnError: false }));
   });
+  settled = true;
+  if (!sourceDone) close();
   clearTimeout(timer);
   clearInterval(poll);
   signal?.removeEventListener("abort", onAbort);
@@ -185,6 +234,11 @@ export async function extract(
   ) {
     return { ok: false, failure: "memory-limit", permanent: true };
   }
+  // Killed by a signal nobody here sent (the host's OOM killer, an operator): not the file's
+  // doing, as far as anyone can tell, so worth another try.
+  if (exit.code === null && exit.signal !== null) {
+    return { ok: false, failure: "killed", permanent: false };
+  }
   if (exit.code !== 0) return { ok: false, failure: "crashed", permanent: true };
   const text = Buffer.concat(out).toString("utf8");
   const newline = text.indexOf("\n");
@@ -200,7 +254,7 @@ export function childArguments(limits: ExtractLimits, entry: string): string[] {
     `--max-old-space-size=${limits.heapMb}`,
     "--max-semi-space-size=16",
     "--permission",
-    ...readableFolders().map((folder) => `--allow-fs-read=${folder}`),
+    ...readablePaths().map((path) => `--allow-fs-read=${path}`),
     "--no-addons",
     "--disallow-code-generation-from-strings",
     "--disable-proto=delete",

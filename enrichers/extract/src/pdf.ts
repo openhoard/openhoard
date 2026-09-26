@@ -1,5 +1,5 @@
-import { createRequire } from "node:module";
 import { dirname, join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtractContext } from "./context.ts";
 import { ExtractError } from "./errors.ts";
 import { PROPERTY_CHARS, sampleOf } from "./text.ts";
@@ -21,7 +21,9 @@ import { PROPERTY_CHARS, sampleOf } from "./text.ts";
 
 /** The pdf.js package folder: character maps and standard fonts are read from it. */
 export function pdfjsFolder(): string {
-  return dirname(createRequire(import.meta.url).resolve("pdfjs-dist/package.json"));
+  // Resolved like an import (node:module, and so createRequire, is locked away in the child).
+  const entry = fileURLToPath(import.meta.resolve("pdfjs-dist/legacy/build/pdf.mjs"));
+  return dirname(dirname(dirname(entry)));
 }
 
 type Matrix = [number, number, number, number, number, number];
