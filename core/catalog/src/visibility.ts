@@ -433,10 +433,12 @@ export interface CardView extends ViewBase {
   readable: boolean;
   updatedAt: Date;
   /**
-   * Metadata only (T-604): the file's exposure doesn't reach this AI client's trust, so the card
-   * carries nothing derived from the content (a summary, extracted fields, excerpts: T-404 and
-   * T-405 attach them only when this is false), and the content can't be opened. Always false
-   * through OpenHoard's own apps.
+   * Metadata only: the card carries nothing derived from the content (no `summary`, and only
+   * trusted tags for a reader), and the content can't be opened through it. True when the
+   * file's exposure doesn't reach this AI client's trust (T-604; a file flagged
+   * `risk:injection` is metadata-only for every AI client), and for a non-reader whose `read` a
+   * policy forbids, whatever the client, OpenHoard's own apps included (core/policy
+   * decideRead() `readForbidden`). Otherwise false through OpenHoard's own apps.
    */
   metadataOnly: boolean;
   /**

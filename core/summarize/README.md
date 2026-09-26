@@ -74,7 +74,13 @@ formulas and chat transcripts.
    or null). Anything else is a `ModelOutputError` listing the problems (never the answer's
    text); the caller repairs once with `buildRepairPrompt()`, without the document.
 3. **The filter** (`filterCardOutput()`): every check runs on the cleaned text and its skeleton,
-   never the raw text. Every summary sentence carrying an instruction pattern (any of the listed
+   never the raw text, and twice: with invisible characters deleted, and as spaces (what
+   storage makes of them: `ignore<ZWSP>all<ZWSP>previous…` is checked as it will read). The
+   assembled summary is checked again whole, so an instruction split across sentences or a line
+   break doesn't pass in halves. Any word mixing Latin letters with another script's (Cherokee,
+   Lisu, Coptic… whatever the confusables table knows) drops its sentence; any bare domain
+   (`name.tld`, so also `report.pdf`) and defanged links (`[.]`, `(dot)`, `hxxp`) count as
+   links. Every summary sentence carrying an instruction pattern (any of the listed
    languages), a link (a scheme, `www.`, `//`, or any `name.tld/path`), an email address,
    markup or code, a role label, or words addressed to an assistant, agent, AI, model, LLM, bot
    or system is dropped; the summary is capped at 100 words; tags must be in the offered

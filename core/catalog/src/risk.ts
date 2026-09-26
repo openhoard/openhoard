@@ -1,11 +1,14 @@
+import { appendAudit } from "@openhoard/core-audit";
 import {
   ensureBuiltInVocabulary,
   injectionReviews,
   isId,
   objectTags,
+  versions,
   type Tx,
 } from "@openhoard/core-db";
-import { and, eq, sql } from "drizzle-orm";
+import { isAdmin } from "@openhoard/core-identity";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { lockObject } from "./locks.js";
 import { BUILTIN_RULE_PREFIX } from "./rules.js";
 import { proposeTag } from "./tagging.js";
@@ -20,15 +23,16 @@ import { proposeTag } from "./tagging.js";
  * while people in OpenHoard's own apps still read it.
  *
  * - The value is built-in vocabulary (core/db ensureBuiltInVocabulary()): every tenant has it,
- *   approved and metadata-only (createTenant(), migration 0046), and flagging puts it back first
- *   if a pack or an admin changed it. So a flag never depends on an admin, and never fails for
- *   want of vocabulary: a missing vocabulary can't leave files hidden.
+ *   approved and metadata-only (createTenant(), migration 0046, and before every flag), and the
+ *   database refuses any change to its levels or its removal (migration 0050). So a flag never
+ *   depends on an admin, and a missing vocabulary can't leave files hidden.
  * - The tag is trusted: source `rule`, applied by `rule:builtin/injection-detector`, a name no
  *   pack rule can take (rule ids have no `/`), and applyRuleTags() leaves it alone.
  * - It is the detector's: when a later version (or a rename) no longer looks like an injection,
  *   the detector takes its own tag off again. A tag a person or a pack put on stays.
- * - A person can decide a file is fine (markNotInjection(): an owner or admin, object-scoped, so
- *   it survives edits): the detector then neither flags it nor keeps its own flag on it.
+ * - A tenant admin can decide a file is fine (markNotInjection(); never the owner, who is who an
+ *   insider attack would come from): for the content they reviewed, the detector then neither
+ *   flags it nor keeps its own flag on it. A new version with other content is judged again.
  */
 
 /** The flag a detector puts on a file that looks like a prompt injection. */
@@ -51,8 +55,9 @@ const tagKey = (tenantId: string, objectId: string) => {
 
 /**
  * Makes the object's detector flag match `flagged`: adds `risk:injection` (as the detector's,
- * trusted) or takes the detector's own tag off. A file a person reviewed (markNotInjection()) is
- * never flagged: `flagged` is taken as false. Call it through enrichment's guarded write.
+ * trusted) or takes the detector's own tag off. A file an admin reviewed (markNotInjection()),
+ * while its current version has the content they reviewed, is never flagged: `flagged` is taken
+ * as false. Call it through enrichment's guarded write.
  */
 export async function applyInjectionFlag(
   tx: Tx,
@@ -66,7 +71,7 @@ export async function applyInjectionFlag(
     .select({ source: objectTags.source, appliedBy: objectTags.appliedBy })
     .from(objectTags)
     .where(key);
-  if (!flagged || (await injectionReviewOf(tx, tenantId, objectId)) !== null) {
+  if (!flagged || (await reviewedNotInjection(tx, tenantId, objectId))) {
     if (have?.source !== "rule" || have.appliedBy !== INJECTION_DETECTOR) return "not-flagged";
     await tx.delete(objectTags).where(and(key, eq(objectTags.appliedBy, INJECTION_DETECTOR)));
     return "cleared";
@@ -97,63 +102,152 @@ export async function hasInjectionFlag(tx: Tx, tenantId: string, objectId: strin
   return rows.length > 0;
 }
 
-/** A person's "not an injection" decision on an object, or null. */
+/** An admin's "not an injection" decision on an object, for the content they reviewed. */
+export interface InjectionReview {
+  versionId: string;
+  blobId: string;
+  reviewedBy: string;
+  reviewedAt: Date;
+}
+
+/** The object's review, whatever version it was for, or null. */
 export async function injectionReviewOf(
   tx: Tx,
   tenantId: string,
   objectId: string,
-): Promise<{ reviewedBy: string; reviewedAt: Date } | null> {
+): Promise<InjectionReview | null> {
   if (typeof objectId !== "string" || !isId("object", objectId)) return null;
   const [row] = await tx
-    .select({ reviewedBy: injectionReviews.reviewedBy, reviewedAt: injectionReviews.reviewedAt })
+    .select({
+      versionId: injectionReviews.versionId,
+      blobId: injectionReviews.blobId,
+      reviewedBy: injectionReviews.reviewedBy,
+      reviewedAt: injectionReviews.reviewedAt,
+    })
     .from(injectionReviews)
     .where(and(eq(injectionReviews.tenantId, tenantId), eq(injectionReviews.objectId, objectId)));
   return row ?? null;
 }
 
-const USER = /^user:usr_[0-9a-hjkmnp-tv-z]{26}$/;
+/** The object's current version and its content, or null. */
+async function currentVersionOf(tx: Tx, tenantId: string, objectId: string) {
+  const [row] = await tx
+    .select({ versionId: versions.id, blobId: versions.blobId })
+    .from(versions)
+    .where(and(eq(versions.tenantId, tenantId), eq(versions.objectId, objectId)))
+    .orderBy(desc(versions.seq))
+    .limit(1);
+  return row ?? null;
+}
 
 /**
- * A person (the owner or an admin: the API authorizes the caller, and appends the audit record
- * in the same transaction) decides the object is not a prompt injection: the detector's own flag
- * comes off now, and the detector won't flag the object again, whatever later versions say.
- * A person's or a pack's own `risk:injection` tag stays. Returns whether a flag came off.
+ * Whether an admin's "not an injection" decision covers the object's current version: it has
+ * the content (blob) they reviewed. A new version with other bytes is judged again.
+ */
+export async function reviewedNotInjection(
+  tx: Tx,
+  tenantId: string,
+  objectId: string,
+): Promise<boolean> {
+  const review = await injectionReviewOf(tx, tenantId, objectId);
+  if (review === null) return false;
+  const current = await currentVersionOf(tx, tenantId, objectId);
+  return current !== null && current.blobId === review.blobId;
+}
+
+/** Why an injection review was refused. */
+export class InjectionReviewError extends Error {
+  constructor(
+    readonly code: "invalid" | "not-admin" | "unknown-object",
+    message: string,
+  ) {
+    super(message);
+    this.name = "InjectionReviewError";
+  }
+}
+
+const USER = /^user:(usr_[0-9a-hjkmnp-tv-z]{26})$/;
+
+/** Checks the input and that `by` is an admin now; returns the user id. */
+async function checkReviewer(
+  tx: Tx,
+  tenantId: string,
+  input: { objectId: string; by: string; adminGroupId?: string | undefined },
+): Promise<void> {
+  if (typeof input.objectId !== "string" || !isId("object", input.objectId)) {
+    throw new InjectionReviewError("invalid", "not an object id");
+  }
+  const user = typeof input.by === "string" ? USER.exec(input.by)?.[1] : undefined;
+  if (user === undefined) throw new InjectionReviewError("invalid", "by must be user:usr_…");
+  // Admins only, never the owner as such: an owner could otherwise clear their own flag.
+  const admin = await isAdmin(tx, tenantId, user, {
+    ...(input.adminGroupId === undefined ? {} : { adminGroupId: input.adminGroupId }),
+  });
+  if (!admin) throw new InjectionReviewError("not-admin", "only a tenant admin reviews a flag");
+}
+
+/**
+ * A tenant admin decides the object's current version is not a prompt injection: the detector's
+ * own flag comes off now, and the detector won't flag the object again while its current version
+ * has this content. A person's or a pack's own `risk:injection` tag stays. The audit record
+ * (`injection.review`) is appended in the same transaction, last; run it in a read-write
+ * transaction (READ COMMITTED). Throws InjectionReviewError (`not-admin`, `unknown-object`,
+ * `invalid`), writing nothing. Returns whether a flag came off.
  */
 export async function markNotInjection(
   tx: Tx,
   tenantId: string,
-  input: { objectId: string; by: string },
+  input: { objectId: string; by: string; adminGroupId?: string },
 ): Promise<boolean> {
-  if (!isId("object", input.objectId)) throw new TypeError("markNotInjection: not an object id");
-  if (!USER.test(input.by)) throw new TypeError("markNotInjection: by must be user:usr_…");
+  await checkReviewer(tx, tenantId, input);
   await lockObject(tx, tenantId, input.objectId);
+  const current = await currentVersionOf(tx, tenantId, input.objectId);
+  if (current === null) throw new InjectionReviewError("unknown-object", "no such object");
   await tx
     .insert(injectionReviews)
-    .values({ tenantId, objectId: input.objectId, reviewedBy: input.by })
+    .values({ tenantId, objectId: input.objectId, ...current, reviewedBy: input.by })
     .onConflictDoUpdate({
       target: [injectionReviews.tenantId, injectionReviews.objectId],
-      set: { reviewedBy: input.by, reviewedAt: sql`now()` },
+      set: { ...current, reviewedBy: input.by, reviewedAt: sql`now()` },
     });
   const removed = await tx
     .delete(objectTags)
     .where(and(tagKey(tenantId, input.objectId), eq(objectTags.appliedBy, INJECTION_DETECTOR)))
     .returning({ facet: objectTags.facet });
+  await appendAudit(tx, tenantId, {
+    actor: input.by,
+    action: "injection.review",
+    decision: "allow",
+    object: input.objectId,
+    version: current.versionId,
+    detail: { flagCleared: removed.length > 0 },
+  });
   return removed.length > 0;
 }
 
 /**
- * Withdraws a "not an injection" decision: the detector judges the object again from its next
- * enrichment (a new version, a rename, or a re-run). Returns whether there was one.
+ * A tenant admin withdraws a "not an injection" decision: the detector judges the object again
+ * from its next enrichment (a new version, a rename, or a re-run). Audited
+ * (`injection.review-withdrawn`) in the same transaction. Returns whether there was one.
  */
 export async function clearInjectionReview(
   tx: Tx,
   tenantId: string,
-  objectId: string,
+  input: { objectId: string; by: string; adminGroupId?: string },
 ): Promise<boolean> {
-  if (typeof objectId !== "string" || !isId("object", objectId)) return false;
+  await checkReviewer(tx, tenantId, input);
   const removed = await tx
     .delete(injectionReviews)
-    .where(and(eq(injectionReviews.tenantId, tenantId), eq(injectionReviews.objectId, objectId)))
+    .where(
+      and(eq(injectionReviews.tenantId, tenantId), eq(injectionReviews.objectId, input.objectId)),
+    )
     .returning({ objectId: injectionReviews.objectId });
-  return removed.length > 0;
+  if (removed.length === 0) return false;
+  await appendAudit(tx, tenantId, {
+    actor: input.by,
+    action: "injection.review-withdrawn",
+    decision: "allow",
+    object: input.objectId,
+  });
+  return true;
 }

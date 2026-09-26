@@ -1,6 +1,11 @@
 import {
+  auditEvents,
+  blobs,
   facets,
   facetValues,
+  newId,
+  users,
+  versions,
   objectTags,
   tenants,
   versionCards,
@@ -29,7 +34,9 @@ import {
   INJECTION_DETECTOR,
   injectionReviewOf,
   markNotInjection,
+  reviewedNotInjection,
 } from "./risk.js";
+import { grantAdmin } from "@openhoard/core-identity";
 import { applyRuleTags } from "./rules.js";
 import { proposeTag } from "./tagging.js";
 import { markProcessed, VIEW_TRANSACTION, viewObjects, type CardView } from "./visibility.js";
@@ -403,7 +410,7 @@ describe("the injection flag", () => {
     expect(await inTenant((tx) => hasInjectionFlag(tx, t.tenantId, t.objectId))).toBe(true);
   });
 
-  it("never depends on the tenant's vocabulary: missing or loosened, it is put back", async () => {
+  it("never depends on the tenant's vocabulary, and nobody can change the built-in value", async () => {
     const other = await seedTenant(db, 2);
     const inOther = <T>(work: (tx: Tx) => Promise<T>) => db.withTenant(other.tenantId, work);
     // No risk facet at all (a tenant from before migration 0046, or a test seed).
@@ -413,50 +420,110 @@ describe("the injection flag", () => {
     const value = () =>
       inOther((tx) => tx.select().from(facetValues).where(eq(facetValues.facet, "risk")));
     expect(await value()).toMatchObject([{ approved: true, exposure: "metadata-only" }]);
-    // An admin loosened it: the next flag restores it.
-    await inOther(async (tx) => {
-      await tx
-        .update(facetValues)
-        .set({ exposure: "full", approved: false })
-        .where(eq(facetValues.facet, "risk"));
-      await applyInjectionFlag(tx, other.tenantId, other.objectId, false);
-    });
-    expect(
-      await inOther((tx) => applyInjectionFlag(tx, other.tenantId, other.objectId, true)),
-    ).toBe("flagged");
+    // An admin or a pack loosening it, hiding it, or removing it: refused by the database.
+    for (const change of [
+      { exposure: "full" as const },
+      { approved: false },
+      { visibility: "hidden" as const },
+    ]) {
+      await expect(
+        inOther((tx) => tx.update(facetValues).set(change).where(eq(facetValues.facet, "risk"))),
+        JSON.stringify(change),
+      ).rejects.toThrow();
+    }
+    await inOther((tx) =>
+      tx.update(facetValues).set({ label: "Maybe injected" }).where(eq(facetValues.facet, "risk")),
+    );
+    const third = await seedTenant(db, 3);
+    await expect(
+      db.withTenant(third.tenantId, async (tx) => {
+        await tx.insert(facets).values({ tenantId: third.tenantId, key: "risk", label: "Risk" });
+        await tx.insert(facetValues).values({
+          tenantId: third.tenantId,
+          facet: "risk",
+          value: "injection",
+          label: "x",
+          approved: true,
+          exposure: "local-only",
+        });
+      }),
+    ).rejects.toThrow();
     expect(await value()).toMatchObject([{ approved: true, exposure: "metadata-only" }]);
   });
 
-  it("respects a person's 'not an injection' decision, across edits, until withdrawn", async () => {
+  it("lets only an admin clear a flag, for the reviewed content, audited", async () => {
     const by = `user:${t.userId}`;
     await inTenant((tx) => applyInjectionFlag(tx, t.tenantId, t.objectId, true));
-    expect(
-      await inTenant((tx) => markNotInjection(tx, t.tenantId, { objectId: t.objectId, by })),
-    ).toBe(true);
-    expect(await inTenant((tx) => hasInjectionFlag(tx, t.tenantId, t.objectId))).toBe(false);
-    expect(await inTenant((tx) => injectionReviewOf(tx, t.tenantId, t.objectId))).toMatchObject({
-      reviewedBy: by,
-    });
-    // The detector says injection again (a later version): the decision stands.
-    expect(await inTenant((tx) => applyInjectionFlag(tx, t.tenantId, t.objectId, true))).toBe(
-      "not-flagged",
-    );
-    // Deciding again changes nothing more; a person's own flag is theirs to keep.
-    expect(
-      await inTenant((tx) => markNotInjection(tx, t.tenantId, { objectId: t.objectId, by })),
-    ).toBe(false);
-    expect(await inTenant((tx) => clearInjectionReview(tx, t.tenantId, t.objectId))).toBe(true);
-    expect(await inTenant((tx) => clearInjectionReview(tx, t.tenantId, t.objectId))).toBe(false);
-    expect(await inTenant((tx) => clearInjectionReview(tx, t.tenantId, "nope"))).toBe(false);
-    expect(await inTenant((tx) => injectionReviewOf(tx, t.tenantId, "nope"))).toBe(null);
-    expect(await inTenant((tx) => applyInjectionFlag(tx, t.tenantId, t.objectId, true))).toBe(
-      "flagged",
-    );
+    // The owner or any other member: refused, nothing written.
     await expect(
-      inTenant((tx) => markNotInjection(tx, t.tenantId, { objectId: t.objectId, by: "model:x" })),
-    ).rejects.toThrow("by must be");
-    await expect(
-      inTenant((tx) => markNotInjection(tx, t.tenantId, { objectId: "x", by })),
-    ).rejects.toThrow("not an object id");
+      inTenant((tx) => markNotInjection(tx, t.tenantId, { objectId: t.objectId, by })),
+    ).rejects.toMatchObject({ code: "not-admin" });
+    expect(await inTenant((tx) => hasInjectionFlag(tx, t.tenantId, t.objectId))).toBe(true);
+    await inTenant((tx) => grantAdmin(tx, t.tenantId, t.userId, "system:test"));
+    try {
+      expect(
+        await inTenant((tx) => markNotInjection(tx, t.tenantId, { objectId: t.objectId, by })),
+      ).toBe(true);
+      expect(await inTenant((tx) => hasInjectionFlag(tx, t.tenantId, t.objectId))).toBe(false);
+      expect(await inTenant((tx) => injectionReviewOf(tx, t.tenantId, t.objectId))).toMatchObject({
+        reviewedBy: by,
+        versionId: t.versionId,
+        blobId: t.blobId,
+      });
+      expect(await inTenant((tx) => reviewedNotInjection(tx, t.tenantId, t.objectId))).toBe(true);
+      // The detector says injection again for the same content: the decision stands.
+      expect(await inTenant((tx) => applyInjectionFlag(tx, t.tenantId, t.objectId, true))).toBe(
+        "not-flagged",
+      );
+      const audit = await inTenant((tx) =>
+        tx.select().from(auditEvents).where(eq(auditEvents.action, "injection.review")),
+      );
+      expect(audit).toMatchObject([{ actor: by, object: t.objectId, decision: "allow" }]);
+
+      // A new version with other content is judged again.
+      const newer = newId("version");
+      await inTenant(async (tx) => {
+        await tx
+          .insert(blobs)
+          .values({ tenantId: t.tenantId, id: `b3t:${"e".repeat(64)}`, size: 9 });
+        await tx.insert(versions).values({
+          tenantId: t.tenantId,
+          id: newer,
+          objectId: t.objectId,
+          seq: 2,
+          blobId: `b3t:${"e".repeat(64)}`,
+          mime: "text/plain",
+        });
+      });
+      expect(await inTenant((tx) => reviewedNotInjection(tx, t.tenantId, t.objectId))).toBe(false);
+      expect(await inTenant((tx) => applyInjectionFlag(tx, t.tenantId, t.objectId, true))).toBe(
+        "flagged",
+      );
+      await inTenant((tx) => tx.delete(versions).where(eq(versions.id, newer)));
+
+      expect(
+        await inTenant((tx) => clearInjectionReview(tx, t.tenantId, { objectId: t.objectId, by })),
+      ).toBe(true);
+      expect(
+        await inTenant((tx) => clearInjectionReview(tx, t.tenantId, { objectId: t.objectId, by })),
+      ).toBe(false);
+      expect(await inTenant((tx) => injectionReviewOf(tx, t.tenantId, "nope"))).toBe(null);
+      await expect(
+        inTenant((tx) => markNotInjection(tx, t.tenantId, { objectId: t.objectId, by: "model:x" })),
+      ).rejects.toMatchObject({ code: "invalid" });
+      await expect(
+        inTenant((tx) => markNotInjection(tx, t.tenantId, { objectId: "x", by })),
+      ).rejects.toMatchObject({ code: "invalid" });
+      await expect(
+        inTenant((tx) =>
+          markNotInjection(tx, t.tenantId, { objectId: "obj_01k5xr3c8v0q6m2d4n7p9s1t3w", by }),
+        ),
+      ).rejects.toMatchObject({ code: "unknown-object" });
+    } finally {
+      // (revokeAdmin() refuses the tenant's last admin; the test puts the row back as it was.)
+      await inTenant((tx) =>
+        tx.update(users).set({ adminAt: null, adminBy: null }).where(eq(users.id, t.userId)),
+      );
+    }
   });
 });

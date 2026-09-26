@@ -59,11 +59,18 @@ export function decodeEntities(s: string): string {
   });
 }
 
-/** Steps 1 to 4: text as a person would read it, in lower case. */
-export function cleanForMatching(s: string, max: number): string {
+/**
+ * Steps 1 to 4: text as a person would read it, in lower case. `invisibleAs` is what an
+ * invisible character becomes: deleted (the default: `ig<ZWSP>nore` is "ignore"), or a space
+ * (`ignore<ZWSP>all` is "ignore all"). Checks run on both, since what is stored (card.ts
+ * stripUnsafeText()) turns them into spaces.
+ */
+export function cleanForMatching(s: string, max: number, invisibleAs: "" | " " = ""): string {
   const cut = s.length > max ? s.slice(0, max) : s;
-  return decodeEntities(cut.replace(INVISIBLE, "").replace(CONTROL, (c) => (c === "\n" ? c : " ")))
-    .replace(INVISIBLE, "")
+  return decodeEntities(
+    cut.replace(INVISIBLE, invisibleAs).replace(CONTROL, (c) => (c === "\n" ? c : " ")),
+  )
+    .replace(INVISIBLE, invisibleAs)
     .normalize("NFKC")
     .toLowerCase()
     .replace(/[^\S\n]+/g, " ")
@@ -71,8 +78,9 @@ export function cleanForMatching(s: string, max: number): string {
 }
 
 /**
- * Lower-case look-alikes of basic Latin letters, by code point. Cyrillic, Greek, Armenian,
- * Cherokee-free (Cherokee has no lower-case forms that fold here), and Latin extensions.
+ * Lower-case look-alikes of basic Latin letters, by code point: Cyrillic, Greek, Armenian,
+ * the Cherokee letter that reads as "i", Lisu and Latin extensions. A subset:
+ * mixedScriptWords() catches the words it misses (a Latin word with any other script's letter).
  */
 const CONFUSABLES: ReadonlyMap<number, string> = new Map<number, string>([
   // Cyrillic
@@ -134,6 +142,34 @@ const CONFUSABLES: ReadonlyMap<number, string> = new Map<number, string>([
   [0x057c, "n"],
   [0x057d, "u"],
   [0x0585, "o"],
+  // Cherokee: the small letter v, which reads as "i"
+  [0xab75, "i"],
+  // Lisu (no case): letters drawn as Latin capitals
+  [0xa4d0, "b"],
+  [0xa4d1, "p"],
+  [0xa4d3, "d"],
+  [0xa4d4, "t"],
+  [0xa4d6, "g"],
+  [0xa4d7, "k"],
+  [0xa4d9, "j"],
+  [0xa4da, "c"],
+  [0xa4dc, "z"],
+  [0xa4dd, "f"],
+  [0xa4de, "m"],
+  [0xa4df, "n"],
+  [0xa4e1, "l"],
+  [0xa4e2, "s"],
+  [0xa4e3, "r"],
+  [0xa4e6, "v"],
+  [0xa4e7, "h"],
+  [0xa4ea, "w"],
+  [0xa4eb, "x"],
+  [0xa4ec, "y"],
+  [0xa4ee, "a"],
+  [0xa4f0, "e"],
+  [0xa4f2, "i"],
+  [0xa4f3, "o"],
+  [0xa4f4, "u"],
   // Latin extensions and IPA
   [0x0131, "i"],
   [0x0237, "j"],
@@ -170,4 +206,25 @@ export function skeleton(cleaned: string): string {
     out += cp < 0x0100 ? ch : (CONFUSABLES.get(cp) ?? ch);
   }
   return out;
+}
+
+/** A word: letters and the marks on them, at most 64 at a time (longer runs are split). */
+const WORD = /[\p{L}\p{M}]{1,64}/gu;
+const LATIN = /\p{Script=Latin}/u;
+/** A letter of neither Latin nor Common/Inherited script. */
+const OTHER = /(?![\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}])\p{L}/u;
+
+/**
+ * How many words mix Latin letters with letters of another script ("ꭵgnore", "prevіous" with a
+ * Cyrillic "і"): the tell of look-alike spoofing, whatever the script, whether or not the
+ * confusables table knows the letter. Ordinary text in any one script, or Latin words beside
+ * words in another script, count nothing. Linear: bounded words, one scan.
+ */
+export function mixedScriptWords(cleaned: string): number {
+  let n = 0;
+  for (const m of cleaned.matchAll(WORD)) {
+    const w = m[0];
+    if (LATIN.test(w) && OTHER.test(w)) n++;
+  }
+  return n;
 }

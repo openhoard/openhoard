@@ -1,5 +1,5 @@
 import { clampWords, MAX_SUMMARY_WORDS, stripUnsafeText, truncateCodePoints } from "./card.js";
-import { cleanForMatching, skeleton } from "./clean.js";
+import { cleanForMatching, mixedScriptWords, skeleton } from "./clean.js";
 import { instructionPatterns } from "./injection.js";
 
 /*
@@ -252,8 +252,12 @@ export function validateCardOutput(answer: string): {
  * then on its skeleton (look-alike letters folded to Latin), never on the raw text: a zero-width
  * space inside "ignore", a fullwidth "https：／／", a Cyrillic "і" or `&#47;` hide nothing.
  * Each pattern is literals and bounded classes: linear.
- * - links: a scheme (`x://`, `mailto:`, `javascript:`…), `www.`, `//`, or a domain with a path
- *   (`bit.ly/…`, `evil.me/drop`: any letters for the top-level domain, not a list);
+ * - links: a scheme (`x://`, `mailto:`, `javascript:`…), `www.`, `//`, any bare domain
+ *   (`name.tld`, any letters for the top-level domain, not a list: `evil.me`, `bit.ly`; so a
+ *   file name with an extension, `report.pdf`, costs its sentence too), and defanged forms
+ *   (`evil[.]example`, `(dot)`, `hxxp`);
+ * - words that mix Latin letters with another script's (`ꭵgnore`, a Cyrillic `і` in a Latin
+ *   word): look-alike spoofing, whether or not the confusables table knows the letter;
  * - email addresses;
  * - markup and code: angle brackets, braces, backticks, markdown link or image syntax, pipes;
  * - role labels: `system:`, `assistant:` and the like;
@@ -263,7 +267,7 @@ export function validateCardOutput(answer: string): {
  * - instruction patterns (injection.ts), with their short list in other languages.
  */
 const LINK =
-  /[a-z][a-z0-9+.-]{0,20}:\/\/|\bwww\.|\b(?:mailto|javascript|vbscript|data|file|ftp):|\/\/|[\p{L}\p{N}-]{1,63}\.\p{L}{2,24}\//u;
+  /[a-z][a-z0-9+.-]{0,20}:\/\/|\bwww\.|\b(?:mailto|javascript|vbscript|data|file|ftp):|\/\/|(?<![\p{L}\p{N}-])[\p{L}\p{N}-]{1,63}\.\p{L}{2,24}(?![\p{L}\p{N}-])|\[\.\]|\(\.\)|\{\.\}|[[({]dot[\])}]|\bhxxps?\b/u;
 const EMAIL = /[\p{L}\p{N}._%+-]{1,64}@[\p{L}\p{N}-]{1,63}\./u;
 const MARKUP = /[<>{}`|]|\]\(|!\[|\[\[|\*\*|__|#{2,}/;
 const ROLE = /\b(?:system|assistant|user|human|ai|developer|tool|model)\s?:/;
@@ -273,16 +277,23 @@ const ADDRESSED = new RegExp(
   `^(?:(?:dear|hey|hi|hello|attention|note to|ok|okay|to|all) )?(?:the |an? |any |all )?${AI}\\b ?[,:;!]|\\b${AI}\\b[^.!?\\n]{0,60}\\b(?:you|your|please|must|should|shall|need to|are (?:instructed|required|asked))\\b|\\b(?:you|please)\\b[^.!?\\n]{0,60}\\b${AI}\\b`,
 );
 
-/** Why a piece of model output is unsafe to keep, or null. */
+/**
+ * Why a piece of model output is unsafe to keep, or null. Checked twice: with invisible
+ * characters deleted (`ig<ZWSP>nore` is "ignore") and turned into spaces (`ignore<ZWSP>all` is
+ * "ignore all", as stripUnsafeText() will store it).
+ */
 function unsafeReason(s: string): string | null {
-  const cleaned = cleanForMatching(s, 4_096);
-  const skel = skeleton(cleaned);
-  const flat = skel.replaceAll("\n", " ");
-  if (LINK.test(skel) || LINK.test(cleaned)) return "link";
-  if (EMAIL.test(skel) || EMAIL.test(cleaned)) return "email";
-  if (MARKUP.test(cleaned)) return "markup";
-  if (ROLE.test(flat)) return "role";
-  if (ADDRESSED.test(flat.trim())) return "addressed";
+  for (const invisibleAs of ["", " "] as const) {
+    const cleaned = cleanForMatching(s, 8_192, invisibleAs);
+    const skel = skeleton(cleaned);
+    const flat = skel.replaceAll("\n", " ");
+    if (LINK.test(skel) || LINK.test(cleaned)) return "link";
+    if (EMAIL.test(skel) || EMAIL.test(cleaned)) return "email";
+    if (MARKUP.test(cleaned)) return "markup";
+    if (mixedScriptWords(cleaned) > 0) return "mixed-script";
+    if (ROLE.test(flat)) return "role";
+    if (ADDRESSED.test(flat.trim())) return "addressed";
+  }
   if (instructionPatterns(s).length > 0) return "instruction";
   return null;
 }
@@ -326,7 +337,13 @@ export function filterCardOutput(
     if (unsafeReason(sentence) === null) kept.push(sentence);
     else filtered++;
   }
-  const summary = clampWords(stripUnsafeText(kept.join(" ")), MAX_SUMMARY_WORDS);
+  let summary = clampWords(stripUnsafeText(kept.join(" ")), MAX_SUMMARY_WORDS);
+  // The summary as it will be stored, checked whole: sentences that passed apart (an instruction
+  // split across a line break, say) must not pass together.
+  if (summary !== "" && unsafeReason(summary) !== null) {
+    filtered += kept.length;
+    summary = "";
+  }
 
   const tags: { tag: string; confidence: number }[] = [];
   const seen = new Set<string>();

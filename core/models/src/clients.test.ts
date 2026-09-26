@@ -528,10 +528,26 @@ describe("plain http reaches private addresses only, as resolved", () => {
       "fd00::1",
       "fe80::1",
       "::ffff:10.0.0.1",
+      "100.64.0.1",
+      "100.101.102.103",
+      "100.127.255.254",
     ]) {
       expect(isPrivateAddress(a), a).toBe(true);
     }
-    for (const a of ["172.32.0.1", "8.8.8.8", "2001:db8::1", "::ffff:8.8.8.8", "localhost", ""]) {
+    for (const a of [
+      "172.32.0.1",
+      "100.128.0.1",
+      "169.254.169.254",
+      "169.254.170.2",
+      "100.100.100.200",
+      "fd00:ec2::254",
+      "::ffff:169.254.169.254",
+      "8.8.8.8",
+      "2001:db8::1",
+      "::ffff:8.8.8.8",
+      "localhost",
+      "",
+    ]) {
       expect(isPrivateAddress(a), a).toBe(false);
     }
   });

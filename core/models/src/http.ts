@@ -16,8 +16,8 @@ import type { ModelsLogger } from "./types.js";
  *   enough, and ends the call as `rate-limited` when it isn't, so the job's own retry waits;
  * - no redirects: a 3xx fails the call at once as `refused` (a key must not follow one to
  *   another host, and a redirect is not something to retry);
- * - over plain http, only private addresses: loopback, RFC 1918, link-local, and IPv6 unique
- *   local or link-local. The check runs on the addresses DNS returned, inside the connection's
+ * - over plain http, only private addresses: loopback, RFC 1918, carrier-grade NAT (Tailscale),
+ *   link-local, and IPv6 unique local or link-local; never a cloud metadata service. The check runs on the addresses DNS returned, inside the connection's
  *   own lookup, so the socket connects to an address that was checked: a name that resolves
  *   elsewhere a second later (DNS rebinding) changes nothing. An IP literal is checked as given.
  *   Anything else fails as `blocked`, before a byte is sent;
@@ -65,17 +65,34 @@ PRIVATE.addSubnet("10.0.0.0", 8, "ipv4");
 PRIVATE.addSubnet("172.16.0.0", 12, "ipv4");
 PRIVATE.addSubnet("192.168.0.0", 16, "ipv4");
 PRIVATE.addSubnet("169.254.0.0", 16, "ipv4");
+// Carrier-grade NAT: Tailscale and similar overlay networks hand these out to a tenant's machines.
+PRIVATE.addSubnet("100.64.0.0", 10, "ipv4");
 PRIVATE.addAddress("::1", "ipv6");
 PRIVATE.addSubnet("fc00::", 7, "ipv6");
 PRIVATE.addSubnet("fe80::", 10, "ipv6");
 
-/** Whether an address is loopback, RFC 1918, link-local or IPv6 unique local (mapped v4 too). */
+/**
+ * Cloud instance metadata services, inside the ranges above: never a model server, and a
+ * request to one can hand out the host's credentials. AWS, GCP and Azure (169.254.169.254, and
+ * AWS's IPv6 fd00:ec2::254), AWS ECS task metadata (169.254.170.2), Alibaba (100.100.100.200).
+ */
+const METADATA = new BlockList();
+METADATA.addAddress("169.254.169.254", "ipv4");
+METADATA.addAddress("169.254.170.2", "ipv4");
+METADATA.addAddress("100.100.100.200", "ipv4");
+METADATA.addAddress("fd00:ec2::254", "ipv6");
+
+/**
+ * Whether an address is loopback, RFC 1918, carrier-grade NAT (100.64.0.0/10), link-local or
+ * IPv6 unique local (IPv4-mapped too), and not a cloud metadata service.
+ */
 export function isPrivateAddress(address: string): boolean {
   const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(address);
-  if (mapped?.[1]) return PRIVATE.check(mapped[1], "ipv4");
-  const family = isIP(address);
-  if (family === 4) return PRIVATE.check(address, "ipv4");
-  if (family === 6) return PRIVATE.check(address, "ipv6");
+  const v4 = mapped?.[1] ?? (isIP(address) === 4 ? address : undefined);
+  if (v4 !== undefined) return PRIVATE.check(v4, "ipv4") && !METADATA.check(v4, "ipv4");
+  if (isIP(address) === 6) {
+    return PRIVATE.check(address, "ipv6") && !METADATA.check(address, "ipv6");
+  }
   return false;
 }
 

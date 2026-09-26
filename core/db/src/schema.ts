@@ -1286,18 +1286,24 @@ export const versionCards = pgTable(
 );
 
 /**
- * "Reviewed: not a prompt injection" (T-408): an owner or admin looked at a file the injection
- * detector flagged (or would flag) and decided it is fine. Object-scoped, so the decision
- * survives edits: the detector doesn't flag the object again and takes its own flag off. A
- * person's or a pack's own `risk:injection` tag is untouched. `reviewed_by` is the person
- * (`user:…`); the API that sets it authorizes the caller and appends the audit record in the
- * same transaction. Removing the row gives the detector back its say.
+ * "Reviewed: not a prompt injection" (T-408): a tenant admin looked at a file the injection
+ * detector flagged (or would flag) and decided it is fine, for the content they looked at. Not
+ * the owner: the owner is who an insider attack would come from. One row per object, for the
+ * version reviewed and its content (`blob_id`): the detector leaves the object alone (and takes
+ * its own flag off) while its current version has that content; a new version with other
+ * content is judged again. `reviewed_by` is the admin (`user:…`); core/catalog
+ * markNotInjection() checks they are one and appends the audit record in the same transaction.
+ * Removing the row gives the detector back its say.
  */
 export const injectionReviews = pgTable(
   "injection_reviews",
   {
     tenantId: text("tenant_id").notNull(),
     objectId: text("object_id").notNull(),
+    /** The version the admin reviewed. */
+    versionId: text("version_id").notNull(),
+    /** Its content: the decision holds for any version with these bytes. */
+    blobId: text("blob_id").notNull(),
     reviewedBy: text("reviewed_by").notNull(),
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1308,7 +1314,13 @@ export const injectionReviews = pgTable(
       columns: [t.tenantId, t.objectId],
       foreignColumns: [objects.tenantId, objects.id],
     }).onDelete("cascade"),
+    foreignKey({
+      name: "injection_reviews_version_fk",
+      columns: [t.tenantId, t.objectId, t.versionId],
+      foreignColumns: [versions.tenantId, versions.objectId, versions.id],
+    }).onDelete("cascade"),
     check("injection_reviews_by_user", sql`reviewed_by ~ '^user:usr_[0-9a-hjkmnp-tv-z]{26}$'`),
+    check("injection_reviews_blob_format", sql`blob_id ~ '^b3t:[0-9a-f]{64}$'`),
   ],
 );
 

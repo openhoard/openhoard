@@ -165,6 +165,16 @@ summary. Errors name the provider and the status, never the key or the content. 
 is clamped (whole, not negative, at most the call's share of the reservation) and the
 reservation is always settled, with the HTTP requests that went out counted in `calls`.
 
+`resummarize(db, jobs, tenant, reasons)` re-enqueues the tenant's current versions skipped as
+`refused`, `unavailable` or `budget` (after an admin fixed a key or raised the budget; the API
+authorizes and audits it); core/catalog `cardSkipCounts()` gives the counts per reason.
+
+**Known gap: a job whose lease expires on its last attempt.** The model step's own time budget
+(8 minutes, enforced with an abort) keeps it inside the lease, so a lease expiry means the
+extract step or the host; but if one happens on a job's last attempt, the job is dead-lettered
+and the version stays unprocessed (hidden) until an operator redrives it. Recording the optional
+model step as `unavailable` from the dead-letter path is a follow-up.
+
 **Text extraction** (`extract-text`, [extract.ts](src/extract.ts), T-402). The step reads the
 version's bytes through the `ContentSource` (core/catalog), extracts them in a limited child
 process ([@openhoard/enricher-extract](../../enrichers/extract/README.md)), and stores the result

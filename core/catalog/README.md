@@ -78,11 +78,19 @@ as `rule:builtin/injection-detector` (source `rule`: trusted). `applyRuleTags()`
 flag): approved, `exposure: metadata-only`, whatever packs or admins did to it. A flag a person
 or a pack put on is never cleared by the detector.
 
-`markNotInjection()` records an owner's or admin's decision that an object is not an injection
-(`injection_reviews`, object-scoped, so it survives edits): the detector's flag comes off and the
-detector won't flag the object again, and the summarize step summarizes it. The API authorizes
-the caller and appends the audit record in the same transaction; `clearInjectionReview()` gives
-the detector back its say.
+`markNotInjection()` records a tenant admin's decision that an object is not an injection (never
+the owner's: an insider attack would come from the owner). It is for the version and content
+reviewed (`injection_reviews`: version and blob): while the object's current version has that
+content, the detector's flag comes off, the detector doesn't flag it again, and the summarize
+step summarizes it; a new version with other content is judged again. It checks the admin
+(core/identity `isAdmin()`) and appends the `injection.review` audit record itself, in the same
+transaction; `clearInjectionReview()` (audited as `injection.review-withdrawn`) gives the
+detector back its say. The database refuses any change to `risk:injection`'s levels or its
+removal, whoever tries (migration 0050); a pack that lists it differently is refused at
+validation.
+
+`cardSkipCounts()` counts the tenant's current versions without a summary by reason (for a
+health view); `skippedVersions()` lists them, paged, for core/jobs `resummarize()`.
 
 A non-reader's card of a `readable` file carries the summary as the exposure allows, unless a
 policy forbids them `read` (a Cedar forbid, or an evaluation error, not merely no permit): then

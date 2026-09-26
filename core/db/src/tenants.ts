@@ -73,10 +73,11 @@ export const BUILT_IN_VOCABULARY = {
 
 /**
  * Makes sure the tenant has the built-in vocabulary, as it must be: creates the `risk` facet
- * if missing, and creates the values, or puts them back to approved with their levels if a pack
- * or an admin changed them. The one exception to "nothing creates vocabulary": these values are
- * the system's, not the tenant's. Idempotent; inside a withTenant() transaction for the tenant.
- * Migration 0046 did the same for tenants that existed before; createTenant() calls it.
+ * and the values if missing. The one exception to "nothing creates vocabulary": these values
+ * are the system's, not the tenant's, and the database refuses any change to their levels, and
+ * their removal (migration 0050's trigger: a clear error, never a silent restore); only the
+ * label may change. Idempotent; inside a withTenant() transaction for the tenant. Migration
+ * 0046 did the same for tenants that existed before; createTenant() calls it.
  */
 export async function ensureBuiltInVocabulary(tx: Tx, tenantId: string): Promise<void> {
   const { facet, values } = BUILT_IN_VOCABULARY;

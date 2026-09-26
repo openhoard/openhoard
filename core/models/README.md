@@ -54,7 +54,9 @@ schema has no field for a key, so one pasted into `config.json` fails loudly.
   must not follow one to another host).
 - **https, or plain http to private addresses only**: http is allowed in the settings only for
   loopback URLs and `local` providers, and every http request may only connect to loopback,
-  RFC 1918, link-local or IPv6 unique-local addresses. The check runs inside the connection's own
+  RFC 1918, carrier-grade NAT (100.64.0.0/10: Tailscale and similar), link-local or IPv6
+  unique-local addresses, never a cloud metadata service (169.254.169.254, 169.254.170.2,
+  100.100.100.200, fd00:ec2::254). The check runs inside the connection's own
   DNS lookup, on every address returned, so the socket connects to an address that was checked
   (a name re-pointed between check and connect, DNS rebinding, changes nothing); IP literals are
   checked as written. Anything else fails as `blocked` before a byte is sent. Node's http client

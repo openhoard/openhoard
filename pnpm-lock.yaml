@@ -317,6 +317,9 @@ importers:
       '@noble/hashes':
         specifier: ^2.4.0
         version: 2.4.0
+      '@openhoard/core-audit':
+        specifier: workspace:^
+        version: link:../audit
       '@openhoard/core-db':
         specifier: workspace:^
         version: link:../db

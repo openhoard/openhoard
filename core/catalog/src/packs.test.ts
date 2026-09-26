@@ -79,6 +79,27 @@ const small = (patch: Partial<Pack> = {}): Pack => ({
   ...patch,
 });
 
+describe("built-in vocabulary in packs", () => {
+  it("refuses a pack that changes risk:injection's levels, and allows it as it is", () => {
+    const withRisk = (value: Record<string, unknown>) =>
+      small({
+        facets: [
+          { key: "risk", label: "Risk", values: [{ value: "injection", label: "x", ...value }] },
+        ] as NonNullable<Pack["facets"]>,
+      });
+    for (const levels of [
+      {},
+      { exposure: "full" },
+      { exposure: "metadata-only", visibility: "hidden" },
+    ]) {
+      expect(validatePack(withRisk(levels)).join("\n"), JSON.stringify(levels)).toContain(
+        "risk:injection is built-in vocabulary",
+      );
+    }
+    expect(validatePack(withRisk({ exposure: "metadata-only" }))).toEqual([]);
+  });
+});
+
 describe("the general business starter pack", () => {
   it("is a valid pack whose tests all pass", () => {
     expect(validatePack(STARTER)).toEqual([]);

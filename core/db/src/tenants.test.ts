@@ -69,11 +69,28 @@ describe("createTenant", () => {
       facets: [{ key: "risk", public: false }],
       values: [{ value: "injection", approved: true, exposure: "metadata-only", visibility: null }],
     });
-    // A pack or an admin loosened it: the next ensure restores it; a second changes nothing.
+    // A pack or an admin changing its levels, or removing it: refused (migration 0050).
+    for (const change of [
+      { approved: false },
+      { exposure: "full" as const },
+      { visibility: "hidden" as const },
+      { value: "other" },
+    ]) {
+      await expect(
+        db.withTenant(id, (tx) =>
+          tx.update(facetValues).set(change).where(eq(facetValues.facet, "risk")),
+        ),
+        JSON.stringify(change),
+      ).rejects.toThrow();
+    }
+    await expect(
+      db.withTenant(id, (tx) => tx.delete(facetValues).where(eq(facetValues.facet, "risk"))),
+    ).rejects.toThrow();
+    // Its label is the tenant's to word; ensuring again changes nothing.
     await db.withTenant(id, (tx) =>
       tx
         .update(facetValues)
-        .set({ approved: false, exposure: "full" })
+        .set({ label: "Suspected injection" })
         .where(eq(facetValues.facet, "risk")),
     );
     await db.withTenant(id, (tx) => ensureBuiltInVocabulary(tx, id));
@@ -88,7 +105,7 @@ describe("createTenant", () => {
       const before = fromDriver(driver);
       const a = await seedTenant(before, 1);
       const b = await seedTenant(before, 2);
-      // b had it, loosened by an admin: put back.
+      // b had it already (a pack listed it): left as it is.
       await before.withTenant(b.tenantId, async (tx) => {
         await tx.insert(facets).values({ tenantId: b.tenantId, key: "risk", label: "Mine" });
         await tx.insert(facetValues).values({
@@ -96,8 +113,8 @@ describe("createTenant", () => {
           facet: "risk",
           value: "injection",
           label: "x",
-          approved: false,
-          exposure: "full",
+          approved: true,
+          exposure: "metadata-only",
         });
       });
       const migration = readFileSync(

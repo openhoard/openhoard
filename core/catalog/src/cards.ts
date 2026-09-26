@@ -6,6 +6,7 @@ import {
   isId,
   MAX_CARD_SUMMARY_CHARS,
   PROVIDER_KINDS,
+  queryRows,
   tagOf,
   versionCards,
   type Tx,
@@ -165,4 +166,72 @@ export async function modelVocabulary(
     .orderBy(asc(facetValues.facet), asc(facetValues.value))
     .limit(Math.max(0, Math.min(limit, 5_000)));
   return rows.map((r) => ({ tag: tagOf(r.facet, r.value), label: r.label }));
+}
+
+/**
+ * How many of the tenant's current versions have no summary, by reason (for an admin's health
+ * view): every skip reason, with 0 for those that don't occur. Replaced versions don't count.
+ */
+export async function cardSkipCounts(
+  tx: Tx,
+  tenantId: string,
+): Promise<Record<CardSkipReason, number>> {
+  const rows = await queryRows<{ reason: string; n: number }>(
+    tx,
+    sql`select c.reason, count(*)::int as n
+        from version_cards c
+        join versions v on v.tenant_id = c.tenant_id and v.id = c.version_id
+        where c.tenant_id = ${tenantId} and c.status = 'skipped'
+          and not exists (select 1 from versions w
+            where w.tenant_id = v.tenant_id and w.object_id = v.object_id and w.seq > v.seq)
+        group by c.reason`,
+  );
+  const counts = Object.fromEntries(CARD_SKIP_REASONS.map((r) => [r, 0])) as Record<
+    CardSkipReason,
+    number
+  >;
+  for (const r of rows) {
+    if ((CARD_SKIP_REASONS as readonly string[]).includes(r.reason)) {
+      counts[r.reason as CardSkipReason] = Number(r.n);
+    }
+  }
+  return counts;
+}
+
+/**
+ * The tenant's current versions whose card was skipped for one of `reasons`, in version id
+ * order after `after`, at most `limit` (1 to 1,000): what resummarize() (core/jobs) enqueues.
+ */
+export async function skippedVersions(
+  tx: Tx,
+  tenantId: string,
+  reasons: readonly CardSkipReason[],
+  options: { after?: string; limit?: number } = {},
+): Promise<string[]> {
+  const limit = options.limit ?? 500;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+    throw new RangeError("skippedVersions: limit is 1 to 1000");
+  }
+  const known = reasons.filter((r) => (CARD_SKIP_REASONS as readonly string[]).includes(r));
+  if (known.length === 0) return [];
+  if (options.after !== undefined && !isId("version", options.after)) {
+    throw new TypeError("skippedVersions: after is not a version id");
+  }
+  const rows = await queryRows<{ id: string }>(
+    tx,
+    sql`select c.version_id as id
+        from version_cards c
+        join versions v on v.tenant_id = c.tenant_id and v.id = c.version_id
+        where c.tenant_id = ${tenantId} and c.status = 'skipped'
+          and c.reason in (${sql.join(
+            known.map((r) => sql`${r}`),
+            sql`, `,
+          )})
+          and c.version_id > ${options.after ?? ""}
+          and not exists (select 1 from versions w
+            where w.tenant_id = v.tenant_id and w.object_id = v.object_id and w.seq > v.seq)
+        order by c.version_id
+        limit ${limit}`,
+  );
+  return rows.map((r) => r.id);
 }

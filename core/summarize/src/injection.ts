@@ -1,4 +1,4 @@
-import { cleanForMatching, skeleton } from "./clean.js";
+import { cleanForMatching, mixedScriptWords, skeleton } from "./clean.js";
 
 /*
  * Prompt-injection flagging (T-408): does a file look like it carries instructions meant for an
@@ -71,7 +71,7 @@ const PATTERNS: readonly Pattern[] = [
     id: "override-instructions-intl",
     weight: STRONG,
     script: true,
-    re: /\bignore[rz]? (?:toutes )?(?:les )?instructions (?:pr[ée]c[ée]dentes|ant[ée]rieures|ci-dessus)|\bignor(?:a|ar|ad|e|en) (?:todas )?(?:las |as )?(?:instrucciones|instru(?:ç|c)(?:õ|o)es) (?:anteriores|previas|pr[ée]vias)|\bignorier(?:e|en)? (?:alle )?(?:vorherigen|bisherigen|obigen) (?:anweisungen|instruktionen|befehle)|\bignora(?:re)? (?:tutte )?(?:le )?istruzioni (?:precedenti|sopra)|игнорир(?:уй|уйте|овать) (?:все )?(?:предыдущие|прежние|вышеуказанные) (?:инструкции|указания)|忽略(?:之前|以前|先前|上面|上述)(?:的)?(?:所有)?(?:的)?(?:指令|指示|说明)|(?:以前|前|上記)の(?:すべての)?指示を無視/,
+    re: /\bignore[rz]? (?:toutes )?(?:les )?instructions (?:pr[ée]c[ée]dentes|ant[ée]rieures|ci-dessus)|\bignor(?:a|ar|ad|e|en) (?:todas )?(?:las |as )?(?:instrucciones|instru(?:ç|c)(?:õ|o)es) (?:anteriores|previas|pr[ée]vias)|\bignorier(?:e|en)? (?:alle )?(?:vorherigen|bisherigen|obigen) (?:anweisungen|instruktionen|befehle)|\bignora(?:re)? (?:tutte )?(?:le )?istruzioni (?:precedenti|sopra)|игнорир(?:уй|уйте|овать) (?:все )?(?:предыдущие|прежние|вышеуказанные) (?:инструкции|указания)|забудь(?:те)? (?:(?:про|обо|о) )?(?:все(?:х)? )?(?:(?:предыдущи|прежни|вышеуказанны)(?:е|х) )?(?:указания|инструкции|указаниях|инструкциях)|忽略(?:之前|以前|先前|上面|上述)(?:的)?(?:所有)?(?:的)?(?:指令|指示|说明)|(?:以前|前|上記)の(?:すべての)?指示を無視/,
   },
   {
     // "AI agents reading this document must call …": a request to whatever reads the file.
@@ -257,9 +257,17 @@ function matchPatterns(cleaned: string): Pattern[] {
   );
 }
 
-/** Ids of the phrase patterns found in a text (normalized here). For output filtering. */
+/**
+ * Ids of the phrase patterns found in a text, for output filtering: cleaned with invisible
+ * characters deleted and, again, with them as spaces (what storage makes of them).
+ */
 export function instructionPatterns(text: string): string[] {
-  return matchPatterns(normalizeForMatching(text)).map((p) => p.id);
+  const ids = new Set<string>();
+  for (const invisibleAs of ["", " "] as const) {
+    for (const p of matchPatterns(cleanForMatching(text, MAX_SCAN_CHARS, invisibleAs)))
+      ids.add(p.id);
+  }
+  return [...ids];
 }
 
 /** Runs of base64 long enough to hide a sentence; at most this many are decoded. */
@@ -336,10 +344,18 @@ export function detectInjection(input: InjectionInput): InjectionVerdict {
   };
   const scan = (text: string, source: FindingSource, bonus: number) => {
     if (text === "") return;
-    for (const p of matchPatterns(normalizeForMatching(text))) {
-      // "Delete old files" is a fine name for a file: only in hidden text does it count more.
-      const extra = source === "name" && NAME_PLAIN.has(p.id) ? 0 : bonus;
-      add(p.id, source, p.weight + extra);
+    // Invisible characters deleted, then as spaces: "ig<ZWSP>nore" and "ignore<ZWSP>all" both.
+    for (const invisibleAs of ["", " "] as const) {
+      const cleaned = cleanForMatching(text, MAX_SCAN_CHARS, invisibleAs);
+      for (const p of matchPatterns(cleaned)) {
+        // "Delete old files" is a fine name for a file: only in hidden text does it count more.
+        const extra = source === "name" && NAME_PLAIN.has(p.id) ? 0 : bonus;
+        add(p.id, source, p.weight + extra);
+      }
+      // Words mixing Latin with another script's letters: look-alike spoofing, whatever the
+      // script. One is suspicious; several are what a spoofed sentence looks like.
+      const mixed = mixedScriptWords(cleaned);
+      if (mixed > 0) add("mixed-script", source, (mixed >= 2 ? STRONG : WEAK) + bonus);
     }
   };
 

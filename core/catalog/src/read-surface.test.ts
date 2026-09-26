@@ -36,8 +36,8 @@ const SURFACE = {
     // Enrichment's injection-flag step, through its guarded write (T-408).
     "applyInjectionFlag",
     "applyPack",
-    // A person's "not an injection" decision and its withdrawal (T-408); the API authorizes the
-    // owner or an admin and audits it.
+    // A tenant admin's "not an injection" decision and its withdrawal (T-408): checks the admin
+    // and appends the audit record itself.
     "clearInjectionReview",
     "markNotInjection",
     "applyRuleTags",
@@ -68,12 +68,17 @@ const SURFACE = {
   trusted: [
     // For enrichment (core/jobs): where a version's bytes are, to extract them (T-402).
     "contentRef",
+    // For an admin's health view (T-405): how many versions have no summary, and why.
+    "cardSkipCounts",
+    // For resummarize() (core/jobs): versions skipped for reasons worth another try.
+    "skippedVersions",
     // For enrichment (core/jobs): the exposure its tags give a file, before it is processed.
     "enrichmentExposure",
     "explainAccess",
     // For enrichment (core/jobs): whether a file carries the injection flag (T-408).
     "hasInjectionFlag",
     "injectionReviewOf",
+    "reviewedNotInjection",
     "explainLevels",
     "levelsFor",
     "listActivity",
@@ -122,6 +127,7 @@ const SURFACE = {
     "INJECTION_DETECTOR",
     "INJECTION_TAG",
     "IngestError",
+    "InjectionReviewError",
     "MAX_OBJECT_IDS",
     "PackError",
     "REPEAT_WINDOW_MS",

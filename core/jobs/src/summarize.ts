@@ -1,10 +1,10 @@
 import {
-  injectionReviewOf,
   modelVocabulary,
   proposeDisplayTitle,
   proposeTag,
   readCard,
   readExtract,
+  reviewedNotInjection,
   saveCard,
   TagError,
   type CardSkipReason,
@@ -120,9 +120,9 @@ export function summarizeStep(options: SummarizeStepOptions): EnrichStep {
         signals: extract.signals,
         metadata: extract.metadata,
       });
-      // A person decided this file is not an injection (core/catalog markNotInjection()).
-      const reviewed = await read((tx) => injectionReviewOf(tx, tenantId, objectId));
-      if (verdict.flagged && reviewed === null) return skip("flagged");
+      // An admin decided this content is not an injection (core/catalog markNotInjection()).
+      const reviewed = await read((tx) => reviewedNotInjection(tx, tenantId, objectId));
+      if (verdict.flagged && !reviewed) return skip("flagged");
 
       const client = await router.pickAllowed("summarize", (c) => context.mayProcess(c));
       if (client === null) return skip("no-provider");

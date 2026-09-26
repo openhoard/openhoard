@@ -1,8 +1,11 @@
 import {
+  cardSkipCounts,
   ingest,
   markNotInjection,
   readCard,
+  saveCard,
   saveExtract,
+  skippedVersions,
   viewObjects,
   VIEW_TRANSACTION,
   type CardView,
@@ -38,6 +41,7 @@ import {
   type Exposure,
   type ProviderKind,
 } from "@openhoard/core-policy";
+import { grantAdmin } from "@openhoard/core-identity";
 import { and, eq } from "drizzle-orm";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -45,6 +49,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EnrichStepError, enrichVersion, ruleTagStep, type EnrichStep } from "./enrich.js";
 import { injectionFlagStep } from "./flag.js";
 import { startJobs } from "./jobs.js";
+import { resummarize } from "./resummarize.js";
 import { summarizeStep, type SummarizeStepOptions } from "./summarize.js";
 
 /*
@@ -349,13 +354,15 @@ describe("the summarize step", () => {
 });
 
 describe("a person's 'not an injection' decision", () => {
-  it("is respected by both the flag and the summary, across new versions", async () => {
+  it("is respected by both the flag and the summary, for the reviewed content", async () => {
     const text = "A security guide: attackers write 'ignore all previous instructions'.";
     const f = await file("Security guide.txt", text);
     const { client, calls } = stub("ollama", "local", answer({}));
     const steps = pipeline(createModelRouter([client]));
     await run(steps, f.versionId);
     expect(calls).toHaveLength(0);
+    // A tenant admin (not the owner) reviews it.
+    await inTenant((tx) => grantAdmin(tx, t.tenantId, t.userId, "system:test"));
     await inTenant((tx) =>
       markNotInjection(tx, t.tenantId, { objectId: f.objectId, by: `user:${t.userId}` }),
     );
@@ -373,6 +380,68 @@ describe("a person's 'not an injection' decision", () => {
         .where(and(eq(objectTags.objectId, f.objectId), eq(objectTags.facet, "risk"))),
     );
     expect(flags).toEqual([]);
+  });
+});
+
+describe("skip reasons for an admin, and summarizing again", () => {
+  it("counts current versions without a summary by reason, and re-enqueues the curable ones", async () => {
+    const { client, calls } = stub("ollama", "local", answer({}));
+    const spent = pipeline(createModelRouter([client]), { budget: dailyTokenBudget(0) });
+    const a = await file("A.txt", "Report A.");
+    const b = await file("B.txt", "Report B.");
+    const none = await file("Scan.tiff", null);
+    for (const f of [a, b, none]) await run(spent, f.versionId);
+    // A refusal, recorded directly as the step would.
+    const c = await file("C.txt", "Report C.");
+    await inTenant((tx) =>
+      saveCard(tx, t.tenantId, {
+        objectId: c.objectId,
+        versionId: c.versionId,
+        status: "skipped",
+        reason: "refused",
+        promptVersion: "openhoard-summary/1",
+      }),
+    );
+    expect(calls).toHaveLength(0);
+    const counts = await inTenant((tx) => cardSkipCounts(tx, t.tenantId));
+    expect(counts).toMatchObject({ budget: 2, "no-text": 1, refused: 1, flagged: 0 });
+    // Paged in version id order.
+    const first = await inTenant((tx) =>
+      skippedVersions(tx, t.tenantId, ["budget", "refused"], { limit: 1 }),
+    );
+    expect(first).toHaveLength(1);
+    const rest = await inTenant((tx) =>
+      skippedVersions(tx, t.tenantId, ["budget", "refused"], { after: first[0] ?? "" }),
+    );
+    expect([...first, ...rest].sort()).toEqual([a.versionId, b.versionId, c.versionId].sort());
+    expect(await inTenant((tx) => skippedVersions(tx, t.tenantId, []))).toEqual([]);
+    await expect(
+      inTenant((tx) => skippedVersions(tx, t.tenantId, ["budget"], { limit: 0 })),
+    ).rejects.toThrow(RangeError);
+    await expect(
+      inTenant((tx) => skippedVersions(tx, t.tenantId, ["budget"], { after: "x" })),
+    ).rejects.toThrow(TypeError);
+
+    const enqueued: string[] = [];
+    const jobs = {
+      enqueueVersion: (_tenant: string, versionId: string) => {
+        enqueued.push(versionId);
+        return Promise.resolve(null);
+      },
+    };
+    expect(await resummarize(db, jobs, t.tenantId, ["budget"], { limit: 1 })).toBe(1);
+    enqueued.length = 0;
+    expect(await resummarize(db, jobs, t.tenantId)).toBe(3);
+    expect(enqueued.sort()).toEqual([a.versionId, b.versionId, c.versionId].sort());
+    await expect(resummarize(db, jobs, t.tenantId, ["no-text"])).rejects.toThrow(TypeError);
+
+    // With the budget raised, the job's run summarizes what was skipped.
+    await inTenant((tx) =>
+      tx.update(versions).set({ processedAt: null }).where(eq(versions.id, a.versionId)),
+    );
+    await run(pipeline(createModelRouter([client])), a.versionId);
+    expect(await card(a.versionId)).toMatchObject({ status: "summarized" });
+    expect((await inTenant((tx) => cardSkipCounts(tx, t.tenantId))).budget).toBe(1);
   });
 });
 
