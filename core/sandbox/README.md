@@ -10,6 +10,12 @@ Part of the OpenHoard trusted core. See [../README.md](../README.md) and
   admitted.
 - `hasCapability(plugin, capability)` is the default-deny gate the core calls before handing a
   plugin anything.
+- `mayReceiveContent(plugin, exposure)` is the gate for content (T-604): `read:content` approved,
+  the file no more sensitive than the manifest's `max_exposure` (`metadata-only`, the default,
+  means no content), and, as for AI clients, `local-only` content only for a plugin with no
+  network (one with any network host counts as a commercial service). Whatever hands a plugin
+  content (the runtime to come, T-9xx: an enricher's `extract`, a connector's `write`) must ask it
+  for every file, with the file's resolved exposure, and send metadata only when it says no.
 
 Running plugins (WASM through Extism/Wasmtime, or isolated OS processes, with resource and
 network limits; no containers) and package signing are not implemented yet. Design discussion

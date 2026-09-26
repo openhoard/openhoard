@@ -24,12 +24,12 @@
     "@openhoard/core-catalog": "workspace:^",
     "@openhoard/core-db": "workspace:^",
     "@openhoard/core-identity": "workspace:^",
+    "@openhoard/core-policy": "workspace:^",
     "drizzle-orm": "^0.45.3",
     "pg-boss": "12.33.1"
   },
   "devDependencies": {
-    "@openhoard/config": "workspace:*",
-    "@openhoard/core-policy": "workspace:*"
+    "@openhoard/config": "workspace:*"
   },
   "license": "Apache-2.0"
 }

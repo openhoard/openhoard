@@ -7,7 +7,7 @@ import {
   queryRows,
   type Tx,
 } from "@openhoard/core-db";
-import type { AuthzClient } from "@openhoard/core-policy";
+import type { AuthzClient, Exposure } from "@openhoard/core-policy";
 import { and, desc, eq, gte, inArray, lt, sql } from "drizzle-orm";
 
 /*
@@ -55,23 +55,55 @@ export interface ActivityInput {
   at?: Date;
 }
 
-/** Where gated reads record activity (ViewRequest.activity). */
+/**
+ * Content an AI client asked for and didn't get because of the file's exposure (T-604): a reader
+ * whose grants allow the open, through a client whose trust label the exposure doesn't reach.
+ * It isn't activity (nothing was read) but a policy decision, which the caller audits (the MCP
+ * server does, as `object.open` denied): an admin can see why an assistant came back empty.
+ * Cards shown as metadata only aren't recorded; they are what exposure is for.
+ */
+export interface WithheldContent {
+  /** The principal who asked: `user:usr_…`. */
+  actor: string;
+  objectId: string;
+  client: AuthzClient;
+  /** The file's exposure, which the client's trust doesn't reach. */
+  exposure: Exposure;
+}
+
+/** Where gated reads record activity (ViewRequest.activity), and content they withheld. */
 export interface ActivityRecorder {
   record(event: ActivityInput): void;
+  withhold(event: WithheldContent): void;
 }
 
 /** An ActivityRecorder that holds events until the caller writes them. */
 export class ActivityBuffer implements ActivityRecorder {
   #events: ActivityInput[] = [];
+  #withheld = new Map<string, WithheldContent>();
 
   record(event: ActivityInput): void {
     this.#events.push({ ...event });
+  }
+
+  /** Once per actor, file and client: a client retrying in a loop is one refusal to audit. */
+  withhold(event: WithheldContent): void {
+    const key = JSON.stringify([event.actor, event.objectId, event.client.id, event.client.trust]);
+    if (!this.#withheld.has(key))
+      this.#withheld.set(key, { ...event, client: { ...event.client } });
   }
 
   /** The events recorded since the last take(), oldest first; empties the buffer. */
   take(): ActivityInput[] {
     const out = this.#events;
     this.#events = [];
+    return out;
+  }
+
+  /** Content withheld since the last takeWithheld(), oldest first; empties that part. */
+  takeWithheld(): WithheldContent[] {
+    const out = [...this.#withheld.values()];
+    this.#withheld.clear();
     return out;
   }
 

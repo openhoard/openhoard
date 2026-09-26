@@ -1,7 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import type { CallToolResult, ToolAnnotations } from "@modelcontextprotocol/sdk/types.js";
-import { ACTIVITY_PAGE, ActivityBuffer, writeActivity } from "@openhoard/core-catalog";
+import { appendAudit, type AuditRecord } from "@openhoard/core-audit";
+import {
+  ACTIVITY_PAGE,
+  ActivityBuffer,
+  writeActivity,
+  type RecordedRequest,
+  type WithheldContent,
+} from "@openhoard/core-catalog";
 import type { Database } from "@openhoard/core-db";
 import { getUser } from "@openhoard/core-identity";
 import type { Hono, MiddlewareHandler } from "hono";
@@ -18,7 +25,9 @@ import type { AuthEnv, BearerAuth } from "./auth.js";
  *
  * Each request gets an ActivityBuffer, which the tools' gated reads record into (they run in
  * read-only snapshots), written once the response is ready (T-205). An MCP read is an AI read:
- * the event keeps the client's id and trust.
+ * the event keeps the client's id and trust. Tools build their catalog requests with
+ * readRequest(), so the client's trust label decides what exposure lets through (T-604), and
+ * content withheld for it is audited with the activity.
  *
  * Tools: `whoami` (who the token speaks for). find, recent and describe come with T-802.
  */
@@ -157,13 +166,18 @@ export function mountMcp(app: Hono<AuthEnv>, deps: McpDeps): void {
       return c.json(JSON_RPC_ERROR(-32000, "request took too long"), 503);
     }
     // What the tools read is recorded before the answer leaves: an unrecorded AI read is refused.
+    // So is content the file's exposure kept from this client (T-604), in the audit log: an
+    // admin can see why an assistant came back with metadata only. Activity first, audit last
+    // (core/audit's lock order).
     const events = ctx.activity.take();
-    if (events.length > 0) {
+    const withheld = ctx.activity.takeWithheld();
+    if (events.length > 0 || withheld.length > 0) {
       try {
         await db.withTenant(bearer.tenantId, async (tx) => {
           for (let i = 0; i < events.length; i += ACTIVITY_PAGE) {
             await writeActivity(tx, bearer.tenantId, events.slice(i, i + ACTIVITY_PAGE));
           }
+          for (const w of withheld) await appendAudit(tx, bearer.tenantId, withheldRecord(w));
         });
       } catch (err) {
         log?.error({ err }, "mcp: writing activity failed");
@@ -229,6 +243,29 @@ function allowedOrigin(publicUrl: string, extra: readonly string[]) {
     if (listed.has(origin)) return true;
     const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
     return local && (url.protocol === "http:" || url.protocol === "https:");
+  };
+}
+
+/**
+ * What a tool passes to core/catalog's gated reads (viewObject, openContent, searchObjects…):
+ * the person the token speaks for, with the grant's scopes, through the client that holds it
+ * with the trust label an admin gave it, recording into the request's buffer. Exposure (T-604)
+ * follows from that trust: cards are metadata only, and content isn't opened, where the file's
+ * exposure doesn't reach the client. Build every catalog request from this, never by hand.
+ */
+export function readRequest(ctx: ToolContext): RecordedRequest {
+  return { principal: ctx.bearer.principal, client: ctx.bearer.client, activity: ctx.activity };
+}
+
+/** The audit record of content an AI client didn't get for the file's exposure. */
+function withheldRecord(w: WithheldContent): AuditRecord {
+  return {
+    actor: w.actor,
+    action: "object.open",
+    decision: "deny",
+    client: w.client.id,
+    object: w.objectId,
+    detail: { reason: "exposure", exposure: w.exposure, trust: w.client.trust },
   };
 }
 

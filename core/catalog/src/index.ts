@@ -47,6 +47,7 @@ export {
   type SourceItemState,
 } from "./ingest.js";
 export {
+  enrichmentExposure,
   explainLevels,
   GENERIC_TITLE,
   levelsFor,
@@ -99,6 +100,7 @@ export {
   type ActivityInput,
   type ActivityRecorder,
   type ActivityType,
+  type WithheldContent,
 } from "./activity.js";
 export {
   explainAccess,

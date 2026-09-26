@@ -1,5 +1,6 @@
 import {
   applyRuleTags,
+  enrichmentExposure,
   lockCurrentVersion,
   markProcessed,
   markSuperseded,
@@ -8,6 +9,7 @@ import {
   type VersionStanding,
 } from "@openhoard/core-catalog";
 import { isId, objects, versions, type Database, type Tx } from "@openhoard/core-db";
+import { mayProcess, type Exposure, type ProviderKind } from "@openhoard/core-policy";
 import { and, eq, max } from "drizzle-orm";
 
 /*
@@ -40,6 +42,15 @@ import { and, eq, max } from "drizzle-orm";
  *
  * Payloads carry the tenant: pg-boss keeps its queue in its own schema, outside row-level
  * security, and the worker does all catalog work inside db.withTenant(tenantId, …).
+ *
+ * Content goes to a model only as far as the file's exposure lets it (T-604). A step that sends
+ * the content out names its `provider`, and the pipeline asks core/policy mayProcess() with the
+ * exposure the file's tags give it at that moment (core/catalog enrichmentExposure(): trusted
+ * tags decide, the rest only tighten, else the tenant default; not the unprocessed file's
+ * `metadata-only`, which would stop every model). A step the exposure doesn't let through is
+ * skipped, and the job's output and the log say so; `local-only` content reaches local providers
+ * only, `metadata-only` content none. The rule tagger runs first, so its tags count before any
+ * model sees the file. The tenant default decides for a file nothing has tagged yet.
  */
 
 /** What one enrichment job is about, as read when it started. */
@@ -67,8 +78,27 @@ export interface EnrichContext {
    * tag value's lock (core/catalog locks.ts); tagging and rule tagging don't.
    */
   write<T>(work: (tx: Tx) => Promise<T>): Promise<T>;
+  /**
+   * Whether the version's content may go to this provider now (T-604): the file's exposure, as
+   * its tags give it at this moment (core/catalog enrichmentExposure()), against the provider's
+   * kind (core/policy mayProcess()). The pipeline asks before a step that names a provider; a
+   * step that takes long before it sends, or sends to more than one provider, asks again right
+   * before each send. False for a file that is gone.
+   */
+  mayProcess(provider: ModelProvider): Promise<boolean>;
   /** Aborted when the job's lease expires or the worker stops: stop, and throw. */
   readonly signal: AbortSignal;
+}
+
+/**
+ * A model provider an enrichment step sends content to (T-404 adds them): where it runs decides
+ * which files' content it may have (core/policy mayProcess()): `local` on the tenant's own
+ * machines, `commercial` under a business agreement, `consumer` on consumer terms.
+ */
+export interface ModelProvider {
+  /** A short, stable name for logs: `ollama-llama3`, `azure-openai`… */
+  readonly id: string;
+  readonly kind: ProviderKind;
 }
 
 /**
@@ -78,6 +108,14 @@ export interface EnrichContext {
 export interface EnrichStep {
   /** A short, stable name for logs and errors: `rule-tags`, `extract-text`… */
   readonly name: string;
+  /**
+   * The model provider this step sends the version's content to, if any (T-604). A step that
+   * sends content anywhere outside this process must name it: the pipeline runs the step only
+   * if the file's exposure allows that provider (core/policy mayProcess(), with the exposure
+   * the file's tags give it), and skips it otherwise. A step without one (the rule tagger, a
+   * text extractor) sends nothing out.
+   */
+  readonly provider?: ModelProvider;
   /**
    * Does this step's work for one version. It may run more than once for the same version, so
    * everything it writes must be keyed: a second run changes nothing. It writes only through
@@ -116,6 +154,17 @@ export const ruleTagStep: EnrichStep = {
 export function defaultEnrichSteps(): EnrichStep[] {
   return [ruleTagStep];
 }
+
+/** A step the pipeline skipped: the file's exposure keeps its content from the step's provider. */
+export interface WithheldStep {
+  step: string;
+  provider: ModelProvider;
+  /** The file's exposure then; null if the file was gone. */
+  exposure: Exposure | null;
+}
+
+/** Reads the exposure in one snapshot (core/catalog's levels need one). */
+const SNAPSHOT = { isolationLevel: "repeatable read", accessMode: "read only" } as const;
 
 /** A job's data: which version of which tenant. */
 export interface EnrichPayload {
@@ -178,7 +227,12 @@ export async function enrichVersion(
   db: Database,
   steps: readonly EnrichStep[],
   payload: unknown,
-  options: { signal: AbortSignal; requeue: (payload: EnrichPayload) => Promise<unknown> },
+  options: {
+    signal: AbortSignal;
+    requeue: (payload: EnrichPayload) => Promise<unknown>;
+    /** A step skipped because the file's exposure keeps its content from the step's provider. */
+    onWithheld?: (withheld: WithheldStep) => void;
+  },
 ): Promise<EnrichOutcome> {
   if (!isEnrichPayload(payload)) return "invalid";
   const { tenantId, versionId } = payload;
@@ -188,11 +242,18 @@ export async function enrichVersion(
   if (target === "gone") return "gone";
   if (target === "superseded") return finish(db, payload, "superseded", options.requeue);
 
+  /** The file's exposure now, as its tags give it; null when it is gone. */
+  const exposure = () =>
+    db.withTenant(tenantId, (tx) => enrichmentExposure(tx, tenantId, target.objectId), SNAPSHOT);
   // Set by write() when the target went stale, whether or not the step lets the error through.
   let stale: Exclude<VersionStanding, "current"> | undefined;
   const context: EnrichContext = {
     target,
     read: (work) => db.withTenant(tenantId, work, { accessMode: "read only" }),
+    async mayProcess(provider) {
+      const level = await exposure();
+      return level !== null && mayProcess(level, provider.kind);
+    },
     async write(work) {
       if (stale) throw new StaleTargetError(stale);
       const done = await db.withTenant(tenantId, async (tx) => {
@@ -214,6 +275,15 @@ export async function enrichVersion(
   };
   for (const step of steps) {
     options.signal.throwIfAborted();
+    if (step.provider !== undefined) {
+      // Content goes to a provider only as far as the file's exposure lets it (T-604): a step
+      // whose provider it doesn't reach is skipped, and the rest of the pipeline runs on.
+      const level = await exposure();
+      if (level === null || !mayProcess(level, step.provider.kind)) {
+        options.onWithheld?.({ step: step.name, provider: step.provider, exposure: level });
+        continue;
+      }
+    }
     try {
       await step.run(context);
     } catch (e) {

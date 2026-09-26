@@ -110,6 +110,27 @@ or an operator's redrive, from the first step. So whatever a step writes must be
 is: `applyRuleTags()` makes the object's rule tags exactly what the rules give. The tests run a
 completed job again, and a job that failed half way, and check that nothing was added.
 
+**Content goes to a model only as far as the file's exposure lets it (T-604).** A step that sends
+the version's content out of this process names its `provider` (`{ id, kind }`, kind `local`,
+`commercial` or `consumer`; `startJobs()` refuses any other). Before running it, the pipeline
+reads the exposure the file's tags give it at that moment (core/catalog `enrichmentExposure()`:
+trusted tags decide, the rest only tighten, else the tenant default; not the unprocessed file's
+`metadata-only`, which would stop every model) and asks core/policy `mayProcess()`:
+
+- `full` goes to any provider, `commercial-only` to commercial and local ones, `local-only` to
+  local ones only, `metadata-only` to none;
+- a step the exposure doesn't let through is skipped (the job still finishes and marks the
+  version processed), and the job's output (`withheld: [{ step, provider, exposure }]`) and the
+  log say so;
+- `context.mayProcess(provider)` asks the same question at any time: a step that takes long
+  before it sends, or sends to more than one provider, asks again right before each send;
+- the rule tagger runs first, so its tags count before any model sees the file, and so does a
+  model's guess that the file is sensitive, the moment it is recorded. A file nothing has tagged
+  yet goes by the tenant default.
+
+A step without a provider (the rule tagger, a text extractor) sends nothing out; one that does
+must declare it (T-404 adds the providers).
+
 **Short transactions.** A step does its slow work (extracting, calling a model) outside any
 transaction. A transaction held open blocks the embedded database for everyone, and pins a
 pooled connection on PostgreSQL. Transactions don't nest: `withTenant()` refuses to open one

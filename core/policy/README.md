@@ -29,6 +29,28 @@ const shape = decideRead({
 whatever the exposure) or an AI client's trust label, which exposure then limits. Only
 `canRead === true` counts as a reader.
 
+## Exposure (T-604)
+
+Exposure is what AI clients, model providers and plugins may have of a file's content. The
+object's level is resolved like visibility (core/catalog: trusted tags decide, most restrictive
+wins, else the tenant default; untrusted tags only tighten; unprocessed is `metadata-only`).
+
+| exposure          | `local`  | `commercial` | `consumer` |
+| ----------------- | -------- | ------------ | ---------- |
+| `full`            | content  | content      | content    |
+| `commercial-only` | content  | content      | metadata   |
+| `local-only`      | content  | metadata     | metadata   |
+| `metadata-only`   | metadata | metadata     | metadata   |
+
+- **AI clients** (`decideRead()`): where the exposure doesn't reach the client's trust, the card
+  is `metadataOnly` (nothing derived from the content: no summary, extracted fields or excerpts)
+  and there is no content. A non-reader's card of a readable file follows the same rule.
+  OpenHoard's own apps (`first-party`) aren't limited by exposure.
+- **Enrichment** (`mayProcess(exposure, providerKind)`): the same table, for the model provider a
+  step sends content to (core/jobs).
+- **Plugins**: core/sandbox `mayReceiveContent()` adds the manifest's `max_exposure`.
+- Anything unknown (a trust label, a provider kind, an exposure) gets metadata only.
+
 ## Administration (T-106)
 
 `mayAdminister(principal, client)` is the check for administration endpoints (tenant settings,

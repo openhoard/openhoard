@@ -153,6 +153,16 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
       throw new TypeError(`enrichment step names must be distinct slugs: ${step.name}`);
     }
     names.add(step.name);
+    // A provider of a kind nobody knows would be skipped every time (mayProcess() refuses it):
+    // said at start, not found missing in every job's output.
+    if (
+      step.provider !== undefined &&
+      !["local", "commercial", "consumer"].includes(step.provider.kind as string)
+    ) {
+      throw new TypeError(
+        `enrichment step ${step.name}: a provider is local, commercial or consumer`,
+      );
+    }
   }
   const maintenance =
     options.maintenance === false ? false : maintenanceSettings(options.maintenance ?? {});
@@ -341,17 +351,25 @@ async function runEnrichJob(
   enqueueVersion: (tenantId: string, versionId: string) => Promise<string | null>,
   log: JobsLogger,
 ) {
+  // Steps skipped for the file's exposure: in the job's output and the log, where an operator
+  // looking for a missing summary finds why (T-604).
+  const withheld: { step: string; provider: string; exposure: string | null }[] = [];
   const outcome = await enrichVersion(db, steps, job.data, {
     signal: job.signal,
     requeue: (p) => enqueueVersion(p.tenantId, p.versionId),
+    onWithheld: (w) =>
+      withheld.push({ step: w.step, provider: w.provider.id, exposure: w.exposure }),
   });
   if (outcome === "invalid") {
     log.warn?.({ job: job.id, outcome }, "enrichment job without a tenant and version");
   } else {
     const { tenantId, versionId } = job.data as EnrichPayload;
+    if (withheld.length > 0) {
+      log.info?.({ job: job.id, tenantId, versionId, withheld }, "enrichment: content withheld");
+    }
     log.debug?.({ job: job.id, tenantId, versionId, outcome }, "enrichment job done");
   }
-  return { outcome };
+  return withheld.length > 0 ? { outcome, withheld } : { outcome };
 }
 
 /**

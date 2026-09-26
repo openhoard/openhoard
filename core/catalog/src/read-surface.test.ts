@@ -55,6 +55,8 @@ const SURFACE = {
     "writeActivity",
   ],
   trusted: [
+    // For enrichment (core/jobs): the exposure its tags give a file, before it is processed.
+    "enrichmentExposure",
     "explainAccess",
     "explainLevels",
     "levelsFor",

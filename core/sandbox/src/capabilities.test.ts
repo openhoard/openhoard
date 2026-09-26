@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { admitPlugin, hasCapability, PluginRejected } from "./index.js";
+import { admitPlugin, hasCapability, mayReceiveContent, PluginRejected } from "./index.js";
 
 const manifest = {
   manifest_version: 1,
@@ -71,5 +71,37 @@ describe("admitPlugin", () => {
       expect(e).toBeInstanceOf(PluginRejected);
       expect((e as PluginRejected).problems).toEqual(["approval of undeclared source:write"]);
     }
+  });
+});
+
+describe("mayReceiveContent (T-604)", () => {
+  const levels = ["full", "commercial-only", "local-only", "metadata-only"] as const;
+  const plugin = (max_exposure: string | undefined, network: string[] = [], approve = true) =>
+    admitPlugin(
+      { ...manifest, network, ...(max_exposure ? { max_exposure } : {}) },
+      approve ? ["read:content"] : [],
+    );
+  const receives = (p: ReturnType<typeof plugin>) =>
+    levels.filter((level) => mayReceiveContent(p, level));
+
+  it("hands content only up to the manifest's max_exposure, and none by default", () => {
+    expect(receives(plugin(undefined))).toEqual([]);
+    expect(receives(plugin("metadata-only"))).toEqual([]);
+    expect(receives(plugin("full"))).toEqual(["full"]);
+    expect(receives(plugin("commercial-only"))).toEqual(["full", "commercial-only"]);
+    expect(receives(plugin("local-only"))).toEqual(["full", "commercial-only", "local-only"]);
+  });
+
+  it("keeps local-only content from a plugin that can reach the network", () => {
+    const online = plugin("local-only", ["api.example.com"]);
+    expect(receives(online)).toEqual(["full", "commercial-only"]);
+  });
+
+  it("needs read:content approved, and refuses anything it doesn't know", () => {
+    expect(receives(plugin("full", [], false))).toEqual([]);
+    const p = plugin("full");
+    expect(mayReceiveContent(p, "secret" as never)).toBe(false);
+    const lookalike = { ...p } as typeof p;
+    expect(mayReceiveContent(lookalike, "full")).toBe(false);
   });
 });

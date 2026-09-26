@@ -11,6 +11,8 @@ export {
   type EnrichPayload,
   type EnrichStep,
   type EnrichTarget,
+  type ModelProvider,
+  type WithheldStep,
 } from "./enrich.js";
 export {
   deadLetteredVersions,

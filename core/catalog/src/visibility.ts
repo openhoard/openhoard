@@ -48,6 +48,11 @@ import { lockObject } from "./locks.js";
  * Only active tenant members discover files: guests and deprovisioned users see what they can
  * read and nothing else.
  *
+ * Exposure (T-604) is resolved the same way, per object, and decides what an AI client gets of
+ * the content: a client whose trust label the exposure doesn't reach gets cards as metadata only
+ * (CardView.metadataOnly) and can't open the file (openContent() records the refusal in the
+ * request's recorder, for the audit). OpenHoard's own apps get what grants and visibility allow.
+ *
  * A title can be sensitive on its own. Non-readers see the owner's display title when there is
  * one, a generic title while a model's proposal waits for the owner, and the real title only
  * when nobody has flagged it (see nonReaderTitle()).
@@ -153,6 +158,34 @@ export async function explainLevels(
 ): Promise<LevelsExplanation | null> {
   await requireSnapshot(tx, "explainLevels");
   return (await collectLevels(tx, tenantId, [objectId])).get(objectId) ?? null;
+}
+
+/**
+ * The exposure an object's tags give it, as if enrichment had finished (T-604), or null if it
+ * doesn't exist: what enrichment asks (core/policy mayProcess()) before it sends the content of
+ * the version it works on to a model provider. The levels anyone else reads say
+ * `metadata-only` until enrichment finishes, which would stop every model step; the tags,
+ * trusted ones deciding and the rest only tightening, over the tenant default, don't. So the
+ * rule tagger's tags, which run first, and any model's guess that the file is sensitive count
+ * before the next step sends anything. Needs one snapshot, like levelsFor().
+ */
+export async function enrichmentExposure(
+  tx: Tx,
+  tenantId: string,
+  objectId: string,
+): Promise<Exposure | null> {
+  await requireSnapshot(tx, "enrichmentExposure");
+  if (typeof objectId !== "string" || !isId("object", objectId)) return null;
+  const levels = await collectLevels(tx, tenantId, [objectId], {
+    present: (
+      await tx
+        .select({ id: objects.id })
+        .from(objects)
+        .where(and(eq(objects.tenantId, tenantId), eq(objects.id, objectId)))
+    ).map((r) => r.id),
+    processed: new Map([[objectId, true]]),
+  });
+  return levels.get(objectId)?.exposure ?? null;
 }
 
 /**
@@ -376,6 +409,13 @@ export interface CardView extends ViewBase {
   /** Whether the caller can read the file (and so open it). */
   readable: boolean;
   updatedAt: Date;
+  /**
+   * Metadata only (T-604): the file's exposure doesn't reach this AI client's trust, so the card
+   * carries nothing derived from the content (a summary, extracted fields, excerpts: T-404 and
+   * T-405 attach them only when this is false), and the content can't be opened. Always false
+   * through OpenHoard's own apps.
+   */
+  metadataOnly: boolean;
 }
 
 export type ObjectView = TitleOnlyView | CardView;
@@ -539,8 +579,19 @@ export async function viewObjects(
       clientTrust: request.client.trust,
       wantsContent,
     });
-    // Asked for content: a file this client may only see the card of is left out.
-    if (wantsContent && decision.shape !== "content") continue;
+    // Asked for content: a file this client may only see the card of is left out. A reader the
+    // rules let open it, refused only by its exposure, is a refusal worth recording (T-604).
+    if (wantsContent && decision.shape !== "content") {
+      if (decision.metadataOnly) {
+        request.activity?.withhold({
+          actor: `user:${principal.userId}`,
+          objectId: row.id,
+          client: request.client,
+          exposure: level.exposure,
+        });
+      }
+      continue;
+    }
     const shown = canRead ? tags.all : tags.public;
     const base = {
       id: row.id,
@@ -565,6 +616,7 @@ export async function viewObjects(
         tags: sorted(shown),
         readable: canRead,
         updatedAt: row.updatedAt,
+        metadataOnly: decision.metadataOnly,
       });
     }
   }

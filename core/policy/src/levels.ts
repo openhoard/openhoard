@@ -85,6 +85,33 @@ export function exposureAllowsContent(exposure: Exposure, trust: ClientTrust): b
 }
 
 /**
+ * Where a model provider runs, for enrichment (T-404): on the tenant's own machines (`local`),
+ * a commercial service under a business agreement (`commercial`), or a service on consumer terms
+ * (`consumer`). The same scale as an AI client's trust label.
+ */
+export type ProviderKind = ClientTrust;
+
+const PROVIDER_KINDS: readonly string[] = [
+  "local",
+  "commercial",
+  "consumer",
+] satisfies ProviderKind[];
+
+/**
+ * Whether enrichment may send a file's content, at this exposure, to a model provider of this
+ * kind (T-604). The rule is the AI clients' ({@link exposureAllowsContent}): `full` goes to any
+ * provider, `commercial-only` to commercial and local ones, `local-only` to local ones only,
+ * `metadata-only` to none. An unknown kind or exposure gets nothing.
+ *
+ * Enrichment asks with the exposure the file's tags give it (core/catalog
+ * enrichmentExposure()), not the unprocessed default, which would stop every model step.
+ */
+export function mayProcess(exposure: Exposure, provider: ProviderKind): boolean {
+  if (!PROVIDER_KINDS.includes(provider)) return false;
+  return exposureAllowsContent(exposure, provider);
+}
+
+/**
  * Picks the most restrictive level. Values that are not recognised (bad data, a newer schema,
  * a typo in a pack) count as the MOST restrictive level, so corruption can only tighten access.
  */

@@ -2,7 +2,19 @@ import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { activityEvents, type Database } from "@openhoard/core-db";
+import { exportAudit } from "@openhoard/core-audit";
+import { markProcessed, openContent, viewObject, VIEW_TRANSACTION } from "@openhoard/core-catalog";
+import {
+  activityEvents,
+  addGrant,
+  facets,
+  facetValues,
+  objectTags,
+  type Database,
+  type Tx,
+} from "@openhoard/core-db";
+import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
+import { and, eq } from "drizzle-orm";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import {
   createUser,
@@ -22,7 +34,7 @@ import { z } from "zod";
 import { createApp } from "./app.js";
 import type { AuthEnv } from "./auth.js";
 import { ConfigSchema } from "./config.js";
-import { mountMcp, TOOLS, whoami, type McpTool } from "./mcp.js";
+import { mountMcp, readRequest, TOOLS, whoami, type McpTool } from "./mcp.js";
 
 /* T-801: the MCP server, stateless Streamable HTTP behind T-105's bearer tokens. */
 
@@ -548,5 +560,142 @@ describe("tools", () => {
 
   it("serves only whoami in T-801", () => {
     expect(TOOLS.map((x) => x.name)).toEqual(["whoami"]);
+  });
+});
+
+/*
+ * T-604 through MCP, and T-106's trust label reaching policy: a tool as T-802 and T-803 will
+ * write them, reading the catalog with readRequest(ctx), for a client whose label an admin set.
+ */
+describe("exposure and the client's trust through MCP", () => {
+  const plain = new Authorizer(createCedarEngine());
+  // A pack rule on the client's trust: a label is something policy can decide on.
+  const noConsumerOpens = new Authorizer(
+    createCedarEngine({
+      "pack/no-consumer-open": `forbid (principal, action == OpenHoard::Action::"open", resource)
+        when { context.client.trust == "consumer" };`,
+    }),
+  );
+  const probe: McpTool = {
+    name: "probe",
+    title: "Probe",
+    description: "Reads the seeded file's card and opens it, as T-802/T-803's tools will.",
+    inputSchema: { rule: z.boolean() },
+    async run(ctx, args) {
+      const gate = args.rule === true ? noConsumerOpens : plain;
+      const request = readRequest(ctx);
+      const snapshot = <T>(work: (tx: Tx) => Promise<T>) =>
+        ctx.db.withTenant(ctx.bearer.tenantId, work, VIEW_TRANSACTION);
+      const card = await snapshot((tx) =>
+        viewObject(tx, ctx.bearer.tenantId, gate, request, t.objectId),
+      );
+      const opened = await snapshot((tx) =>
+        openContent(tx, ctx.bearer.tenantId, gate, request, t.objectId),
+      );
+      const out = {
+        metadataOnly: card?.shape === "card" ? card.metadataOnly : null,
+        opened: opened !== null,
+      };
+      return { structuredContent: out, content: [{ type: "text", text: JSON.stringify(out) }] };
+    },
+  };
+  const setExposure = (exposure: string) =>
+    db.withTenant(t.tenantId, (tx) =>
+      tx
+        .update(facetValues)
+        .set({ exposure: exposure as "full" })
+        .where(and(eq(facetValues.tenantId, t.tenantId), eq(facetValues.facet, "sensitivity"))),
+    );
+  const relabel = (trust: "local" | "commercial" | "consumer") =>
+    db.withTenant(t.tenantId, (tx) =>
+      decideClient(tx, t.tenantId, clientKey, { approve: true, trust }, "user:admin"),
+    );
+
+  beforeEach(async () => {
+    await db.withTenant(t.tenantId, async (tx) => {
+      await tx.insert(facets).values({ tenantId: t.tenantId, key: "sensitivity", label: "S" });
+      await tx.insert(facetValues).values({
+        tenantId: t.tenantId,
+        facet: "sensitivity",
+        value: "internal",
+        label: "Internal",
+        approved: true,
+        exposure: "commercial-only",
+      });
+      await tx.insert(objectTags).values({
+        tenantId: t.tenantId,
+        objectId: t.objectId,
+        facet: "sensitivity",
+        value: "internal",
+        source: "rule",
+        appliedBy: "rule:test",
+        confidence: 1,
+      });
+      await addGrant(tx, t.tenantId, {
+        principal: `user:${ana.id}`,
+        role: "read",
+        target: { objectId: t.objectId },
+        grantedBy: "user:admin",
+      });
+      await markProcessed(tx, t.tenantId, { versionId: t.versionId, title: "Report 1.docx" });
+    });
+  });
+
+  const call = async (app: Hono<AuthEnv>, accessToken: string, rule = false) => {
+    const res = await rpc(app, accessToken, "tools/call", { name: "probe", arguments: { rule } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { result: { structuredContent: unknown } };
+    return body.result.structuredContent;
+  };
+  const withheldAudit = async () => {
+    const lines: string[] = [];
+    await exportAudit(db, t.tenantId, {}, "ndjson", (s: string) => void lines.push(s));
+    return lines
+      .join("")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((e) => e.action === "object.open");
+  };
+
+  it("gives a consumer client metadata only for a commercial-only tag, and audits what it withheld", async () => {
+    const app = build([probe]);
+    const { accessToken } = await token();
+    // Approved as commercial: the content.
+    expect(await call(app, accessToken)).toEqual({ metadataOnly: false, opened: true });
+    expect(await withheldAudit()).toEqual([]);
+    // Relabelled consumer: the same token's next request gets metadata only.
+    await relabel("consumer");
+    expect(await call(app, accessToken)).toEqual({ metadataOnly: true, opened: false });
+    expect(await withheldAudit()).toMatchObject([
+      {
+        actor: `user:${ana.id}`,
+        decision: "deny",
+        client: CLIENT_ID,
+        object: t.objectId,
+        detail: { reason: "exposure", exposure: "commercial-only", trust: "consumer" },
+      },
+    ]);
+    // Full exposure: any client.
+    await setExposure("full");
+    expect(await call(app, accessToken)).toEqual({ metadataOnly: false, opened: true });
+    // Local-only: only a local client.
+    await setExposure("local-only");
+    await relabel("commercial");
+    expect(await call(app, accessToken)).toEqual({ metadataOnly: true, opened: false });
+    await relabel("local");
+    expect(await call(app, accessToken)).toEqual({ metadataOnly: false, opened: true });
+    expect(await withheldAudit()).toHaveLength(2);
+  });
+
+  it("hands the client's trust label to policy: a pack rule can decide on it", async () => {
+    await setExposure("full");
+    const app = build([probe]);
+    const { accessToken } = await token();
+    expect(await call(app, accessToken, true)).toEqual({ metadataOnly: false, opened: true });
+    await relabel("consumer");
+    // Exposure would let it through; the pack's forbid on consumer clients doesn't.
+    expect(await call(app, accessToken, false)).toEqual({ metadataOnly: false, opened: true });
+    expect(await call(app, accessToken, true)).toEqual({ metadataOnly: false, opened: false });
   });
 });

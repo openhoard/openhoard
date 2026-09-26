@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   decideRead,
   exposureAllowsContent,
+  mayProcess,
   mostRestrictiveExposure,
   mostRestrictiveVisibility,
   resolveLevels,
   UNPROCESSED,
   type ClientTrust,
   type Exposure,
+  type ProviderKind,
   type ReadRequest,
 } from "./index.js";
 
@@ -101,6 +103,30 @@ describe("exposureAllowsContent", () => {
   });
 });
 
+describe("mayProcess (enrichment, T-604)", () => {
+  const table: [Exposure, ProviderKind, boolean][] = [
+    ["full", "consumer", true],
+    ["full", "local", true],
+    ["commercial-only", "consumer", false],
+    ["commercial-only", "commercial", true],
+    ["commercial-only", "local", true],
+    ["local-only", "consumer", false],
+    ["local-only", "commercial", false],
+    ["local-only", "local", true],
+    ["metadata-only", "local", false],
+    ["metadata-only", "commercial", false],
+  ];
+  it.each(table)("%s content to a %s provider → %s", (exposure, provider, expected) => {
+    expect(mayProcess(exposure, provider)).toBe(expected);
+  });
+
+  it("sends nothing to a provider of a kind it doesn't know, or at an unknown exposure", () => {
+    expect(mayProcess("full", "first-party" as ProviderKind)).toBe(false);
+    expect(mayProcess("full", "cloud" as ProviderKind)).toBe(false);
+    expect(mayProcess("secret" as Exposure, "local")).toBe(false);
+  });
+});
+
 describe("decideRead", () => {
   const base = {
     visibility: "readable",
@@ -129,26 +155,73 @@ describe("decideRead", () => {
 
   it("AI clients get content only when exposure allows", () => {
     const r = { ...base, canRead: true, exposure: "commercial-only" } as const;
-    expect(decideRead({ ...r, clientTrust: "commercial" }).shape).toBe("content");
+    expect(decideRead({ ...r, clientTrust: "commercial" })).toMatchObject({
+      shape: "content",
+      metadataOnly: false,
+    });
     const blocked = decideRead({ ...r, clientTrust: "consumer" });
-    expect(blocked.shape).toBe("card");
+    expect(blocked).toMatchObject({ shape: "card", metadataOnly: true });
     expect(blocked.reason).toMatch(/blocks content for consumer/);
   });
 
   it("gives content without an exposure check only to OpenHoard's own app", () => {
     const r = { ...base, canRead: true, exposure: "metadata-only" } as const;
-    expect(decideRead(r)).toEqual({ shape: "content", reason: "person via OpenHoard app" });
-    expect(decideRead({ ...r, clientTrust: "local" }).shape).toBe("card");
+    expect(decideRead(r)).toEqual({
+      shape: "content",
+      metadataOnly: false,
+      reason: "person via OpenHoard app",
+    });
+    expect(decideRead({ ...r, clientTrust: "local" })).toMatchObject({
+      shape: "card",
+      metadataOnly: true,
+    });
   });
 
   it("treats a missing or unknown client trust as no content", () => {
     // Callers may pass parsed input; leaving the trust out must not mean first-party.
     const { clientTrust: _, ...noTrust } = { ...base, canRead: true };
-    expect(decideRead(noTrust as unknown as ReadRequest).shape).toBe("card");
+    expect(decideRead(noTrust as unknown as ReadRequest)).toMatchObject({
+      shape: "card",
+      metadataOnly: true,
+    });
     const bogus = { ...base, canRead: true, clientTrust: "trusted" as unknown as "local" };
     expect(decideRead(bogus)).toEqual({
       shape: "card",
-      reason: "unknown client trust: card without content",
+      metadataOnly: true,
+      reason: "unknown client trust: card without content; metadata only",
+    });
+  });
+
+  // T-604: "consumer client gets metadata only for commercial-only tags".
+  const trusts = ["first-party", "local", "commercial", "consumer"] as const;
+  const exposures = ["full", "commercial-only", "local-only", "metadata-only"] as const;
+  const reaches: Record<(typeof trusts)[number], readonly string[]> = {
+    "first-party": exposures,
+    local: ["full", "commercial-only", "local-only"],
+    commercial: ["full", "commercial-only"],
+    consumer: ["full"],
+  };
+  const cases = trusts.flatMap((trust) => exposures.map((exposure) => [trust, exposure] as const));
+  it.each(cases)("a %s client's cards and content at %s exposure", (trust, exposure) => {
+    const allowed = reaches[trust].includes(exposure);
+    const r = { ...base, canRead: true, exposure, clientTrust: trust } as const;
+    // A reader's card: its summary only where the content could go.
+    expect(decideRead({ ...r, wantsContent: false })).toMatchObject({
+      shape: "card",
+      metadataOnly: !allowed,
+    });
+    // Opening: the content, or the card as metadata.
+    expect(decideRead(r)).toMatchObject(
+      allowed ? { shape: "content", metadataOnly: false } : { shape: "card", metadataOnly: true },
+    );
+    // A non-reader's card of a readable file follows the same rule; title-only has no summary.
+    expect(decideRead({ ...r, canRead: false })).toMatchObject({
+      shape: "card",
+      metadataOnly: !allowed,
+    });
+    expect(decideRead({ ...r, canRead: false, visibility: "discoverable" })).toMatchObject({
+      shape: "title-only",
+      metadataOnly: false,
     });
   });
 

@@ -186,7 +186,9 @@ export interface OpenedContent {
  * earlier version, only its owner through a first-party client, since the levels and rules are
  * the current content's. Null when any of that fails, or there is no such file or version,
  * indistinguishably; viewObject() tells a reader whether they can read the file at all.
- * Records an `open` of that version.
+ * Records an `open` of that version; when only the file's exposure kept the content from the
+ * caller's AI client (T-604), records that instead (`request.activity.withhold()`), for the
+ * caller to audit.
  */
 export async function openContent(
   tx: Tx,
@@ -268,7 +270,10 @@ function newestSeq(tenantId: string, objectId: string) {
 
 /** A recording read refuses a request without a recorder, before it reads anything. */
 function requireRecorder(request: RecordedRequest): void {
-  if (typeof request.activity?.record !== "function") {
+  if (
+    typeof request.activity?.record !== "function" ||
+    typeof request.activity.withhold !== "function"
+  ) {
     throw new TypeError("a read of one file needs request.activity (an ActivityRecorder)");
   }
 }

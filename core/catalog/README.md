@@ -124,8 +124,17 @@ applies the file's levels (T-206). The read API is built on it, in a snapshot (`
   authorized, and levels that let the client have content (an AI client's trust against the
   file's exposure: `viewObjects(…, { content: true })`). An earlier version opens only for the
   file's owner, through a first-party client, since the levels and rules describe the current
-  content. Null otherwise, alike for
-  every reason.
+  content. Null otherwise, alike for every reason; when only the exposure stood in the way, the
+  refusal is recorded in the request's recorder (`activity.withhold()`, `takeWithheld()` on an
+  `ActivityBuffer`) for the caller to audit (the MCP server does).
+- **Exposure (T-604).** An object's exposure resolves like its visibility (above). A card for an
+  AI client whose trust label the exposure doesn't reach is `metadataOnly`: title, type, owner,
+  tags and dates, never what was derived from the content (summaries and extracted fields attach
+  only when it is false, T-404/T-405). OpenHoard's own apps aren't limited by exposure.
+  `enrichmentExposure(objectId)` is the exposure the tags give a file before it is processed, for
+  the enrichment pipeline's model steps (core/jobs); everyone else sees an unprocessed file as
+  `metadata-only`. Search matches titles and tags only, which exposure doesn't cover; content
+  search (T-501) must match content only where the client's trust reaches the exposure.
 - Each checks for a snapshot before it reads anything, and treats input that can't name
   anything (a malformed id, a NUL byte) as unknown.
 

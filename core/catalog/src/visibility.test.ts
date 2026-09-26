@@ -355,6 +355,7 @@ describe("viewObjects", () => {
         readable: true,
         updatedAt: expect.any(Date),
         primaryTag: null,
+        metadataOnly: false,
       },
     ]);
   });

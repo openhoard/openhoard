@@ -376,6 +376,9 @@ importers:
       '@openhoard/core-identity':
         specifier: workspace:^
         version: link:../identity
+      '@openhoard/core-policy':
+        specifier: workspace:^
+        version: link:../policy
       drizzle-orm:
         specifier: ^0.45.3
         version: 0.45.3(@electric-sql/pglite@0.5.8)(@types/pg@8.23.1)(pg@8.23.0)
@@ -386,9 +389,6 @@ importers:
       '@openhoard/config':
         specifier: workspace:*
         version: link:../../packages/config
-      '@openhoard/core-policy':
-        specifier: workspace:*
-        version: link:../policy
 
   core/policy:
     dependencies:
@@ -402,6 +402,9 @@ importers:
 
   core/sandbox:
     dependencies:
+      '@openhoard/core-policy':
+        specifier: workspace:^
+        version: link:../policy
       '@openhoard/schemas':
         specifier: workspace:^
         version: link:../../packages/schemas

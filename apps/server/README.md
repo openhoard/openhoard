@@ -295,6 +295,13 @@ The **admin API** is JSON under `/api/admin`, for the admin UI to come and for s
 - **Activity (T-205).** Each request gets an `ActivityBuffer` that the tools' gated reads record
   into. It is written once the response is ready, and if that fails the answer is withheld (500):
   an AI read is never left unrecorded. Events keep the client's id and trust.
+- **Exposure (T-604).** Tools build every catalog request with `readRequest(ctx)`: the person,
+  through the client with the trust label its admin gave it. Where a file's exposure doesn't
+  reach that label, cards are metadata only (`metadataOnly`: no summary or anything else derived
+  from the content) and the content isn't opened; `local-only` content goes to `local` clients
+  only, `metadata-only` content to none. A refused open is audited with the activity
+  (`object.open`, denied, `reason: exposure`), once per file per request. OpenHoard's own apps
+  aren't limited by exposure.
 - A tool that fails answers `internal error`, never the thrown message, which could name a file.
   The SDK's own argument-validation errors do describe the schema (field paths, patterns), never
   the values sent.

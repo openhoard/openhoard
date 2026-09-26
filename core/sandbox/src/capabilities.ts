@@ -1,3 +1,4 @@
+import { EXPOSURE, exposureAllowsContent, type Exposure } from "@openhoard/core-policy";
 import { validatePluginManifest, type PluginManifest } from "@openhoard/schemas";
 
 export type Capability = PluginManifest["capabilities"][number];
@@ -72,4 +73,31 @@ function deepFreeze<T>(value: T): T {
  */
 export function hasCapability(plugin: InstalledPlugin, cap: Capability): boolean {
   return admitted.get(plugin)?.has(cap) ?? false;
+}
+
+/**
+ * The gate for content (T-604): whether the core may hand a plugin the content of a file at this
+ * exposure (the file's resolved exposure: core/catalog levels, or enrichmentExposure() while it
+ * is enriched). All of:
+ *
+ * - it was admitted with `read:content` approved (hasCapability());
+ * - the file is no more sensitive than its manifest's `max_exposure` (the most sensitive level
+ *   it may receive; `metadata-only`, the default, means no content at all);
+ * - the exposure lets the plugin have it as the AI-client rule would: a plugin with no network
+ *   is local, so `local-only` content reaches only a plugin that can't send it anywhere; one
+ *   with any network host counts as a commercial service, never local.
+ *
+ * Plugins don't run yet (ADR-0012). Whatever hands a plugin content (the plugin runtime, T-9xx:
+ * an enricher's `extract`, a connector's `write`) must ask this first, for every file, and send
+ * only metadata when it says no. Default deny: anything else is false.
+ */
+export function mayReceiveContent(plugin: InstalledPlugin, exposure: Exposure): boolean {
+  if (!hasCapability(plugin, "read:content")) return false;
+  const rank = (level: string) => EXPOSURE.indexOf(level as Exposure);
+  const ceiling = plugin.manifest.max_exposure ?? "metadata-only";
+  if (ceiling === "metadata-only" || rank(ceiling) === -1 || rank(exposure) === -1) return false;
+  // EXPOSURE runs from most to least sensitive: the file mustn't be more sensitive than allowed.
+  if (rank(exposure) < rank(ceiling)) return false;
+  const local = (plugin.manifest.network ?? []).length === 0;
+  return exposureAllowsContent(exposure, local ? "local" : "commercial");
 }

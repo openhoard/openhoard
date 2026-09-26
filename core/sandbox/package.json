@@ -21,6 +21,7 @@
     "clean": "rimraf dist coverage"
   },
   "dependencies": {
+    "@openhoard/core-policy": "workspace:^",
     "@openhoard/schemas": "workspace:^"
   },
   "devDependencies": {

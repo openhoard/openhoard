@@ -2,8 +2,10 @@
 
 Part of the OpenHoard trusted core. See [../README.md](../README.md) and
 [docs/architecture.md](../../docs/architecture.md). Model routing is not implemented yet; the
-enrichment pipeline that will run it is in [core/jobs](../jobs/README.md). Design discussion
-welcome via RFC issues.
+enrichment pipeline that will run it is in [core/jobs](../jobs/README.md), which already refuses
+to send a file's content to a provider its exposure doesn't allow (core/policy `mayProcess()`,
+T-604). A card's summary is content: an AI client the file's exposure doesn't reach gets the card
+as metadata only (core/catalog `CardView.metadataOnly`). Design discussion welcome via RFC issues.
 
 ## File cards
 

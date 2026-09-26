@@ -29,7 +29,7 @@ import { Authorizer, createCedarEngine, type AuthzPrincipal } from "@openhoard/c
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { JobWithMetadata } from "pg-boss";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ruleTagStep, type EnrichStep } from "./enrich.js";
+import { ruleTagStep, type EnrichStep, type ModelProvider } from "./enrich.js";
 import {
   deadLetteredVersions,
   DEFAULT_MAINTENANCE_CRON,
@@ -274,6 +274,10 @@ describe("enqueueing", () => {
     const named = (name: string): EnrichStep => ({ name, run: () => Promise.resolve() });
     await expect(startJobs(db, { steps: [named("Bad Name")] })).rejects.toThrow(TypeError);
     await expect(startJobs(db, { steps: [named("a"), named("a")] })).rejects.toThrow(TypeError);
+    const cloud = { ...named("a"), provider: { id: "x", kind: "cloud" as never } };
+    await expect(startJobs(db, { steps: [cloud] })).rejects.toThrow(
+      /local, commercial or consumer/,
+    );
     await expect(startJobs(db, { pollingIntervalSeconds: 0.1 })).rejects.toThrow(RangeError);
     await expect(startJobs(db, { superviseIntervalSeconds: 0 })).rejects.toThrow(RangeError);
     await expect(startJobs(db, { enrich: { retryLimit: -1 } })).rejects.toThrow(RangeError);
@@ -328,6 +332,77 @@ describe("the worker", () => {
       title: "Budget 2026.xlsx",
       tags: ["kind:spreadsheet"],
     });
+  });
+
+  // T-604: "the pipeline must refuse to send content to a model provider not allowed for the
+  // exposure".
+  it("sends content only to providers the file's exposure allows, and says what it withheld", async () => {
+    const ran: string[] = [];
+    const answers: boolean[] = [];
+    const provider = (kind: ModelProvider["kind"]): ModelProvider => ({
+      id: `${kind}-model`,
+      kind,
+    });
+    const modelStep = (kind: ModelProvider["kind"]): EnrichStep => ({
+      name: `summarize-${kind}`,
+      provider: provider(kind),
+      async run(context) {
+        ran.push(`${kind}:${context.target.title}`);
+        // A step asks again right before it sends; another provider gets its own answer.
+        answers.push(await context.mayProcess(provider("commercial")));
+      },
+    });
+    const steps = [ruleTagStep, modelStep("consumer"), modelStep("commercial"), modelStep("local")];
+    const setDefault = (exposure: string) =>
+      db.withTenant(t.tenantId, (tx) =>
+        tx.execute(sql`update tenants set default_exposure = ${exposure} where id = ${t.tenantId}`),
+      );
+    const jobs = await start({ steps });
+    const run = async (title: string) => {
+      const item = await ingestItem(title);
+      await jobs.enqueueAfterIngest(t.tenantId, item);
+      const [queued] = await enrichJobs(jobs, item.versionId);
+      const job = await settled(jobs, QUEUES.enrich, queued?.id ?? null);
+      expect(job.state).toBe("completed");
+      return job.output as { outcome: string; withheld?: unknown[] };
+    };
+
+    // The tenant default decides for what no tag sets: commercial-only.
+    await setDefault("commercial-only");
+    expect(await run("Notes.docx")).toEqual({
+      outcome: "processed",
+      withheld: [
+        { step: "summarize-consumer", provider: "consumer-model", exposure: "commercial-only" },
+      ],
+    });
+    expect(ran).toEqual(["commercial:Notes.docx", "local:Notes.docx"]);
+    expect(answers).toEqual([true, true]);
+
+    // A rule tag the rule tagger (first) applied sets local-only: only the local model sees it.
+    await db.withTenant(t.tenantId, (tx) =>
+      tx.execute(
+        sql`update facet_values set exposure = 'local-only' where facet = 'topic' and value = 'budget'`,
+      ),
+    );
+    ran.length = 0;
+    answers.length = 0;
+    expect(await run("Budget 2026.xlsx")).toMatchObject({
+      outcome: "processed",
+      withheld: [
+        { step: "summarize-consumer", exposure: "local-only" },
+        { step: "summarize-commercial", exposure: "local-only" },
+      ],
+    });
+    expect(ran).toEqual(["local:Budget 2026.xlsx"]);
+    expect(answers).toEqual([false]);
+
+    // Metadata-only: no model at all, and the version is still processed.
+    await setDefault("metadata-only");
+    ran.length = 0;
+    const out = await run("Plan.docx");
+    expect(out.outcome).toBe("processed");
+    expect(out.withheld).toHaveLength(3);
+    expect(ran).toEqual([]);
   });
 
   it("retries a job whose step failed half way, and the re-run duplicates nothing", async () => {
@@ -407,6 +482,7 @@ describe("the worker", () => {
       },
       read: (work) => db.withTenant(t.tenantId, work),
       write: (work) => db.withTenant(t.tenantId, work),
+      mayProcess: () => Promise.resolve(false),
       signal: new AbortController().signal,
     });
     // Another worker's supervisor finds the expired lease and puts the job back for a retry.
