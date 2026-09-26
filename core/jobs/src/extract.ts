@@ -1,5 +1,6 @@
 import {
   contentRef,
+  readExtract,
   saveExtract,
   type ContentRef,
   type ContentSource,
@@ -48,8 +49,10 @@ import type { EnrichStep } from "./enrich.js";
  *
  * So a hostile or broken file costs at most two child processes, never the job's retries: its
  * failure is recorded (`failed`) and the version is marked processed like any other. The row
- * names the extractor's version (EXTRACTOR_VERSION): when a newer extractor handles more, the
- * rows of older versions (failed, unsupported, or simply older) are what a re-run picks up.
+ * names the extractor's version (EXTRACTOR_VERSION): a job that runs again for the version (a
+ * later step failed, a rename, the sweep) skips extraction when the row is this version's and
+ * final (extracted, failed, unsupported); when a newer extractor handles more, the rows of
+ * older versions are what a re-run picks up. Changing `limits` alone doesn't redo a version.
  *
  * Each attempt gets its own AbortController, aborted when the attempt ends however it ends
  * (and when the job's signal aborts): a source that honours its signal, as blobContentSource()
@@ -77,6 +80,13 @@ type Outcome = Omit<VersionExtract, "extractor">;
 
 const NONE = { kind: null, text: "", truncated: false, metadata: {}, signals: [], warnings: [] };
 
+/**
+ * Statuses that stand for this extractor's version: a job run again (a later step failed, the
+ * sweep, a rename) doesn't extract the same bytes again. `unavailable` is tried again: a source
+ * may reach the bytes by then.
+ */
+const FINAL = new Set(["extracted", "failed", "unsupported"]);
+
 /** Failures worth one more attempt: not the file's own, as far as anyone can tell. */
 const TRY_AGAIN = new Set(["timeout", "killed"]);
 
@@ -95,6 +105,9 @@ export function extractStep(options: ExtractStepOptions): EnrichStep {
       const ref = await read((tx) => contentRef(tx, target.tenantId, target.versionId));
       // Gone since the job started: there is nothing to store, and write() would refuse.
       if (ref === null || !extractsZone(ref, indexedZones)) return;
+      // Versions are immutable: what this extractor stored for one stands.
+      const done = await read((tx) => readExtract(tx, target.tenantId, target.versionId));
+      if (done && done.extractor === EXTRACTOR_VERSION && FINAL.has(done.status)) return;
       const hint = { mime: target.mime, name: target.title };
       let outcome: Outcome;
       if (!mayExtract(hint)) {

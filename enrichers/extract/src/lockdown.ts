@@ -20,7 +20,11 @@ import Module, { isBuiltin, registerHooks } from "node:module";
  * - Module.registerHooks and Module.register, reachable from any CommonJS module as
  *   `module.constructor`, are replaced by functions that throw, and so are process.binding,
  *   process._linkedBinding and process.dlopen;
- * - fetch, WebSocket and EventSource are removed from the global scope.
+ * - modules resolve only to `file:` URLs and allowed built-ins: never `data:` (code from a
+ *   string), `http:`, `blob:` or any other scheme;
+ * - fetch, WebSocket, EventSource and WebAssembly are removed from the global scope (V8's
+ *   `--no-expose-wasm` no longer exists in Node 24's V8, so the child can't be started with
+ *   it; pdf.js runs with its WebAssembly decoders off).
  *
  * What remains is only what Node's own modules reach internally. The host can add the hard
  * boundary (a firewall rule or network namespace for the service user); the README says so.
@@ -68,9 +72,11 @@ export function lockDown(): void {
     resolve(specifier, context, next) {
       if (isRefusedBuiltin(specifier)) throw new BlockedModuleError(specifier);
       const resolved = next(specifier, context);
-      // A package's `imports` map can name a built-in too.
-      if (resolved.url.startsWith("node:") && isRefusedBuiltin(resolved.url)) {
-        throw new BlockedModuleError(resolved.url);
+      // Only files and allowed built-ins: a package's `imports` map can name a built-in too,
+      // and a `data:` URL (or any other scheme) is code from a string.
+      const url = resolved.url;
+      if (url.startsWith("node:") ? isRefusedBuiltin(url) : !url.startsWith("file:")) {
+        throw new BlockedModuleError(url.slice(0, 64));
       }
       return resolved;
     },
@@ -85,7 +91,8 @@ export function lockDown(): void {
   for (const name of ["binding", "_linkedBinding", "dlopen"]) {
     replace(process, name, refuse(`process.${name}`));
   }
-  for (const name of ["fetch", "WebSocket", "EventSource"]) {
+  // WebAssembly too: V8's --no-expose-wasm is gone from Node 24, so the global is removed here.
+  for (const name of ["fetch", "WebSocket", "EventSource", "WebAssembly"]) {
     Reflect.deleteProperty(globalThis, name);
   }
 }

@@ -115,15 +115,22 @@ per version with core/catalog `saveExtract()` through `write`:
 | no process could start                                           | nothing       | fails and retries |
 
 So a hostile file costs at most two child processes, never the job's retries, and its version
-is processed like any other. Each row names the extractor's version: a newer extractor can find
-the rows it would do better (failed, unsupported, or simply older) and re-run them; no job for
-that exists yet. Each attempt's ContentSource gets a signal the step aborts when the attempt
+is processed like any other. Each row names the extractor's version. A job that runs again for
+the same version (a later step failed, a rename, the sweep) skips extraction when the row is
+this extractor version's and final (`extracted`, `failed`, `unsupported`); `unavailable` is
+tried again. A newer extractor can find the rows it would do better (failed, unsupported, or
+simply older) and re-run them; no job for that exists yet. Each attempt's ContentSource gets a signal the step aborts when the attempt
 ends, so a stalled store stream is closed.
 
 Only a managed zone's content is read by default. `startJobs({ content, extract: {
 indexedZones: true } })` opts indexed zones in (their bytes come from the customer's store);
 local-only and code zones are never read on the server. `extract.limits` and
 `extract.budgetMs` (13 minutes, under the job's lease) tune the rest.
+
+**The job's lease** (`enrich.expireInSeconds`, 15 minutes) covers every step of one job: the
+extract step's budget is sized to fit it alone. When model steps (T-404, T-405) join the same
+job, the lease must grow by their time (or the extract budget shrink), or a slow file's job
+expires mid-run and is retried from the first step.
 
 The step names no provider: the content goes to OpenHoard's own process on the same machine and
 nowhere else, so it runs whatever the file's exposure, `metadata-only` included; what reads the

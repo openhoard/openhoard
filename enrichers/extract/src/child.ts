@@ -23,6 +23,14 @@ import type { ExtractHint, ExtractLimits } from "./types.ts";
 export const EXIT_MEMORY = 70;
 /** Exit code: started without its settings or without the permission model. */
 export const EXIT_USAGE = 64;
+/**
+ * Exit code: an error nothing caught. Never 1: on Windows a process terminated from outside
+ * (the host running out of memory, an operator) exits with 1, and the parent tells the two
+ * apart by it.
+ */
+export const EXIT_FATAL = 71;
+process.on("uncaughtException", () => process.exit(EXIT_FATAL));
+process.on("unhandledRejection", () => process.exit(EXIT_FATAL));
 
 // Before any parser loads.
 lockDown();

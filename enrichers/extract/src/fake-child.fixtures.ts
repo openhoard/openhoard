@@ -21,6 +21,10 @@ switch (how) {
   case "crash.txt":
     process.exit(3);
     break;
+  case "fatal.txt":
+    // An error nothing caught, as child.ts exits for one.
+    process.exit(71);
+    break;
   case "memory.txt":
     process.exit(70);
     break;
@@ -60,6 +64,10 @@ switch (how) {
     break;
   case "hang.txt":
     setInterval(() => {}, 1000);
+    break;
+  case "exit1.txt":
+    // What a process terminated from outside looks like on Windows.
+    process.exit(1);
     break;
   case "sigkill.txt":
     // What the host's out-of-memory killer does.

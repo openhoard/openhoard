@@ -58,12 +58,21 @@ layout (text under a shape, same colour as a shaded background).
 Permanent (the file's own; enrichment records `failed` and moves on): `unsupported`,
 `malformed`, `encrypted`, `binary`, `too-large`, `archive-limits`, `xml-limits`,
 `record-too-large`, `timeout`, `memory-limit`, `output-too-large`, `crashed`, `protocol`.
-Transient (enrichment retries): `spawn-failed`; `killed` (the child died of a signal the
-parent didn't send, such as the host's out-of-memory killer; enrichment tries once more, then
-takes it as the file's); `input-failed`: the source failed part way, ran out the clock (the child
-waited on it and it sent nothing for half the time limit, at most 30 s), or sent more or fewer
-bytes than the content's `size`. The child is then killed before it sees the end of its input,
-so it never answers for part of a file.
+Transient (enrichment retries): `spawn-failed`; `killed`: the child ended without an answer
+because something outside it ended it (the host's out-of-memory killer, an operator). On Linux
+and macOS that is a signal the parent didn't send; on Windows, where TerminateProcess leaves
+exit code 1, it is exit code 1, which the child itself never uses (its own uncaught errors
+exit 71, `crashed`). Enrichment tries once more, then takes it as the file's. And
+`input-failed`: the source failed part way, ran out the clock (the child waited on it and it
+sent nothing for half the time limit, at most 30 s), or sent more or fewer bytes than the
+content's `size`. The child is then killed before it sees the end of its input, so it never
+answers for part of a file.
+
+**An early answer waits for the source's checks.** Some extractions answer from the start of a
+file (plain text stops at its limit). The rest of the source is still read to its end, in the
+time left and never past `size`, without being sent anywhere, so the size check and the
+source's own (blobContentSource() hashes the bytes and fails at the end of a mismatch) decide
+before the answer counts: a failure there, or no end in time, is `input-failed`.
 
 However an extraction ends, the content is closed: its iterator is returned, and a stream with
 `destroy()` (a Node Readable) is destroyed, even one stalled mid-read. core/jobs also gives each
@@ -114,8 +123,11 @@ or `process.getBuiltinModule()`: the network (`net`, `tls`, `dgram`, `dns`, `htt
 past `--disallow-code-generation-from-strings`), `module` (whose registerHooks() could get
 ahead of the lockdown's hook; `Module.registerHooks` and `Module.register` are also replaced),
 `repl`, `sqlite`, `wasi`, `trace_events`, `inspector`, `child_process`, `worker_threads`,
-`cluster`, `v8`, `os`, `crypto`… `fetch`, `WebSocket` and `EventSource` are removed from the
-global scope. The tests try each of these in a real child.
+`cluster`, `v8`, `os`, `crypto`… Modules resolve only to `file:` URLs and allowed built-ins:
+never `data:` (code from a string), `http:`, `blob:` or another scheme. `fetch`, `WebSocket`,
+`EventSource` and `WebAssembly` are removed from the global scope (V8's `--no-expose-wasm`
+isn't in Node 24's V8, which refuses the option, so the global is deleted instead; pdf.js runs
+with its WebAssembly decoders off). The tests try each of these in a real child.
 
 **Network, best effort.** Node 24's permission model has no network switch (`--allow-net`
 comes in Node 25), so the allowlist is what keeps the network out: what remains is only what

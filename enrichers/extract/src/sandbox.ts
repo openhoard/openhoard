@@ -1,8 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import { mayExtract } from "./detect.ts";
 import { resolveLimits } from "./limits.ts";
 import { childEntry, readablePaths } from "./paths.ts";
@@ -117,26 +115,52 @@ export async function extract(
     child.kill("SIGKILL");
   };
 
-  // Content in, with backpressure; a failing source kills the child, which must never take
-  // a cut-off stream for the whole file. `waitingSince` is set while the source is asked for
-  // bytes and hasn't answered: a timeout while it has been silent a while is the source's.
+  // Content in, with backpressure. A failing source kills the child, which must never take a
+  // cut-off stream for the whole file. `waitingSince` is set while the source is asked for bytes
+  // and hasn't answered: a timeout while it has been silent a while is the source's. Once the
+  // child stops reading (it answered from the start of the file), the rest is still read,
+  // without writing it anywhere, so the size check here and a source's own checks (a hash at
+  // the end) run before its answer counts.
   let sourceFailed = false;
   let sourceDone = false;
   let waitingSince: number | null = null;
   let sent = 0;
+  let stopFeeding = false;
+  let childReading = true;
+  // Reading on after the child stops waits for the decision to (it answered) or not (it was
+  // killed), so a fast source doesn't keep this process busy meanwhile.
+  let decide: () => void = () => {};
+  const decided = new Promise<void>((resolve) => (decide = resolve));
   const expected = options.size;
-  /** The source failed, ended early or ran long: the child must not answer for this content. */
   let settled = false;
+  /** The source failed, ended early or ran long: the child must not answer for this content. */
   const sourceFault = () => {
-    // Once the child has exited, closing the source below may make it fail: that isn't news.
+    // Once the extraction is over, closing the source may make it fail: that isn't news.
     if (settled) return;
     sourceFailed = true;
     child.kill("SIGKILL");
   };
-  async function* source(): AsyncGenerator<Uint8Array> {
+  const stdinGone = () => {
+    childReading = false;
+  };
+  child.stdin.on("error", stdinGone);
+  child.stdin.on("close", stdinGone);
+  /** Resolves when stdin can take more, or is gone. */
+  const writable = () =>
+    new Promise<void>((resolve) => {
+      const done = () => {
+        child.stdin.off("drain", done);
+        child.stdin.off("close", done);
+        resolve();
+      };
+      child.stdin.once("drain", done);
+      child.stdin.once("close", done);
+    });
+  const feeding = (async () => {
     const iterator = content[Symbol.asyncIterator]();
     try {
       for (;;) {
+        if (stopFeeding) return;
         let step: IteratorResult<Uint8Array>;
         waitingSince = Date.now();
         try {
@@ -148,9 +172,10 @@ export async function extract(
           waitingSince = null;
         }
         if (step.done) {
-          sourceDone = true;
           // Before the child sees the end of its input, so it never answers for a short file.
           if (expected !== undefined && sent !== expected) sourceFault();
+          else sourceDone = true;
+          if (childReading) child.stdin.end();
           return;
         }
         sent += step.value.byteLength;
@@ -158,17 +183,19 @@ export async function extract(
           sourceFault();
           return;
         }
-        yield step.value;
+        if (childReading) {
+          if (!child.stdin.write(step.value)) await writable();
+        } else {
+          await decided;
+          if (stopFeeding) return;
+          // Draining: let timers and I/O run between chunks.
+          await new Promise((resolve) => setImmediate(resolve));
+        }
       }
     } finally {
-      // The child stopped reading (it had enough, or it is gone): the source is closed too.
       await iterator.return?.();
     }
-  }
-  child.stdin.on("error", () => {
-    // The child stopped reading (it had enough, or it died): what it answers says which.
-  });
-  const feeding = pipeline(Readable.from(source()), child.stdin).catch(() => {});
+  })();
 
   // The answer out, bounded.
   const maxBytes = maxAnswerBytes(limits);
@@ -185,6 +212,7 @@ export async function extract(
     err = (err + chunk.toString("utf8")).slice(-8192);
   });
 
+  const deadline = Date.now() + limits.timeoutMs;
   let sourceStalled = false;
   const timer = setTimeout(() => {
     sourceStalled =
@@ -212,19 +240,42 @@ export async function extract(
     child.on("error", () => resolve({ code: null, signal: null, spawnError: true }));
     child.on("close", (code, signal) => resolve({ code, signal, spawnError: false }));
   });
-  settled = true;
-  if (!sourceDone) close();
+  childReading = false;
   clearTimeout(timer);
   clearInterval(poll);
-  signal?.removeEventListener("abort", onAbort);
-  // Not awaited: a source that stalls may not answer for a long time, and nothing below
-  // depends on it (a failure was noted before the child was killed).
-  void feeding;
 
-  if (killedFor === "aborted") throw signal?.reason ?? new Error("extraction aborted");
-  // The source failed, or ran out the clock without sending anything: the moment's, not the file's.
-  if (sourceFailed || sourceStalled)
+  // The child answered before the source ended: read the rest through the checks, in the time
+  // left (the bytes go nowhere; the size check bounds them).
+  let unchecked = false;
+  const answered = !exit.spawnError && killedFor === undefined && exit.code === 0;
+  if (answered && !sourceDone && !sourceFailed) {
+    decide();
+    const left = deadline - Date.now();
+    const drained = await Promise.race([
+      feeding.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), Math.max(0, left)).unref()),
+      new Promise<false>((resolve) =>
+        signal?.addEventListener("abort", () => resolve(false), { once: true }),
+      ),
+    ]);
+    if (!drained) unchecked = true;
+  }
+  settled = true;
+  stopFeeding = true;
+  decide();
+  signal?.removeEventListener("abort", onAbort);
+  if (!sourceDone) close();
+  // The source's own cleanup gets a moment to finish, but no more: a source that stalls may not
+  // answer for a long time, and nothing below depends on it (a failure was noted already).
+  await Promise.race([feeding, new Promise((resolve) => setTimeout(resolve, 50).unref())]);
+
+  if (killedFor === "aborted" || signal?.aborted) {
+    throw signal?.reason ?? new Error("extraction aborted");
+  }
+  // The source failed, stalled, or couldn't be checked to its end: the moment's, not the file's.
+  if (sourceFailed || sourceStalled || unchecked) {
     return { ok: false, failure: "input-failed", permanent: false };
+  }
   if (exit.spawnError) return { ok: false, failure: "spawn-failed", permanent: false };
   if (killedFor !== undefined) return { ok: false, failure: killedFor, permanent: true };
   if (
@@ -234,9 +285,10 @@ export async function extract(
   ) {
     return { ok: false, failure: "memory-limit", permanent: true };
   }
-  // Killed by a signal nobody here sent (the host's OOM killer, an operator): not the file's
-  // doing, as far as anyone can tell, so worth another try.
-  if (exit.code === null && exit.signal !== null) {
+  // Ended by something outside it (the host's OOM killer, an operator): a signal on POSIX; on
+  // Windows, TerminateProcess leaves exit code 1, which the child itself never uses (its own
+  // fatal errors exit with EXIT_FATAL). Not the file's doing, as far as anyone can tell.
+  if ((exit.code === null && exit.signal !== null) || exit.code === 1) {
     return { ok: false, failure: "killed", permanent: false };
   }
   if (exit.code !== 0) return { ok: false, failure: "crashed", permanent: true };

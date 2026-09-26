@@ -128,9 +128,10 @@ const step = (more: Partial<ExtractStepOptions> = {}) => {
 };
 
 describe("the extract step", () => {
-  it("extracts a version's text and stores it, and a re-run rewrites the same row", async () => {
+  it("extracts a version's text and stores it; a re-run skips it, a newer extractor redoes it", async () => {
     const file = await ingestFile("Q3 report.docx", MIME.docx, REPORT);
-    const steps = [ruleTagStep, step().step];
+    const { step: s, opened } = step();
+    const steps = [ruleTagStep, s];
     expect(await run(steps, file.versionId)).toBe("processed");
     const first = await stored(file.versionId);
     expect(first).toMatchObject({
@@ -144,12 +145,26 @@ describe("the extract step", () => {
       failure: null,
       extractor: EXTRACTOR_VERSION,
     });
+    // A job run again (a later step failed, say): this extractor's final answer stands.
     expect(await run(steps, file.versionId)).toBe("already-processed");
+    expect(opened).toHaveLength(1);
+    // Stored by an older extractor: done again, into the same row.
+    await db.withTenant(t.tenantId, (tx) =>
+      tx
+        .update(versionExtracts)
+        .set({ extractor: "openhoard-extract/0" })
+        .where(eq(versionExtracts.versionId, file.versionId)),
+    );
+    expect(await run(steps, file.versionId)).toBe("already-processed");
+    expect(opened).toHaveLength(2);
     const rows = await db.withTenant(t.tenantId, (tx) =>
       tx.select().from(versionExtracts).where(eq(versionExtracts.versionId, file.versionId)),
     );
     expect(rows).toHaveLength(1);
-    expect(await stored(file.versionId)).toMatchObject({ text: first?.text });
+    expect(await stored(file.versionId)).toMatchObject({
+      text: first?.text,
+      extractor: EXTRACTOR_VERSION,
+    });
   });
 
   it("records a hostile or broken file as failed, and the version is still processed", async () => {
@@ -178,6 +193,29 @@ describe("the extract step", () => {
     expect(opened.map((o) => o.ref.versionId)).toEqual([missing.versionId]);
     expect(await stored(image.versionId)).toMatchObject({ status: "unsupported", kind: null });
     expect(await stored(missing.versionId)).toMatchObject({ status: "unavailable", text: "" });
+    // Unavailable isn't final: a later run tries the source again.
+    await run([s], missing.versionId);
+    expect(opened.map((o) => o.ref.versionId)).toEqual([missing.versionId, missing.versionId]);
+  });
+
+  it("stores nothing when the source's bytes fail its check after an early answer", async () => {
+    // 64 MiB of text: the child answers from the first MiB; the source fails at its very end,
+    // as blobContentSource() does for bytes that don't hash to the version's blob.
+    const chunk = enc.encode("word ".repeat((1024 * 1024) / 5));
+    const size = 64 * chunk.byteLength;
+    const big = await ingestFile("Big.txt", MIME.txt, new Uint8Array(size));
+    const mismatched: ContentSource = {
+      async open() {
+        return (async function* () {
+          for (let i = 0; i < 64; i++) yield chunk;
+          throw new Error("the stored bytes don't match the version's blob (hash)");
+        })();
+      },
+    };
+    await expect(run([extractStep({ content: mismatched })], big.versionId)).rejects.toThrow(
+      "enrichment step extract-text failed",
+    );
+    expect(await stored(big.versionId)).toBe(null);
   });
 
   it("reads managed zones, indexed zones only on opt-in, local-only zones never", async () => {

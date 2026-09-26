@@ -54,6 +54,15 @@ for (const m of refused) {
   await attempt(`require:${m}`, () => require(m));
   await attempt(`builtin:${m}`, () => process.getBuiltinModule(m));
 }
+// Through variables: TypeScript would look for these modules.
+const dataUrl = "data:text/javascript,export default 1";
+const httpUrl = "http://127.0.0.1:9/x.js";
+await attempt("import-data-url", () => import(dataUrl));
+await attempt("import-http-url", () => import(httpUrl));
+await attempt("wasm", () => {
+  if ("WebAssembly" in globalThis) return;
+  throw new TypeError("gone");
+});
 await attempt("allowed:zlib", () => import("node:zlib"));
 await attempt("allowed:require-stream", () => require("stream"));
 await attempt(

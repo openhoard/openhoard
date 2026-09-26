@@ -143,6 +143,28 @@ describe("extract() in a child process", () => {
     expect(stalled.destroyed).toBe(true);
   });
 
+  it("reads a source to its end after an early answer, so its checks still decide", async () => {
+    const MiB = 1024 * 1024;
+    const chunk = enc.encode("word ".repeat(MiB / 5));
+    async function* text(fail: "hash" | "stall" | null): AsyncGenerator<Uint8Array> {
+      for (let i = 0; i < 64; i++) yield chunk;
+      // What blobContentSource() throws at the end of bytes that aren't the version's.
+      if (fail === "hash")
+        throw new Error("the stored bytes don't match the version's blob (hash)");
+      if (fail === "stall") await new Promise(() => {});
+    }
+    const size = 64 * chunk.byteLength;
+    const hint = { mime: "text/plain" };
+    // Plain text stops at 1 MiB of text: the child answers long before the 64 MiB end.
+    const wrong = await extract(text("hash"), hint, { size });
+    expect(wrong).toEqual({ ok: false, failure: "input-failed", permanent: false });
+    const stalled = await extract(text("stall"), hint, { size, limits: { timeoutMs: 3_000 } });
+    expect(stalled).toEqual({ ok: false, failure: "input-failed", permanent: false });
+    const fine = await extract(text(null), hint, { size });
+    expect(fine.ok && fine.extraction.truncated).toBe(true);
+    expect(fine.ok && fine.stats.bytesRead).toBeLessThan(size);
+  });
+
   it("closes a stream the child stopped reading early", async () => {
     const big = Readable.from(generatedCsv(1_000_000));
     // Plain text stops at the text limit; the rest of the stream is never read.
@@ -236,7 +258,10 @@ describe("the child's confinement", () => {
       "cjs-register-hooks": "BlockedModuleError",
       "cjs-register": "BlockedModuleError",
       "cjs-require-fs": "allowed",
+      "import-data-url": "BlockedModuleError",
+      wasm: "TypeError",
     });
+    expect(outcome["import-http-url"]).not.toBe("allowed");
     expect(existsSync(`${secret}.written`)).toBe(false);
   });
 

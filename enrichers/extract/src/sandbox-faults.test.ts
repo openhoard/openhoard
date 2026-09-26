@@ -28,6 +28,7 @@ const run = (name: string, limits = {}) =>
 describe("a child that misbehaves", () => {
   it.each([
     ["crash.txt", "crashed"],
+    ["fatal.txt", "crashed"],
     ["memory.txt", "memory-limit"],
     ["heap.txt", "memory-limit"],
     ["garbage.txt", "protocol"],
@@ -46,6 +47,10 @@ describe("a child that misbehaves", () => {
       expect(await run("sigkill.txt")).toEqual({ ok: false, failure: "killed", permanent: false });
     },
   );
+
+  it("is worth another try when it exits 1 without an answer (terminated on Windows)", async () => {
+    expect(await run("exit1.txt")).toEqual({ ok: false, failure: "killed", permanent: false });
+  });
 
   it("never starts, and closes the content, when the install would widen the sandbox", async () => {
     install.unsafe = true;
