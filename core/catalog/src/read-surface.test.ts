@@ -26,6 +26,8 @@ const SURFACE = {
   gated: [
     "listVersions",
     "openContent",
+    // The caller's own activity (T-506), every file through the gate; records nothing.
+    "recentObjects",
     "searchObjects",
     "suggestTitles",
     "viewBySource",
@@ -79,6 +81,9 @@ const SURFACE = {
     // For enrichment (core/jobs): the exposure its tags give a file, before it is processed.
     "enrichmentExposure",
     "explainAccess",
+    // "Who can see this?" (T-806): grants on a file, for its owner and admins only, like
+    // explainAccess.
+    "whoCanAccess",
     // For enrichment (core/jobs): whether a file carries the injection flag (T-408).
     "hasInjectionFlag",
     "injectionReviewOf",
@@ -165,7 +170,7 @@ const RECORDING = {
   viewBySource: "view",
   viewObject: "view",
 } as const;
-const LISTING = ["searchObjects", "suggestTitles", "viewObjects"] as const;
+const LISTING = ["recentObjects", "searchObjects", "suggestTitles", "viewObjects"] as const;
 
 /** The gated reads in search.ts, which reach viewObjects() through gatedMatches(). */
 const SEARCH: readonly string[] = ["searchObjects", "suggestTitles"];
@@ -203,7 +208,9 @@ describe("the catalog's export surface", () => {
     const starts = [...text.matchAll(/^export async function (\w+)/gm)];
     const names = starts.map((m) => m[1]).sort();
     expect(names).toEqual(
-      SURFACE.gated.filter((n) => n !== "viewObjects" && !SEARCH.includes(n)).sort(),
+      SURFACE.gated
+        .filter((n) => n !== "viewObjects" && n !== "recentObjects" && !SEARCH.includes(n))
+        .sort(),
     );
     for (const [i, m] of starts.entries()) {
       const whole = text.slice(m.index, starts[i + 1]?.index ?? text.length);
@@ -294,6 +301,8 @@ describe("the catalog's export surface", () => {
           (await catalog.searchObjects(tx, t.tenantId, deny, request, { query: "" })).hits,
         suggestTitles: (tx) =>
           catalog.suggestTitles(tx, t.tenantId, deny, request, { prefix: "report" }),
+        recentObjects: async (tx) =>
+          (await catalog.recentObjects(tx, t.tenantId, deny, request)).items,
       };
       expect(Object.keys(CALLS).sort()).toEqual([...SURFACE.gated].sort());
       // The seeded file is unprocessed, so hidden to anyone authorize() refuses.
@@ -363,6 +372,7 @@ describe("the catalog's export surface", () => {
             catalog.searchObjects(tx, t.tenantId, authz, request, { query: "report" }),
           suggestTitles: (tx) =>
             catalog.suggestTitles(tx, t.tenantId, authz, request, { prefix: "report" }),
+          recentObjects: (tx) => catalog.recentObjects(tx, t.tenantId, authz, request),
         };
         const got = await db.withTenant(t.tenantId, calls[name], catalog.VIEW_TRANSACTION);
         return { got, events: activity.take() };

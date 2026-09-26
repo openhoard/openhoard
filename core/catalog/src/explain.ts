@@ -1,4 +1,13 @@
-import { liveGrants, objects, zones, type LiveGrant, type Tx } from "@openhoard/core-db";
+import {
+  grants,
+  groups,
+  liveGrants,
+  objects,
+  users,
+  zones,
+  type LiveGrant,
+  type Tx,
+} from "@openhoard/core-db";
 import {
   getUser,
   groupPrincipal,
@@ -16,7 +25,7 @@ import {
   type AuthzDecision,
   type ResultShape,
 } from "@openhoard/core-policy";
-import { and, eq } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import { tagsForDecisions } from "./tagging.js";
 import { explainLevels, requireSnapshot, type LevelsExplanation } from "./visibility.js";
 
@@ -385,4 +394,139 @@ function summarize(e: AccessExplanation, canRead: boolean): string {
     } else if (e.hiddenBecause === "hidden") parts.push("It is hidden from them.");
   }
   return parts.join(" ");
+}
+
+/** One live grant that reaches an object, and whom it is for. */
+export interface AccessEntry {
+  grantId: string;
+  /** `user:usr_…` or `group:grp_…`. */
+  principal: string;
+  /** The user's display name or the group's name; the principal itself if it is gone. */
+  name: string;
+  role: "read" | "write";
+  /** On the object itself, or on one of its tags. */
+  target: { tag: string } | { objectId: string };
+  grantedBy: string;
+  expiresAt: Date | null;
+}
+
+/** "Who can see this?" for one object, as of now: see {@link whoCanAccess}. */
+export interface AccessList {
+  objectId: string;
+  title: string;
+  ownerId: string;
+  /** The owner's display name, when the owner is a user who still exists. */
+  ownerName: string | null;
+  deleted: boolean;
+  /** Live grants on the object or on a tag grants may match (trusted or reviewed). */
+  grants: AccessEntry[];
+  /**
+   * Live grants on tags the object carries only as unreviewed model guesses: they reach nobody
+   * until a person reviews the tag.
+   */
+  unreviewedTagGrants: AccessEntry[];
+  /** Who discovers it without a grant: the visibility and exposure, and the tags behind them. */
+  levels: LevelsExplanation;
+}
+
+/**
+ * Who can see an object, as of now: its owner, every live grant that reaches it (on the object,
+ * or on one of its grantable tags) with the user's or group's name, the grants on tags only a
+ * model guessed (which count for nobody yet), and the levels that decide who discovers it
+ * without a grant. The read side of "why can they see it" (scenario 4): for one person's
+ * decision, with pack rules and account stops, use explainAccess().
+ *
+ * Pack rules can permit or forbid beyond grants, and a locked account reads nothing whatever it
+ * holds: this lists grants, not decisions. FOR ADMINS AND OWNERS ONLY, like explainAccess(): it
+ * names groups, people, grants and the real title. Runs in a snapshot (VIEW_TRANSACTION).
+ */
+export async function whoCanAccess(
+  tx: Tx,
+  tenantId: string,
+  objectId: string,
+): Promise<AccessList> {
+  await requireSnapshot(tx, "whoCanAccess");
+  const [object] = await tx
+    .select({ title: objects.title, ownerId: objects.ownerId, deletedAt: objects.deletedAt })
+    .from(objects)
+    .where(and(eq(objects.tenantId, tenantId), eq(objects.id, objectId)));
+  if (!object) throw new ExplainError("unknown-object", `no object ${objectId}`);
+  const levels = await explainLevels(tx, tenantId, objectId);
+  if (!levels) throw new ExplainError("unknown-object", `no levels for ${objectId}`);
+  const tags = await tagsForDecisions(tx, tenantId, objectId);
+  const grantable = new Set(tags.grantable);
+  // Live now, by the database's clock, as enforcement reads it (liveGrants()).
+  const now = sql`now()`;
+  const tagMatch = [...new Set(tags.levels)].map((tag) => {
+    const at = tag.indexOf(":");
+    return and(eq(grants.facet, tag.slice(0, at)), eq(grants.value, tag.slice(at + 1)));
+  });
+  const rows = await tx
+    .select({
+      id: grants.id,
+      principal: grants.principal,
+      role: grants.role,
+      facet: grants.facet,
+      value: grants.value,
+      objectId: grants.objectId,
+      grantedBy: grants.grantedBy,
+      expiresAt: grants.expiresAt,
+    })
+    .from(grants)
+    .where(
+      and(
+        eq(grants.tenantId, tenantId),
+        or(eq(grants.objectId, objectId), ...tagMatch),
+        lte(grants.createdAt, now),
+        or(isNull(grants.revokedAt), gt(grants.revokedAt, now)),
+        or(isNull(grants.expiresAt), gt(grants.expiresAt, now)),
+      ),
+    )
+    .orderBy(grants.id);
+  const idsOf = (kind: "user" | "group") => [
+    ...new Set(
+      [object.ownerId, ...rows.map((r) => r.principal)]
+        .filter((p) => p.startsWith(`${kind}:`))
+        .map((p) => p.slice(kind.length + 1)),
+    ),
+  ];
+  const names = new Map<string, string>();
+  const userIds = idsOf("user");
+  if (userIds.length > 0) {
+    const found = await tx
+      .select({ id: users.id, name: users.displayName })
+      .from(users)
+      .where(and(eq(users.tenantId, tenantId), inArray(users.id, userIds)));
+    for (const u of found) names.set(`user:${u.id}`, u.name);
+  }
+  const groupIds = idsOf("group");
+  if (groupIds.length > 0) {
+    const found = await tx
+      .select({ id: groups.id, name: groups.name })
+      .from(groups)
+      .where(and(eq(groups.tenantId, tenantId), inArray(groups.id, groupIds)));
+    for (const g of found) names.set(`group:${g.id}`, g.name);
+  }
+  type Row = (typeof rows)[number];
+  const tagOf = (r: Row) => `${r.facet ?? ""}:${r.value ?? ""}`;
+  const entry = (r: Row): AccessEntry => ({
+    grantId: r.id,
+    principal: r.principal,
+    name: names.get(r.principal) ?? r.principal,
+    role: r.role,
+    target: r.objectId !== null ? { objectId: r.objectId } : { tag: tagOf(r) },
+    grantedBy: r.grantedBy,
+    expiresAt: r.expiresAt,
+  });
+  const counts = (r: Row) => r.objectId !== null || grantable.has(tagOf(r));
+  return {
+    objectId,
+    title: object.title,
+    ownerId: object.ownerId,
+    ownerName: names.get(object.ownerId) ?? null,
+    deleted: object.deletedAt !== null,
+    grants: rows.filter(counts).map(entry),
+    unreviewedTagGrants: rows.filter((r) => !counts(r)).map(entry),
+    levels,
+  };
 }

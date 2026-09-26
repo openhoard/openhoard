@@ -914,7 +914,9 @@ export const grants = pgTable(
  */
 /**
  * `conflict`: a second value of a single-value facet. `primary`: a model proposing which of the
- * object's trusted tags is its home (T-409); an item for that, not for applying a tag.
+ * object's trusted tags is its home (T-409); an item for that, not for applying a tag. `agent`:
+ * an AI assistant proposed it for the person it acts for (the MCP `tag` tool, T-804), which
+ * never applies a tag itself: a person approves it here, in OpenHoard's own app.
  */
 export const REVIEW_REASONS = [
   "new-value",
@@ -922,6 +924,7 @@ export const REVIEW_REASONS = [
   "sensitive",
   "conflict",
   "primary",
+  "agent",
 ] as const;
 /** `withdrawn`: a rule's item, closed when the rule stopped giving the tag before anyone decided. */
 export const REVIEW_DECISIONS = ["approved", "rejected", "merged", "withdrawn"] as const;

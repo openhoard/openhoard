@@ -269,6 +269,9 @@ events in bounded batches.
 - `listActivity()` is trusted: it names files the caller may not know about. `recent` passes
   them through the gate before showing any. It pages newest first with `after` (the last
   event's time and id).
+- `recentObjects()` (T-506) is that `recent`: the caller's own events only (the actor is the
+  request's principal, never a parameter), by action, time range and media type, newest first
+  per file, every file through `viewObjects()`. A gated listing: it records nothing.
 - An insert takes FOR KEY SHARE on its object row (the foreign key). In a transaction that also
   appends audit, write activity first: audit's lock is last.
 - `share` is a type waiting for the share feature; nothing records it yet.
@@ -373,6 +376,11 @@ conditions) into the candidate SQL, keep the gate as the final check, and drop t
 so counts are exact. `search.test.ts` pins today's behaviour; flip that test when this lands.
 
 ## Why can X see this?
+
+`whoCanAccess()` (T-806) is the list view of the same question for one file: its owner, every
+live grant that reaches it (on the file, or on one of its grantable tags) with the user's or
+group's name, the grants on tags only a model guessed, and its levels. Like `explainAccess()`,
+it is for the file's owner and admins only.
 
 `explainAccess()` replays one decision the way the product makes it, using the same principal
 resolution, grants, `authorize()` and levels. It returns what decided the outcome:

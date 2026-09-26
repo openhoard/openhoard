@@ -73,8 +73,11 @@ export interface TagProposal {
   label?: string;
 }
 
-/** Why a tag waits for a person. (`primary` items are proposals of a home: primary.ts.) */
-export type ReviewReason = "new-value" | "low-confidence" | "sensitive" | "conflict";
+/**
+ * Why a tag waits for a person. (`primary` items are proposals of a home: primary.ts.) `agent`:
+ * an AI assistant proposed it (the MCP `tag` tool), which may only ever propose.
+ */
+export type ReviewReason = "new-value" | "low-confidence" | "sensitive" | "conflict" | "agent";
 
 export type TagOutcome =
   { applied: true; tag: string } | { applied: false; reviewId: string; reason: ReviewReason };
@@ -91,12 +94,27 @@ const PRINCIPAL = /^[a-z]+:[^\0]+$/;
 const PRINCIPAL_MAX = 1024;
 const LABEL_MAX = 200;
 
+export interface ProposeOptions {
+  minConfidence?: number;
+  now?: Date;
+  /**
+   * `agent`: whatever the table above says, the tag waits for a person (reason `agent`, unless
+   * a stronger reason applies first: a new value, a sensitive one, a conflict). For an AI
+   * assistant's proposals (T-804), which are never applied directly: a person approves each in
+   * OpenHoard's own app (T-605). Only with a model source, so provenance stays untrusted.
+   */
+  review?: "agent";
+}
+
 export async function proposeTag(
   tx: Tx,
   tenantId: string,
   proposal: TagProposal,
-  options: { minConfidence?: number; now?: Date } = {},
+  options: ProposeOptions = {},
 ): Promise<TagOutcome> {
+  if (options.review !== undefined && (options.review !== "agent" || proposal.source !== "model")) {
+    throw new TagError("invalid", "an agent's proposal must come from a model source");
+  }
   const { facet, value } = splitTag(proposal.tag);
   checkProposal(proposal, facet, value);
   const minConfidence = options.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
@@ -221,6 +239,7 @@ export async function proposeTag(
   ) {
     reason = "conflict";
   }
+  if (reason === undefined && options.review === "agent") reason = "agent";
   // The model's item waits on this tag already, and there can be only one open item for it.
   if (reason !== undefined && open) {
     return { applied: false, reviewId: open.id, reason: open.reason };

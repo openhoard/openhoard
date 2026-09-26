@@ -506,3 +506,67 @@ describe("the review inbox", () => {
     expect(await inTenant((tx) => listOpenReviews(tx, t.tenantId, 2))).toHaveLength(2);
   });
 });
+
+/* T-804: an AI assistant's proposal waits for a person, even where a model's would apply. */
+describe("proposeTag for an agent (review: agent)", () => {
+  const agent = (p: Partial<TagProposal>) =>
+    inTenant((tx) =>
+      proposeTag(
+        tx,
+        t.tenantId,
+        {
+          objectId: t.objectId,
+          tag: "client:globex",
+          source: "model",
+          appliedBy: "model:agent/https://client.example/mcp.json",
+          confidence: 1,
+          ...p,
+        },
+        { review: "agent" },
+      ),
+    );
+
+  it("files an `agent` item for an approved, harmless value a model would get applied", async () => {
+    const before = await tagsOn();
+    const out = await agent({});
+    expect(out).toMatchObject({ applied: false, reason: "agent" });
+    expect(await tagsOn()).toEqual(before);
+    const open = await inTenant((tx) => listOpenReviews(tx, t.tenantId));
+    expect(open).toMatchObject([{ facet: "client", value: "globex", reason: "agent" }]);
+    // Proposed again: the same item, nothing new.
+    const again = await agent({});
+    expect(again).toMatchObject({
+      applied: false,
+      reviewId: (out as { reviewId: string }).reviewId,
+    });
+    // A person approves it: then, and only then, the tag applies.
+    await inTenant((tx) =>
+      approveReview(tx, t.tenantId, (out as { reviewId: string }).reviewId, "user:reviewer"),
+    );
+    expect(await tagsOn()).toContain("client:globex (reviewed)");
+  });
+
+  it("keeps a stronger reason, and changes nothing for a tag already on the file", async () => {
+    expect(await agent({ tag: "sensitivity:restricted" })).toMatchObject({ reason: "sensitive" });
+    expect(await agent({ tag: t.tag })).toEqual({ applied: true, tag: t.tag });
+  });
+
+  it("is only for model sources", async () => {
+    await expect(
+      inTenant((tx) =>
+        proposeTag(
+          tx,
+          t.tenantId,
+          {
+            objectId: t.objectId,
+            tag: "client:globex",
+            source: "user",
+            appliedBy: "user:x",
+            confidence: 1,
+          },
+          { review: "agent" },
+        ),
+      ),
+    ).rejects.toThrow(TagError);
+  });
+});

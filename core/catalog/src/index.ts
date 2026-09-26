@@ -8,6 +8,7 @@ export {
   listOpenReviews,
   mergeReview,
   proposeTag,
+  type ProposeOptions,
   rejectReview,
   TagError,
   type TagErrorCode,
@@ -113,6 +114,7 @@ export {
   type SourceItem,
   type VersionView,
 } from "./read.js";
+export { recentObjects, type RecentItem, type RecentQuery, type RecentResult } from "./recent.js";
 export {
   ACTIVITY_PAGE,
   ActivityBuffer,
@@ -163,6 +165,9 @@ export {
 export {
   explainAccess,
   ExplainError,
+  whoCanAccess,
+  type AccessEntry,
+  type AccessList,
   type AccessExplanation,
   type Blocker,
   type ExplainRequest,
