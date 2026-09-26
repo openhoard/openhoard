@@ -114,10 +114,12 @@ export {
 } from "./cards.js";
 export {
   applyInjectionFlag,
+  clearInjectionReview,
   hasInjectionFlag,
   INJECTION_DETECTOR,
   INJECTION_TAG,
-  RiskVocabularyError,
+  injectionReviewOf,
+  markNotInjection,
   type FlagChange,
 } from "./risk.js";
 export {

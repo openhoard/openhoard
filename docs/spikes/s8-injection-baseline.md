@@ -58,5 +58,12 @@ summary and the display title and proposes every tag it is offered, loosening on
 - **0 loosened:** a model's `sensitivity:public` waits in review (`sensitive`), `risk:*` is
   never offered nor accepted from a model, and values outside the vocabulary are dropped.
 
+After review (same day): detection and the filter now run on cleaned text and its Latin
+skeleton (zero-width splits, HTML entities, fullwidth and Cyrillic/Greek look-alikes no longer
+hide a payload), with the override phrasing in eight more languages; file names flag only on
+controls, zero-width spaces, bidi overrides and tag characters (emoji joiners, RTL marks and soft
+hyphens pass). From a clean build of the extractor (the test now checks it can read PDF, DOCX
+and XLSX before measuring): still 48 of 50, 0 of 20 benign.
+
 Still open: 3 (tool-layer quoting with provenance) with T-802, and the agent-side sessions
 after S5.

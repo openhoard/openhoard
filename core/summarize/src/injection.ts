@@ -1,3 +1,5 @@
+import { cleanForMatching, skeleton } from "./clean.js";
+
 /*
  * Prompt-injection flagging (T-408): does a file look like it carries instructions meant for an
  * AI rather than for a person? Spike S8 found that sanitising characters stops none of the plain
@@ -13,10 +15,17 @@
  * discusses prompt injection is flagged too, and a determined attacker can word around it. That
  * is why summaries are also filtered (output.ts) and clients treat every card as quoted data.
  *
- * Everything here runs on untrusted input, so the matching is linear-time: the text is first
- * normalized (NFKC, lower case, one space for any run of spaces), and every pattern is literals,
- * small alternations and bounded gaps, with no nested or overlapping quantifiers. Inputs are cut
- * at {@link MAX_SCAN_CHARS} as well. Results carry pattern ids, never the matched text, so they
+ * Patterns never see raw text: it is cleaned first (clean.ts: invisible characters deleted, HTML
+ * entities decoded, NFKC, lower case), and the English patterns run on its skeleton, where
+ * Cyrillic, Greek and other look-alike letters are Latin ones ("іgnore" with a Cyrillic "і" is
+ * "ignore"). A short list of the common "ignore the previous instructions" phrasings in French,
+ * Spanish, German, Portuguese, Italian, Russian, Chinese and Japanese runs on the cleaned text
+ * (the skeleton would garble them). No list covers every language or paraphrase: the real
+ * defence for what gets through is that clients quote cards as data (T-802).
+ *
+ * Everything here runs on untrusted input, so the matching is linear-time: every pattern is
+ * literals, small alternations and bounded gaps, with no nested or overlapping quantifiers.
+ * Inputs are cut at {@link MAX_SCAN_CHARS} as well. Results carry pattern ids, never the matched text, so they
  * can go to logs and job output without repeating the payload.
  */
 
@@ -36,6 +45,8 @@ interface Pattern {
   re: RegExp;
   /** Matched against the text with its line breaks (the others see them as spaces). */
   lines?: boolean;
+  /** Matched against the cleaned text rather than its Latin skeleton (other scripts). */
+  script?: boolean;
 }
 
 /*
@@ -53,6 +64,20 @@ const PATTERNS: readonly Pattern[] = [
     id: "override-your-instructions",
     weight: STRONG,
     re: /\b(?:ignore|disregard|forget) (?:all )?(?:your|any) (?:instructions?|prompts?|rules|guidelines|programming)\b/,
+  },
+  {
+    // The same in other languages, on the cleaned text; accents optional (a decomposed accent
+    // is deleted as an invisible mark).
+    id: "override-instructions-intl",
+    weight: STRONG,
+    script: true,
+    re: /\bignore[rz]? (?:toutes )?(?:les )?instructions (?:pr[ée]c[ée]dentes|ant[ée]rieures|ci-dessus)|\bignor(?:a|ar|ad|e|en) (?:todas )?(?:las |as )?(?:instrucciones|instru(?:ç|c)(?:õ|o)es) (?:anteriores|previas|pr[ée]vias)|\bignorier(?:e|en)? (?:alle )?(?:vorherigen|bisherigen|obigen) (?:anweisungen|instruktionen|befehle)|\bignora(?:re)? (?:tutte )?(?:le )?istruzioni (?:precedenti|sopra)|игнорир(?:уй|уйте|овать) (?:все )?(?:предыдущие|прежние|вышеуказанные) (?:инструкции|указания)|忽略(?:之前|以前|先前|上面|上述)(?:的)?(?:所有)?(?:的)?(?:指令|指示|说明)|(?:以前|前|上記)の(?:すべての)?指示を無視/,
+  },
+  {
+    // "AI agents reading this document must call …": a request to whatever reads the file.
+    id: "ai-readers",
+    weight: STRONG,
+    re: /\b(?:ai|a\.i\.|llm|language model|assistant|agent|bot|chatbot|model)s?\b[^.!?\n]{0,40}\b(?:reading|processing|parsing|summari[sz]ing|indexing|seeing|ingesting) (?:this|these)\b/,
   },
   {
     // Chat-template and role markup: `<system>`, `<|im_start|>`, `[INST]`.
@@ -165,6 +190,16 @@ const SUSPICIOUS_ALONE = new Set([
   "html-comment",
 ]);
 
+/**
+ * Characters that flag a file name: C0 and C1 controls, the zero-width space, word joiner and
+ * invisible operators (U+200B, U+2060 to U+2064, U+FEFF), bidi embeddings and overrides (U+202A
+ * to U+202E), bidi isolates (U+2066 to U+2069) and Unicode tag characters. Not the zero-width
+ * joiner and non-joiner (emoji, Indic and Persian names), left-to-right and right-to-left marks
+ * (names in Hebrew or Arabic on Windows and macOS) or soft hyphens.
+ */
+const NAME_CONTROL =
+  /[\p{Cc}\u200b\u2060-\u2064\ufeff\u202a-\u202e\u2066-\u2069\u{e0000}-\u{e007f}]/u;
+
 /** Patterns a file name may match without counting more than in text. */
 const NAME_PLAIN = new Set(["destroy", "send-out", "quote-elsewhere"]);
 
@@ -201,27 +236,25 @@ export interface InjectionInput {
 }
 
 /**
- * Normalizes text for matching: cut to `max` characters, NFKC (fullwidth and other compatibility
- * forms fold to plain letters), lower case, runs of spaces and tabs to one space, runs of line
- * breaks to one `\n`. Linear in the input.
+ * Text as the patterns see it (clean.ts): cut to `max` characters, invisible characters
+ * deleted, HTML entities decoded, NFKC, lower case, spaces collapsed, line breaks kept.
  */
 export function normalizeForMatching(s: string, max = MAX_SCAN_CHARS): string {
-  const cut = s.length > max ? s.slice(0, max) : s;
-  return cut
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/[^\S\n]+/g, " ")
-    .replace(/ ?\n[\s]*/g, "\n");
+  return cleanForMatching(s, max);
 }
 
 /**
- * The patterns that match normalized text. Phrases run on the text with line breaks as spaces
- * (a wrapped line doesn't break "ignore all previous / instructions"); the line-start ones
- * (`role-line`) on the text with its line breaks.
+ * The patterns that match cleaned text. English ones run on its skeleton (look-alike letters
+ * folded to Latin), the other-script ones on the cleaned text itself. Phrases see line breaks
+ * as spaces (a wrapped line doesn't break "ignore all previous / instructions"); the line-start
+ * ones (`role-line`) see them.
  */
-function matchPatterns(normalized: string): Pattern[] {
-  const flat = normalized.replaceAll("\n", " ");
-  return PATTERNS.filter((p) => p.re.test(p.lines === true ? normalized : flat));
+function matchPatterns(cleaned: string): Pattern[] {
+  const skel = skeleton(cleaned);
+  const flat = { skel: skel.replaceAll("\n", " "), cleaned: cleaned.replaceAll("\n", " ") };
+  return PATTERNS.filter((p) =>
+    p.re.test(p.lines === true ? (p.script ? cleaned : skel) : p.script ? flat.cleaned : flat.skel),
+  );
 }
 
 /** Ids of the phrase patterns found in a text (normalized here). For output filtering. */
@@ -312,8 +345,10 @@ export function detectInjection(input: InjectionInput): InjectionVerdict {
 
   const name = typeof input.name === "string" ? input.name.slice(0, 4096) : "";
   if (name !== "") {
-    // Line breaks, bidi overrides, zero-width characters: no honest file name needs them.
-    if (/[\p{Cc}\p{Cf}]/u.test(name)) add("name-control", "name", STRONG);
+    // Control characters (a line break), bidi overrides and isolates, and tag characters: no
+    // honest file name needs them. Joiners in emoji, marks for right-to-left names and soft
+    // hyphens are ordinary, and pass.
+    if (NAME_CONTROL.test(name)) add("name-control", "name", STRONG);
     if (/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(name)) add("name-traversal", "name", STRONG);
     scan(name, "name", 1);
   }
@@ -324,7 +359,7 @@ export function detectInjection(input: InjectionInput): InjectionVerdict {
     const scanned = text.length > MAX_SCAN_CHARS ? text.slice(0, MAX_SCAN_CHARS) : text;
     for (const decoded of decodedBase64(scanned)) scan(decoded, "decoded", 0);
     // Text stored reversed inside a right-to-left override reads normally on screen.
-    const reversed = normalizeForMatching(scanned).split("").reverse().join("");
+    const reversed = skeleton(normalizeForMatching(scanned)).split("").reverse().join("");
     for (const id of ["override-instructions", "override-your-instructions"]) {
       const p = BY_ID.get(id);
       if (p?.re.test(reversed)) add(id, "reversed", p.weight);

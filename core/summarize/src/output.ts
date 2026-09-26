@@ -1,4 +1,5 @@
 import { clampWords, MAX_SUMMARY_WORDS, stripUnsafeText, truncateCodePoints } from "./card.js";
+import { cleanForMatching, skeleton } from "./clean.js";
 import { instructionPatterns } from "./injection.js";
 
 /*
@@ -246,24 +247,42 @@ export function validateCardOutput(answer: string): {
 }
 
 /*
- * What no sentence of a summary may carry. Each is a literal or a single bounded class: linear.
- * - links: a scheme, `www.`, or a bare domain with a path;
+ * What no sentence of a summary (nor a display title) may carry. Every check runs on the text
+ * cleaned (clean.ts: invisible characters deleted, HTML entities decoded, NFKC, lower case) and
+ * then on its skeleton (look-alike letters folded to Latin), never on the raw text: a zero-width
+ * space inside "ignore", a fullwidth "https：／／", a Cyrillic "і" or `&#47;` hide nothing.
+ * Each pattern is literals and bounded classes: linear.
+ * - links: a scheme (`x://`, `mailto:`, `javascript:`…), `www.`, `//`, or a domain with a path
+ *   (`bit.ly/…`, `evil.me/drop`: any letters for the top-level domain, not a list);
  * - email addresses;
  * - markup and code: angle brackets, braces, backticks, markdown link or image syntax, pipes;
- * - role labels: `system:`, `assistant:` and the like.
+ * - role labels: `system:`, `assistant:` and the like;
+ * - anything addressed to an AI: a sentence that starts by calling an assistant, agent, AI,
+ *   model, LLM, bot or system (`Assistant, …`, `Dear AI:`), or names one near "you", "please",
+ *   "must", "should": a summary describes a document, it never talks to its reader's tools;
+ * - instruction patterns (injection.ts), with their short list in other languages.
  */
 const LINK =
-  /[a-z][a-z0-9+.-]{1,20}:\/\/|\bwww\.|\b(?:mailto|javascript|data|file):|\b[a-z0-9-]{1,63}\.(?:com|net|org|io|example|ai|co|dev|app|xyz)\/|\/\//i;
-const EMAIL = /[a-z0-9._%+-]{1,64}@[a-z0-9-]{1,63}\./i;
+  /[a-z][a-z0-9+.-]{0,20}:\/\/|\bwww\.|\b(?:mailto|javascript|vbscript|data|file|ftp):|\/\/|[\p{L}\p{N}-]{1,63}\.\p{L}{2,24}\//u;
+const EMAIL = /[\p{L}\p{N}._%+-]{1,64}@[\p{L}\p{N}-]{1,63}\./u;
 const MARKUP = /[<>{}`|]|\]\(|!\[|\[\[|\*\*|__|#{2,}/;
-const ROLE = /\b(?:system|assistant|user|human|ai|developer|tool)\s?:/i;
+const ROLE = /\b(?:system|assistant|user|human|ai|developer|tool|model)\s?:/;
+const AI =
+  "(?:ai|a\\.i\\.|assistant|agent|model|llm|bot|chatbot|system|copilot|claude|chatgpt|gpt|gemini)s?";
+const ADDRESSED = new RegExp(
+  `^(?:(?:dear|hey|hi|hello|attention|note to|ok|okay|to|all) )?(?:the |an? |any |all )?${AI}\\b ?[,:;!]|\\b${AI}\\b[^.!?\\n]{0,60}\\b(?:you|your|please|must|should|shall|need to|are (?:instructed|required|asked))\\b|\\b(?:you|please)\\b[^.!?\\n]{0,60}\\b${AI}\\b`,
+);
 
 /** Why a piece of model output is unsafe to keep, or null. */
 function unsafeReason(s: string): string | null {
-  if (LINK.test(s)) return "link";
-  if (EMAIL.test(s)) return "email";
-  if (MARKUP.test(s)) return "markup";
-  if (ROLE.test(s)) return "role";
+  const cleaned = cleanForMatching(s, 4_096);
+  const skel = skeleton(cleaned);
+  const flat = skel.replaceAll("\n", " ");
+  if (LINK.test(skel) || LINK.test(cleaned)) return "link";
+  if (EMAIL.test(skel) || EMAIL.test(cleaned)) return "email";
+  if (MARKUP.test(cleaned)) return "markup";
+  if (ROLE.test(flat)) return "role";
+  if (ADDRESSED.test(flat.trim())) return "addressed";
   if (instructionPatterns(s).length > 0) return "instruction";
   return null;
 }

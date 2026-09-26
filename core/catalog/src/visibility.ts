@@ -586,12 +586,13 @@ export async function viewObjects(
       zone: row.zone,
       zoneId: row.zoneId,
     };
-    const canRead = authz.authorize({
+    const readDecision = authz.authorize({
       principal,
       action: "read",
       resource,
       client: request.client,
-    }).allow;
+    });
+    const canRead = readDecision.allow;
     if (!canRead && !member) continue;
     if (options.search === true) {
       // No permit is fine (members find by level); a forbid or an error takes the file out.
@@ -614,6 +615,8 @@ export async function viewObjects(
       exposure: level.exposure,
       clientTrust: request.client.trust,
       wantsContent,
+      // A forbid (not merely no permit) takes content-derived fields off a non-reader's card.
+      readForbidden: readDecision.kind === "forbid" || readDecision.kind === "error",
     });
     // Asked for content: a file this client may only see the card of is left out. A reader the
     // rules let open it, refused only by its exposure, is a refusal worth recording (T-604).

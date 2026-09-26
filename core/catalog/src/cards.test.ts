@@ -24,9 +24,11 @@ import { modelVocabulary, readCard, saveCard } from "./cards.js";
 import { viewObject } from "./read.js";
 import {
   applyInjectionFlag,
+  clearInjectionReview,
   hasInjectionFlag,
   INJECTION_DETECTOR,
-  RiskVocabularyError,
+  injectionReviewOf,
+  markNotInjection,
 } from "./risk.js";
 import { applyRuleTags } from "./rules.js";
 import { proposeTag } from "./tagging.js";
@@ -281,6 +283,54 @@ describe("the summary on cards", () => {
   });
 });
 
+describe("a non-reader's card of a readable file", () => {
+  it("carries the summary, unless a policy forbids them read", async () => {
+    await inTenant((tx) => saveCard(tx, t.tenantId, summarized("local")));
+    await inTenant((tx) =>
+      tx.update(tenants).set({ defaultVisibility: "readable" }).where(eq(tenants.id, t.tenantId)),
+    );
+    try {
+      const stranger: AuthzPrincipal = { ...reader(), tagGrants: [] };
+      const viewWith = async (kind: "no-permit" | "forbid" | "error") => {
+        const fake = {
+          authorize: () => ({ allow: false, kind, reason: kind, policies: [] }),
+        } as unknown as Authorizer;
+        const [v] = await db.withTenant(
+          t.tenantId,
+          (tx) =>
+            viewObjects(
+              tx,
+              t.tenantId,
+              fake,
+              { principal: stranger, client: { id: "app", trust: "first-party" } },
+              [t.objectId],
+            ),
+          VIEW_TRANSACTION,
+        );
+        return v as CardView;
+      };
+      expect(await viewWith("no-permit")).toMatchObject({
+        shape: "card",
+        readable: false,
+        metadataOnly: false,
+        summary: "An invoice from Acme for Q3.",
+      });
+      for (const kind of ["forbid", "error"] as const) {
+        const v = await viewWith(kind);
+        expect(v, kind).toMatchObject({ shape: "card", readable: false, metadataOnly: true });
+        expect(v, kind).not.toHaveProperty("summary");
+      }
+    } finally {
+      await inTenant((tx) =>
+        tx
+          .update(tenants)
+          .set({ defaultVisibility: "discoverable" })
+          .where(eq(tenants.id, t.tenantId)),
+      );
+    }
+  });
+});
+
 describe("the injection flag", () => {
   it("adds the trusted flag, keeps it, and clears only its own", async () => {
     expect(await inTenant((tx) => applyInjectionFlag(tx, t.tenantId, t.objectId, false))).toBe(
@@ -353,34 +403,60 @@ describe("the injection flag", () => {
     expect(await inTenant((tx) => hasInjectionFlag(tx, t.tenantId, t.objectId))).toBe(true);
   });
 
-  it("fails closed without the vocabulary: no approved metadata-only risk:injection", async () => {
+  it("never depends on the tenant's vocabulary: missing or loosened, it is put back", async () => {
     const other = await seedTenant(db, 2);
-    await expect(
-      db.withTenant(other.tenantId, (tx) =>
-        applyInjectionFlag(tx, other.tenantId, other.objectId, true),
-      ),
-    ).rejects.toBeInstanceOf(RiskVocabularyError);
-    await db.withTenant(other.tenantId, async (tx) => {
-      await tx.insert(facets).values({ tenantId: other.tenantId, key: "risk", label: "Risk" });
-      await tx.insert(facetValues).values({
-        tenantId: other.tenantId,
-        facet: "risk",
-        value: "injection",
-        label: "x",
-        approved: true,
-        exposure: "local-only",
-      });
-    });
-    await expect(
-      db.withTenant(other.tenantId, (tx) =>
-        applyInjectionFlag(tx, other.tenantId, other.objectId, true),
-      ),
-    ).rejects.toThrow("apply the starter pack");
-    // Clearing needs no vocabulary.
+    const inOther = <T>(work: (tx: Tx) => Promise<T>) => db.withTenant(other.tenantId, work);
+    // No risk facet at all (a tenant from before migration 0046, or a test seed).
     expect(
-      await db.withTenant(other.tenantId, (tx) =>
-        applyInjectionFlag(tx, other.tenantId, other.objectId, false),
-      ),
-    ).toBe("not-flagged");
+      await inOther((tx) => applyInjectionFlag(tx, other.tenantId, other.objectId, true)),
+    ).toBe("flagged");
+    const value = () =>
+      inOther((tx) => tx.select().from(facetValues).where(eq(facetValues.facet, "risk")));
+    expect(await value()).toMatchObject([{ approved: true, exposure: "metadata-only" }]);
+    // An admin loosened it: the next flag restores it.
+    await inOther(async (tx) => {
+      await tx
+        .update(facetValues)
+        .set({ exposure: "full", approved: false })
+        .where(eq(facetValues.facet, "risk"));
+      await applyInjectionFlag(tx, other.tenantId, other.objectId, false);
+    });
+    expect(
+      await inOther((tx) => applyInjectionFlag(tx, other.tenantId, other.objectId, true)),
+    ).toBe("flagged");
+    expect(await value()).toMatchObject([{ approved: true, exposure: "metadata-only" }]);
+  });
+
+  it("respects a person's 'not an injection' decision, across edits, until withdrawn", async () => {
+    const by = `user:${t.userId}`;
+    await inTenant((tx) => applyInjectionFlag(tx, t.tenantId, t.objectId, true));
+    expect(
+      await inTenant((tx) => markNotInjection(tx, t.tenantId, { objectId: t.objectId, by })),
+    ).toBe(true);
+    expect(await inTenant((tx) => hasInjectionFlag(tx, t.tenantId, t.objectId))).toBe(false);
+    expect(await inTenant((tx) => injectionReviewOf(tx, t.tenantId, t.objectId))).toMatchObject({
+      reviewedBy: by,
+    });
+    // The detector says injection again (a later version): the decision stands.
+    expect(await inTenant((tx) => applyInjectionFlag(tx, t.tenantId, t.objectId, true))).toBe(
+      "not-flagged",
+    );
+    // Deciding again changes nothing more; a person's own flag is theirs to keep.
+    expect(
+      await inTenant((tx) => markNotInjection(tx, t.tenantId, { objectId: t.objectId, by })),
+    ).toBe(false);
+    expect(await inTenant((tx) => clearInjectionReview(tx, t.tenantId, t.objectId))).toBe(true);
+    expect(await inTenant((tx) => clearInjectionReview(tx, t.tenantId, t.objectId))).toBe(false);
+    expect(await inTenant((tx) => clearInjectionReview(tx, t.tenantId, "nope"))).toBe(false);
+    expect(await inTenant((tx) => injectionReviewOf(tx, t.tenantId, "nope"))).toBe(null);
+    expect(await inTenant((tx) => applyInjectionFlag(tx, t.tenantId, t.objectId, true))).toBe(
+      "flagged",
+    );
+    await expect(
+      inTenant((tx) => markNotInjection(tx, t.tenantId, { objectId: t.objectId, by: "model:x" })),
+    ).rejects.toThrow("by must be");
+    await expect(
+      inTenant((tx) => markNotInjection(tx, t.tenantId, { objectId: "x", by })),
+    ).rejects.toThrow("not an object id");
   });
 });

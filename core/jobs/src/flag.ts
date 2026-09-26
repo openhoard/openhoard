@@ -15,9 +15,10 @@ import type { EnrichStep, EnrichTarget } from "./enrich.js";
  * a failed one, a zone that isn't extracted) it scores the name alone. The job's output and log
  * carry the verdict's pattern ids and score, never the text that matched.
  *
- * A tenant without the `risk:injection` vocabulary can't be flagged: the step throws
- * (RiskVocabularyError) and the job retries, leaving the version unprocessed (hidden,
- * metadata-only) until an admin applies the starter pack. Clean files are unaffected.
+ * `risk:injection` is built-in vocabulary, put back before every flag (core/db
+ * ensureBuiltInVocabulary()), so the step never waits on an admin or leaves a version hidden for
+ * want of it. An object a person marked "not an injection" (core/catalog markNotInjection()) is
+ * not flagged, whatever the score.
  */
 
 export interface FlagStepOptions {

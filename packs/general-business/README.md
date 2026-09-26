@@ -19,8 +19,9 @@ receive its content.
 it carries instructions for an AI (hidden text with instructions, "ignore all previous
 instructions", fake tool calls…). The value sets `exposure: metadata-only` and nothing else: AI
 clients get a metadata-only card and no content, no model summarizes the file, and people in
-OpenHoard's own apps still see and open it as before. Without this value in a tenant, flagged
-files stay unprocessed (hidden) until the pack is applied: keep it when you edit the pack.
+OpenHoard's own apps still see and open it as before. It is built-in vocabulary: every tenant
+has it whether or not this pack is applied, and OpenHoard puts it back (approved,
+metadata-only) before it flags a file, so editing it here changes nothing lasting.
 
 **Rules.** Department folders (`**/Finance/**`, `**/HR/**`, …) tag the department. HR files are
 also tagged `sensitivity:confidential`. `**/Confidential/**` sets confidentiality. Contract and

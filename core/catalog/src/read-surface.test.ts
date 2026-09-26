@@ -36,6 +36,10 @@ const SURFACE = {
     // Enrichment's injection-flag step, through its guarded write (T-408).
     "applyInjectionFlag",
     "applyPack",
+    // A person's "not an injection" decision and its withdrawal (T-408); the API authorizes the
+    // owner or an admin and audits it.
+    "clearInjectionReview",
+    "markNotInjection",
     "applyRuleTags",
     "approveReview",
     "clearPrimaryTag",
@@ -69,6 +73,7 @@ const SURFACE = {
     "explainAccess",
     // For enrichment (core/jobs): whether a file carries the injection flag (T-408).
     "hasInjectionFlag",
+    "injectionReviewOf",
     "explainLevels",
     "levelsFor",
     "listActivity",
@@ -120,7 +125,6 @@ const SURFACE = {
     "MAX_OBJECT_IDS",
     "PackError",
     "REPEAT_WINDOW_MS",
-    "RiskVocabularyError",
     "SEARCH_CANDIDATES",
     "TagError",
     "VIEW_TRANSACTION",
