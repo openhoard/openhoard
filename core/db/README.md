@@ -127,6 +127,48 @@ CREATE DATABASE openhoard OWNER openhoard TEMPLATE template0 ENCODING 'UTF8'
 CREATE EXTENSION vector;  -- pgvector is not a trusted extension
 ```
 
+pgvector doesn't mark itself trusted, so only a superuser can create it, and OpenHoard never
+connects as one. Migration 0051 checks for it (and tries to create it, in case a later pgvector
+is trusted or the role was allowed); without it the migrations stop with the instruction above
+(`pgvector is not installed in database …`, SQLSTATE 55000) instead of failing later on an
+unknown type. PGlite creates it when it opens.
+
+**Tests on PostgreSQL** (`OPENHOARD_TEST_POSTGRES_URL`) create a database per test as an ordinary
+role with CREATEDB, which can't create the extension either. They copy a template that has it,
+`openhoard_test_template`, which a superuser makes once per server (CI's postgres job does):
+
+```sql
+CREATE DATABASE openhoard_test_template TEMPLATE template0 ENCODING 'UTF8'
+  LOCALE_PROVIDER builtin BUILTIN_LOCALE 'C.UTF-8';
+ALTER DATABASE openhoard_test_template IS_TEMPLATE true;
+\c openhoard_test_template
+CREATE EXTENSION vector;
+```
+
+Without the template, test databases come from template0 and every migration run stops at 0051.
+
+## Search storage
+
+- **`search_documents`** (T-501): one per object, the weighted words of its current version
+  (title A, tag values B, model summary C, the first 200,000 characters of extracted text D),
+  split by who may be matched on what: the real title and every tag (readers), trusted tags
+  (a reader's metadata-only card), the title a non-reader is shown and public trusted tags
+  (everyone else), and the content columns with the summary's provider kind. Kept by triggers
+  (migration 0053) on objects, tags, facets' `public`, versions, extracts and cards, so every
+  code path keeps it current; a new version empties the content columns until its own text
+  and summary arrive. Two GIN indexes, on exactly the expressions core/catalog's search uses.
+  The text search configuration is `simple`: split and lower-cased, no stemming and no stop
+  words, in every language alike (tenants write in many, often in one file; S1 measured it).
+  "invoices" doesn't find "invoice", and accents count. Dots, underscores and slashes split
+  words first.
+- **`version_embeddings`** (T-407): vectors per version, model (`<provider id>/<model>`), part
+  (summary or chunk) and seq, with the size (`dimensions`, checked against the vector), the
+  provider's kind and the text's SHA-256. One untyped `vector` column holds every model's
+  vectors; partial HNSW indexes (cosine, m 16, ef_construction 64) cover the common sizes, 384,
+  768, 1024 and 1536 (`INDEXED_DIMENSIONS`): `embedding::vector(768)` where `dimensions = 768`.
+  Other sizes are searched exactly. One index per size serves every tenant; core/catalog's
+  search filters by tenant and access with pgvector's iterative scan.
+
 OpenHoard then connects as `openhoard`, runs the migrations (so it owns the tables) and every
 query. Each connection runs in UTC, with limits that `openDatabase({ postgres: … })` can change
 (0 turns a timeout off):

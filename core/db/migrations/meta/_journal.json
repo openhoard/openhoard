@@ -358,6 +358,27 @@
       "when": 1790446964380,
       "tag": "0050_built_in_vocabulary_guard",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1790449754889,
+      "tag": "0051_require_pgvector",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1790449755928,
+      "tag": "0052_search_documents",
+      "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1790449756953,
+      "tag": "0053_search_index",
+      "breakpoints": true
     }
   ]
 }

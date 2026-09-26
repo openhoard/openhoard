@@ -4,6 +4,7 @@ import {
   bigint,
   boolean,
   check,
+  customType,
   foreignKey,
   index,
   integer,
@@ -1285,6 +1286,171 @@ export const versionCards = pgTable(
   ],
 );
 
+/** Postgres full-text documents. Written by triggers only (migration 0053), never by the app. */
+const tsvector = customType<{ data: string }>({ dataType: () => "tsvector" });
+
+/**
+ * pgvector's `vector`, without a fixed dimension: one table holds every embedding model's
+ * vectors, each row checked against its own `dimensions`. Read and written as number arrays.
+ */
+const vector = customType<{ data: number[]; driverData: string }>({
+  dataType: () => "vector",
+  toDriver: (v) => `[${v.join(",")}]`,
+  fromDriver: (v) => (typeof v === "string" ? (JSON.parse(v) as number[]) : (v as number[])),
+});
+
+/** How OpenHoard's full-text search splits and folds words: see searchDocuments. */
+export const SEARCH_TEXT_CONFIG = "simple";
+/** Extracted text indexed per version, in characters: the rest of a long text isn't searched. */
+export const SEARCH_BODY_CHARS = 200_000;
+
+/**
+ * The full-text search document of each object (T-501): the weighted words of its current
+ * version, split by what each caller may be matched on (T-504, T-604), so no search matches a
+ * file on anything its caller isn't shown.
+ *
+ * | column            | weight | from                                                        |
+ * | ----------------- | ------ | ----------------------------------------------------------- |
+ * | `title_tsv`       | A      | the title (readers)                                         |
+ * | `other_title_tsv` | A      | the title a non-reader is shown (visibility nonReaderTitle) |
+ * | `tags_tsv`        | B      | every tag's value (readers)                                 |
+ * | `trusted_tags_tsv`| B      | trusted tags' values (a reader's metadata-only card)        |
+ * | `public_tags_tsv` | B      | trusted tags of public facets (non-readers)                 |
+ * | `summary_tsv`     | C      | the current version's model summary (content)               |
+ * | `body_tsv`        | D      | the current version's extracted text, its first 200,000     |
+ * |                   |        | characters (content)                                        |
+ *
+ * The text search configuration is `simple`: words are split and lower-cased, nothing is
+ * stemmed and no stop word is dropped, in every language alike. Tenants write in many
+ * languages, often in one file, and a stemmer for one language mangles the others ("simple" is
+ * what spike S1 measured, too). So "invoices" doesn't find "invoice", and accents count
+ * ("cafe" doesn't find "café"); no unaccent dictionary, which PGlite doesn't ship. Dots,
+ * underscores and slashes split words first, as the title search always has
+ * (`Q3_forecast.xlsx` has the words q3, forecast and xlsx).
+ *
+ * Kept current by database triggers (migration 0053), whatever code path changes the inputs:
+ * an object's insert or rename or display title, a tag added or removed, a facet made public or
+ * not, a new version (whose extract and summary don't exist yet, so its content columns empty
+ * out), and an extract or a card written. `version_id` names the version the content columns
+ * come from. The content columns are content: core/catalog matches them only for a reader
+ * whose card isn't metadata-only, and the summary only while the file's exposure still allows
+ * the provider that wrote it (`summary_provider_kind`).
+ */
+export const searchDocuments = pgTable(
+  "search_documents",
+  {
+    tenantId: text("tenant_id").notNull(),
+    objectId: text("object_id").notNull(),
+    versionId: text("version_id"),
+    titleTsv: tsvector("title_tsv")
+      .notNull()
+      .default(sql`''::tsvector`),
+    otherTitleTsv: tsvector("other_title_tsv")
+      .notNull()
+      .default(sql`''::tsvector`),
+    tagsTsv: tsvector("tags_tsv")
+      .notNull()
+      .default(sql`''::tsvector`),
+    trustedTagsTsv: tsvector("trusted_tags_tsv")
+      .notNull()
+      .default(sql`''::tsvector`),
+    publicTagsTsv: tsvector("public_tags_tsv")
+      .notNull()
+      .default(sql`''::tsvector`),
+    summaryTsv: tsvector("summary_tsv")
+      .notNull()
+      .default(sql`''::tsvector`),
+    summaryProviderKind: text("summary_provider_kind", { enum: PROVIDER_KINDS }),
+    bodyTsv: tsvector("body_tsv")
+      .notNull()
+      .default(sql`''::tsvector`),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.objectId] }),
+    foreignKey({
+      name: "search_documents_object_fk",
+      columns: [t.tenantId, t.objectId],
+      foreignColumns: [objects.tenantId, objects.id],
+    }).onDelete("cascade"),
+    check(
+      "search_documents_provider_kind_valid",
+      sql.raw(
+        `summary_provider_kind is null or summary_provider_kind in (${quoted(PROVIDER_KINDS)})`,
+      ),
+    ),
+  ],
+);
+
+/** What part of a version an embedding is of. */
+export const EMBEDDING_PARTS = ["summary", "chunk"] as const;
+/**
+ * Dimensions with an HNSW index (migration 0053): the common embedding sizes (all-MiniLM and
+ * bge-small 384, nomic-embed-text 768, mxbai-embed-large 1024, OpenAI's small model 1536).
+ * Vectors of other sizes are stored and searched exactly, without an index.
+ */
+export const INDEXED_DIMENSIONS = [384, 768, 1024, 1536] as const;
+/** The most dimensions a stored vector may have (pgvector's own limit is 16,000). */
+export const MAX_EMBEDDING_DIMENSIONS = 16_000;
+
+/**
+ * Embeddings of a version's content (T-407): its summary and chunks of its extracted text, each
+ * a row, per embedding model. `model` is `<provider id>/<model name>`: a change of model (or of
+ * provider) is a new model, whose vectors are written beside the old ones, so search keeps
+ * working with the old model's until a re-embed (core/jobs reembed()) has done the tenant, and
+ * old models' rows are pruned (core/catalog pruneEmbeddings()). `dimensions` is the vector's
+ * size, checked; `text_hash` (SHA-256 of the text embedded) lets a re-run keep what hasn't
+ * changed. The vectors are content: core/catalog uses them only for a reader whose card isn't
+ * metadata-only (T-604).
+ *
+ * Written only by enrichment's embed step (core/jobs), through its guarded write. It goes with
+ * its version when the object is purged.
+ */
+export const versionEmbeddings = pgTable(
+  "version_embeddings",
+  {
+    tenantId: text("tenant_id").notNull(),
+    versionId: text("version_id").notNull(),
+    objectId: text("object_id").notNull(),
+    model: text("model").notNull(),
+    part: text("part", { enum: EMBEDDING_PARTS }).notNull(),
+    /** The chunk's place in the text (0 for the summary). */
+    seq: integer("seq").notNull(),
+    dimensions: integer("dimensions").notNull(),
+    providerKind: text("provider_kind", { enum: PROVIDER_KINDS }).notNull(),
+    textHash: text("text_hash").notNull(),
+    embedding: vector("embedding").notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.versionId, t.model, t.part, t.seq] }),
+    foreignKey({
+      name: "version_embeddings_version_fk",
+      columns: [t.tenantId, t.objectId, t.versionId],
+      foreignColumns: [versions.tenantId, versions.objectId, versions.id],
+    }).onDelete("cascade"),
+    index("version_embeddings_object_idx").on(t.tenantId, t.objectId, t.model),
+    index("version_embeddings_model_idx").on(t.tenantId, t.model, t.versionId),
+    check("version_embeddings_part_valid", sql.raw(`part in (${quoted(EMBEDDING_PARTS)})`)),
+    check(
+      "version_embeddings_model_format",
+      sql`model ~ '^[a-z0-9][a-z0-9-]{0,62}/[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$'`,
+    ),
+    check("version_embeddings_seq_range", sql`seq between 0 and 1000`),
+    check(
+      "version_embeddings_dimensions",
+      sql.raw(
+        `dimensions between 1 and ${MAX_EMBEDDING_DIMENSIONS} and vector_dims(embedding) = dimensions`,
+      ),
+    ),
+    check(
+      "version_embeddings_provider_kind_valid",
+      sql.raw(`provider_kind in (${quoted(PROVIDER_KINDS)})`),
+    ),
+    check("version_embeddings_text_hash_format", sql`text_hash ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+
 /**
  * "Reviewed: not a prompt injection" (T-408): a tenant admin looked at a file the injection
  * detector flagged (or would flag) and decided it is fine, for the content they looked at. Not
@@ -1718,6 +1884,8 @@ export const tables = {
   activityEvents,
   versionExtracts,
   versionCards,
+  searchDocuments,
+  versionEmbeddings,
   modelUsage,
   injectionReviews,
   sourceSyncs,

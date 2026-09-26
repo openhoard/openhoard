@@ -78,11 +78,17 @@ jobs:
           sudo apt-get install -y -qq postgresql-common
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y -qq postgresql-18 postgresql-18-pgvector
-      - name: Start a cluster and create an ordinary (non-superuser) user
+      # pgvector isn't a trusted extension: the superuser creates it once, in a template the
+      # ordinary user's test databases are copied from (core/db testing-postgres.ts).
+      - name: Start a cluster, create an ordinary (non-superuser) user and the test template
         run: |
           sudo pg_createcluster 18 ci --port 5499 --start
           sudo -u postgres psql -p 5499 -v ON_ERROR_STOP=1 \
-            -c "create role openhoard_ci login createdb password 'ci'"
+            -c "create role openhoard_ci login createdb password 'ci'" \
+            -c "create database openhoard_test_template template template0 encoding 'UTF8' locale_provider builtin builtin_locale 'C.UTF-8'" \
+            -c "alter database openhoard_test_template is_template true"
+          sudo -u postgres psql -p 5499 -d openhoard_test_template -v ON_ERROR_STOP=1 \
+            -c "create extension vector"
       - run: pnpm install --frozen-lockfile
       # Workspace packages the suites import are used from their build output.
       - run: >-
