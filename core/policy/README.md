@@ -47,7 +47,11 @@ wins, else the tenant default; untrusted tags only tighten; unprocessed is `meta
   and there is no content. A non-reader's card of a readable file follows the same rule.
   OpenHoard's own apps (`first-party`) aren't limited by exposure.
 - **Enrichment** (`mayProcess(exposure, providerKind)`): the same table, for the model provider a
-  step sends content to (core/jobs).
+  step sends content to (core/jobs), at the exposure core/catalog `enrichmentExposure()` gives
+  (capped at `commercial-only` until a trusted tag classifies the file).
+- **Metadata** on a metadata-only card is what isn't the content in other words: title, type,
+  owner, dates, and trusted tags. An unreviewed model tag is a model's reading of the content,
+  so it is left out, and search neither counts nor matches it for that client.
 - **Plugins**: core/sandbox `mayReceiveContent()` adds the manifest's `max_exposure`.
 - Anything unknown (a trust label, a provider kind, an exposure) gets metadata only.
 

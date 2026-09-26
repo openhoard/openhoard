@@ -131,10 +131,14 @@ applies the file's levels (T-206). The read API is built on it, in a snapshot (`
   AI client whose trust label the exposure doesn't reach is `metadataOnly`: title, type, owner,
   tags and dates, never what was derived from the content (summaries and extracted fields attach
   only when it is false, T-404/T-405). OpenHoard's own apps aren't limited by exposure.
+  A metadata-only card shows trusted tags only (no unreviewed model tag, a model's reading of the
+  content), and search counts facets from, and matches tags against, what the card shows.
   `enrichmentExposure(objectId)` is the exposure the tags give a file before it is processed, for
-  the enrichment pipeline's model steps (core/jobs); everyone else sees an unprocessed file as
-  `metadata-only`. Search matches titles and tags only, which exposure doesn't cover; content
-  search (T-501) must match content only where the client's trust reaches the exposure.
+  the enrichment pipeline's model steps (core/jobs): capped at `commercial-only` until a trusted
+  tag gives it one, so an unclassified file never reaches a consumer provider whatever the
+  tenant default. Everyone else sees an unprocessed file as `metadata-only`. Search matches
+  titles and tags only; content search (T-501) must match content only where the client's trust
+  reaches the exposure.
 - Each checks for a snapshot before it reads anything, and treats input that can't name
   anything (a malformed id, a NUL byte) as unknown.
 

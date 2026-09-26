@@ -367,6 +367,19 @@ describe("the worker", () => {
       return job.output as { outcome: string; withheld?: unknown[] };
     };
 
+    // A permissive default doesn't reach a consumer provider while nothing trusted classified
+    // the file: it is capped at commercial-only.
+    await setDefault("full");
+    expect(await run("Memo.docx")).toEqual({
+      outcome: "processed",
+      withheld: [
+        { step: "summarize-consumer", provider: "consumer-model", exposure: "commercial-only" },
+      ],
+    });
+    expect(ran).toEqual(["commercial:Memo.docx", "local:Memo.docx"]);
+    ran.length = 0;
+    answers.length = 0;
+
     // The tenant default decides for what no tag sets: commercial-only.
     await setDefault("commercial-only");
     expect(await run("Notes.docx")).toEqual({

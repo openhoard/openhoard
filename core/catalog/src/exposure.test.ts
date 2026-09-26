@@ -16,10 +16,11 @@ import {
   type Exposure,
   type Visibility,
 } from "@openhoard/core-policy";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ActivityBuffer } from "./activity.js";
 import { openContent, viewObject } from "./read.js";
+import { searchObjects } from "./search.js";
 import {
   enrichmentExposure,
   markProcessed,
@@ -63,6 +64,16 @@ beforeAll(async () => {
         exposure,
       })),
     );
+    await tx.insert(facets).values({ tenantId: t.tenantId, key: "topic", label: "Topic" });
+    await tx.insert(facetValues).values(
+      ["budget", "layoffs"].map((value) => ({
+        tenantId: t.tenantId,
+        facet: "topic",
+        value,
+        label: value,
+        approved: true,
+      })),
+    );
     await markProcessed(tx, t.tenantId, { versionId: t.versionId, title: "Report 1.docx" });
   });
 });
@@ -71,7 +82,9 @@ beforeEach(async () => {
   await inTenant(async (tx) => {
     await tx
       .delete(objectTags)
-      .where(and(eq(objectTags.tenantId, t.tenantId), eq(objectTags.facet, "level")));
+      .where(
+        and(eq(objectTags.tenantId, t.tenantId), inArray(objectTags.facet, ["level", "topic"])),
+      );
     await tx
       .update(tenants)
       .set({ defaultVisibility: "discoverable", defaultExposure: "full" })
@@ -232,6 +245,65 @@ describe("exposure on cards and open (T-604)", () => {
   });
 });
 
+describe("metadata-only cards and search (T-604)", () => {
+  const topic = (value: string, source: "rule" | "model") =>
+    inTenant((tx) =>
+      tx.insert(objectTags).values({
+        tenantId: t.tenantId,
+        objectId: t.objectId,
+        facet: "topic",
+        value,
+        source,
+        appliedBy: `${source}:test`,
+        confidence: 1,
+      }),
+    );
+  const search = (trust: Trust, query: string) =>
+    db.withTenant(
+      t.tenantId,
+      (tx) =>
+        searchObjects(
+          tx,
+          t.tenantId,
+          authz,
+          { principal: reader(), client: { id: `${trust}-app`, trust } },
+          { query },
+        ),
+      VIEW_TRANSACTION,
+    );
+
+  it("shows, counts and matches no unreviewed model tag where the card is metadata only", async () => {
+    await tag("commercial-only");
+    await topic("budget", "rule");
+    // A model read the content and said what it is about: content-derived, and unreviewed.
+    await topic("layoffs", "model");
+    const consumer = await through("consumer");
+    expect(consumer.card?.metadataOnly).toBe(true);
+    expect(consumer.card?.tags).toContain("topic:budget");
+    expect(consumer.card?.tags).not.toContain("topic:layoffs");
+    const commercial = await through("commercial");
+    expect(commercial.card?.tags).toContain("topic:layoffs");
+
+    // Facets count what each card shows.
+    expect((await search("consumer", "")).facets.topic).toEqual({ budget: 1 });
+    expect((await search("commercial", "")).facets.topic).toEqual({ budget: 1, layoffs: 1 });
+    // Searching for the model's tag finds nothing through the consumer client.
+    expect((await search("consumer", "topic:layoffs")).hits).toEqual([]);
+    expect((await search("commercial", "topic:layoffs")).hits).toHaveLength(1);
+    expect((await search("consumer", "topic:budget")).hits).toHaveLength(1);
+
+    // Reviewed by a person, the tag is metadata, shown and matched everywhere.
+    await inTenant((tx) =>
+      tx
+        .update(objectTags)
+        .set({ reviewed: true })
+        .where(and(eq(objectTags.tenantId, t.tenantId), eq(objectTags.value, "layoffs"))),
+    );
+    expect((await through("consumer")).card?.tags).toContain("topic:layoffs");
+    expect((await search("consumer", "topic:layoffs")).hits).toHaveLength(1);
+  });
+});
+
 describe("enrichmentExposure", () => {
   it("is what the tags say before the file is processed, not the unprocessed default", async () => {
     await inTenant((tx) =>
@@ -246,9 +318,21 @@ describe("enrichmentExposure", () => {
         (tx) => enrichmentExposure(tx, t.tenantId, t.objectId),
         VIEW_TRANSACTION,
       );
-    expect(await exposure()).toBe("full");
+    // Unclassified, a permissive default is capped at commercial-only: no consumer provider.
+    expect(await exposure()).toBe("commercial-only");
+    await tag("full", "model");
+    expect(await exposure()).toBe("commercial-only");
+    await inTenant((tx) =>
+      tx
+        .delete(objectTags)
+        .where(and(eq(objectTags.tenantId, t.tenantId), eq(objectTags.facet, "level"))),
+    );
+    // A stricter default stays.
+    await setDefault("local-only");
+    expect(await exposure()).toBe("local-only");
     await setDefault("commercial-only");
     expect(await exposure()).toBe("commercial-only");
+    // A trusted tag decides, and lifts the cap.
     await tag("full");
     expect(await exposure()).toBe("full");
     // A model's guess that it is sensitive counts at once.

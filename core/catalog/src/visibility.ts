@@ -168,6 +168,11 @@ export async function explainLevels(
  * trusted ones deciding and the rest only tightening, over the tenant default, don't. So the
  * rule tagger's tags, which run first, and any model's guess that the file is sensitive count
  * before the next step sends anything. Needs one snapshot, like levelsFor().
+ *
+ * Until a trusted tag sets the file's exposure, the tenant default alone doesn't open it to
+ * every provider: it is capped at `commercial-only`, so a file nothing has classified never
+ * goes to a consumer-terms provider, however permissive the default (a stricter default, such
+ * as `local-only`, stays). A trusted `full` tag lifts the cap.
  */
 export async function enrichmentExposure(
   tx: Tx,
@@ -185,8 +190,16 @@ export async function enrichmentExposure(
     ).map((r) => r.id),
     processed: new Map([[objectId, true]]),
   });
-  return levels.get(objectId)?.exposure ?? null;
+  const found = levels.get(objectId);
+  if (!found) return null;
+  const classified = found.contributions.some((c) => c.trusted && c.exposure !== null);
+  return classified
+    ? found.exposure
+    : mostRestrictiveExposure([found.exposure, UNCLASSIFIED_CEILING]);
 }
+
+/** The most an unclassified file's content is exposed to enrichment (enrichmentExposure()). */
+const UNCLASSIFIED_CEILING: Exposure = "commercial-only";
 
 /**
  * Levels of `ids` (distinct, at most MAX_OBJECT_IDS), read in one snapshot the caller checked.
@@ -404,7 +417,10 @@ export interface TitleOnlyView extends ViewBase {
 export interface CardView extends ViewBase {
   shape: "card";
   title: string;
-  /** Every tag for a reader; trusted public-facet tags only for a non-reader. */
+  /**
+   * Every tag for a reader, trusted ones only on a metadata-only card (no unreviewed model tag);
+   * trusted public-facet tags only for a non-reader.
+   */
   tags: string[];
   /** Whether the caller can read the file (and so open it). */
   readable: boolean;
@@ -592,7 +608,10 @@ export async function viewObjects(
       }
       continue;
     }
-    const shown = canRead ? tags.all : tags.public;
+    // A reader sees every tag, unless the card is metadata only (T-604): an unreviewed model tag
+    // is the model's reading of the content, which this client may not have. Trusted tags (rules,
+    // packs, people, reviewed model tags) are metadata. Anyone else sees trusted public tags.
+    const shown = canRead ? (decision.metadataOnly ? tags.grantable : tags.all) : tags.public;
     const base = {
       id: row.id,
       mime: current.get(row.id)?.mime ?? "application/octet-stream",

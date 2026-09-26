@@ -50,7 +50,8 @@ import { and, eq, max } from "drizzle-orm";
  * `metadata-only`, which would stop every model). A step the exposure doesn't let through is
  * skipped, and the job's output and the log say so; `local-only` content reaches local providers
  * only, `metadata-only` content none. The rule tagger runs first, so its tags count before any
- * model sees the file. The tenant default decides for a file nothing has tagged yet.
+ * model sees the file. For a file no trusted tag has given an exposure, the tenant default
+ * decides, capped at `commercial-only`: an unclassified file never goes to a consumer provider.
  */
 
 /** What one enrichment job is about, as read when it started. */

@@ -104,7 +104,8 @@ const PROVIDER_KINDS: readonly string[] = [
  * `metadata-only` to none. An unknown kind or exposure gets nothing.
  *
  * Enrichment asks with the exposure the file's tags give it (core/catalog
- * enrichmentExposure()), not the unprocessed default, which would stop every model step.
+ * enrichmentExposure()), not the unprocessed default, which would stop every model step; until a
+ * trusted tag classifies the file, that exposure is at most `commercial-only`.
  */
 export function mayProcess(exposure: Exposure, provider: ProviderKind): boolean {
   if (!PROVIDER_KINDS.includes(provider)) return false;

@@ -265,6 +265,8 @@ async function gatedMatches(
         ), matched as (
           select a.id, a.readable, a.updated_at,
                  (${textMatch(sql`a.title`)} and ${tagMatch(sql`true`)}) as as_reader,
+                 (${textMatch(sql`a.title`)}
+                   and ${tagMatch(sql`(ot.source <> 'model' or ot.reviewed)`)}) as as_trusted,
                  (${textMatch(prefix === undefined ? otherTitle : suggestedOther)}
                    and ${tagMatch(sql`f.public and (ot.source <> 'model' or ot.reviewed)`)}) as as_other,
                  ${rank(sql`a.title`)} as reader_rank,
@@ -272,7 +274,7 @@ async function gatedMatches(
             from candidates a
            where a.readable or (${member} and ${effectiveVisibility(tenantId)} >= 1)
         )
-        select id, readable, as_reader, as_other, reader_rank, other_rank from matched
+        select id, readable, as_reader, as_trusted, as_other, reader_rank, other_rank from matched
          where (readable and as_reader) or as_other
          order by case when readable and as_reader then reader_rank else other_rank end desc,
                   case when readable then updated_at end desc nulls last, id
@@ -295,7 +297,10 @@ async function gatedMatches(
     const reader = view.shape === "card" && view.readable;
     // A reader SQL didn't expect (a pack permit) was matched only as anyone else: that match
     // still counts, since what anyone may be shown tells a reader nothing new.
-    const asReader = row.as_reader && row.readable;
+    // A reader's metadata-only card (T-604) shows no unreviewed model tag, which a model derived
+    // from the content: it is matched on the tags it shows, as any view is.
+    const metadataOnly = view.shape === "card" && view.metadataOnly;
+    const asReader = (metadataOnly ? row.as_trusted : row.as_reader) && row.readable;
     if (reader ? !(asReader || row.as_other) : !row.as_other) return [];
     if (startsWord !== undefined && !startsWord.test(view.title)) return [];
     return [{ view, rank: Number(reader && asReader ? row.reader_rank : row.other_rank) }];
@@ -315,6 +320,8 @@ interface Candidate {
   id: string;
   readable: boolean;
   as_reader: boolean;
+  /** Matched as a reader, on trusted tags only: a metadata-only card's (T-604). */
+  as_trusted: boolean;
   as_other: boolean;
   reader_rank: number;
   other_rank: number;

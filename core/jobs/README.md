@@ -125,8 +125,12 @@ trusted tags decide, the rest only tighten, else the tenant default; not the unp
 - `context.mayProcess(provider)` asks the same question at any time: a step that takes long
   before it sends, or sends to more than one provider, asks again right before each send;
 - the rule tagger runs first, so its tags count before any model sees the file, and so does a
-  model's guess that the file is sensitive, the moment it is recorded. A file nothing has tagged
-  yet goes by the tenant default.
+  model's guess that the file is sensitive, the moment it is recorded;
+- a file no trusted tag has given an exposure yet goes by the tenant default, capped at
+  `commercial-only`: however permissive the default, an unclassified file's content never goes
+  to a `consumer` provider (a stricter default, such as `local-only`, stays). A trusted tag
+  (a rule's, a pack's, a person's, or a reviewed model tag) decides from then on, `full`
+  included.
 
 A step without a provider (the rule tagger, a text extractor) sends nothing out; one that does
 must declare it (T-404 adds the providers).
