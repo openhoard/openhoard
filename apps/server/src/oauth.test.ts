@@ -579,6 +579,23 @@ describe("bad requests", () => {
     expect(register.status).toBe(415);
   });
 
+  it("refuses a resource of a long run of slashes at the token endpoint, quickly", async () => {
+    const started = performance.now();
+    const res = await app.request(
+      `${PUBLIC}/oauth/token`,
+      form({
+        grant_type: "authorization_code",
+        client_id: CLIENT_ID,
+        code:
+          "ohac.ten_01k5xr3c8v0q6m2d4n7p9s1t3w.oac_01k5xr3c8v0q6m2d4n7p9s1t3w." + "a".repeat(43),
+        // URL-encoded, 18,000 slashes are 54 KB: inside the endpoint's 64 KiB body limit.
+        resource: `${PUBLIC}/${"/".repeat(18_000)}x`,
+      }),
+    );
+    expect(await res.json()).toMatchObject({ error: "invalid_target" });
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   it("refuses token requests that don't match their code", async () => {
     const { url, verifier } = authorizeUrl();
     const { answer } = await consent(new Browser(), url);
@@ -804,5 +821,11 @@ describe("client resolution", () => {
     expect(canonicalResource("HTTPS://Hoard.Example/mcp/")).toBe(RESOURCE);
     expect(canonicalResource("https://hoard.example/mcp#x")).toBeNull();
     expect(canonicalResource("nope")).toBeNull();
+    // Trailing slashes go in linear time, however many; past 2,048 characters it isn't parsed.
+    const started = performance.now();
+    expect(canonicalResource(`${RESOURCE}${"/".repeat(2000)}`)).toBe(RESOURCE);
+    expect(canonicalResource(`${RESOURCE}${"/".repeat(60_000)}`)).toBeNull();
+    expect(canonicalResource(`${RESOURCE}${"/".repeat(60_000)}x`)).toBeNull();
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 });

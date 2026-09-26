@@ -199,7 +199,9 @@ transaction open for long or starves the others.
 Every one of those decisions is in the audit log; the rows only matter while they can still be
 used, and a while after. OAuth rows are kept 30 days after they end so a replayed code or refresh
 token is still recognized (and revokes what it made); an OAuth grant goes only once no code
-points at it. SCIM tokens stay listed for admins 90 days after they stop working.
+points at it. After that, a replayed code or refresh token is just unknown, with no replay
+revocation: acceptable, as a code lives a minute and needs its PKCE verifier, and a grant is
+pruned only once it has ended, leaving nothing to revoke. SCIM tokens stay listed for admins 90 days after they stop working.
 
 **The sweep.** Enqueueing happens after ingest commits, so a crash in between loses the job, and
 the file would stay hidden for good. The sweep enqueues current versions left unprocessed for

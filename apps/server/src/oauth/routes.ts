@@ -91,15 +91,30 @@ interface ConsentRequest {
   expiresAt: number;
 }
 
-/** A canonical resource URI: lower-case scheme and host, no trailing slash; null with a fragment. */
+/** Longest resource URI taken (what oauth_codes and oauth_grants hold). */
+const MAX_RESOURCE = 2048;
+
+/**
+ * A canonical resource URI: lower-case scheme and host, no trailing slash; null with a fragment,
+ * or over {@link MAX_RESOURCE} characters. It arrives before anyone is known (the token
+ * endpoint), so the length is checked before parsing, and trailing slashes are trimmed by a loop:
+ * the regex `/\/+$/` retries from every slash of a long run, which is quadratic.
+ */
 export function canonicalResource(uri: string): string | null {
+  if (typeof uri !== "string" || uri.length > MAX_RESOURCE || uri.includes("#")) return null;
   try {
     const u = new URL(uri);
-    if (u.hash !== "" || uri.includes("#")) return null;
-    return `${u.protocol}//${u.host}${u.pathname.replace(/\/+$/, "")}${u.search}`;
+    if (u.hash !== "") return null;
+    return `${u.protocol}//${u.host}${withoutTrailingSlashes(u.pathname)}${u.search}`;
   } catch {
     return null;
   }
+}
+
+function withoutTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 0 && path.charCodeAt(end - 1) === 0x2f) end--;
+  return path.slice(0, end);
 }
 
 /**
@@ -602,6 +617,7 @@ export function mountOAuth(
         principal: check.principal,
         client: check.client,
         grantId: check.grantId,
+        tokenId: check.tokenId,
         scopes: check.scopes,
       });
       await next();

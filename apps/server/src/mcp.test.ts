@@ -528,7 +528,7 @@ describe("tools", () => {
   /** mountMcp on its own, with a bearer check that lets ana through as the approved client. */
   async function bare(tools: readonly McpTool[], deadlineMs: number) {
     const app = new Hono<AuthEnv>();
-    const { grantId } = await token();
+    const { grantId, accessToken } = await token();
     mountMcp(app, {
       db,
       version: "0.0.0",
@@ -550,6 +550,7 @@ describe("tools", () => {
           },
           client: { id: CLIENT_ID, trust: "commercial" },
           grantId,
+          tokenId: accessToken.split(".")[2] as string,
           scopes: ["files:read"],
         });
         await next();

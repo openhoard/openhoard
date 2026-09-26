@@ -474,11 +474,32 @@ describe("access tokens", () => {
     expect(await live(a.grantId)).toBe(true);
     expect(await live("ogr_not-an-id")).toBe(false);
     expect(await live(a.grantId.slice(0, -1) + (a.grantId.endsWith("0") ? "1" : "0"))).toBe(false);
+    // With its access token: a client's RFC 7009 revocation of that token alone ends it too.
+    const other = await tokens();
+    const tokenId = (token: string) => token.split(".")[2] as string;
+    const both = (x: { grantId: string; accessToken: string }) =>
+      db.withTenant(
+        t.tenantId,
+        (tx) => grantIsLive(tx, t.tenantId, x.grantId, { tokenId: tokenId(x.accessToken) }),
+        snap,
+      );
+    expect(await both(other)).toBe(true);
+    expect(await both({ ...other, accessToken: a.accessToken })).toBe(false);
+    expect(
+      await db.withTenant(
+        t.tenantId,
+        (tx) => grantIsLive(tx, t.tenantId, other.grantId, { tokenId: "oat_nope" }),
+        snap,
+      ),
+    ).toBe(false);
+    await write((tx) => revokeByToken(tx, t.tenantId, other.accessToken));
+    expect(await both(other)).toBe(false);
+    expect(await live(other.grantId)).toBe(true);
     const ended: EndedAccess[] = [];
     await write((tx) =>
       lockUser(tx, t.tenantId, ana.id, "user:admin", { onEnded: (e) => ended.push(e) }),
     );
-    expect(ended).toEqual([{ sessions: 0, oauthCodes: 1, oauthGrants: 1, apiKeys: 0 }]);
+    expect(ended).toEqual([{ sessions: 0, oauthCodes: 1, oauthGrants: 2, apiKeys: 0 }]);
     expect(await live(a.grantId)).toBe(false);
     expect((await redeem(pending)).ok).toBe(false);
     // Locked already: nothing ends, and nothing is reported.
@@ -642,5 +663,41 @@ describe("revocation and pruning", () => {
       tokens: (await tx.select().from(oauthTokens)).length,
     }));
     expect(counts).toEqual({ codes: 0, grants: 1, tokens: 0 });
+  });
+
+  it("keeps a grant a retained code still points at, and forgets a pruned grant's refresh tokens", async () => {
+    await approve();
+    const r = await tokens();
+    const rotated = await write((tx) =>
+      refreshGrant(tx, t.tenantId, r.refreshToken, { clientKey: client.clientKey }),
+    );
+    if (!rotated.ok) throw new Error(rotated.reason);
+    await write((tx) => revokeGrant(tx, t.tenantId, r.grantId, "user:admin"));
+    const grants = () => write(async (tx) => (await tx.select().from(oauthGrants)).length);
+    // The grant ended before this moment, but its code (a minute's life) hasn't: it stays, so a
+    // replay of that code would still be recognized.
+    const soon = new Date(Date.now() + 30_000);
+    expect(await write((tx) => pruneOAuth(tx, t.tenantId, soon))).toEqual({
+      codes: 0,
+      tokens: 0,
+      grants: 0,
+    });
+    expect(await grants()).toBe(1);
+    // Later, code and grant go together, the grant's tokens with it.
+    const later = new Date(Date.now() + 2 * 3600 * 1000);
+    expect(await write((tx) => pruneOAuth(tx, t.tenantId, later))).toMatchObject({
+      codes: 1,
+      grants: 1,
+    });
+    expect(await grants()).toBe(0);
+    // A refresh token presented after its grant is pruned, the rotated-out one included, is
+    // unknown: there is no grant left to revoke (it had ended already).
+    for (const presented of [r.refreshToken, rotated.refreshToken]) {
+      expect(
+        await write((tx) =>
+          refreshGrant(tx, t.tenantId, presented, { clientKey: client.clientKey }),
+        ),
+      ).toEqual({ ok: false, error: "invalid_grant", reason: "unknown refresh token" });
+    }
   });
 });

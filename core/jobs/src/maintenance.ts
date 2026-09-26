@@ -33,7 +33,13 @@ import type { EnrichPayload } from "./enrich.js";
 export interface MaintenanceOptions {
   /** How long ended sessions are kept, in days. Default 30. */
   sessionRetentionDays?: number;
-  /** How long ended OAuth codes, tokens and grants are kept, in days. Default 30. */
+  /**
+   * How long ended OAuth codes, tokens and grants are kept, in days. Default 30. A code or
+   * refresh token presented after its row is pruned is simply unknown: it gets no replay
+   * handling (which revokes the grant it made). That is acceptable: a code lives a minute and
+   * needs its PKCE verifier, and a refresh token's grant is pruned only once it has ended, so
+   * there is nothing left to revoke.
+   */
   oauthRetentionDays?: number;
   /** How long revoked or expired SCIM tokens are kept, in days. Default 90. */
   scimTokenRetentionDays?: number;

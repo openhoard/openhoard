@@ -745,6 +745,8 @@ export type AccessCheck =
       principal: AuthzPrincipal;
       client: AuthzClient;
       grantId: string;
+      /** The access token's id (`oat_…`): grantIsLive() checks it again. */
+      tokenId: string;
       clientKey: string;
       scopes: OAuthScope[];
     }
@@ -810,6 +812,7 @@ export async function checkAccessToken(
     principal: { ...person, scope: scopeOf(row.scopes) },
     client: { id: client.clientRef, trust },
     grantId,
+    tokenId: m[2] as string,
     clientKey: row.clientKey,
     scopes: row.scopes as OAuthScope[],
   };
@@ -817,19 +820,41 @@ export async function checkAccessToken(
 
 /**
  * Whether a grant still holds now: not revoked or expired, its client not refused, its person
- * active. One read, no locks: the resource server asks it again once a request's answer is
- * ready (T-104), so a request that passed checkAccessToken() just before a lock, a disable, a
- * retirement or the client's revocation committed doesn't deliver what it read. Every one of
- * those revokes the grant; the person and client are checked too, so this never depends on it.
+ * active; and, with `tokenId`, that access token of it too (not revoked by its client under RFC
+ * 7009, which removes the token alone, nor expired). One read, no locks: the resource server
+ * asks it again once a request's answer is ready (T-104), so a request that passed
+ * checkAccessToken() just before a lock, a disable, a retirement, the client's revocation or the
+ * token's own revocation committed doesn't deliver what it read. Each of the first four revokes
+ * the grant; the person and client are checked too, so this never depends on it.
+ *
+ * What the database holds is all it reads: an approval the server's config gives or takes away
+ * (`auth.clients`, a TrustResolver) comes with a restart, and the next request's
+ * checkAccessToken() applies it.
  */
-export async function grantIsLive(tx: Tx, tenantId: string, grantId: string): Promise<boolean> {
+export async function grantIsLive(
+  tx: Tx,
+  tenantId: string,
+  grantId: string,
+  options: { tokenId?: string } = {},
+): Promise<boolean> {
   if (typeof grantId !== "string" || !isId("oauthGrant", grantId)) return false;
+  const { tokenId } = options;
+  if (tokenId !== undefined && (typeof tokenId !== "string" || !isId("oauthToken", tokenId))) {
+    return false;
+  }
+  const tokenLive =
+    tokenId === undefined
+      ? sql`true`
+      : sql`exists (select 1 from oauth_tokens t where t.tenant_id = ${oauthGrants.tenantId}
+          and t.id = ${tokenId} and t.grant_id = ${oauthGrants.id}
+          and t.expires_at > statement_timestamp())`;
   const [row] = await tx
     .select({
       live: sql<boolean>`${oauthGrants.revokedAt} is null
         and ${oauthGrants.expiresAt} > statement_timestamp()
         and ${users.lockedAt} is null and ${users.providerDisabledAt} is null
-        and ${users.retiredAt} is null and ${oauthClients.status} <> 'refused'`,
+        and ${users.retiredAt} is null and ${oauthClients.status} <> 'refused'
+        and ${tokenLive}`,
     })
     .from(oauthGrants)
     .innerJoin(

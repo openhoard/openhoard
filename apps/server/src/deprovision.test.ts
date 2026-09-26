@@ -67,7 +67,7 @@ let a: Hono<AuthEnv>;
 let b: Hono<AuthEnv>;
 
 /** A tool that waits until the test lets it answer: a request in flight. */
-const gate = { entered: deferred(), release: deferred() };
+let gate = { entered: deferred(), release: deferred() };
 const slow: McpTool = {
   name: "slow",
   title: "Slow",
@@ -443,6 +443,32 @@ describe("deprovisioning a person (T-104)", () => {
     expect(res.headers.get("www-authenticate")).toMatch(/error="invalid_token"/);
     expect(await res.text()).not.toMatch(/read something/);
     expect(performance.now() - started).toBeLessThan(BOUND_MS);
+  });
+
+  it("nor does one whose access token its client revokes (RFC 7009) meanwhile", async () => {
+    gate = { entered: deferred(), release: deferred() };
+    const userId = await provision();
+    const h = await expectWorking(await hold(userId));
+    const inFlight = mcp(b, h.access, "slow");
+    await gate.entered.promise;
+    // The client revokes the access token alone: the grant (and its refresh token) stay.
+    const revoked = await a.request(`${PUBLIC}/oauth/revoke`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token: h.access }).toString(),
+    });
+    expect(revoked.status).toBe(200);
+    gate.release.resolve();
+    const res = await inFlight;
+    expect(res.status).toBe(401);
+    expect(await res.text()).not.toMatch(/read something/);
+    for (const app of [b, a]) expect((await mcp(app, h.access)).status).toBe(401);
+    const refreshed = await tokenRequest(b, {
+      grant_type: "refresh_token",
+      refresh_token: h.refresh,
+    });
+    expect(refreshed.status).toBe(200);
+    expect((await mcp(b, refreshed.body.access_token as string)).status).toBe(200);
   });
 
   it("a disabled admin, or one the provider takes out of the admin group, stops being one at once", async () => {

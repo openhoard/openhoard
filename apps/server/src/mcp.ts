@@ -168,10 +168,11 @@ export function mountMcp(app: Hono<AuthEnv>, deps: McpDeps): void {
       log?.warn({ tenantId: bearer.tenantId }, "mcp: request past its deadline");
       return c.json(JSON_RPC_ERROR(-32000, "request took too long"), 503);
     }
-    // The answer is ready; before it leaves, the grant must still hold (T-104). A request that
-    // passed the bearer check just before a lock, a provider disable, a retirement or the
-    // client's revocation committed, and read on for up to its deadline, is refused here: what
-    // it read never leaves, so it isn't recorded as read either.
+    // The answer is ready; before it leaves, the grant and the access token must still hold
+    // (T-104). A request that passed the bearer check just before a lock, a provider disable, a
+    // retirement, the client's revocation or the token's own (RFC 7009) committed, and read on
+    // for up to its deadline, is refused here: what it read never leaves, so it isn't recorded
+    // as read either.
     //
     // What the tools read is recorded, in the same transaction, before the answer leaves: an
     // unrecorded AI read is refused. So is content the file's exposure kept from this client
@@ -185,7 +186,10 @@ export function mountMcp(app: Hono<AuthEnv>, deps: McpDeps): void {
       delivered = await db.withTenant(
         bearer.tenantId,
         async (tx) => {
-          if (!(await grantIsLive(tx, bearer.tenantId, bearer.grantId))) return false;
+          const live = await grantIsLive(tx, bearer.tenantId, bearer.grantId, {
+            tokenId: bearer.tokenId,
+          });
+          if (!live) return false;
           for (let i = 0; i < events.length; i += ACTIVITY_PAGE) {
             await writeActivity(tx, bearer.tenantId, events.slice(i, i + ACTIVITY_PAGE));
           }
@@ -201,7 +205,7 @@ export function mountMcp(app: Hono<AuthEnv>, deps: McpDeps): void {
     if (!delivered) {
       log?.info(
         { tenantId: bearer.tenantId, grant: bearer.grantId },
-        "mcp: the grant ended during the request; its answer was withheld",
+        "mcp: the grant or token ended during the request; its answer was withheld",
       );
       c.header(
         "www-authenticate",

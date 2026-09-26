@@ -71,6 +71,8 @@ export interface BearerAuth {
   principal: AuthzPrincipal;
   client: AuthzClient;
   grantId: string;
+  /** The access token (`oat_…`), checked again before an MCP answer leaves (T-104). */
+  tokenId: string;
   scopes: OAuthScope[];
 }
 
