@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { TOOLS } from "../mcp.js";
 import { RESOURCE, openHarness, type Harness } from "./tools.fixtures.js";
@@ -13,6 +13,9 @@ import { RESOURCE, openHarness, type Harness } from "./tools.fixtures.js";
  * (`vitest -u`). The same zod shapes validate every answer in the other suites (strict: no
  * field a client wasn't told about).
  */
+
+// Many calls through the real endpoint per test: the Windows runner, under coverage, needs room.
+vi.setConfig({ testTimeout: process.platform === "win32" ? 300_000 : 60_000 });
 
 let h: Harness;
 beforeAll(async () => {

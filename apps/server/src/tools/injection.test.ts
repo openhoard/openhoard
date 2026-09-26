@@ -9,7 +9,7 @@ import {
 } from "@openhoard/core-db";
 import { buildCorpus, extractText, type InjectionCase } from "@openhoard/testkit";
 import { and, eq } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { MIME, openHarness, type Harness, type ToolAnswer } from "./tools.fixtures.js";
 
 /*
@@ -25,6 +25,9 @@ import { MIME, openHarness, type Harness, type ToolAnswer } from "./tools.fixtur
  * and the agent obeys it anyway: the tools must then hold on their own (scopes, proposals only,
  * the gate).
  */
+
+// Many calls through the real endpoint per test: the Windows runner, under coverage, needs room.
+vi.setConfig({ testTimeout: process.platform === "win32" ? 300_000 : 60_000 });
 
 const ATTACKER = "x@attacker.example";
 

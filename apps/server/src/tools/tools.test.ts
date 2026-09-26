@@ -2,7 +2,7 @@ import { activityEvents, addGrant, facetValues, tagReviews, objectTags } from "@
 import { createGroup, addMember } from "@openhoard/core-identity";
 import { writeActivity } from "@openhoard/core-catalog";
 import { and, eq } from "drizzle-orm";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { TOOLS, whoami } from "../mcp.js";
 import { estimateTokens, UNTRUSTED_NOTE } from "./cards.js";
@@ -21,6 +21,9 @@ import { CLIENTS, MIME, openHarness, type Harness } from "./tools.fixtures.js";
  * was I looking at yesterday?"), 4 (why can they see it, read side) and 7 (sensitive stays
  * local), the token budget, scopes, and the audit of every call and every AI read.
  */
+
+// Many calls through the real endpoint per test: the Windows runner, under coverage, needs room.
+vi.setConfig({ testTimeout: process.platform === "win32" ? 300_000 : 60_000 });
 
 let h: Harness;
 beforeEach(async () => {
