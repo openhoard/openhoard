@@ -10,18 +10,21 @@ import {
   type WithheldContent,
 } from "@openhoard/core-catalog";
 import type { Database } from "@openhoard/core-db";
-import { getUser } from "@openhoard/core-identity";
+import { getUser, grantIsLive } from "@openhoard/core-identity";
 import type { Hono, MiddlewareHandler } from "hono";
 import { cors } from "hono/cors";
 import type { Logger } from "pino";
 import { z } from "zod";
 import type { AuthEnv, BearerAuth } from "./auth.js";
+import { bearerChallenge } from "./oauth/routes.js";
 
 /*
  * The MCP server (T-801): Streamable HTTP at `<publicUrl>/mcp`, the resource T-105's tokens are
  * for. Stateless: no Mcp-Session-Id, and every request is its own POST, whose bearer token is
- * checked against oauth_tokens before anything else (requireBearer). A fresh McpServer and
- * transport serve each request, so nothing about one caller outlives their request.
+ * checked against oauth_tokens before anything else (requireBearer), and its grant once more
+ * before the answer leaves, so a lock, disable, retirement or client revocation that commits
+ * while a request runs stops that answer too (T-104). A fresh McpServer and transport serve each
+ * request, so nothing about one caller outlives their request.
  *
  * Each request gets an ActivityBuffer, which the tools' gated reads record into (they run in
  * read-only snapshots), written once the response is ready (T-205). An MCP read is an AI read:
@@ -165,24 +168,46 @@ export function mountMcp(app: Hono<AuthEnv>, deps: McpDeps): void {
       log?.warn({ tenantId: bearer.tenantId }, "mcp: request past its deadline");
       return c.json(JSON_RPC_ERROR(-32000, "request took too long"), 503);
     }
-    // What the tools read is recorded before the answer leaves: an unrecorded AI read is refused.
-    // So is content the file's exposure kept from this client (T-604), in the audit log: an
-    // admin can see why an assistant came back with metadata only. Activity first, audit last
-    // (core/audit's lock order).
+    // The answer is ready; before it leaves, the grant must still hold (T-104). A request that
+    // passed the bearer check just before a lock, a provider disable, a retirement or the
+    // client's revocation committed, and read on for up to its deadline, is refused here: what
+    // it read never leaves, so it isn't recorded as read either.
+    //
+    // What the tools read is recorded, in the same transaction, before the answer leaves: an
+    // unrecorded AI read is refused. So is content the file's exposure kept from this client
+    // (T-604), in the audit log: an admin can see why an assistant came back with metadata only.
+    // Activity first, audit last (core/audit's lock order).
     const events = ctx.activity.take();
     const withheld = ctx.activity.takeWithheld();
-    if (events.length > 0 || withheld.length > 0) {
-      try {
-        await db.withTenant(bearer.tenantId, async (tx) => {
+    const writes = events.length > 0 || withheld.length > 0;
+    let delivered: boolean;
+    try {
+      delivered = await db.withTenant(
+        bearer.tenantId,
+        async (tx) => {
+          if (!(await grantIsLive(tx, bearer.tenantId, bearer.grantId))) return false;
           for (let i = 0; i < events.length; i += ACTIVITY_PAGE) {
             await writeActivity(tx, bearer.tenantId, events.slice(i, i + ACTIVITY_PAGE));
           }
           for (const w of withheld) await appendAudit(tx, bearer.tenantId, withheldRecord(w));
-        });
-      } catch (err) {
-        log?.error({ err }, "mcp: writing activity failed");
-        return c.json(JSON_RPC_ERROR(-32603, "internal error"), 500);
-      }
+          return true;
+        },
+        writes ? undefined : SNAPSHOT,
+      );
+    } catch (err) {
+      log?.error({ err }, "mcp: writing activity failed");
+      return c.json(JSON_RPC_ERROR(-32603, "internal error"), 500);
+    }
+    if (!delivered) {
+      log?.info(
+        { tenantId: bearer.tenantId, grant: bearer.grantId },
+        "mcp: the grant ended during the request; its answer was withheld",
+      );
+      c.header(
+        "www-authenticate",
+        `Bearer ${bearerChallenge(deps.publicUrl, { error: "invalid_token" })}`,
+      );
+      return c.json({ error: "invalid_token" }, 401);
     }
     return response;
   });

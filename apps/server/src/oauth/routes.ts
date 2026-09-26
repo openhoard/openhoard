@@ -102,6 +102,19 @@ export function canonicalResource(uri: string): string | null {
   }
 }
 
+/**
+ * The WWW-Authenticate challenge for /mcp (after `Bearer `): where to get a token (RFC 9728),
+ * the scope to ask for, and any error parameters (quotes and backslashes dropped).
+ */
+export function bearerChallenge(publicUrl: string, extra: Record<string, string> = {}): string {
+  const issuer = new URL(publicUrl).origin;
+  return [
+    `resource_metadata="${issuer}/.well-known/oauth-protected-resource/mcp"`,
+    `scope="files:read"`,
+    ...Object.entries(extra).map(([k, v]) => `${k}="${v.replace(/["\\]/g, "")}"`),
+  ].join(", ");
+}
+
 export function mountOAuth(
   app: Hono<AuthEnv>,
   deps: OAuthDeps,
@@ -109,7 +122,6 @@ export function mountOAuth(
   const { auth, db, key, log } = deps;
   const issuer = new URL(auth.publicUrl).origin;
   const resource = `${issuer}/mcp`;
-  const resourceMetadata = `${issuer}/.well-known/oauth-protected-resource/mcp`;
   const clients = new ClientResolver(deps.fetchMetadata);
   const cache = new PrincipalCache();
 
@@ -536,12 +548,7 @@ export function mountOAuth(
 
   // --- The resource server's side --------------------------------------------------------------
 
-  const challenge = (extra: Record<string, string> = {}) =>
-    [
-      `resource_metadata="${resourceMetadata}"`,
-      `scope="files:read"`,
-      ...Object.entries(extra).map(([k, v]) => `${k}="${v.replace(/["\\]/g, "")}"`),
-    ].join(", ");
+  const challenge = (extra: Record<string, string> = {}) => bearerChallenge(auth.publicUrl, extra);
 
   const requireBearer =
     (scope: OAuthScope = "files:read"): MiddlewareHandler<AuthEnv> =>
@@ -571,6 +578,15 @@ export function mountOAuth(
             })
         : ({ ok: false, refused: "unknown" } as const);
       if (!check.ok || !tenantId) {
+        // A real grant's token refused (revoked, its person stopped, its client refused): the
+        // client still holds what was taken away (T-104). Logged, not audited: a client retrying
+        // in a loop would otherwise fill the audit log, which has the revocation itself.
+        if (!check.ok && "grantId" in check && check.grantId !== undefined) {
+          log?.info(
+            { tenantId, grant: check.grantId, refused: check.refused },
+            "oauth: bearer refused",
+          );
+        }
         c.header("www-authenticate", `Bearer ${challenge({ error: "invalid_token" })}`);
         return c.json({ error: "invalid_token" }, 401);
       }

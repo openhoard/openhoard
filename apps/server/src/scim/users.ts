@@ -8,6 +8,8 @@ import {
   setProviderActive,
   updateUser,
   userNameKey,
+  type EndedAccess,
+  type StopOptions,
   type User,
   type UserChanges,
   type UserQuery,
@@ -374,13 +376,33 @@ export async function createScimUser(tx: Tx, tenantId: string, body: Json, actor
   return u;
 }
 
-/** Writes `next` over the user `current`: only what changed. */
+/**
+ * What a deactivation or deletion ended, for the request's audit record (T-104): the provider
+ * cut someone off, and the record says what went with it.
+ */
+export function endedDetail(
+  how: "deactivated" | "retired",
+  ended: EndedAccess,
+): Record<string, number | boolean> {
+  return {
+    [how]: true,
+    sessionsEnded: ended.sessions,
+    oauthGrantsRevoked: ended.oauthGrants,
+    oauthCodesUsedUp: ended.oauthCodes,
+  };
+}
+
+/**
+ * Writes `next` over the user `current`: only what changed. `options.onEnded` hears what a
+ * deactivation ended (sessions, OAuth grants and codes).
+ */
 export async function saveUser(
   tx: Tx,
   tenantId: string,
   current: User,
   next: UserState,
   actor: string,
+  options: StopOptions = {},
 ): Promise<User> {
   const d = derive(next);
   const changes: UserChanges = {};
@@ -393,17 +415,23 @@ export async function saveUser(
   if (d.kind !== current.kind) changes.kind = d.kind;
   try {
     await updateUser(tx, tenantId, current.id, changes, "scim");
-    await setProviderActive(tx, tenantId, current.id, d.active, actor);
+    await setProviderActive(tx, tenantId, current.id, d.active, actor, options);
   } catch (e) {
     throw identityError(e, "another user has that userName, externalId or email");
   }
   return (await getUser(tx, tenantId, current.id)) as User;
 }
 
-/** Retires a SCIM user (DELETE): for good. */
-export async function deleteScimUser(tx: Tx, tenantId: string, id: string, actor: string) {
+/** Retires a SCIM user (DELETE): for good. `options.onEnded` hears what it ended. */
+export async function deleteScimUser(
+  tx: Tx,
+  tenantId: string,
+  id: string,
+  actor: string,
+  options: StopOptions = {},
+) {
   const u = await scimUser(tx, tenantId, id);
-  await retireUser(tx, tenantId, u.id, actor);
+  await retireUser(tx, tenantId, u.id, actor, options);
 }
 
 /** A page of SCIM users matching `filter` (eq, joined by and). */

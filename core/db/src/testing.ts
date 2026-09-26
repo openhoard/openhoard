@@ -1,4 +1,4 @@
-import { fromDriver, prepareDriver, type Database, type Driver } from "./database.js";
+import { fromDriver, openDatabase, prepareDriver, type Database, type Driver } from "./database.js";
 import { newId } from "./ids.js";
 import { openPglite } from "./pglite.js";
 import {
@@ -67,6 +67,44 @@ export async function openTestDriver(): Promise<Driver> {
 }
 
 let snapshot: Promise<Blob> | undefined;
+
+/**
+ * Two handles on one migrated, empty test database, as two server processes sharing it would
+ * hold (T-104's cross-process tests): on PostgreSQL two separate connection pools; PGlite belongs
+ * to one process, so there both are the same one. close() closes both, and drops the database on
+ * PostgreSQL.
+ */
+export async function openSharedTestDatabases(): Promise<{
+  first: Database;
+  second: Database;
+  close(): Promise<void>;
+}> {
+  const server = process.env[TEST_POSTGRES_ENV];
+  if (!server) {
+    const db = await openTestDatabase();
+    return { first: db, second: db, close: () => db.close() };
+  }
+  const { createPostgresDatabase } = await import("./testing-postgres.js");
+  const driver = await createPostgresDatabase(server);
+  await prepareDriver(driver, { migrate: true });
+  const first = fromDriver(driver);
+  let second: Database;
+  try {
+    second = await openDatabase({ url: driver.url, migrate: false });
+  } catch (err) {
+    await first.close();
+    throw err;
+  }
+  return {
+    first,
+    second,
+    async close() {
+      // The second pool first: dropping the database waits for its connections to go.
+      await second.close();
+      await first.close();
+    },
+  };
+}
 
 export interface SeededTenant {
   tenantId: string;

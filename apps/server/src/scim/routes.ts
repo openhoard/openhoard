@@ -8,7 +8,9 @@ import {
   parseScimToken,
   scimActor,
   touchScimToken,
+  type EndedAccess,
   type ScimTokenCheck,
+  type User,
 } from "@openhoard/core-identity";
 import { Hono, type Context, type Env } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -41,6 +43,7 @@ import { FailureLimiter, RecentTokens, RefusalSummary } from "./limiter.js";
 import {
   createScimUser,
   deleteScimUser,
+  endedDetail,
   listScimUsers,
   patchUser,
   saveUser,
@@ -49,6 +52,7 @@ import {
   stateOf,
   userResource,
   type PatchOpName,
+  type UserState,
 } from "./users.js";
 
 /*
@@ -253,7 +257,10 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): ScimHand
     if (!check.ok) {
       if (check.refused) {
         // Audited above either way; but while its token id is in use, a wrong secret doesn't
-        // count toward blocking it, so knowing a token id isn't enough to lock it out.
+        // count toward blocking it, so knowing a token id isn't enough to lock it out. A revoked
+        // or expired token is in use no more (T-104): its id counts again from now, so whoever
+        // still holds it is soon blocked, and then turned away without a record each time.
+        if (check.refused.reason !== "wrong-secret") recent.forget(tokenId);
         limiter.fail(address, ...(recent.has(tokenId) ? [] : [tokenKey]));
       } else {
         limiter.fail(address, tenantKey);
@@ -290,7 +297,7 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): ScimHand
     access: "read" | "write",
     work: (tx: Tx, actor: string) => Promise<Done>,
   ): Promise<Response> => {
-    const { tenantId, token, actor, keys } = c.var.scim;
+    const { tenantId, token, tokenId, actor, keys } = c.var.scim;
     const target = targetOf(c.req.param("id"));
     let outcome: { refused: true } | { done: Done } | { error: ScimError };
     try {
@@ -354,7 +361,9 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): ScimHand
       return fail(new ScimError(500, `internal error (request ${requestId})`));
     }
     if ("refused" in outcome) {
-      // Revoked or expired since the middleware's check: counted like any refusal.
+      // Revoked or expired since the middleware's check: counted like any refusal, and in use
+      // no more.
+      recent.forget(tokenId);
       limiter.fail(...keys);
       return unauthorized(true);
     }
@@ -444,6 +453,39 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): ScimHand
     });
   });
 
+  /** saveUser(), and what a deactivation it made ended (T-104). */
+  const saving = async (
+    tx: Tx,
+    c: Context<ScimEnv>,
+    current: User,
+    next: UserState,
+    actor: string,
+  ): Promise<{ user: User; ended?: EndedAccess }> => {
+    const seen: { ended?: EndedAccess } = {};
+    const user = await saveUser(tx, tenantOf(c), current, next, actor, {
+      onEnded: (e) => (seen.ended = e),
+    });
+    return { user, ...(seen.ended ? { ended: seen.ended } : {}) };
+  };
+
+  /**
+   * A PUT's or PATCH's answer, and its audit detail: a deactivation with what it ended, or a
+   * reactivation (which brings none of that back).
+   */
+  const saved = (
+    c: Context,
+    current: User,
+    { user, ended }: { user: User; ended?: EndedAccess },
+  ): Done => ({
+    status: 200,
+    body: userResource(user, base(c)),
+    ...(ended
+      ? { detail: endedDetail("deactivated", ended) }
+      : current.providerDisabled !== null && user.providerDisabled === null
+        ? { detail: { reactivated: true } }
+        : {}),
+  });
+
   scim.put("/Users/:id", async (c) => {
     const body = await bodyOf(c);
     return run(c, "scim.user.replace", "write", async (tx, actor) => {
@@ -454,8 +496,7 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): ScimHand
         active: current.providerDisabled === null,
         guest: current.kind === "guest",
       });
-      const u = await saveUser(tx, tenantOf(c), current, next, actor);
-      return { status: 200, body: userResource(u, base(c)) };
+      return saved(c, current, await saving(tx, c, current, next, actor));
     });
   });
 
@@ -465,15 +506,17 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): ScimHand
       const current = await scimUser(tx, tenantOf(c), c.req.param("id"));
       const state = stateOf(current);
       for (const { op, path, value } of patchOps(body())) patchUser(state, op, path, value);
-      const u = await saveUser(tx, tenantOf(c), current, state, actor);
-      return { status: 200, body: userResource(u, base(c)) };
+      return saved(c, current, await saving(tx, c, current, state, actor));
     });
   });
 
   scim.delete("/Users/:id", (c) =>
     run(c, "scim.user.delete", "write", async (tx, actor) => {
-      await deleteScimUser(tx, tenantOf(c), c.req.param("id"), actor);
-      return { status: 204 };
+      const seen: { ended?: EndedAccess } = {};
+      await deleteScimUser(tx, tenantOf(c), c.req.param("id"), actor, {
+        onEnded: (e) => (seen.ended = e),
+      });
+      return { status: 204, ...(seen.ended ? { detail: endedDetail("retired", seen.ended) } : {}) };
     }),
   );
 

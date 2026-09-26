@@ -43,6 +43,49 @@ A sync that re-activates a user doesn't lift an admin's lock. Lifting a lock doe
 someone the provider deactivated. To remove a SCIM user for good, lock them and delete them in
 the identity provider; otherwise the next sync would create them again.
 
+## Deprovisioning (T-104)
+
+Stopping someone, or revoking one of their credentials, takes effect on the **next request that
+starts after the change commits**, in every server process sharing the database. Nothing waits
+for a timeout: each credential is read from the database on every request, and what is cached
+(the principal cache) is invalidated by the tenant's principal epoch in the same transaction
+(below). The cache's 60 s TTL is only a backstop. apps/server's `deprovision.test.ts` holds each
+row below to it end to end, with a second app instance on the same database; it measures
+milliseconds.
+
+The stops are a lock (an admin, `openhoard admin user lock`, or the system), a provider disable
+(SCIM `active: false`, a soft delete) and retirement (SCIM `DELETE` for SCIM users, an admin for
+local ones). "For good" means lifting the stop brings nothing back: the person signs in again and
+AI clients ask for consent again.
+
+| Credential                           | Event                                                                                   | Effect                                                                                                                   | When                                                                                                        |
+| ------------------------------------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| Browser session (`ohs.`)             | any stop                                                                                | revoked for good; refused for the inactive principal too                                                                 | next request (`checkSession()` reads the row every time)                                                    |
+| Browser session                      | `unlinkIdentity()`; sign-out                                                            | the sessions that identity signed in; that session                                                                       | next request                                                                                                |
+| OAuth code (`ohac.`)                 | any stop, `unlinkIdentity()`, the client refused or revoked                             | used up: redeeming it is refused                                                                                         | at once                                                                                                     |
+| OAuth access token (`ohat.`, `/mcp`) | any stop, `unlinkIdentity()`, the client revoked (admin API), `revokeGrant()`, RFC 7009 | the grant is revoked, and with it every token it holds                                                                   | next request; a request already running doesn't deliver its answer (`grantIsLive()` again before it leaves) |
+| OAuth refresh token (`ohrt.`)        | as the access token                                                                     | refused (`invalid_grant`)                                                                                                | next token request                                                                                          |
+| API key (`ohk.`)                     | the service account locked                                                              | suspended (its principal is inactive); unlocking brings it back                                                          | next request, every process (principal epoch)                                                               |
+| API key                              | `revokeApiKey()`, expiry, the service account retired                                   | revoked for good                                                                                                         | next request                                                                                                |
+| SCIM token (`ohscim.`)               | `revokeScimToken()` (`openhoard admin scim-token revoke`), expiry                       | refused, each attempt audited (`scim.auth`); its id counts toward the failure limiter again, so a holder is soon blocked | next request (`checkScimToken()` reads the row every time; nothing about tokens is cached)                  |
+| Admin (role or admin group)          | a lock, a provider disable, becoming a guest                                            | not an admin while it lasts (`isAdmin()` counts active members only); the session ends anyway                            | next request                                                                                                |
+| Admin (admin group)                  | removed from the group by the identity provider, or the group no longer a SCIM group    | not an admin; still signed in                                                                                            | next request, every process (principal epoch)                                                               |
+| Admin (role)                         | retirement, `revokeAdmin()`                                                             | the role is removed                                                                                                      | next request                                                                                                |
+| An AI client's approval (T-106)      | an admin refuses or revokes it                                                          | every grant it holds is revoked and its codes are used up; the people's own sessions stay                                | next request                                                                                                |
+
+What is recorded: the SCIM request's audit record says what a deactivation or deletion ended
+(`deactivated` or `retired`, with `sessionsEnded`, `oauthGrantsRevoked`, `oauthCodesUsedUp`), and
+a reactivation says `reactivated`; `openhoard admin user lock` and `unlock` are audited as
+`user.lock` and `user.unlock` with the same counts; an admin's client revocation as
+`oauth-client.revoke`; a revoked or expired SCIM token's use as `scim.auth`. The stops tell their
+caller what they ended (`StopOptions.onEnded`, `EndedAccess`). A token refused at `/mcp` for a
+real grant is logged, not audited: a client retrying in a loop would fill the audit log, which
+already has the revocation.
+
+Limits: a request that read its credential before the change committed finishes as it began
+(sessions and admin requests are short; MCP answers are checked again, above). A client's own
+RFC 7009 revocation isn't audited yet. Nothing here reaches a file already downloaded.
+
 ## Principals
 
 A user is `user:<id>` and a group `group:<id>`, using OpenHoard's ids (`usr_…`, `grp_…`), so

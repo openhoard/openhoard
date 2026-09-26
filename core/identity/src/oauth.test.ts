@@ -12,6 +12,7 @@ import {
   retireUser,
   unlinkIdentity,
   unlockUser,
+  type EndedAccess,
   type User,
 } from "./directory.js";
 import {
@@ -19,6 +20,7 @@ import {
   clientKeyOf,
   decideClient,
   getClient,
+  grantIsLive,
   issueCode,
   listClients,
   MAX_PENDING_CLIENTS,
@@ -461,6 +463,53 @@ describe("access tokens", () => {
     const d = await tokens();
     await write((tx) => retireUser(tx, t.tenantId, ana.id, "user:admin"));
     expect(await check(d.accessToken)).toMatchObject({ ok: false, refused: "revoked" });
+  });
+
+  it("say whether their grant still holds, and a stop says what it ended (T-104)", async () => {
+    await approve();
+    const live = (grantId: string) =>
+      db.withTenant(t.tenantId, (tx) => grantIsLive(tx, t.tenantId, grantId), snap);
+    const a = await tokens();
+    const pending = await code();
+    expect(await live(a.grantId)).toBe(true);
+    expect(await live("ogr_not-an-id")).toBe(false);
+    expect(await live(a.grantId.slice(0, -1) + (a.grantId.endsWith("0") ? "1" : "0"))).toBe(false);
+    const ended: EndedAccess[] = [];
+    await write((tx) =>
+      lockUser(tx, t.tenantId, ana.id, "user:admin", { onEnded: (e) => ended.push(e) }),
+    );
+    expect(ended).toEqual([{ sessions: 0, oauthCodes: 1, oauthGrants: 1, apiKeys: 0 }]);
+    expect(await live(a.grantId)).toBe(false);
+    expect((await redeem(pending)).ok).toBe(false);
+    // Locked already: nothing ends, and nothing is reported.
+    await write((tx) =>
+      lockUser(tx, t.tenantId, ana.id, "user:admin", { onEnded: (e) => ended.push(e) }),
+    );
+    expect(ended).toHaveLength(1);
+    await write((tx) => unlockUser(tx, t.tenantId, ana.id, "user:admin"));
+
+    // Even a grant nobody revoked fails for a person who can't sign in, or a refused client.
+    const b = await tokens();
+    await write((tx) =>
+      tx.execute(sql`update users set locked_at = now(), locked_by = 'user:admin'
+                       where id = ${ana.id}`),
+    );
+    expect(await live(b.grantId)).toBe(false);
+    await write((tx) =>
+      tx.execute(sql`update users set locked_at = null, locked_by = null where id = ${ana.id}`),
+    );
+    expect(await live(b.grantId)).toBe(true);
+    await write((tx) => tx.execute(sql`update oauth_clients set status = 'refused', trust = null`));
+    expect(await live(b.grantId)).toBe(false);
+    await approve();
+
+    // Retirement reports it too.
+    await tokens();
+    const retired: EndedAccess[] = [];
+    await write((tx) =>
+      retireUser(tx, t.tenantId, ana.id, "user:admin", { onEnded: (e) => retired.push(e) }),
+    );
+    expect(retired).toEqual([{ sessions: 0, oauthCodes: 0, oauthGrants: 2, apiKeys: 0 }]);
   });
 
   it("take a configured trust over a pending client, never over a refused one", async () => {

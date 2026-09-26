@@ -815,6 +815,38 @@ export async function checkAccessToken(
   };
 }
 
+/**
+ * Whether a grant still holds now: not revoked or expired, its client not refused, its person
+ * active. One read, no locks: the resource server asks it again once a request's answer is
+ * ready (T-104), so a request that passed checkAccessToken() just before a lock, a disable, a
+ * retirement or the client's revocation committed doesn't deliver what it read. Every one of
+ * those revokes the grant; the person and client are checked too, so this never depends on it.
+ */
+export async function grantIsLive(tx: Tx, tenantId: string, grantId: string): Promise<boolean> {
+  if (typeof grantId !== "string" || !isId("oauthGrant", grantId)) return false;
+  const [row] = await tx
+    .select({
+      live: sql<boolean>`${oauthGrants.revokedAt} is null
+        and ${oauthGrants.expiresAt} > statement_timestamp()
+        and ${users.lockedAt} is null and ${users.providerDisabledAt} is null
+        and ${users.retiredAt} is null and ${oauthClients.status} <> 'refused'`,
+    })
+    .from(oauthGrants)
+    .innerJoin(
+      users,
+      and(eq(users.tenantId, oauthGrants.tenantId), eq(users.id, oauthGrants.userId)),
+    )
+    .innerJoin(
+      oauthClients,
+      and(
+        eq(oauthClients.tenantId, oauthGrants.tenantId),
+        eq(oauthClients.clientKey, oauthGrants.clientKey),
+      ),
+    )
+    .where(and(eq(oauthGrants.tenantId, tenantId), eq(oauthGrants.id, grantId)));
+  return row?.live === true;
+}
+
 /** Revokes a grant (and so its tokens). Returns false if it had ended already. */
 export async function revokeGrant(
   tx: Tx,

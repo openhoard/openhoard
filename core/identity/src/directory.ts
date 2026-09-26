@@ -532,16 +532,37 @@ export async function updateUser(
 }
 
 /**
+ * What a stop (a lock, a provider disable, a retirement) or an unlinked identity ended at once,
+ * for the caller's audit record (T-104): sessions revoked, OAuth codes used up, OAuth grants
+ * revoked (with every access and refresh token they hold), and API keys revoked (retirement of
+ * a service account only; a lock suspends its keys through the inactive principal instead).
+ */
+export interface EndedAccess {
+  sessions: number;
+  oauthCodes: number;
+  oauthGrants: number;
+  apiKeys: number;
+}
+
+/** What the stops take besides who acted. */
+export interface StopOptions {
+  /** Told what the stop ended, when it took effect (not when the user was stopped already). */
+  onEnded?: (ended: EndedAccess) => void;
+}
+
+/**
  * An admin's lock (`user:` or `system:`): the user is denied everything from the next
- * resolution (authorize() forbids inactive principals), whatever their source, and their sessions
- * end, so unlocking doesn't bring back one from before (a stolen cookie). Returns false if
- * already locked. Revoking tokens elsewhere (MCP clients) is T-104.
+ * resolution (authorize() forbids inactive principals), whatever their source. Their sessions
+ * end and their OAuth grants are revoked (T-104), so unlocking brings back neither a stolen
+ * cookie nor an AI client's tokens from before; a service account's API keys stop while it is
+ * locked, and work again when it is unlocked. Returns false if already locked.
  */
 export async function lockUser(
   tx: Tx,
   tenantId: string,
   userId: string,
   by: string,
+  options: StopOptions = {},
 ): Promise<boolean> {
   await lockPrincipals(tx, tenantId);
   checkActor(by, ["user", "system"]);
@@ -551,14 +572,17 @@ export async function lockUser(
     .update(users)
     .set({ lockedAt: sql`now()`, lockedBy: by })
     .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)));
-  // Unlocking must not bring back a session (a stolen cookie) from before the lock.
-  await endSessions(tx, tenantId, userId, by);
+  // Unlocking must not bring back a session (a stolen cookie) from before the lock. (Ended
+  // before the callback is looked at: `onEnded?.(…)` would skip its argument without one.)
+  const ended = await endSessions(tx, tenantId, userId, by);
+  options.onEnded?.(ended);
   return true;
 }
 
 /**
  * Ends a user's live sessions and OAuth grants (a lock, a provider disable, retirement), or, with
  * `identity`, the sessions that identity signed in and every grant: they don't come back.
+ * Returns what it ended.
  */
 async function endSessions(
   tx: Tx,
@@ -566,8 +590,8 @@ async function endSessions(
   userId: string,
   by: string,
   identity?: { issuer: string; subject: string },
-) {
-  await tx
+): Promise<EndedAccess> {
+  const ended = await tx
     .update(sessions)
     .set({ revokedAt: sql`greatest(now(), ${sessions.createdAt})`, revokedBy: by })
     .where(
@@ -579,9 +603,10 @@ async function endSessions(
           ? [eq(sessions.issuer, identity.issuer), eq(sessions.subject, identity.subject)]
           : []),
       ),
-    );
+    )
+    .returning({ id: sessions.id });
   // Codes not yet redeemed can't be any more (a grant made from one would outlive this).
-  await tx
+  const codes = await tx
     .update(oauthCodes)
     .set({ usedAt: sql`greatest(now(), ${oauthCodes.createdAt})` })
     .where(
@@ -590,10 +615,11 @@ async function endSessions(
         eq(oauthCodes.userId, userId),
         isNull(oauthCodes.usedAt),
       ),
-    );
+    )
+    .returning({ id: oauthCodes.id });
   // What AI clients hold for them ends too (the grants' tokens with them). A grant doesn't record
   // which identity signed in to consent, so unlinking one ends them all: the person consents again.
-  await tx
+  const revoked = await tx
     .update(oauthGrants)
     .set({ revokedAt: sql`greatest(now(), ${oauthGrants.createdAt})`, revokedBy: by })
     .where(
@@ -602,7 +628,14 @@ async function endSessions(
         eq(oauthGrants.userId, userId),
         isNull(oauthGrants.revokedAt),
       ),
-    );
+    )
+    .returning({ id: oauthGrants.id });
+  return {
+    sessions: ended.length,
+    oauthCodes: codes.length,
+    oauthGrants: revoked.length,
+    apiKeys: 0,
+  };
 }
 
 /** Lifts an admin's lock. Any provider disable stays. Returns false if there was no lock. */
@@ -625,7 +658,8 @@ export async function unlockUser(
 
 /**
  * The identity provider's view of a SCIM user (SCIM `active`). Idempotent: returns whether
- * anything changed. Re-activating never lifts an admin's lock.
+ * anything changed. Deactivating ends their sessions and OAuth grants for good, as a lock does;
+ * re-activating brings neither back, and never lifts an admin's lock.
  */
 export async function setProviderActive(
   tx: Tx,
@@ -633,6 +667,7 @@ export async function setProviderActive(
   userId: string,
   active: boolean,
   by: string,
+  options: StopOptions = {},
 ): Promise<boolean> {
   await lockPrincipals(tx, tenantId);
   checkActor(by, ["scim"]);
@@ -646,7 +681,10 @@ export async function setProviderActive(
         : { providerDisabledAt: sql`now()`, providerDisabledBy: by },
     )
     .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)));
-  if (!active) await endSessions(tx, tenantId, userId, by);
+  if (!active) {
+    const ended = await endSessions(tx, tenantId, userId, by);
+    options.onEnded?.(ended);
+  }
   return true;
 }
 
@@ -662,6 +700,7 @@ export async function retireUser(
   tenantId: string,
   userId: string,
   by: string,
+  options: StopOptions = {},
 ): Promise<boolean> {
   await lockPrincipals(tx, tenantId);
   const actor = checkActor(by, ["user", "system", "scim"]);
@@ -697,20 +736,22 @@ export async function retireUser(
     .delete(userIdentities)
     .where(and(eq(userIdentities.tenantId, tenantId), eq(userIdentities.userId, userId)));
   // Their sessions end now (they would fail anyway: the principal is inactive).
-  await endSessions(tx, tenantId, userId, by);
+  const ended = await endSessions(tx, tenantId, userId, by);
   // A retired service account's keys stop at once (they would anyway: it is inactive).
-  await tx
+  const keys = await tx
     .update(apiKeys)
     .set({ revokedAt: sql`greatest(now(), ${apiKeys.createdAt})`, revokedBy: by })
     .where(
       and(eq(apiKeys.tenantId, tenantId), eq(apiKeys.userId, userId), isNull(apiKeys.revokedAt)),
-    );
+    )
+    .returning({ id: apiKeys.id });
   // Retirement is final, so an admin role goes with it (T-106): a retired admin isn't one anyway,
   // and nobody should find the role there later.
   await tx
     .update(users)
     .set({ retiredAt: sql`now()`, retiredBy: by, adminAt: null, adminBy: null })
     .where(and(eq(users.tenantId, tenantId), eq(users.id, userId)));
+  options.onEnded?.({ ...ended, apiKeys: keys.length });
   return true;
 }
 

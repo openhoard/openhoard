@@ -3,7 +3,7 @@ import { type Database } from "./database.js";
 import { newId } from "./ids.js";
 import { principalEpochs } from "./schema.js";
 import { createTenant, getTenant } from "./tenants.js";
-import { openTestDatabase } from "./testing.js";
+import { openSharedTestDatabases, openTestDatabase } from "./testing.js";
 
 /* T-103's bootstrap: a tenant with what every tenant needs. */
 
@@ -12,6 +12,22 @@ beforeEach(async () => {
   db = await openTestDatabase();
 });
 afterEach(() => db?.close());
+
+describe("openSharedTestDatabases", () => {
+  it("gives two handles on one database, as two server processes would hold", async () => {
+    const shared = await openSharedTestDatabases();
+    try {
+      const id = newId("tenant");
+      await shared.first.withTenant(id, (tx) => createTenant(tx, id, { name: "Shared" }));
+      expect(await shared.second.withTenant(id, (tx) => getTenant(tx, id))).toMatchObject({
+        id,
+        name: "Shared",
+      });
+    } finally {
+      await shared.close();
+    }
+  });
+});
 
 describe("createTenant", () => {
   it("creates the tenant with fail-closed defaults and its principal epoch", async () => {

@@ -21,9 +21,12 @@ import {
   MAX_LIST,
   memberCount,
   listScimTokens,
+  lockUser,
   revokeAdmin,
   revokeScimToken,
   SCIM_TOKEN_MAX_DAYS,
+  unlockUser,
+  type EndedAccess,
   type User,
 } from "@openhoard/core-identity";
 import { adminGroupOf, ensureDataDir, loadConfig, type Config } from "./config.js";
@@ -41,6 +44,8 @@ import { retrying } from "./retry.js";
  *   admin user grant-admin  --tenant ten_… --user <usr_… | email | userName>
  *   admin user revoke-admin --tenant ten_… --user <usr_… | email | userName>
  *   admin user list-admins  --tenant ten_…
+ *   admin user lock         --tenant ten_… --user <usr_… | email | userName>
+ *   admin user unlock       --tenant ten_… --user <usr_… | email | userName>
  *   admin group list        --tenant ten_…
  *
  * It reads the server's configuration (and `--data-dir`, as the server does) and opens the same
@@ -51,6 +56,13 @@ import { retrying } from "./retry.js";
  * kept. The CLI is the way in when a tenant has no admin (the first one, or after the last was
  * locked or left); admins then make others in the app (the admin API). Removing the last admin
  * is refused here too.
+ *
+ * `user lock` is the operator's emergency stop (T-104), for anyone: a person of either source,
+ * or a service account. It ends their sessions and revokes their AI clients' grants at once, and
+ * they are refused from their next request on every server sharing the database; a service
+ * account's API keys stop until `user unlock`. Unlocking brings back none of what the lock ended,
+ * and never lifts a provider disable. Both are audited (`user.lock`, `user.unlock`), with what
+ * the lock ended.
  */
 
 export const ADMIN_ACTOR = "system:admin-cli";
@@ -95,6 +107,11 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
   user revoke-admin --tenant <ten_…> --user <usr_…|email|userName>
                                                    take the admin role away
   user list-admins --tenant <ten_…>                list the tenant's admins
+  user lock --tenant <ten_…> --user <usr_…|email|userName>
+                                                   lock someone out now: their sessions and AI
+                                                   clients' grants end, API keys stop
+  user unlock --tenant <ten_…> --user <usr_…|email|userName>
+                                                   lift the lock (what it ended stays ended)
   group list --tenant <ten_…>                      list the tenant's groups (the grp_… id
                                                    names the admin group in auth.adminGroups)
 `;
@@ -138,6 +155,8 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "user grant-admin",
     "user revoke-admin",
     "user list-admins",
+    "user lock",
+    "user unlock",
     "group list",
   ];
   if (!known.includes(command)) {
@@ -200,6 +219,15 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         );
       case "user list-admins":
         return await adminList(db, config, tenantArg(values.tenant), io);
+      case "user lock":
+      case "user unlock":
+        return await lockChange(
+          db,
+          command === "user lock" ? "lock" : "unlock",
+          tenantArg(values.tenant),
+          need(values.user, "--user"),
+          io,
+        );
       case "group list":
         return await groupList(db, config, tenantArg(values.tenant), io);
       default:
@@ -499,6 +527,108 @@ async function adminChange(
     const { reason, message } = adminRefusal(e);
     return refused(reason, message, user.id);
   }
+}
+
+/**
+ * `user lock` and `user unlock`: an admin's lock (core/identity lockUser()), set or lifted as
+ * `system:admin-cli`, and audited with what the lock ended.
+ */
+async function lockChange(
+  db: Database,
+  change: "lock" | "unlock",
+  tenantId: string,
+  named: string,
+  io: AdminIo,
+): Promise<number> {
+  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  const action = change === "lock" ? "user.lock" : "user.unlock";
+  const refused = async (reason: string, message: string) => {
+    await db.withTenant(tenantId, (tx) =>
+      appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action,
+        decision: "deny",
+        detail: { reason },
+      }),
+    );
+    io.err(`${message}\n`);
+    return 1;
+  };
+  const user = await namedUser(db, tenantId, named);
+  if (user === "none") {
+    return refused("unknown-user", `tenant ${tenantId} has no current person ${named}`);
+  }
+  if (user === "ambiguous") {
+    return refused(
+      "ambiguous",
+      `${named} is one person's email and another's userName: use the id`,
+    );
+  }
+  let outcome: { changed: boolean; ended?: EndedAccess };
+  try {
+    // Run again after a deadlock or serialization failure: a lock ends sessions and grants, and
+    // may meet an OAuth request or a SCIM sync locking the same rows (beside a running server).
+    outcome = await retrying(() =>
+      db.withTenant(tenantId, async (tx) => {
+        const seen: { ended?: EndedAccess } = {};
+        const changed =
+          change === "lock"
+            ? await lockUser(tx, tenantId, user.id, ADMIN_ACTOR, {
+                onEnded: (e) => (seen.ended = e),
+              })
+            : await unlockUser(tx, tenantId, user.id, ADMIN_ACTOR);
+        const ended = seen.ended;
+        await appendAudit(tx, tenantId, {
+          actor: ADMIN_ACTOR,
+          action,
+          decision: "allow",
+          detail: {
+            user: user.id,
+            ...(changed ? {} : { unchanged: true }),
+            ...(ended
+              ? {
+                  sessionsEnded: ended.sessions,
+                  oauthGrantsRevoked: ended.oauthGrants,
+                  oauthCodesUsedUp: ended.oauthCodes,
+                }
+              : {}),
+          },
+        });
+        return { changed, ...(ended ? { ended } : {}) };
+      }),
+    );
+  } catch (e) {
+    // Retired since it was found.
+    if (!(e instanceof IdentityError)) throw e;
+    return refused("unknown-user", `tenant ${tenantId} has no current person ${named}`);
+  }
+  const who = `${user.displayName} (${user.id})`;
+  if (change === "unlock") {
+    io.err(
+      outcome.changed
+        ? `${who} is unlocked. What the lock ended stays ended: they sign in again, and AI ` +
+            `clients ask for their consent again.\n`
+        : `${who} wasn't locked.\n`,
+    );
+  } else if (!outcome.changed) {
+    io.err(`${who} was locked already.\n`);
+  } else {
+    const ended = outcome.ended as EndedAccess;
+    io.err(
+      `${who} is locked: refused from their next request. Ended ${ended.sessions} ` +
+        `session(s) and revoked ${ended.oauthGrants} AI-client grant(s).` +
+        (user.kind === "service" ? " Their API keys stop until they are unlocked." : "") +
+        (user.source === "scim"
+          ? " The identity provider's syncs don't lift the lock; if they left, remove them there."
+          : "") +
+        "\n",
+    );
+  }
+  io.out(`${user.id}\n`);
+  return 0;
 }
 
 async function adminList(

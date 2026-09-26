@@ -78,6 +78,11 @@ export class RecentTokens {
     }
   }
 
+  /** Forgets a token: revoked or expired, it is in use no more (T-104). */
+  forget(tokenId: string): void {
+    this.#seen.delete(tokenId);
+  }
+
   has(tokenId: string): boolean {
     const until = this.#seen.get(tokenId);
     if (until === undefined) return false;

@@ -481,7 +481,7 @@ database closes, and writes none after.
 **Transactions.** Each request is one transaction, with its audit record written last. Writes to
 one tenant run one at a time (the principal lock). A refused request (4xx) changes nothing.
 
-## Admin commands (T-103, T-106)
+## Admin commands (T-103, T-106, T-104)
 
 Until there is an admin UI, the server's entry point has a few admin commands. They read the same
 configuration as the server, and accept `--data-dir` as it does (before or after `admin`). They
@@ -496,6 +496,8 @@ node apps/server/dist/main.js admin scim-token revoke --tenant ten_… --id sct_
 node apps/server/dist/main.js admin user grant-admin --tenant ten_… --user <usr_… | email | userName>
 node apps/server/dist/main.js admin user revoke-admin --tenant ten_… --user <usr_… | email | userName>
 node apps/server/dist/main.js admin user list-admins --tenant ten_…
+node apps/server/dist/main.js admin user lock --tenant ten_… --user <usr_… | email | userName>
+node apps/server/dist/main.js admin user unlock --tenant ten_… --user <usr_… | email | userName>
 node apps/server/dist/main.js admin group list --tenant ten_…
 ```
 
@@ -505,6 +507,14 @@ node apps/server/dist/main.js admin group list --tenant ten_…
   id, how they are one (`role`, `group`, `role+group`), whether it counts now, email and name.
   The admin group (config `auth.adminGroups`) is read from the same config, and `list-admins`
   warns when it makes nobody an admin. Removing the last admin is refused here too.
+- **Locking someone out (T-104).** `user lock` is the emergency stop, for a person of either
+  source or a service account: their sessions end and their AI clients' grants are revoked at
+  once, and every server on the database refuses them from their next request; a service
+  account's API keys stop until `user unlock`. Unlocking brings back none of what the lock ended
+  (they sign in again; AI clients ask for consent again), and never lifts the identity
+  provider's disable. The identity provider's syncs don't lift a lock either: to remove someone
+  who left, lock them here and delete them in the identity provider. core/identity's README has
+  what each deprovisioning step ends, and when.
 - **Groups.** `group list` prints each group's id, source, member count, external id and name,
   and marks the configured admin group: the id is what `auth.adminGroups` takes.
 
@@ -515,8 +525,9 @@ node apps/server/dist/main.js admin group list --tenant ten_…
   start the server again. With PostgreSQL they run beside the server.
 - **What a new tenant gets.** `tenant create` makes the tenant row, with the fail-closed
   defaults (hidden, metadata-only), and its principal epoch: nothing else.
-- **Audit.** Creating a tenant, issuing or revoking a token, and granting or removing an admin
-  (refusals too) are audited as `system:admin-cli`.
+- **Audit.** Creating a tenant, issuing or revoking a token, granting or removing an admin, and
+  locking or unlocking someone (refusals too) are audited as `system:admin-cli`; a lock's record
+  says what it ended.
 
 ## Testing with a new Entra tenant (T-102 and T-103 together)
 
