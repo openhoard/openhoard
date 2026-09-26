@@ -146,24 +146,39 @@ describe("extract() in a child process", () => {
   it("reads a source to its end after an early answer, so its checks still decide", async () => {
     const MiB = 1024 * 1024;
     const chunk = enc.encode("word ".repeat(MiB / 5));
-    async function* text(fail: "hash" | "stall" | null): AsyncGenerator<Uint8Array> {
-      for (let i = 0; i < 64; i++) yield chunk;
+    async function* text(fail: "hash" | "stall" | null, mib: number): AsyncGenerator<Uint8Array> {
+      for (let i = 0; i < mib; i++) yield chunk;
       // What blobContentSource() throws at the end of bytes that aren't the version's.
-      if (fail === "hash")
+      if (fail === "hash") {
         throw new Error("the stored bytes don't match the version's blob (hash)");
+      }
       if (fail === "stall") await new Promise(() => {});
     }
-    const size = 64 * chunk.byteLength;
     const hint = { mime: "text/plain" };
+    const size = (mib: number) => mib * chunk.byteLength;
     // Plain text stops at 1 MiB of text: the child answers long before the 64 MiB end.
-    const wrong = await extract(text("hash"), hint, { size });
+    const wrong = await extract(text("hash", 64), hint, { size: size(64) });
     expect(wrong).toEqual({ ok: false, failure: "input-failed", permanent: false });
-    const stalled = await extract(text("stall"), hint, { size, limits: { timeoutMs: 3_000 } });
+    // A source that stalls after the answer never finishes its checks: not an answer either.
+    // (4 MiB and 15 s: the child must answer inside the limit even on a slow runner, or the
+    // result is the child's own timeout, which is right too but not what this checks.)
+    const stalled = await extract(text("stall", 4), hint, {
+      size: size(4),
+      limits: { timeoutMs: 15_000 },
+    });
     expect(stalled).toEqual({ ok: false, failure: "input-failed", permanent: false });
-    const fine = await extract(text(null), hint, { size });
+    // However the time runs out (the child's timeout, or the check's), a source that ends
+    // wrong is never an answer.
+    const rushed = await extract(text("hash", 64), hint, {
+      size: size(64),
+      limits: { timeoutMs: 500 },
+    });
+    expect(rushed.ok).toBe(false);
+    const fine = await extract(text(null, 64), hint, { size: size(64) });
     expect(fine.ok && fine.extraction.truncated).toBe(true);
-    expect(fine.ok && fine.stats.bytesRead).toBeLessThan(size);
-  });
+    expect(fine.ok && fine.stats.bytesRead).toBeLessThan(size(64));
+    // Three 64 MiB streams and a 15 s stall: slow runners need the time.
+  }, 120_000);
 
   it("closes a stream the child stopped reading early", async () => {
     const big = Readable.from(generatedCsv(1_000_000));
