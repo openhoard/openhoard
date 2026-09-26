@@ -50,11 +50,15 @@ const SURFACE = {
     "rejectReview",
     "removeFromSource",
     "removePack",
+    // Enrichment's extract step, through its guarded write (T-402).
+    "saveExtract",
     "setDisplayTitle",
     "setPrimaryTag",
     "writeActivity",
   ],
   trusted: [
+    // For enrichment (core/jobs): where a version's bytes are, to extract them (T-402).
+    "contentRef",
     // For enrichment (core/jobs): the exposure its tags give a file, before it is processed.
     "enrichmentExposure",
     "explainAccess",
@@ -65,6 +69,9 @@ const SURFACE = {
     "planPack",
     "planPackRemoval",
     "primaryTagOf",
+    // Extracted text is content: for pipeline steps (search T-501, summaries T-405) only;
+    // whatever shows it to someone gates it as content first.
+    "readExtract",
     "sourceItemState",
     "tenantPolicies",
     "tenantRules",

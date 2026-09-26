@@ -49,6 +49,14 @@ const stream = await blobs.open(tenantId, blobId, { offset: 0, length: 1024 });
 - `read()` loads a small blob or range into memory.
 - `verify()` re-hashes a blob and reports whether it still matches its id.
 
+## Enrichment
+
+`blobContentSource(store)` is how enrichment reads the bytes OpenHoard holds (core/catalog
+`ContentSource`, T-402): a version whose blob has a location streams from the store by its
+content-addressed id; one without (an indexed zone) is left to a connector's source (null). A
+blob the catalog says is stored but the store doesn't have throws, so the job retries and then
+dead-letters for an operator instead of treating the content as absent.
+
 ## Limits
 
 - S3's CopyObject handles up to 5 GiB, so on S3 a single upload larger than that fails at

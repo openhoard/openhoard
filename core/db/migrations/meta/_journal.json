@@ -260,6 +260,20 @@
       "when": 1790391511397,
       "tag": "0036_admin_principal_epoch",
       "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1790403045641,
+      "tag": "0037_version_extracts",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1790403046441,
+      "tag": "0038_version_extracts_rls",
+      "breakpoints": true
     }
   ]
 }

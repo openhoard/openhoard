@@ -1119,6 +1119,74 @@ export const activityEvents = pgTable(
   ],
 );
 
+/** How extraction ended for a version (T-402); see {@link versionExtracts}. */
+export const EXTRACT_STATUSES = ["extracted", "failed", "unsupported", "unavailable"] as const;
+/** The most extracted text a version keeps, in UTF-8 bytes; extractors are set lower. */
+export const MAX_EXTRACT_TEXT_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Text extracted from a version's content (T-402), one row per version, for search (T-501) and
+ * summaries (T-405). It is content: whatever reads it for someone must gate it as it gates the
+ * file's content (levels, exposure), never as metadata. Title and author, when an extractor
+ * reports them, come from inside the file too, so they are in `metadata` here, not on the object.
+ *
+ * - `extracted`: `kind`, `text` (capped; `truncated` says so), `metadata`, `signals` (cheap
+ *   hints of hidden text for injection flagging, T-408) and `warnings`.
+ * - `failed`: the content can't be extracted, and trying again won't change that (malformed,
+ *   encrypted, over a limit, timed out, crashed the extractor): `failure` says which.
+ * - `unsupported`: no extractor for this type. `unavailable`: nothing could read the bytes
+ *   (an indexed zone before its connector reads content, T-301).
+ *
+ * Enrichment writes it (core/jobs extract step), overwriting on every run: one row per version,
+ * never two. `extractor` names the extractor's version, so a newer one can find what to redo.
+ */
+export const versionExtracts = pgTable(
+  "version_extracts",
+  {
+    tenantId: text("tenant_id").notNull(),
+    versionId: text("version_id").notNull(),
+    objectId: text("object_id").notNull(),
+    status: text("status", { enum: EXTRACT_STATUSES }).notNull(),
+    /** What the content turned out to be (`pdf`, `docx`, `csv`…), when extracted. */
+    kind: text("kind"),
+    text: text("text").notNull().default(""),
+    truncated: boolean("truncated").notNull().default(false),
+    metadata: jsonb("metadata").notNull().default({}),
+    signals: jsonb("signals").notNull().default([]),
+    warnings: jsonb("warnings").notNull().default([]),
+    /** Why a `failed` extraction failed: `malformed`, `timeout`… */
+    failure: text("failure"),
+    extractor: text("extractor").notNull(),
+    extractedAt: timestamp("extracted_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.versionId] }),
+    // A version of that object; the extract goes with it.
+    foreignKey({
+      name: "version_extracts_version_fk",
+      columns: [t.tenantId, t.objectId, t.versionId],
+      foreignColumns: [versions.tenantId, versions.objectId, versions.id],
+    }).onDelete("cascade"),
+    index("version_extracts_object_idx").on(t.tenantId, t.objectId),
+    check("version_extracts_status_valid", sql.raw(`status in (${quoted(EXTRACT_STATUSES)})`)),
+    check("version_extracts_kind_format", sql`kind is null or kind ~ '^[a-z0-9][a-z0-9-]{0,31}$'`),
+    check("version_extracts_kind_when_extracted", sql`(status = 'extracted') = (kind is not null)`),
+    check(
+      "version_extracts_failure_when_failed",
+      sql`(status = 'failed') = (failure is not null) and (failure is null or failure ~ '^[a-z0-9][a-z0-9-]{0,31}$')`,
+    ),
+    check(
+      "version_extracts_text_only_extracted",
+      sql`status = 'extracted' or (text = '' and not truncated)`,
+    ),
+    check("version_extracts_text_size", sql.raw(`octet_length(text) <= ${MAX_EXTRACT_TEXT_BYTES}`)),
+    check("version_extracts_metadata_object", sql`jsonb_typeof(metadata) = 'object'`),
+    check("version_extracts_signals_array", sql`jsonb_typeof(signals) = 'array'`),
+    check("version_extracts_warnings_array", sql`jsonb_typeof(warnings) = 'array'`),
+    check("version_extracts_extractor_format", sql`extractor ~ '^[a-z0-9][a-z0-9./-]{0,63}$'`),
+  ],
+);
+
 /** OAuth scopes an MCP client may ask for (T-105), and the policy actions each allows. */
 export const OAUTH_SCOPES = ["files:read", "files:tag"] as const;
 /** The trust an admin gives an approved AI client: every client trust but first-party. */
@@ -1402,6 +1470,7 @@ export const tables = {
   principalEpochs,
   apiKeys,
   activityEvents,
+  versionExtracts,
   sessions,
   oauthClients,
   oauthCodes,

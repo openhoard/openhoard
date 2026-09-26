@@ -1,3 +1,4 @@
+export { blobContentSource } from "./content.js";
 export {
   BlobNotFoundError,
   blobPath,

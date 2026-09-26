@@ -16,6 +16,27 @@ Part of the OpenHoard trusted core. See [../README.md](../README.md) and
 - [`rules.ts`](src/rules.ts): the rule tagger (T-403), deterministic tags from path, site,
   file type and a client dictionary, applied before any model sees a file.
 - [`activity.ts`](src/activity.ts): who viewed, opened, edited or shared which file (T-205).
+- [`extracts.ts`](src/extracts.ts): where a version's bytes are (`contentRef`, the
+  `ContentSource` interface that reads them) and the text extracted from them (T-402).
+
+## Extracted text
+
+`saveExtract()` stores a version's extraction in `version_extracts`, one row per version:
+`extracted` (kind, text, truncated, metadata, signals, warnings), `failed` (a code),
+`unsupported` or `unavailable`, with the extractor's version. Every run rewrites the row, never
+adds one, and it goes with its version when the object is purged. Enrichment's extract step
+(core/jobs) writes it through its guarded write, so only the current version under the title
+the job read gets one. `readExtract()` is for pipeline steps (search T-501, summaries T-405):
+the text is content, so whatever shows it to someone gates it as content first (levels,
+exposure), never as metadata.
+
+A `ContentSource` returns a version's bytes, or null when it can't reach them. core/storage's
+`blobContentSource()` reads what OpenHoard holds (managed zones). Connectors (T-301) provide
+the source for indexed zones, and it must return exactly the bytes of the version's blob:
+when the item changed at the source since the crawl that made the version (eTag or version
+marker differs), it refuses (throws, or returns null) rather than hand over newer bytes, which
+belong to the next version and its own job. It throws when the source is unreachable for now,
+so the job is retried.
 
 ## Ingest
 

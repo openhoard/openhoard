@@ -103,6 +103,15 @@ export {
   type WithheldContent,
 } from "./activity.js";
 export {
+  contentRef,
+  readExtract,
+  saveExtract,
+  type ContentRef,
+  type ContentSource,
+  type ExtractStatus,
+  type VersionExtract,
+} from "./extracts.js";
+export {
   explainAccess,
   ExplainError,
   type AccessExplanation,
