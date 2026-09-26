@@ -107,7 +107,11 @@ export interface SourceItem {
    * read() is asked for this version and refuses to return any other. Required for files.
    */
   contentVersion?: string;
-  /** Where people find the item (a web URL, a file: URL): kept with it, and a hint for read(). */
+  /**
+   * Where people find the item: kept with it, and a hint for read(). `https:` or a scheme in
+   * `redirectSchemes`, never one that runs code, never with credentials, and a `file:` URL only
+   * without a host (a UNC host would make a client authenticate to it).
+   */
   url?: string;
 }
 
@@ -123,12 +127,17 @@ export interface SourceItem {
  *   it. Yield one at least every few hundred items so a killed crawl loses little.
  * - `done`: the last event. `cursor` is what delta() starts from next time: it must cover every
  *   change made after the crawl or delta began looking, even at items it had already yielded.
+ * - `warning`: something the runner should know and report, by code (a slug), with the item it
+ *   concerns when there is one. `unreadable`: part of the source (the item, or everything under
+ *   it) couldn't be listed or read; its contents are unknown, not gone, so nothing under it may
+ *   be taken as deleted (a crawl that met one doesn't reconcile). Other codes are reported only.
  */
 export type SyncEvent =
   | { type: "item"; item: SourceItem }
   | { type: "deleted"; externalId: string }
   | { type: "checkpoint"; token: string }
-  | { type: "done"; cursor: string };
+  | { type: "done"; cursor: string }
+  | { type: "warning"; code: string; externalId?: string };
 
 /** Which item, and which of its versions, a caller means. Built from what a crawl reported. */
 export interface ItemRef {
@@ -231,6 +240,12 @@ export interface Connector {
    * `redirectSchemes`. `not-found` when it is gone.
    */
   redirect?(ref: ItemRef, signal: AbortSignal): Promise<string>;
+  /**
+   * What the source is, as a stable string (a folder's device and inode, a site's id): the runner
+   * records it on the first sync and refuses a sync when it changes (another disk mounted at the
+   * same path, a site recreated), until an admin accepts the new one. Optional.
+   */
+  identity?(signal: AbortSignal): Promise<string>;
   /** Releases what it holds (connections, files). Optional. */
   close?(): Promise<void>;
 }

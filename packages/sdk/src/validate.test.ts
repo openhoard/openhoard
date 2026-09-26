@@ -66,9 +66,9 @@ describe("checkDescription", () => {
 
 describe("checkItem and checkEvent", () => {
   it("accepts files and folders", () => {
-    expect(checkItem(file)).toBeNull();
+    expect(checkItem(file, description)).toBeNull();
     expect(checkItem(folder)).toBeNull();
-    expect(checkEvent({ type: "item", item: file })).toBeNull();
+    expect(checkEvent({ type: "item", item: file }, description)).toBeNull();
     expect(checkEvent({ type: "deleted", externalId: "i.1" })).toBeNull();
     expect(checkEvent({ type: "checkpoint", token: "t" })).toBeNull();
     expect(checkEvent({ type: "done", cursor: "c" })).toBeNull();
@@ -99,7 +99,7 @@ describe("checkItem and checkEvent", () => {
     ["a bad media type", { ...file, mediaType: 5 }],
     ["a folder with a size", { ...folder, size: 1 }],
   ])("refuses an item with %s", (_label, item) => {
-    expect(checkItem(item)).not.toBeNull();
+    expect(checkItem(item, description)).not.toBeNull();
   });
 
   it("refuses unknown events and bad tokens", () => {
@@ -328,5 +328,46 @@ describe("checkRedirect", () => {
     expect(checkRedirect("https://ann:pw@example.com/", description)).toMatch(/credentials/);
     expect(checkRedirect("/relative", description)).toMatch(/absolute/);
     expect(checkRedirect(5, description)).not.toBeNull();
+  });
+
+  it("refuses file: URLs that name a host: opening one sends Windows credentials to it", () => {
+    expect(checkRedirect("file://localhost/srv/a.txt", description)).toBeNull();
+    expect(checkRedirect("file://evil.example/share/a.txt", description)).toMatch(/host/);
+    expect(checkRedirect("file://10.0.0.1/c$/a.txt", description)).toMatch(/host/);
+  });
+});
+
+describe("item URLs", () => {
+  it("follow the redirect rules, with the schemes the connector declares", () => {
+    const at = (url: string, d?: ConnectorDescription) => checkItem({ ...file, url }, d);
+    expect(at("file:///srv/Docs/plan.md", description)).toBeNull();
+    // Without a description only https: passes.
+    expect(at("file:///srv/Docs/plan.md")).toMatch(/^url: scheme/);
+    expect(at("https://contoso.sharepoint.com/Docs/plan.md")).toBeNull();
+    for (const bad of [
+      "javascript:alert(document.cookie)",
+      "data:text/html,<script>alert(1)</script>",
+      "vbscript:msgbox",
+      "blob:https://x/1",
+      "file://attacker.example/share/plan.md",
+      "https://user:pw@example.com/plan.md",
+      "not a url",
+    ]) {
+      expect(at(bad, { ...description, redirectSchemes: ["file:", "javascript:"] }), bad).toMatch(
+        /^url: /,
+      );
+    }
+    expect(
+      checkEvent({ type: "item", item: { ...file, url: "javascript:x" } }, description),
+    ).toMatch(/^url: /);
+  });
+});
+
+describe("warnings", () => {
+  it("carry a slug code and, optionally, an item", () => {
+    expect(checkEvent({ type: "warning", code: "unreadable" })).toBeNull();
+    expect(checkEvent({ type: "warning", code: "hard-link", externalId: "i.1" })).toBeNull();
+    expect(checkEvent({ type: "warning", code: "Not A Slug" })).not.toBeNull();
+    expect(checkEvent({ type: "warning", code: "unreadable", externalId: "" })).not.toBeNull();
   });
 });

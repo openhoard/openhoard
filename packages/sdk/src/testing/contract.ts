@@ -9,7 +9,14 @@ import {
   type SyncEvent,
 } from "../connector.js";
 import { isAbortError, isConnectorError, type ConnectorErrorCode } from "../errors.js";
-import { checkAcl, checkDescription, checkEvent, checkRedirect, refOf } from "../validate.js";
+import {
+  checkAcl,
+  checkDescription,
+  checkEvent,
+  checkRedirect,
+  refOf,
+  storableText,
+} from "../validate.js";
 
 /*
  * The connector contract kit (T-301): one Vitest suite every connector runs against a source it
@@ -137,7 +144,7 @@ export function connectorContract(name: string, fixture: ContractFixture): void 
 
     /** Checks a whole run's events: valid, one `done`, last. */
     const checkRun = (events: SyncEvent[]) => {
-      for (const e of events) expect(checkEvent(e), JSON.stringify(e)).toBeNull();
+      for (const e of events) expect(checkEvent(e, description), JSON.stringify(e)).toBeNull();
       expect(events.filter((e) => e.type === "done")).toHaveLength(1);
       expect(events[events.length - 1]?.type).toBe("done");
     };
@@ -188,6 +195,19 @@ export function connectorContract(name: string, fixture: ContractFixture): void 
           expect(m.name).toBe(description.id);
           expect(m.capabilities).toEqual(expect.arrayContaining(manifestCapabilities(description)));
         }
+      },
+      timeout,
+    );
+
+    it(
+      "names what the source is the same way every time, when it can",
+      async () => {
+        if (!connector.identity) return;
+        const signal = new AbortController().signal;
+        const identity = await connector.identity(signal);
+        expect(storableText(identity) && identity.length > 0 && identity.length <= 1024).toBe(true);
+        await seed();
+        expect(await connector.identity(signal)).toBe(identity);
       },
       timeout,
     );

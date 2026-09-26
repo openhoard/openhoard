@@ -68,6 +68,8 @@ export class MemorySource implements ContractSource {
   private readonly every: number;
   private readonly stableIds: boolean;
   private readonly chunk: number;
+  /** What identity() answers: a new source gets a new one, and a test may change it. */
+  identity = `memory:${++sources}`;
 
   constructor(options: MemorySourceOptions = {}) {
     this.every = options.checkpointEvery ?? 3;
@@ -89,6 +91,10 @@ export class MemorySource implements ContractSource {
       read: (ref, signal) => this.read(ref, signal),
       aclImport: (ref, signal) => this.aclImport(ref, signal),
       redirect: (ref, signal) => this.redirect(ref, signal),
+      identity: async (signal) => {
+        signal.throwIfAborted();
+        return this.identity;
+      },
       close: async () => this.copies.clear(),
     };
   }
@@ -336,6 +342,9 @@ export class MemorySource implements ContractSource {
     return items;
   }
 }
+
+/** Numbers each source, for its identity. */
+let sources = 0;
 
 /** A fresh, empty in-memory source. */
 export function memorySource(options: MemorySourceOptions = {}): MemorySource {

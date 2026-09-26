@@ -25,18 +25,23 @@ A connector reaches files where they live and answers five questions; the core d
 | `read()`      | exactly the bytes of the version a crawl reported, or `changed`: never newer bytes             |
 | `aclImport()` | the item's permissions, normalized, by the source's own ids (optional)                         |
 | `redirect()`  | a URL that opens the item in its own app: `https:` or a declared scheme (optional)             |
+| `identity()`  | what the source is (a folder's device and inode): the runner refuses another later (optional)  |
 
 **Items** (`SourceItem`): external id (stable across renames when `stableIds`), kind (file or
 folder), parent id, path (names, never joined), title, media type, size, modified time and
 author, `etag` (changes when anything reported changes, the path included: moving a folder
 changes everything in it) and `contentVersion` (changes when the bytes do; what `read()` is
-asked for).
+asked for). An item's `url`, like what `redirect()` returns, is `https:` or a declared scheme,
+never `javascript:`, `data:`, `vbscript:` or `blob:`, never with credentials, and a `file:` URL
+never names a host (opening `file://server/…` makes Windows authenticate to that server).
 
 **Events** (`SyncEvent`), in the source's order: `item`, `deleted` (every item of a deleted
 folder too), `checkpoint` (everything before it may be considered applied once the token is
 saved), `done` (last; its cursor covers every change made after the crawl or delta began
-looking). Tokens are at most 64 KiB: a connector that needs more state keeps it itself (the fs
-connector keeps snapshots in its own folder).
+looking), `warning` (a code, and the item when there is one: `unreadable` says part of the
+source couldn't be seen, which the runner must not take as deleted; others are reported only).
+Tokens are at most 64 KiB: a connector that needs more state keeps it itself (the fs connector
+keeps snapshots in its own folder).
 
 **Errors** are `ConnectorError`s with a code: `retryable`, `throttled` (with `retryAfterMs`),
 `auth`, `permanent`, `not-found`, `changed`, `resync` (a token that can't be used any more: the

@@ -108,8 +108,11 @@ export function checkDescription(d: unknown): string[] {
 /** Schemes redirect() may never return: they run code or carry content, not a location. */
 const UNSAFE_SCHEMES = new Set(["javascript:", "data:", "vbscript:", "blob:", "about:"]);
 
-/** What is wrong with an item, or null. */
-export function checkItem(item: unknown): string | null {
+/**
+ * What is wrong with an item, or null. Its `url` follows the rules of {@link checkUrl}, with the
+ * schemes `description` declares (without one, `https:` only).
+ */
+export function checkItem(item: unknown, description?: ConnectorDescription): string | null {
   if (!isObject(item)) return "an item must be an object";
   if (!text(item.externalId, LIMITS.externalId)) return "externalId";
   if (item.kind !== "file" && item.kind !== "folder") return "kind must be file or folder";
@@ -132,7 +135,10 @@ export function checkItem(item: unknown): string | null {
   }
   if (item.title !== undefined && !text(item.title, LIMITS.title)) return "title";
   if (!text(item.etag, LIMITS.etag)) return "etag";
-  if (item.url !== undefined && !text(item.url, LIMITS.url)) return "url";
+  if (item.url !== undefined) {
+    const problem = checkUrl(item.url, description);
+    if (problem !== null) return `url: ${problem}`;
+  }
   if (item.modifiedAt !== undefined) {
     if (typeof item.modifiedAt !== "string" || !ISO_TIME.test(item.modifiedAt)) {
       return "modifiedAt must be an ISO 8601 time";
@@ -168,12 +174,14 @@ export function checkItem(item: unknown): string | null {
   return null;
 }
 
-/** What is wrong with an event, or null. */
-export function checkEvent(e: unknown): string | null {
+const CODE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/** What is wrong with an event, or null. `description` gives items' URL schemes (checkItem). */
+export function checkEvent(e: unknown, description?: ConnectorDescription): string | null {
   if (!isObject(e)) return "an event must be an object";
   switch (e.type) {
     case "item":
-      return checkItem(e.item);
+      return checkItem(e.item, description);
     case "deleted":
       return text(e.externalId, LIMITS.externalId) ? null : "externalId";
     case "checkpoint":
@@ -182,6 +190,11 @@ export function checkEvent(e: unknown): string | null {
         : "a checkpoint token must be 1 to 65,536 characters";
     case "done":
       return text(e.cursor, LIMITS.token) ? null : "a cursor must be 1 to 65,536 characters";
+    case "warning":
+      if (typeof e.code !== "string" || !CODE.test(e.code)) return "a warning's code is a slug";
+      return e.externalId === undefined || text(e.externalId, LIMITS.externalId)
+        ? null
+        : "externalId";
     default:
       return "unknown event type";
   }
@@ -356,11 +369,18 @@ export function acceptAcl(acl: unknown): ItemAcl {
 }
 
 /**
- * What is wrong with a URL redirect() returned, or null: an absolute URL, `https:` or a scheme
- * the connector declared, never one that runs code (`javascript:`, `data:`), never carrying a
- * user name or password.
+ * What is wrong with a URL a connector gave (an item's `url`, what redirect() returned), or null:
+ *
+ * - absolute, at most 4,096 characters;
+ * - `https:`, or a scheme `description` declares (`redirectSchemes`), and never one that runs
+ *   code or carries content (`javascript:`, `data:`, `vbscript:`, `blob:`, `about:`), even
+ *   declared;
+ * - no user name or password;
+ * - a `file:` URL without a host (`file:///…`; `localhost` parses to none): opening
+ *   `file://server/share/…` on Windows authenticates to that server (NTLM), so a connector could
+ *   make people's machines send their credentials anywhere.
  */
-export function checkRedirect(url: unknown, description: ConnectorDescription): string | null {
+export function checkUrl(url: unknown, description?: ConnectorDescription): string | null {
   if (!text(url, LIMITS.url)) return "a URL must be text of at most 4,096 characters";
   let parsed: URL;
   try {
@@ -368,10 +388,16 @@ export function checkRedirect(url: unknown, description: ConnectorDescription): 
   } catch {
     return "not an absolute URL";
   }
-  const allowed = new Set(["https:", ...(description.redirectSchemes ?? [])]);
+  const allowed = new Set(["https:", ...(description?.redirectSchemes ?? [])]);
   if (UNSAFE_SCHEMES.has(parsed.protocol) || !allowed.has(parsed.protocol)) {
     return `scheme ${parsed.protocol} is not one the connector declared`;
   }
   if (parsed.username !== "" || parsed.password !== "") return "a URL must not carry credentials";
+  if (parsed.protocol === "file:" && parsed.host !== "") return "a file: URL must not name a host";
   return null;
+}
+
+/** What is wrong with a URL redirect() returned, or null: {@link checkUrl}. */
+export function checkRedirect(url: unknown, description: ConnectorDescription): string | null {
+  return checkUrl(url, description);
 }
