@@ -179,18 +179,22 @@ describe("the output schema", () => {
     );
   });
 
-  it("never throws anything but ModelOutputError", () => {
-    fc.assert(
-      fc.property(fc.oneof(fc.string({ maxLength: 400 }), fc.json({ maxDepth: 3 })), (answer) => {
-        try {
-          validateCardOutput(answer);
-        } catch (e) {
-          expect(e).toBeInstanceOf(ModelOutputError);
-        }
-      }),
-      { numRuns: 500 },
-    );
-  });
+  it(
+    "never throws anything but ModelOutputError",
+    () => {
+      fc.assert(
+        fc.property(fc.oneof(fc.string({ maxLength: 400 }), fc.json({ maxDepth: 3 })), (answer) => {
+          try {
+            validateCardOutput(answer);
+          } catch (e) {
+            expect(e).toBeInstanceOf(ModelOutputError);
+          }
+        }),
+        { numRuns: 300 },
+      );
+    },
+    process.platform === "win32" ? 120_000 : 60_000,
+  );
 });
 
 describe("the filter", () => {

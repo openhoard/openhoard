@@ -1,5 +1,5 @@
 import { clampWords, MAX_SUMMARY_WORDS, stripUnsafeText, truncateCodePoints } from "./card.js";
-import { cleanForMatching, mixedScriptWords, skeleton } from "./clean.js";
+import { cleanForMatching, invisibleVariants, mixedScriptWords, skeleton } from "./clean.js";
 import { instructionPatterns } from "./injection.js";
 
 /*
@@ -283,7 +283,7 @@ const ADDRESSED = new RegExp(
  * "ignore all", as stripUnsafeText() will store it).
  */
 function unsafeReason(s: string): string | null {
-  for (const invisibleAs of ["", " "] as const) {
+  for (const invisibleAs of invisibleVariants(s)) {
     const cleaned = cleanForMatching(s, 8_192, invisibleAs);
     const skel = skeleton(cleaned);
     const flat = skel.replaceAll("\n", " ");

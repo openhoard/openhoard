@@ -198,14 +198,28 @@ const CONFUSABLES: ReadonlyMap<number, string> = new Map<number, string>([
   [0x029f, "l"],
 ]);
 
-/** Step 5: the cleaned text with look-alike letters folded to Latin. */
+/** Anything past Latin-1: only those characters can be look-alikes. */
+const BEYOND_LATIN1 = /[^\n\x20-\xff]/gu;
+const HAS_BEYOND_LATIN1 = /[^\n\x20-\xff]/u;
+
+/**
+ * Step 5: the cleaned text with look-alike letters folded to Latin. One native replace over the
+ * characters past Latin-1 (none, for most text: then the text itself).
+ */
 export function skeleton(cleaned: string): string {
-  let out = "";
-  for (const ch of cleaned) {
-    const cp = ch.codePointAt(0) ?? 0;
-    out += cp < 0x0100 ? ch : (CONFUSABLES.get(cp) ?? ch);
-  }
-  return out;
+  return cleaned.replace(BEYOND_LATIN1, (ch) => CONFUSABLES.get(ch.codePointAt(0) ?? 0) ?? ch);
+}
+
+/** One invisible character, to tell whether a text has any. */
+// eslint-disable-next-line no-misleading-character-class -- INVISIBLE's class, as a one-off test
+const HAS_INVISIBLE = new RegExp(INVISIBLE.source, "u");
+
+/**
+ * The ways to clean `s` for checks: invisible characters deleted, and, only if it has any, as
+ * spaces too (without any, both give the same text: scanned once).
+ */
+export function invisibleVariants(s: string): readonly ("" | " ")[] {
+  return HAS_INVISIBLE.test(s) ? ["", " "] : [""];
 }
 
 /** A word: letters and the marks on them, at most 64 at a time (longer runs are split). */
@@ -221,9 +235,13 @@ const OTHER = /(?![\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}])\p{L}/
  * words in another script, count nothing. Linear: bounded words, one scan.
  */
 export function mixedScriptWords(cleaned: string): number {
+  // Latin-1 only: every letter there is Latin (the micro sign folds to Greek mu under NFKC, and
+  // is left out below). Nothing to count.
+  if (!HAS_BEYOND_LATIN1.test(cleaned)) return 0;
   let n = 0;
   for (const m of cleaned.matchAll(WORD)) {
-    const w = m[0];
+    // "10μg": the micro sign is a unit, not spoofing.
+    const w = m[0].replaceAll("μ", "");
     if (LATIN.test(w) && OTHER.test(w)) n++;
   }
   return n;

@@ -53,7 +53,7 @@ marks (Hebrew and Arabic names) or soft hyphens.
 It is a tripwire, not a classifier: a document about prompt injection is flagged too (a person
 can mark it reviewed), and a determined attacker can word around it; that is what the filter
 below and quoted rendering are for. Every scan is linear: patterns are literals, small
-alternations and bounded gaps, never nested quantifiers; input is cut at 4 Mi characters.
+alternations and bounded gaps, never nested quantifiers; input is cut at 1 Mi characters (the extractor's default text cap), each text is cleaned once per variant (the spaced one only when it has invisible characters), and scoring stops once the file is flagged.
 Verdicts carry pattern ids, never matched text, so they can be logged.
 
 **Measured on the S8 corpus v0** (core/jobs `s8-corpus.test.ts`, the real extractor): 48 of 50

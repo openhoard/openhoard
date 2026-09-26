@@ -1,4 +1,4 @@
-import { cleanForMatching, mixedScriptWords, skeleton } from "./clean.js";
+import { cleanForMatching, invisibleVariants, mixedScriptWords, skeleton } from "./clean.js";
 
 /*
  * Prompt-injection flagging (T-408): does a file look like it carries instructions meant for an
@@ -29,8 +29,12 @@ import { cleanForMatching, mixedScriptWords, skeleton } from "./clean.js";
  * can go to logs and job output without repeating the payload.
  */
 
-/** How much of one text is scanned, in UTF-16 units: well above the extractor's 1 MiB default. */
-export const MAX_SCAN_CHARS = 4 * 1024 * 1024;
+/**
+ * How much of one text is scanned, in UTF-16 units: the extractor's default text cap (1 MiB of
+ * UTF-8), and far more than any model is sent (a summary prompt carries its first 24,000
+ * characters). Text past it isn't scored.
+ */
+export const MAX_SCAN_CHARS = 1024 * 1024;
 
 /** A score of this or more flags the file. */
 export const FLAG_THRESHOLD = 3;
@@ -101,10 +105,11 @@ const PATTERNS: readonly Pattern[] = [
     re: /\bdo not (?:mention|reveal|disclose|tell (?:the )?user about|repeat|show) (?:this|these|that) (?:note|instructions?|message|comment|text|request)\b|\bwithout (?:telling|informing|notifying) the user\b/,
   },
   {
-    // Markdown image with a remote URL: rendered, it fetches the URL (data exfiltration).
+    // Markdown image with a remote URL: rendered, it fetches the URL (data exfiltration). The
+    // alt text stops at the next "[" too, so "![![![…" costs one step per opener.
     id: "markdown-image-link",
     weight: STRONG,
-    re: /!\[[^\]\n]{0,200}\]\( ?(?:https?:|\/\/)/,
+    re: /!\[[^[\]\n]{0,200}\]\( ?(?:https?:|\/\/)/,
   },
   {
     id: "tool-call",
@@ -249,8 +254,7 @@ export function normalizeForMatching(s: string, max = MAX_SCAN_CHARS): string {
  * as spaces (a wrapped line doesn't break "ignore all previous / instructions"); the line-start
  * ones (`role-line`) see them.
  */
-function matchPatterns(cleaned: string): Pattern[] {
-  const skel = skeleton(cleaned);
+function matchPatterns(cleaned: string, skel = skeleton(cleaned)): Pattern[] {
   const flat = { skel: skel.replaceAll("\n", " "), cleaned: cleaned.replaceAll("\n", " ") };
   return PATTERNS.filter((p) =>
     p.re.test(p.lines === true ? (p.script ? cleaned : skel) : p.script ? flat.cleaned : flat.skel),
@@ -263,7 +267,7 @@ function matchPatterns(cleaned: string): Pattern[] {
  */
 export function instructionPatterns(text: string): string[] {
   const ids = new Set<string>();
-  for (const invisibleAs of ["", " "] as const) {
+  for (const invisibleAs of invisibleVariants(text)) {
     for (const p of matchPatterns(cleanForMatching(text, MAX_SCAN_CHARS, invisibleAs)))
       ids.add(p.id);
   }
@@ -342,12 +346,28 @@ export function detectInjection(input: InjectionInput): InjectionVerdict {
     const had = found.get(key);
     if (!had || had.weight < weight) found.set(key, { id, source, weight });
   };
-  const scan = (text: string, source: FindingSource, bonus: number) => {
-    if (text === "") return;
-    // Invisible characters deleted, then as spaces: "ig<ZWSP>nore" and "ignore<ZWSP>all" both.
-    for (const invisibleAs of ["", " "] as const) {
+  /** The score so far: each id once, at its heaviest. */
+  const total = () => {
+    const best = new Map<string, number>();
+    for (const f of found.values()) best.set(f.id, Math.max(best.get(f.id) ?? 0, f.weight));
+    let n = 0;
+    for (const w of best.values()) n += w;
+    return n;
+  };
+  const flagged = () => total() >= FLAG_THRESHOLD;
+  /**
+   * Scores one text, cleaned once per variant (invisible characters deleted, then as spaces,
+   * the second only when the text has any), each variant's skeleton made once and shared by
+   * every pattern. Returns the first variant's skeleton, for the reversed scan.
+   */
+  const scan = (text: string, source: FindingSource, bonus: number): string => {
+    if (text === "") return "";
+    let first: string | undefined;
+    for (const invisibleAs of invisibleVariants(text)) {
       const cleaned = cleanForMatching(text, MAX_SCAN_CHARS, invisibleAs);
-      for (const p of matchPatterns(cleaned)) {
+      const skel = skeleton(cleaned);
+      first ??= skel;
+      for (const p of matchPatterns(cleaned, skel)) {
         // "Delete old files" is a fine name for a file: only in hidden text does it count more.
         const extra = source === "name" && NAME_PLAIN.has(p.id) ? 0 : bonus;
         add(p.id, source, p.weight + extra);
@@ -357,6 +377,7 @@ export function detectInjection(input: InjectionInput): InjectionVerdict {
       const mixed = mixedScriptWords(cleaned);
       if (mixed > 0) add("mixed-script", source, (mixed >= 2 ? STRONG : WEAK) + bonus);
     }
+    return first ?? "";
   };
 
   const name = typeof input.name === "string" ? input.name.slice(0, 4096) : "";
@@ -369,13 +390,21 @@ export function detectInjection(input: InjectionInput): InjectionVerdict {
     scan(name, "name", 1);
   }
 
+  // Once flagged, the rest can't unflag it: later scans are skipped (the findings then list
+  // what flagged it, not everything there is).
   const text = typeof input.text === "string" ? input.text : "";
-  scan(text, "text", 0);
-  if (text !== "") {
+  const textSkeleton = flagged() ? "" : scan(text, "text", 0);
+  if (textSkeleton !== "" && !flagged()) {
     const scanned = text.length > MAX_SCAN_CHARS ? text.slice(0, MAX_SCAN_CHARS) : text;
-    for (const decoded of decodedBase64(scanned)) scan(decoded, "decoded", 0);
+    for (const decoded of decodedBase64(scanned)) {
+      scan(decoded, "decoded", 0);
+      if (flagged()) break;
+    }
+  }
+  if (textSkeleton !== "" && !flagged()) {
     // Text stored reversed inside a right-to-left override reads normally on screen.
-    const reversed = skeleton(normalizeForMatching(scanned)).split("").reverse().join("");
+    let reversed = "";
+    for (let i = textSkeleton.length - 1; i >= 0; i--) reversed += textSkeleton[i];
     for (const id of ["override-instructions", "override-your-instructions"]) {
       const p = BY_ID.get(id);
       if (p?.re.test(reversed)) add(id, "reversed", p.weight);
@@ -384,6 +413,7 @@ export function detectInjection(input: InjectionInput): InjectionVerdict {
 
   let hiddenAlone = false;
   for (const { kind, sample } of readSignals(input.signals ?? [])) {
+    if (flagged()) break;
     if (!HIDING.has(kind)) continue;
     if (FLAGS_ALONE.has(kind)) add(kind, "hidden", STRONG);
     if (SUSPICIOUS_ALONE.has(kind)) hiddenAlone = true;
@@ -392,7 +422,10 @@ export function detectInjection(input: InjectionInput): InjectionVerdict {
   }
   if (hiddenAlone) add("hidden-text-present", "hidden", 1);
 
-  for (const s of metadataStrings(input.metadata ?? {})) scan(s, "metadata", 1);
+  for (const s of metadataStrings(input.metadata ?? {})) {
+    if (flagged()) break;
+    scan(s, "metadata", 1);
+  }
 
   // Each pattern once per file, where it weighs most.
   const best = new Map<string, InjectionFinding>();

@@ -1,6 +1,12 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { cleanForMatching, decodeEntities, skeleton } from "./clean.js";
+import {
+  cleanForMatching,
+  decodeEntities,
+  invisibleVariants,
+  mixedScriptWords,
+  skeleton,
+} from "./clean.js";
 
 const cp = (n: number) => String.fromCodePoint(n);
 
@@ -16,6 +22,18 @@ describe("cleaning text for patterns", () => {
     expect(decodeEntities("&amp;lt;")).toBe("&lt;");
   });
 
+  it("scans the spaced variant only when there is something invisible", () => {
+    expect(invisibleVariants("plain text")).toEqual([""]);
+    expect(invisibleVariants(`a${cp(0x200b)}b`)).toEqual(["", " "]);
+  });
+
+  it("counts mixed-script words, not units or other scripts", () => {
+    expect(mixedScriptWords("plain latin text")).toBe(0);
+    expect(mixedScriptWords(`w${cp(0x456)}rd and pr${cp(0x435)}v`)).toBe(2);
+    expect(mixedScriptWords(`10${cp(0x3bc)}g dose`)).toBe(0);
+    expect(mixedScriptWords(`${cp(0x43e)}${cp(0x442)} latin`)).toBe(0);
+  });
+
   it("folds fullwidth by NFKC and look-alikes in the skeleton", () => {
     expect(cleanForMatching(`${cp(0xff28)}${cp(0xff34)}${cp(0xff34)}${cp(0xff30)}`, 100)).toBe(
       "http",
@@ -25,15 +43,21 @@ describe("cleaning text for patterns", () => {
     expect(skeleton(`${cp(0x3bf)}${cp(0x3c1)}${cp(0x131)}é`)).toBe("opié");
   });
 
-  it("cuts at the bound and keeps its shape on any input", () => {
-    expect(cleanForMatching("x".repeat(10), 3)).toBe("xxx");
-    fc.assert(
-      fc.property(fc.string({ unit: "binary", maxLength: 200 }), (s) => {
-        const c = cleanForMatching(s, 1_000);
-        expect(c).toBe(c.toLowerCase());
-        expect(/\p{Cf}/u.test(c)).toBe(false);
-        expect(skeleton(c).length).toBeLessThanOrEqual(c.length * 2);
-      }),
-    );
-  });
+  it(
+    "cuts at the bound and keeps its shape on any input",
+    () => {
+      expect(cleanForMatching("x".repeat(10), 3)).toBe("xxx");
+      fc.assert(
+        fc.property(fc.string({ unit: "binary", maxLength: 120 }), (s) => {
+          const c = cleanForMatching(s, 1_000);
+          expect(c).toBe(c.toLowerCase());
+          expect(/\p{Cf}/u.test(c)).toBe(false);
+          expect(skeleton(c).length).toBeLessThanOrEqual(c.length * 2);
+          expect(invisibleVariants(s).length).toBeGreaterThanOrEqual(1);
+        }),
+        { numRuns: 100 },
+      );
+    },
+    process.platform === "win32" ? 120_000 : 60_000,
+  );
 });

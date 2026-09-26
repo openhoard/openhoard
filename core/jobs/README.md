@@ -210,7 +210,7 @@ local-only and code zones are never read on the server. `extract.limits` and
 | Step             | Time budget                                                                 |
 | ---------------- | --------------------------------------------------------------------------- |
 | `extract-text`   | 13 minutes (`extract.budgetMs`), both attempts together                     |
-| `injection-flag` | milliseconds (linear scans of at most 4 MiB)                                |
+| `injection-flag` | milliseconds (linear scans of at most 1 Mi characters)                      |
 | `rule-tags`      | milliseconds                                                                |
 | `summarize`      | 8 minutes (`summarize.budgetMs`): two calls of 60 s per attempt, 2 retries, |
 |                  | backoff up to 30 s each                                                     |
