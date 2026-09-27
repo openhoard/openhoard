@@ -270,23 +270,27 @@ describe("false positives", () => {
  */
 const WIN = process.platform === "win32";
 const SLOW = WIN ? 240_000 : 120_000;
-const bestOf5 = (work: () => void) => {
-  let best = Number.POSITIVE_INFINITY;
-  for (let i = 0; i < 5; i++) {
-    const started = performance.now();
-    work();
-    best = Math.min(best, performance.now() - started);
-  }
-  return best;
-};
+/**
+ * Times the small and the big input in alternation, keeping each one's best of 7, so a burst of
+ * load on a shared runner lands on both rather than on one. 8x the input separates linear (about
+ * 8x the time) from quadratic (about 64x) with room for noise either way.
+ */
 const grows = (build: (chars: number) => string, run: (text: string) => void) => {
   const n = 128 * 1024;
   const smallText = build(n);
-  const bigText = build(4 * n);
-  const small = bestOf5(() => run(smallText));
-  const big = bestOf5(() => run(bigText));
+  const bigText = build(8 * n);
+  let small = Number.POSITIVE_INFINITY;
+  let big = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < 7; i++) {
+    let started = performance.now();
+    run(smallText);
+    small = Math.min(small, performance.now() - started);
+    started = performance.now();
+    run(bigText);
+    big = Math.min(big, performance.now() - started);
+  }
   expect(big).toBeLessThan(WIN ? 60_000 : 30_000);
-  if (!WIN && small > 20) expect(big / small).toBeLessThan(9);
+  if (!WIN && small > 10) expect(big / small).toBeLessThan(24);
 };
 
 describe("linear time on hostile input", () => {
