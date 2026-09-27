@@ -1633,6 +1633,12 @@ export const sourceSyncs = pgTable(
      */
     stoppedAt: timestamp("stopped_at", { withTimezone: true }),
     stoppedError: text("stopped_error"),
+    /**
+     * Who owns what the source syncs (0057): the person the configured owner named when the
+     * source first ran, pinned from then on (`user:usr_…`), so an email later reused by someone
+     * else never takes the source over.
+     */
+    ownerId: text("owner_id"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -1672,6 +1678,10 @@ export const sourceSyncs = pgTable(
       sql`last_counts is null or jsonb_typeof(last_counts) = 'object'`,
     ),
     check("source_syncs_stop_complete", sql`(stopped_at is null) = (stopped_error is null)`),
+    check(
+      "source_syncs_owner_format",
+      sql.raw(`owner_id is null or owner_id ~ '^user:${idPattern("user").slice(1)}'`),
+    ),
   ],
 );
 

@@ -676,54 +676,61 @@ describe("the worker", () => {
     expect(await nonReaderView(item.objectId)).toEqual([]);
   });
 
-  it("salvages a job whose lease ran out on its last attempt: processed, no model step", async () => {
-    // A tenant whose files a local model may read.
-    await db.withTenant(t.tenantId, (tx) =>
-      tx.update(tenants).set({ defaultExposure: "full" }).where(eq(tenants.id, t.tenantId)),
-    );
-    const item = await ingestItem("Budget 2026.xlsx");
-    const gaveUp: string[] = [];
-    let entered = 0;
-    const hanging: EnrichStep = {
-      name: "hanging-model",
-      provider: { id: "slow", kind: "local" },
-      async run({ signal }) {
-        entered++;
-        // Never answers: the lease runs out, and the worker aborts it.
-        await new Promise((_resolve, reject) =>
-          signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
-        );
-      },
-      async giveUp({ target }) {
-        gaveUp.push(target.versionId);
-      },
-    };
-    const jobs = await start({
-      steps: [ruleTagStep, hanging],
-      enrich: { retryLimit: 0, expireInSeconds: 1 },
-      superviseIntervalSeconds: 1,
-    });
-    await jobs.enqueueAfterIngest(t.tenantId, item);
-    const [queued] = await enrichJobs(jobs, item.versionId);
-    expect(await settled(jobs, QUEUES.enrich, queued?.id ?? null)).toMatchObject({
-      state: "failed",
-    });
-    await waitFor(() => processedAt(item.versionId), "the salvage run");
-    const [salvaged] = await jobs.boss.findJobs<unknown>(QUEUES.enrichFailed, {});
-    const done = await settled(jobs, QUEUES.enrichFailed, salvaged?.id ?? null);
-    expect(done).toMatchObject({
-      state: "completed",
-      output: { outcome: "processed", salvaged: true },
-    });
-    expect(entered).toBe(1);
-    expect(gaveUp).toEqual([item.versionId]);
-    // The rule tagger ran in the salvage: its tags are on the file non-readers now see.
-    expect((await tagState(item.objectId)).tags).toContainEqual({
-      facet: "kind",
-      value: "spreadsheet",
-      source: "rule",
-    });
-  });
+  // Three waits of up to 25 s each (waitFor), and a lease that must run out first.
+  it(
+    "salvages a job whose lease ran out on its last attempt: processed, no model step",
+    {
+      timeout: process.platform === "win32" ? 300_000 : 120_000,
+    },
+    async () => {
+      // A tenant whose files a local model may read.
+      await db.withTenant(t.tenantId, (tx) =>
+        tx.update(tenants).set({ defaultExposure: "full" }).where(eq(tenants.id, t.tenantId)),
+      );
+      const item = await ingestItem("Budget 2026.xlsx");
+      const gaveUp: string[] = [];
+      let entered = 0;
+      const hanging: EnrichStep = {
+        name: "hanging-model",
+        provider: { id: "slow", kind: "local" },
+        async run({ signal }) {
+          entered++;
+          // Never answers: the lease runs out, and the worker aborts it.
+          await new Promise((_resolve, reject) =>
+            signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
+          );
+        },
+        async giveUp({ target }) {
+          gaveUp.push(target.versionId);
+        },
+      };
+      const jobs = await start({
+        steps: [ruleTagStep, hanging],
+        enrich: { retryLimit: 0, expireInSeconds: 1 },
+        superviseIntervalSeconds: 1,
+      });
+      await jobs.enqueueAfterIngest(t.tenantId, item);
+      const [queued] = await enrichJobs(jobs, item.versionId);
+      expect(await settled(jobs, QUEUES.enrich, queued?.id ?? null)).toMatchObject({
+        state: "failed",
+      });
+      await waitFor(() => processedAt(item.versionId), "the salvage run");
+      const [salvaged] = await jobs.boss.findJobs<unknown>(QUEUES.enrichFailed, {});
+      const done = await settled(jobs, QUEUES.enrichFailed, salvaged?.id ?? null);
+      expect(done).toMatchObject({
+        state: "completed",
+        output: { outcome: "processed", salvaged: true },
+      });
+      expect(entered).toBe(1);
+      expect(gaveUp).toEqual([item.versionId]);
+      // The rule tagger ran in the salvage: its tags are on the file non-readers now see.
+      expect((await tagState(item.objectId)).tags).toContainEqual({
+        facet: "kind",
+        value: "spreadsheet",
+        source: "rule",
+      });
+    },
+  );
 
   it("stops gracefully: a running job finishes first, then the database can close", async () => {
     const item = await ingestItem("Budget 2026.xlsx");

@@ -402,6 +402,7 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
                   if (needsEnrichment(result)) await enqueueVersion(tenantId, result.versionId);
                 },
                 next: sendSync,
+                unschedule: (p) => boss.unschedule(QUEUES.sync, syncKey(p)),
                 log,
               },
               job?.data,
@@ -409,10 +410,11 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
             ),
           ),
         );
-        await keepSyncSchedules(boss, sync.sources.values(), log);
         // A first run for each at start, rather than at the next tick of its schedule.
         for (const s of sync.sources.values()) await sendSync(s, 0);
       }
+      // Always, sources or none: a source taken out of the configuration loses its schedule.
+      await keepSyncSchedules(boss, sync?.sources.values() ?? [], log);
       if (maintenance) {
         await boss.work<unknown>(
           QUEUES.maintenance,

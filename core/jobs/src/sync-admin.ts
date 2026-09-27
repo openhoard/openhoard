@@ -1,5 +1,5 @@
 import { sourceSyncs, SYNC_STATUSES, type Tx } from "@openhoard/core-db";
-import { and, asc, eq, isNotNull, or, sql } from "drizzle-orm";
+import { and, asc, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 
 /*
  * What an admin does about a source's sync (T-301, T-303): see where each source stands and how
@@ -41,6 +41,8 @@ export interface SourceSyncState {
    */
   stoppedAt: Date | null;
   stoppedError: string | null;
+  /** The owner pinned on the source's first run (`user:usr_…`), if any. */
+  ownerId: string | null;
   updatedAt: Date;
 }
 
@@ -67,6 +69,7 @@ export async function listSourceSyncs(tx: Tx, tenantId: string): Promise<SourceS
     lastCounts: r.lastCounts,
     stoppedAt: r.stoppedAt,
     stoppedError: r.stoppedError,
+    ownerId: r.ownerId,
     updatedAt: r.updatedAt,
   }));
 }
@@ -119,6 +122,29 @@ export async function sourceStopped(
     .from(sourceSyncs)
     .where(and(eq(sourceSyncs.tenantId, tenantId), eq(sourceSyncs.source, source)));
   return row ? row.stoppedAt !== null : null;
+}
+
+/**
+ * The source's pinned owner (`user:usr_…`), pinning `candidate` first when none is pinned yet
+ * (the first to pin wins; a concurrent pin is read back). Null for a source without a row.
+ * Once pinned, the owner never changes here: a configuration naming someone else must bind a new
+ * source.
+ */
+export async function pinSourceOwner(
+  tx: Tx,
+  tenantId: string,
+  source: string,
+  candidate: string | null,
+): Promise<string | null> {
+  const where = and(eq(sourceSyncs.tenantId, tenantId), eq(sourceSyncs.source, source));
+  if (candidate !== null) {
+    await tx
+      .update(sourceSyncs)
+      .set({ ownerId: candidate })
+      .where(and(where, isNull(sourceSyncs.ownerId)));
+  }
+  const [row] = await tx.select({ ownerId: sourceSyncs.ownerId }).from(sourceSyncs).where(where);
+  return row?.ownerId ?? null;
 }
 
 /** What a scheduled run records about itself: codes and numbers only. */

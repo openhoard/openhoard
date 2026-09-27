@@ -16,6 +16,7 @@ import {
   confirmReconcile,
   ensureSourceSync,
   listSourceSyncs,
+  pinSourceOwner,
   recordSyncRun,
   resumeSource,
 } from "./sync-admin.js";
@@ -109,7 +110,10 @@ const audit = async () =>
     detail: (JSON.parse(e.event) as { detail?: unknown }).detail,
   }));
 
-describe("the sync queue", () => {
+// Up to three waits of 120 s each on the Windows runner (waitFor): room for all of them.
+const QUEUE_TIMEOUT = process.platform === "win32" ? 600_000 : 90_000;
+
+describe("the sync queue", { timeout: QUEUE_TIMEOUT }, () => {
   it("keeps a schedule per source, runs each at start, and enriches what it ingested", async () => {
     const docs = await folder("docs", 2);
     // A schedule left from a source taken out of the configuration.
@@ -154,6 +158,14 @@ describe("the sync queue", () => {
     const second = await jobs.requestSync(t.tenantId, "fs-docs");
     expect([first, second].filter((id) => id !== null).length).toBeLessThanOrEqual(1);
     await expect(jobs.requestSync(t.tenantId, "Not A Slug")).rejects.toThrow(TypeError);
+  });
+
+  it("drops every schedule on a worker once no source is configured", async () => {
+    const docs = await folder("docs", 1);
+    await start({ sync: { sources: [source("fs-docs", docs)], tenantKey: () => KEY } });
+    for (const jobs of started.splice(0)) await jobs.stop({ timeoutMs: 1_000 });
+    const none = await start();
+    expect(await none.boss.getSchedules(QUEUES.sync)).toEqual([]);
   });
 
   it("a node that isn't a worker sends but doesn't run, and leaves the schedules alone", async () => {
@@ -291,11 +303,16 @@ describe("one scheduled run", () => {
     expect(await run(d, "nowhere")).toEqual({ outcome: "unconfigured" });
   });
 
-  it("audits a failure before the source was bound, and stops nothing", async () => {
+  it("audits a failure before the source was bound, and drops its schedule", async () => {
     const memory = memorySource();
-    const d = deps([source("mem", memory.connector, { zoneId: "zon_00000000000000000000000000" })]);
+    const dropped: SyncPayload[] = [];
+    const d = {
+      ...deps([source("mem", memory.connector, { zoneId: "zon_00000000000000000000000000" })]),
+      unschedule: async (p: SyncPayload) => void dropped.push(p),
+    };
     expect(await run(d, "mem")).toMatchObject({ status: "failed", error: "unknown-zone" });
     expect(await syncs()).toEqual([]);
+    expect(dropped).toEqual([{ tenantId: t.tenantId, source: "mem" }]);
     expect(await audit()).toContainEqual({
       actor: "system:sync",
       action: "source.sync-stopped",
@@ -342,6 +359,20 @@ describe("one scheduled run", () => {
         ensureSourceSync(tx, t.tenantId, { source: "mem", zoneId: t.zoneId, connector: "other" }),
       ),
     ).toBe("connector-mismatch");
+  });
+
+  it("pins the first owner, and never another after", async () => {
+    await db.withTenant(t.tenantId, (tx) =>
+      ensureSourceSync(tx, t.tenantId, { source: "mem", zoneId: t.zoneId, connector: "memory" }),
+    );
+    const pin = (who: string | null, name = "mem") =>
+      db.withTenant(t.tenantId, (tx) => pinSourceOwner(tx, t.tenantId, name, who));
+    const ana = `user:${t.userId}`;
+    expect(await pin(null)).toBeNull();
+    expect(await pin(ana)).toBe(ana);
+    expect(await pin("user:usr_00000000000000000000000000")).toBe(ana);
+    expect(await stateOf("mem")).toMatchObject({ ownerId: ana });
+    expect(await pin(ana, "nowhere")).toBeNull();
   });
 
   it("checks its settings", () => {

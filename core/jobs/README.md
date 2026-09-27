@@ -464,8 +464,10 @@ a schedule of its own ([sync-schedule.ts](src/sync-schedule.ts)):
   checkpoint before its lease ends. The queue is created on every node, so any may send.
 - **Schedules.** Each source (`{ tenantId, source, zoneId, cron, connector, owner,
 reconcileGuard }`) gets a pg-boss schedule keyed by tenant and source, in UTC, which sends its
-  job; a worker also drops the schedules of sources no longer configured (the configuration is
-  the cluster's), and sends one run per source at start. `jobs.requestSync(tenant, source)`
+  job; a worker also drops the schedules of sources no longer configured, every start, with or
+  without `sync` (no `sync` is no source), and sends one run per source at start. **Every node
+  must have the same sources:** the configuration is the cluster's, and a worker that doesn't
+  know a source completes its jobs as `unconfigured` without running them. `jobs.requestSync(tenant, source)`
   sends one now: an admin's `run-now`, `connectorContentSource`'s `onStale` (an item changed
   since it was recorded), the start. A job already waiting for the source is reused and brought
   forward, never doubled. A node with `worker: false` sends, but neither works the queue nor
@@ -486,7 +488,7 @@ reconcileGuard }`) gets a pg-boss schedule keyed by tenant and source, in UTC, w
 
 - **What admins see.** Every run records how it ended in `source_syncs` (core/db migration
   0055): `last_run_at`, `last_status`, `last_error` (a code) and `last_counts` (numbers only).
-  `listSourceSyncs()` returns them.
+  `listSourceSyncs()` returns them (with the pinned `ownerId`).
 - **Stopping.** A `failed` run (credentials refused, a configuration the runner refuses, a held
   reconcile or delta, another folder at the root) sets `stopped_at` and `stopped_error` and
   writes `source.sync-stopped` (actor `system:sync`, the code as `reason`) to the audit log, in
@@ -495,8 +497,14 @@ reconcileGuard }`) gets a pg-boss schedule keyed by tenant and source, in UTC, w
   clears the stop; so do `confirmReconcile()`, `discardReconcile()` and
   `acceptSourceIdentity()`, which act on what failed. A run that fails again stops it again. A
   run that fails before the source was ever bound (an unknown zone) is audited with
-  `unbound: true`, and stops nothing (there is no row to stop; the server binds each source
-  with `ensureSourceSync()` at start, so this means a configuration the runner refuses).
+  `unbound: true`, and its schedule is dropped (there is no row to mark stopped) until the next
+  start schedules it again. The server binds each source with `ensureSourceSync()` at start and
+  stops when it can't, so this means a configuration the runner refuses.
+- **The owner is pinned.** `pinSourceOwner()` records the person the configured owner named on
+  the source's first run (`owner_id`, migration 0057); the server resolves the owner from that
+  id from then on, never by email again, so an address later reused by someone else can't take
+  the source over. While the pinned person is locked, disabled or retired, runs wait
+  (`unknown-owner`).
 - **Failures of the run itself.** `runSync()` throws only for its own failures (the database
   unreachable, a bug): the job fails and pg-boss retries it after a minute, twice.
 - **Out-of-process connectors** (the local agent's folders) will push the same events through

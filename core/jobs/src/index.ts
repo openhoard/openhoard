@@ -66,6 +66,7 @@ export {
   discardReconcile,
   ensureSourceSync,
   listSourceSyncs,
+  pinSourceOwner,
   recordSyncRun,
   resumeSource,
   sourceStopped,

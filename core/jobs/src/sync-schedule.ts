@@ -34,6 +34,8 @@ import { runSync, type SyncOptions, type SyncReport } from "./sync.js";
  *   `discard-reconcile`, `accept-identity`). A run that fails again stops it again.
  * - A source whose owner isn't known yet (nobody signed in as them) is waited for: the run is
  *   recorded as `retry` / `unknown-owner`, and the schedule tries again.
+ * - A run that fails before the source was ever bound (no row to stop: an unknown zone) is
+ *   audited and its schedule dropped, until the next start schedules it again.
  * - runSync() throws only for its own failures (the database unreachable, a bug): the job then
  *   fails, and pg-boss retries it a little later.
  */
@@ -145,6 +147,8 @@ export interface SyncJobDeps {
   ) => Promise<unknown>;
   /** Sends the source's next run after `delayMs` (0: now), reusing a waiting one. */
   next: (payload: SyncPayload, delayMs: number) => Promise<unknown>;
+  /** Drops the source's schedule (a failure before it was ever bound). */
+  unschedule?: (payload: SyncPayload) => Promise<unknown>;
   log: JobsLogger;
 }
 
@@ -194,7 +198,7 @@ export async function runSyncJob(
       : { reconcileGuard: configured.reconcileGuard }),
     log,
   });
-  await record(deps, data, {
+  const recorded = await record(deps, data, {
     status: report.status,
     ...(report.error === undefined ? {} : { error: report.error }),
     counts: {
@@ -202,6 +206,11 @@ export async function runSyncJob(
       ...(report.reconcileHeld === undefined ? {} : { held: report.reconcileHeld }),
     },
   });
+  if (report.status === "failed" && !recorded) {
+    // Never bound (an unknown zone, say): nothing to mark stopped, so its schedule goes, until
+    // the next start schedules it again (and the server binds, or refuses, it first).
+    await deps.unschedule?.(data);
+  }
   const out: SyncJobOutcome = {
     outcome: "ran",
     status: report.status,
@@ -227,7 +236,7 @@ async function record(
   deps: SyncJobDeps,
   payload: SyncPayload,
   run: { status: SyncReport["status"]; error?: string; counts?: Record<string, number> },
-) {
+): Promise<boolean> {
   const { db, log } = deps;
   const { tenantId, source } = payload;
   for (let attempt = 1; ; attempt++) {
@@ -256,7 +265,7 @@ async function record(
             : "sync failed before the source was bound (see the audit log)",
         );
       }
-      return;
+      return done.recorded;
     } catch (e) {
       if (!isRetryable(e) || attempt >= 5) throw e;
       await new Promise((r) => setTimeout(r, 20 * attempt));

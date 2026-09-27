@@ -96,19 +96,21 @@ export function summarizeStep(options: SummarizeStepOptions): EnrichStep {
     name: "summarize",
     providers: candidates,
     // The salvage run of a dead-lettered job: `unavailable`, which resummarize() takes again.
-    async giveUp({ target, read, write }) {
+    async giveUp({ target, write }) {
       const { tenantId, objectId, versionId } = target;
-      const done = await read((tx) => readCard(tx, tenantId, versionId));
-      if (done?.promptVersion === PROMPT_VERSION) return;
-      await write((tx) =>
-        saveCard(tx, tenantId, {
+      // Read and written under the object's lock (write()), which a summary's own write takes
+      // too: a card saved meanwhile, at this prompt version, is never overwritten.
+      await write(async (tx) => {
+        const done = await readCard(tx, tenantId, versionId);
+        if (done?.promptVersion === PROMPT_VERSION) return;
+        await saveCard(tx, tenantId, {
           objectId,
           versionId,
           status: "skipped",
           reason: "unavailable",
           promptVersion: PROMPT_VERSION,
-        }),
-      );
+        });
+      });
     },
     async run(context) {
       const { target, read, write } = context;
