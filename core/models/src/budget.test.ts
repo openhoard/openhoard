@@ -1,6 +1,6 @@
 import { modelUsage, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   dailyTokenBudget,
   DEFAULT_DAILY_TOKENS,
@@ -17,12 +17,18 @@ import {
 let db: Database;
 let a: SeededTenant;
 let b: SeededTenant;
-beforeEach(async () => {
+let n = 0;
+// One database for the file, opened in a hook (hookTimeout): the worker's first PGlite open
+// builds its migrated snapshot, slow under coverage on a busy runner. Each test gets two tenants
+// of its own, so none sees another's usage.
+beforeAll(async () => {
   db = await openTestDatabase();
-  a = await seedTenant(db, 1);
-  b = await seedTenant(db, 2);
 });
-afterEach(() => db?.close());
+beforeEach(async () => {
+  a = await seedTenant(db, ++n);
+  b = await seedTenant(db, ++n);
+});
+afterAll(() => db?.close());
 
 const reserve = (t: SeededTenant, tokens: number, limit: number) =>
   db.withTenant(t.tenantId, (tx) => reserveTokens(tx, t.tenantId, tokens, limit));

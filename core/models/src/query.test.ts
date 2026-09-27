@@ -1,7 +1,7 @@
-import { modelUsage } from "@openhoard/core-db";
-import { openTestDatabase, seedTenant } from "@openhoard/core-db/testing";
+import { modelUsage, type Database } from "@openhoard/core-db";
+import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { eq } from "drizzle-orm";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { dailyTokenBudget } from "./budget.js";
 import {
   checkProviderConfig,
@@ -117,10 +117,18 @@ describe("embedQuery", () => {
 });
 
 describe("embedQuery and the budget", () => {
+  // Opened once, in a hook (hookTimeout): the worker's first PGlite open builds its migrated
+  // snapshot, which under coverage on a busy CI runner takes longer than a test may.
+  let db: Database;
+  let t: SeededTenant;
+  beforeAll(async () => {
+    db = await openTestDatabase();
+    t = await seedTenant(db, 1);
+  });
+  afterAll(() => db?.close());
+
   it("counts every query embedding in the tenant's budget, local ones too, and stops when it is spent", async () => {
-    const db = await openTestDatabase();
-    try {
-      const t = await seedTenant(db, 1);
+    {
       const router = createModelRouter([stub("ollama", "local", { embedModel: "a" })]);
       const usage = () =>
         db.withTenant(t.tenantId, (tx) =>
@@ -141,8 +149,6 @@ describe("embedQuery and the budget", () => {
       expect(spent).toEqual([]);
       expect(warned[0]).toMatch(/budget spent/);
       expect((await usage())[0]?.calls).toBe(1);
-    } finally {
-      await db.close();
     }
   });
 });
