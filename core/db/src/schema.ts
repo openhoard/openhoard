@@ -798,6 +798,49 @@ export const scimTokens = pgTable(
 );
 
 /**
+ * One-time sign-in links (0056): what an operator issues with the admin CLI (`admin user
+ * sign-in-link`) for a person to sign in without an identity provider, on a server that allows
+ * it (`auth.signInLinks`, loopback only). Only a SHA-256 of the secret is kept; a link lives at
+ * most an hour and is used once (`used_at`), starting the session it names.
+ */
+export const signInLinks = pgTable(
+  "sign_in_links",
+  {
+    tenantId: text("tenant_id").notNull(),
+    id: text("id").notNull(),
+    userId: text("user_id").notNull(),
+    /** SHA-256 of the secret, hex. The secret is 32 random bytes, so a fast hash is enough. */
+    secretHash: text("secret_hash").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    /** The session it started. */
+    sessionId: text("session_id"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    foreignKey({
+      name: "sign_in_links_user_fk",
+      columns: [t.tenantId, t.userId],
+      foreignColumns: [users.tenantId, users.id],
+    }),
+    index("sign_in_links_user_idx").on(t.tenantId, t.userId),
+    idCheck("sign_in_links_id_format", "id", "signInLink"),
+    check("sign_in_links_secret_hash_format", sql`secret_hash ~ '^[0-9a-f]{64}$'`),
+    check(
+      "sign_in_links_expiry",
+      sql`expires_at > created_at and expires_at <= created_at + interval '1 hour'`,
+    ),
+    check("sign_in_links_created_by_principal", sql`created_by ~ '^(user|system):.+$'`),
+    check(
+      "sign_in_links_use_complete",
+      sql`(used_at is null) = (session_id is null) and (used_at is null or used_at >= created_at)`,
+    ),
+  ],
+);
+
+/**
  * A counter per tenant, bumped by a trigger (migration 0021) on every change resolvePrincipal()
  * reads: grants, group memberships, and a user's kind or stops. core/identity's principal cache
  * keys entries by it, so a change anywhere in the tenant invalidates them, in every process.
@@ -1524,6 +1567,8 @@ export const modelUsage = pgTable(
 
 /** Where a source's sync stands: crawling (from a checkpoint), or following deltas. */
 export const SYNC_PHASES = ["crawl", "delta"] as const;
+/** How a scheduled sync run ended (core/jobs SyncStatus, T-303). */
+export const SYNC_STATUSES = ["done", "partial", "retry", "failed", "cancelled"] as const;
 /** Longest checkpoint token or cursor kept, in characters (the SDK's LIMITS.token). */
 export const MAX_SYNC_TOKEN_CHARS = 65_536;
 
@@ -1573,6 +1618,21 @@ export const sourceSyncs = pgTable(
      * Back to 0 when the delta reaches its end.
      */
     deltaDeletes: integer("delta_deletes").notNull().default(0),
+    /**
+     * How the last scheduled run ended (0055, T-303): when, its status, its error code and its
+     * counts (numbers only, never messages or names), for admins (`admin source status`).
+     */
+    lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+    lastStatus: text("last_status", { enum: SYNC_STATUSES }),
+    lastError: text("last_error"),
+    lastCounts: jsonb("last_counts").$type<Record<string, number>>(),
+    /**
+     * A run failed in a way a retry won't fix (credentials, a held reconcile, another folder at
+     * the root): the schedule skips the source from then on, until an admin resumes it (`admin
+     * source resume`). When, and the error code.
+     */
+    stoppedAt: timestamp("stopped_at", { withTimezone: true }),
+    stoppedError: text("stopped_error"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
@@ -1599,6 +1659,19 @@ export const sourceSyncs = pgTable(
       sql`(reconcile_held is null or reconcile_held >= 0) and (reconcile_confirmed is null or reconcile_confirmed >= 0)`,
     ),
     check("source_syncs_delta_deletes", sql`delta_deletes >= 0`),
+    check(
+      "source_syncs_last_status_valid",
+      sql.raw(`last_status is null or last_status in (${quoted(SYNC_STATUSES)})`),
+    ),
+    check(
+      "source_syncs_error_format",
+      sql`(last_error is null or last_error ~ '^[a-z0-9][a-z0-9-]{0,63}$') and (stopped_error is null or stopped_error ~ '^[a-z0-9][a-z0-9-]{0,63}$')`,
+    ),
+    check(
+      "source_syncs_last_counts_object",
+      sql`last_counts is null or jsonb_typeof(last_counts) = 'object'`,
+    ),
+    check("source_syncs_stop_complete", sql`(stopped_at is null) = (stopped_error is null)`),
   ],
 );
 
@@ -1898,4 +1971,5 @@ export const tables = {
   oauthGrants,
   oauthTokens,
   scimTokens,
+  signInLinks,
 } as const;

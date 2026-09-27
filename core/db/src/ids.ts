@@ -30,6 +30,7 @@ export const ID_PREFIXES = {
   oauthGrant: "ogr",
   oauthToken: "oat",
   scimToken: "sct",
+  signInLink: "sil",
 } as const;
 export type IdKind = keyof typeof ID_PREFIXES;
 
