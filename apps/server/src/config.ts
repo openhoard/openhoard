@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { z } from "zod";
 
 /**
@@ -166,6 +167,13 @@ export const AuthSchema = z
       .string()
       .regex(/^[A-Za-z0-9_-]{43}$/, "32 bytes, base64url (43 characters)")
       .optional(),
+    /**
+     * One-time sign-in links (`openhoard admin user sign-in-link`): a person signs in without an
+     * identity provider, with a link an operator issued on this machine. Off by default, and
+     * refused unless the server listens on this machine only (`host` a loopback address): for
+     * a single person trying OpenHoard out, never for a team.
+     */
+    signInLinks: z.boolean().default(false),
   })
   .strict()
   .superRefine((a, ctx) => {
@@ -318,6 +326,62 @@ export const ModelsSchema = z
   })
   .strict();
 
+/** Standard cron (five fields): minutes, hours, day of month, month, day of week. */
+const CRON = /^(\S+\s+){4}\S+$/;
+
+/**
+ * A local folder synced on a schedule (T-303, the fs connector): indexed in place, its files
+ * owned (and so read) by `owner`. Each source's content is read by the server only when it opts
+ * in (`extract`), for text extraction, summaries and embeddings.
+ */
+export const SourceSchema = z
+  .object({
+    /** The connection's name: the `source` of its items, and how admin commands name it. */
+    id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/, "a lower-case slug"),
+    connector: z.literal("fs"),
+    tenantId: z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
+    /** The folder, an absolute path on this machine (a local disk, or a mapped drive). */
+    root: z
+      .string()
+      .min(1)
+      .max(1024)
+      .refine((r) => isAbsolute(r), "an absolute path on this machine")
+      .refine(
+        (r) => !/^[\\/]{2}/.test(r) && isAbsolute(r) && pathToFileURL(r).host === "",
+        "a network share or a device path isn't supported: map the share to a drive letter",
+      ),
+    /**
+     * The zone its items go to, by name: an indexed zone, made at start if the tenant has none
+     * of that name. A source stays in the zone it was first synced into.
+     */
+    zone: z.string().min(1).max(200),
+    /** Who owns (and so reads) its files: a person's email, or their id (`usr_…`). */
+    owner: z.string().min(3).max(320),
+    /** When it syncs, in UTC (standard cron). Default every 15 minutes. */
+    schedule: z
+      .string()
+      .max(100)
+      .regex(CRON, "a cron expression with five fields")
+      .default("*/15 * * * *"),
+    /**
+     * Read its files' content on this server for text extraction, summaries and embeddings (as
+     * far as each file's exposure lets content reach a model). Default false: names and
+     * metadata only.
+     */
+    extract: z.boolean().default(false),
+    /** When a reconcile is held for an admin (core/jobs runSync()); the defaults suit most. */
+    reconcileGuard: z
+      .object({
+        maxFraction: z.number().min(0).max(1).optional(),
+        minItems: z.number().int().min(0).max(1_000_000).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+export type SourceConfig = z.infer<typeof SourceSchema>;
+
 export const ConfigSchema = z
   .object({
     host: z.string().default("127.0.0.1"),
@@ -343,6 +407,8 @@ export const ConfigSchema = z
       })
       .strict()
       .prefault({}),
+    /** Folders synced on a schedule (T-303). */
+    sources: z.array(SourceSchema).max(100).default([]),
     models: ModelsSchema.prefault({}),
     auth: AuthSchema.optional(),
     /**
@@ -366,9 +432,48 @@ export const ConfigSchema = z
       .strict()
       .prefault({}),
   })
-  .strict();
+  .strict()
+  .superRefine((c, ctx) => {
+    if (c.auth?.signInLinks === true && !LOOPBACK_HOSTS.has(c.host)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["auth", "signInLinks"],
+        message: "sign-in links need a server that listens on this machine only (host 127.0.0.1)",
+      });
+    }
+    const ids = new Set<string>();
+    c.sources.forEach((s, i) => {
+      const key = `${s.tenantId}/${s.id}`;
+      if (ids.has(key)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["sources", i, "id"],
+          message: `duplicate source ${s.id}`,
+        });
+      }
+      ids.add(key);
+      // The connector keeps its state under the data directory, which must be outside the root.
+      if (isAbsolute(s.root) && within(resolve(s.root), resolve(c.dataDir))) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["sources", i, "root"],
+          message: "the data directory can't be inside a source's folder",
+        });
+      }
+    });
+  });
 
 export type Config = z.infer<typeof ConfigSchema>;
+
+/** The addresses `host` may name for a server that listens on this machine only. */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+/** Whether `inner` is `outer` or inside it (case-insensitively on Windows and macOS). */
+function within(outer: string, inner: string): boolean {
+  const fold = process.platform === "linux" ? (x: string) => x : (x: string) => x.toLowerCase();
+  const rel = relative(fold(outer), fold(inner));
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): Config {
   const dataDir = resolve(cwd, env.OPENHOARD_DATA_DIR ?? ".openhoard");

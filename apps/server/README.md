@@ -29,6 +29,56 @@ running jobs get 5 s to finish, then any still running are failed (retried later
 stop, with up to 2 s more for their handlers to return. Then it closes the database, all within
 the 10 s after which it forces an exit.
 
+## Local folders on a schedule (T-303)
+
+`sources` lists folders the server indexes in place (the fs connector, core/jobs `sync` queue).
+To try it on your own machine, follow [docs/dogfood.md](../../docs/dogfood.md).
+
+```json
+{
+  "sources": [
+    {
+      "id": "fs-notes",
+      "connector": "fs",
+      "tenantId": "ten_…",
+      "root": "C:\\Users\\Steve\\Documents\\Notes",
+      "zone": "Steve's notes",
+      "owner": "steve@example.com",
+      "schedule": "*/15 * * * *",
+      "extract": true
+    }
+  ]
+}
+```
+
+| Field            | What                                                                                                                                                                                    |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`             | the connection's name, a lower-case slug: the `source` of its items, and what `admin source …` takes                                                                                    |
+| `connector`      | `fs` (SharePoint comes with T-302)                                                                                                                                                      |
+| `root`           | an absolute path on this machine: a local disk or a mapped drive. A network share or device path (`\\server\share`, `\\?\…`) is refused, and so is a data directory inside the root     |
+| `zone`           | the zone's name: an indexed zone, made at start (audited `zone.create`) if the tenant has none of that name; a zone of that name of another kind is refused                             |
+| `owner`          | an email or a user id: the person who owns, and so reads, its files (the fs connector imports no permissions: owner-only). Until that person exists, runs wait (`unknown-owner`)        |
+| `schedule`       | standard cron, in UTC; default every 15 minutes. The fs connector's delta compares the whole folder with its last snapshot, so deletions are seen too: no separate full crawl is needed |
+| `extract`        | default false: names and metadata only. True: the server reads the files' content for text extraction, then summaries and embeddings as far as each file's exposure allows              |
+| `reconcileGuard` | `maxFraction`, `minItems`: when a reconcile is held for an admin (core/jobs)                                                                                                            |
+
+At start the server checks each source's tenant, finds or makes its zone, binds the source to it
+(a source later pointed at another zone is refused: give it a new id), builds its connector (its
+state in `<dataDir>/connectors/<tenant>/<source>`) and schedules it; any failure stops the server,
+naming the source. A worker (`jobs.worker`) keeps one pg-boss schedule per source, runs each once
+at start, and drops schedules of sources no longer listed. A run that fails for good (refused
+credentials, a held reconcile, another folder at the root) stops that source's runs, audited
+(`source.sync-stopped`), until an admin acts (`admin source resume`, or the reconcile and
+identity commands). `admin source status` and `GET /api/admin/sources` show how each source's
+last run ended.
+
+Content is read through the source's connector, checked against the version's size and BLAKE3
+blob id with the tenant's blob key. **Tenant blob keys** live in `<dataDir>/keys/<tenant>.blob-key`
+(32 random bytes, made on first use, 0600): outside the database, so the database alone can't tell
+two tenants hold the same file. Back them up with the database; losing one makes every blob id of
+that tenant unverifiable. Servers sharing one database must share them (a KMS-backed store is for
+later).
+
 ## Models (T-404, T-405)
 
 Off by default: with no `models.providers`, enrichment runs no model. Each provider has an id, a
@@ -52,7 +102,8 @@ URL and models, and optional timeouts, retries, caps and concurrency. See
 API keys come only from the environment, `OPENHOARD_MODEL_<ID>_API_KEY` (here
 `OPENHOARD_MODEL_CLAUDE_API_KEY`); the configuration file has no field for one, and a missing
 one stops the server naming the variable. Summaries run only where the server also reads
-versions' bytes (managed zones); local-only content only ever reaches a `local` provider.
+versions' bytes (a source with `extract: true`); local-only content only ever reaches a `local`
+provider.
 
 ## Signing in (T-102)
 
@@ -135,6 +186,20 @@ only a hash is stored.
 | `GET /auth/callback/<id>` | The provider sends the browser back here.                                                                        |
 | `GET /auth/me`            | Who is signed in (401 if nobody).                                                                                |
 | `POST /auth/logout`       | Ends the session (204).                                                                                          |
+| `GET /auth/link?token=…`  | A one-time sign-in link's page: a button (with `auth.signInLinks`).                                              |
+| `POST /auth/link`         | Uses the link: starts a session. Must come from `publicUrl`'s origin.                                            |
+
+**One-time sign-in links** are for a server with no identity provider, for one person trying
+OpenHoard on their own machine ([docs/dogfood.md](../../docs/dogfood.md)). `auth.signInLinks: true`
+turns them on, and the config refuses it unless `host` is a loopback address (a tunnel in front
+is fine; a server listening on the network is not). An operator makes the person (`admin user
+create`) and issues a link (`admin user sign-in-link`, 15 minutes by default, at most 60); the
+link's page only shows a button, so a prefetch doesn't use it up, and the POST must come from
+this origin. A link starts one session; the same link again is refused and ends that session.
+No identity is linked, so signing in again takes a new link. Every use is audited
+(`auth.sign-in`, provider `sign-in-link`). `GET /auth/sign-in` sends a browser that is signed in
+already straight back to `return_to` (an MCP client's authorization, after a link was used in
+another tab).
 
 Every sign-in is written to the audit log (`auth.sign-in`), whether it was allowed or refused, and
 so is every sign-out (`auth.sign-out`). A refused person nobody provisioned is logged as
@@ -299,6 +364,7 @@ The **admin API** is JSON under `/api/admin`, for the admin UI to come and for s
 | `GET /api/admin/admins`                | The tenant's admins, how (`role`, `group`), and if they count now            |
 | `POST /api/admin/admins`               | `{"userId": "usr_…"}`, or `{"email": …}`, or `{"userName": …}`               |
 | `DELETE /api/admin/admins/:userId`     | Takes the role away                                                          |
+| `GET /api/admin/sources`               | Each connector sync: phase, reconcile, last run (status, code, counts), stop |
 
 - **Who.** A person signed in with the session cookie (above), who is an admin, through
   OpenHoard's own app (an AI client's token never administers). Anyone else gets 401 or 403, and
@@ -564,8 +630,15 @@ node apps/server/dist/main.js admin user revoke-admin --tenant ten_… --user <u
 node apps/server/dist/main.js admin user list-admins --tenant ten_…
 node apps/server/dist/main.js admin user lock --tenant ten_… --user <usr_… | email | userName>
 node apps/server/dist/main.js admin user unlock --tenant ten_… --user <usr_… | email | userName>
+node apps/server/dist/main.js admin user create --tenant ten_… --email <email> --name <name>
+node apps/server/dist/main.js admin user sign-in-link --tenant ten_… --user <usr_… | email> [--minutes 15]
 node apps/server/dist/main.js admin group list --tenant ten_…
+node apps/server/dist/main.js admin pack plan --tenant ten_… --file packs/general-business/pack.json
+node apps/server/dist/main.js admin pack apply --tenant ten_… --file packs/general-business/pack.json --plan-hash <hash>
 node apps/server/dist/main.js admin source list --tenant ten_…
+node apps/server/dist/main.js admin source status --tenant ten_… [--source <name>]
+node apps/server/dist/main.js admin source run-now --tenant ten_… --source <name>
+node apps/server/dist/main.js admin source resume --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source confirm-reconcile --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source discard-reconcile --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source accept-identity --tenant ten_… --source <name>
@@ -585,6 +658,14 @@ node apps/server/dist/main.js admin source accept-identity --tenant ten_… --so
   provider's disable. The identity provider's syncs don't lift a lock either: to remove someone
   who left, lock them here and delete them in the identity provider. core/identity's README has
   what each deprovisioning step ends, and when.
+- **Local people and sign-in links.** `user create` makes a local member (no identity
+  provider), audited `user.create`; `user sign-in-link` prints a one-time link for them (on a
+  server with `auth.signInLinks`), audited `sign-in-link.issue` without the token.
+- **Packs.** `pack plan` prints what applying a pack would change (`!` marks a loosening), its
+  warnings and tests, and the plan's hash on standard output; `pack apply` with that hash applies
+  exactly that plan (refused when anything changed since, or a test fails), audited `pack.apply`.
+  A new tenant is hidden and metadata-only until a pack (the starter pack,
+  `packs/general-business`) sets other defaults: until then AI clients get no content.
 - **Groups.** `group list` prints each group's id, source, member count, external id and name,
   and marks the configured admin group: the id is what `auth.adminGroups` takes.
 - **Connector syncs (T-301).** `source list` prints each source's connector, zone, phase, last
@@ -600,7 +681,15 @@ node apps/server/dist/main.js admin source accept-identity --tenant ten_… --so
   met a place it couldn't read. A source whose connector now says it is another one (another
   disk at the folder's path) stops syncing until `source accept-identity`, which starts a crawl
   from the beginning (guarded the same way). All three are audited (`source.confirm-reconcile`,
-  `source.discard-reconcile`, `source.accept-identity`), refusals too.
+  `source.discard-reconcile`, `source.accept-identity`), refusals too, and each also lifts a stop
+  (below).
+- **Scheduled syncs (T-303).** `source list` also says whether each source is scheduled, stopped
+  (and why) or never run; `source status` prints each source (or one) in full: its state, last
+  run, status and error code, counts and reconcile. A run that failed for good stops the source
+  until `source resume` (audited `source.resume`). `source run-now` queues a run (audited
+  `source.run-now`; refused for a stopped source): a running server picks it up within seconds,
+  and on the embedded database, which the server holds while it runs, the queued run waits for
+  the server's next start (which runs every source anyway).
 
 - **Output.** The id or token goes to standard output, and messages go to standard error. The
   exit code is 0 for done, 1 for failed and 2 for misused.

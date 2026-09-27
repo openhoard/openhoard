@@ -35,6 +35,7 @@ function page(title: string, body: string, formTargets: readonly string[] = []):
 export function signInPage(
   providers: readonly { id: string; label: string }[],
   returnTo: string,
+  options: { links?: boolean } = {},
 ): Page {
   const links = providers
     .map(
@@ -42,9 +43,34 @@ export function signInPage(
         `<li><a class="button" href="/auth/login/${encodeURIComponent(p.id)}?return_to=${encodeURIComponent(returnTo)}">${escapeHtml(p.label)}</a></li>`,
     )
     .join("");
+  const viaLink = options.links
+    ? `<p>${providers.length ? "Or sign" : "Sign"} in with a one-time link: run <code>openhoard admin user sign-in-link</code> on the server, open the link it prints in this browser, then reload this page.</p>`
+    : "";
   return page(
     "Sign in",
-    `<h1>Sign in to OpenHoard</h1>${providers.length ? `<ul>${links}</ul>` : "<p>No sign-in is configured.</p>"}`,
+    `<h1>Sign in to OpenHoard</h1>${providers.length ? `<ul>${links}</ul>` : options.links ? "" : "<p>No sign-in is configured.</p>"}${viaLink}`,
+  );
+}
+
+/** A one-time sign-in link's page: a button, so opening (or prefetching) it uses nothing up. */
+export function signInLinkPage(token: string): Page {
+  return page(
+    "Sign in",
+    `<h1>Sign in to OpenHoard</h1>
+<p>This link signs you in once, in this browser. Use it only if you asked for it.</p>
+<form method="post" action="/auth/link">
+<input type="hidden" name="token" value="${escapeHtml(token)}">
+<button class="primary" type="submit">Sign in</button>
+</form>`,
+  );
+}
+
+/** After a sign-in link: where to go next. */
+export function signedInPage(): Page {
+  return page(
+    "Signed in",
+    `<h1>You're signed in</h1>
+<p>Go back to the tab or app that asked you to sign in, and try again: an AI client connecting to OpenHoard asks for your consent next.</p>`,
   );
 }
 

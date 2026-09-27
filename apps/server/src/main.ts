@@ -1,12 +1,16 @@
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
 import { openDatabase } from "@openhoard/core-db";
 import { startJobs, type Jobs } from "@openhoard/core-jobs";
+import { BlobStore, blobContentSource } from "@openhoard/core-storage";
 import { adminArgument, runAdmin } from "./admin.js";
 import { closeApp, createApp } from "./app.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { createServerModels, modelsStartupWarning } from "./models.js";
+import { prepareSources, type ServerSources } from "./sources.js";
+import { tenantKeyStore } from "./tenant-keys.js";
 
 // `main.js [options] admin …` runs an admin command (admin.ts) instead of the server, then exits.
 // `admin` is the first argument that isn't an option (`--data-dir x admin …` is admin too).
@@ -43,19 +47,45 @@ try {
 }
 log.info({ database: db.kind }, "database ready");
 
+// Each tenant's blob key, kept in <dataDir>/keys (outside the database).
+const tenantKey = tenantKeyStore(config.dataDir);
+
+// The configured folders (T-303): their zones, bindings and connectors. A source that can't be
+// set up stops the server, naming it.
+let sources: ServerSources;
+try {
+  sources = await prepareSources(db, config, {
+    tenantKey,
+    // What OpenHoard holds itself (managed zones, none yet in M1), before the connectors.
+    blobs: blobContentSource(BlobStore.open({ kind: "fs", root: join(config.dataDir, "blobs") }), {
+      tenantKey,
+    }),
+    log: log.child({ component: "sources" }),
+  });
+} catch (err) {
+  log.fatal({ err }, "cannot set up the configured sources");
+  await db.close().catch(() => {});
+  process.exit(1);
+}
+
 // Background jobs (core/jobs on pg-boss, in the same database). Every node can enqueue; with
-// jobs.worker (the default) this one also runs enrichment and the maintenance schedule.
+// jobs.worker (the default) this one also runs enrichment, the sources' syncs and the
+// maintenance schedule.
 let jobs: Jobs;
 let models: ReturnType<typeof createServerModels>;
 try {
   // Model providers (T-404) from `models`, keys from OPENHOARD_MODEL_<ID>_API_KEY; none, no model.
   models = createServerModels(config.models, process.env, log.child({ component: "models" }));
-  // The server passes no content source yet (M1 zones are index-only): say so, once.
-  const warning = modelsStartupWarning(models, false);
+  // Content is read only from sources that opted in (`extract`): say so when models can't run.
+  const warning = modelsStartupWarning(models, sources.content !== null);
   if (warning !== null) log.warn(warning);
   jobs = await startJobs(db, {
     worker: config.jobs.worker,
     log: log.child({ component: "jobs" }),
+    ...(sources.content === null
+      ? {}
+      : { content: sources.content, extract: { indexedZones: true } }),
+    ...(sources.scheduled.length === 0 ? {} : { sync: { sources: sources.scheduled, tenantKey } }),
     ...(models === null
       ? {}
       : {
@@ -78,7 +108,13 @@ try {
   await db.close().catch(() => {});
   process.exit(1);
 }
-log.info({ worker: config.jobs.worker }, "job queue ready");
+log.info({ worker: config.jobs.worker, sources: sources.scheduled.length }, "job queue ready");
+// An item that changed since it was recorded: sync its source now, not at its next schedule.
+sources.onStale((tenantId, source) => {
+  jobs
+    .requestSync(tenantId, source)
+    .catch((err: unknown) => log.warn({ err, tenantId, source }, "could not request a sync"));
+});
 
 // The MCP `find` tool embeds queries with the same providers (local ones only, by default).
 const app = createApp(config, log, {

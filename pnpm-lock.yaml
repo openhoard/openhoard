@@ -242,6 +242,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.30.1
         version: 1.30.1(supports-color@7.2.0)(zod@4.6.5)
+      '@openhoard/connector-fs':
+        specifier: workspace:^
+        version: link:../../connectors/fs
       '@openhoard/core-audit':
         specifier: workspace:^
         version: link:../../core/audit
@@ -263,6 +266,9 @@ importers:
       '@openhoard/core-policy':
         specifier: workspace:^
         version: link:../../core/policy
+      '@openhoard/core-storage':
+        specifier: workspace:^
+        version: link:../../core/storage
       '@openhoard/sdk':
         specifier: workspace:^
         version: link:../../packages/sdk

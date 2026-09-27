@@ -5,6 +5,7 @@ import { exportAudit } from "@openhoard/core-audit";
 import { newId, openDatabase, sourceSyncs, zones, type Database } from "@openhoard/core-db";
 import { openTestDatabase, TEST_POSTGRES_ENV } from "@openhoard/core-db/testing";
 import { addMember, createGroup, createUser } from "@openhoard/core-identity";
+import { startJobs } from "@openhoard/core-jobs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ADMIN_ACTOR, adminArgument, runAdmin } from "./admin.js";
 import { createApp } from "./app.js";
@@ -38,7 +39,13 @@ async function admin(...argv: string[]) {
     out: (s) => void (out += s),
     err: (s) => void (err += s),
     // On PostgreSQL, the test database, kept open across commands (each command closes its own).
-    ...(shared ? { open: async () => ({ ...(shared as Database), close: async () => {} }) } : {}),
+    ...(shared
+      ? {
+          open: async () => ({ ...(shared as Database), close: async () => {} }),
+          // The queue needs the database itself, not the wrapper above.
+          startJobs: (_db, options) => startJobs(shared as Database, options),
+        }
+      : {}),
   });
   return { code, out, err };
 }
@@ -327,7 +334,9 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
       }),
     );
     const listed = await admin("source", "list", "--tenant", tenantId);
-    expect(listed.out).toMatch(/^fs-main\tconnector-fs\tzon_\S+\tdelta\t\S+\treconcile held: 60/);
+    expect(listed.out).toMatch(
+      /^fs-main\tconnector-fs\tzon_\S+\tdelta\t\S+\tnever run\treconcile held: 60/,
+    );
 
     const confirmed = await admin(
       "source",
@@ -430,6 +439,248 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
       ["source.discard-reconcile", "deny", { source: "fs-main", reason: "nothing-held" }],
       ["source.accept-identity", "allow", { source: "fs-main" }],
       ["source.accept-identity", "deny", { source: "nope", reason: "unknown-source" }],
+    ]);
+  });
+
+  it("shows a source's last run, resumes a stopped one and queues a run, audited", async () => {
+    const tenantId = (await admin("tenant", "create", "--name", "Acme")).out.trim();
+    await inspect((db) =>
+      db.withTenant(tenantId, async (tx) => {
+        const zoneId = newId("zone");
+        await tx.insert(zones).values({ tenantId, id: zoneId, kind: "indexed", name: "Docs" });
+        await tx.insert(sourceSyncs).values({
+          tenantId,
+          source: "fs-docs",
+          zoneId,
+          connector: "connector-fs",
+          phase: "delta",
+          token: "fs1.x",
+          lastRunAt: new Date(),
+          lastStatus: "failed",
+          lastError: "auth",
+          lastCounts: { files: 3, ingested: 0 },
+          stoppedAt: new Date(),
+          stoppedError: "auth",
+        });
+      }),
+    );
+    expect((await admin("source", "list", "--tenant", tenantId)).out).toContain(
+      "\tstopped: auth\t",
+    );
+    const status = await admin("source", "status", "--tenant", tenantId, "--source", "fs-docs");
+    expect(status.code, status.err).toBe(0);
+    expect(status.out).toContain("state: STOPPED since");
+    expect(status.out).toContain("last status: failed (auth)\n");
+    expect(status.out).toContain("last counts: files 3, ingested 0\n");
+    expect((await admin("source", "status", "--tenant", tenantId, "--source", "nope")).code).toBe(
+      1,
+    );
+
+    const refused = await admin("source", "run-now", "--tenant", tenantId, "--source", "fs-docs");
+    expect([refused.code, refused.err]).toEqual([
+      1,
+      "source fs-docs is stopped: fix what failed (source status), then source resume\n",
+    ]);
+    const resumed = await admin("source", "resume", "--tenant", tenantId, "--source", "fs-docs");
+    expect(resumed.code, resumed.err).toBe(0);
+    expect(resumed.err).toContain("it was stopped for auth");
+    expect(
+      (await admin("source", "resume", "--tenant", tenantId, "--source", "fs-docs")).code,
+    ).toBe(1);
+    expect((await admin("source", "status", "--tenant", tenantId)).out).toContain(
+      "state: scheduled\n",
+    );
+    const queued = await admin("source", "run-now", "--tenant", tenantId, "--source", "fs-docs");
+    expect(queued.code, queued.err).toBe(0);
+    expect(queued.err).toContain("Queued a sync of fs-docs");
+    expect((await admin("source", "run-now", "--tenant", tenantId, "--source", "nope")).code).toBe(
+      1,
+    );
+    const jobs = await inspect(async (db) => {
+      const j = await startJobs(db, { worker: false, maintenance: false });
+      try {
+        return await j.boss.findJobs("sync", { key: `${tenantId}/fs-docs`, queued: true });
+      } finally {
+        await j.stop({ timeoutMs: 1_000 });
+      }
+    });
+    expect(jobs.map((j) => j.data)).toEqual([{ tenantId, source: "fs-docs" }]);
+
+    const events = await inspect(async (db) => {
+      const lines: string[] = [];
+      await exportAudit(db, tenantId, {}, "ndjson", (s: string) => void lines.push(s));
+      return lines
+        .join("")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { action: string; decision: string; detail?: object });
+    });
+    expect(
+      events
+        .filter((e) => e.action.startsWith("source."))
+        .map((e) => [e.action, e.decision, e.detail]),
+    ).toEqual([
+      ["source.run-now", "deny", { source: "fs-docs", reason: "stopped" }],
+      ["source.resume", "allow", { source: "fs-docs", was: "auth" }],
+      ["source.resume", "deny", { source: "fs-docs", reason: "not-stopped" }],
+      ["source.run-now", "allow", { source: "fs-docs" }],
+      ["source.run-now", "deny", { source: "nope", reason: "unknown-source" }],
+    ]);
+  });
+
+  it("makes a local person and a one-time sign-in link, only where links are on", async () => {
+    const tenantId = (await admin("tenant", "create", "--name", "Solo")).out.trim();
+    const made = await admin(
+      "user",
+      "create",
+      "--tenant",
+      tenantId,
+      "--email",
+      "steve@example.com",
+      "--name",
+      "Steve",
+    );
+    expect(made.code, made.err).toBe(0);
+    const userId = made.out.trim();
+    expect(userId).toMatch(/^usr_/);
+    const twice = await admin(
+      "user",
+      "create",
+      "--tenant",
+      tenantId,
+      "--email",
+      "steve@example.com",
+      "--name",
+      "Steve",
+    );
+    expect([twice.code, twice.err]).toEqual([
+      1,
+      `someone in tenant ${tenantId} has that email already\n`,
+    ]);
+    // Off unless the config turns links on.
+    const off = await admin("user", "sign-in-link", "--tenant", tenantId, "--user", userId);
+    expect(off.code).toBe(1);
+    expect(off.err).toContain("sign-in links are off");
+    writeFileSync(
+      join(dir, "config.json"),
+      JSON.stringify({ auth: { publicUrl: "http://127.0.0.1:7420", signInLinks: true } }),
+    );
+    const link = await admin(
+      "user",
+      "sign-in-link",
+      "--tenant",
+      tenantId,
+      "--user",
+      "steve@example.com",
+      "--minutes",
+      "5",
+    );
+    expect(link.code, link.err).toBe(0);
+    expect(link.out).toMatch(
+      new RegExp(`^http://127\\.0\\.0\\.1:7420/auth/link\\?token=ohl\\.${tenantId}\\.sil_\\S+\\n$`),
+    );
+    expect(
+      (
+        await admin(
+          "user",
+          "sign-in-link",
+          "--tenant",
+          tenantId,
+          "--user",
+          userId,
+          "--minutes",
+          "90",
+        )
+      ).code,
+    ).toBe(2);
+    const nobody = await admin("user", "sign-in-link", "--tenant", tenantId, "--user", "x@y.z");
+    expect(nobody.code).toBe(1);
+    const events = await inspect(async (db) => {
+      const lines: string[] = [];
+      await exportAudit(db, tenantId, {}, "ndjson", (s: string) => void lines.push(s));
+      return lines
+        .join("")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { action: string; decision: string; detail?: object });
+    });
+    expect(
+      events
+        .filter((e) => e.action === "user.create" || e.action === "sign-in-link.issue")
+        .map((e) => [e.action, e.decision]),
+    ).toEqual([
+      ["user.create", "allow"],
+      ["user.create", "deny"],
+      ["sign-in-link.issue", "allow"],
+      ["sign-in-link.issue", "deny"],
+    ]);
+    // The token is never in the audit log.
+    expect(JSON.stringify(events)).not.toContain(link.out.trim().split("token=")[1]);
+  });
+
+  it("plans a pack, applies exactly that plan, and refuses a stale hash, audited", async () => {
+    const tenantId = (await admin("tenant", "create", "--name", "Acme")).out.trim();
+    const file = join(dir, "pack.json");
+    const pack = {
+      pack_version: 1,
+      name: "tiny",
+      version: "1.0.0",
+      defaults: { visibility: "discoverable", exposure: "commercial-only" },
+      facets: [{ key: "kind", label: "Kind", values: [{ value: "memo", label: "Memo" }] }],
+    };
+    writeFileSync(file, JSON.stringify(pack));
+    const plan = await admin("pack", "plan", "--tenant", tenantId, "--file", file);
+    expect(plan.code, plan.err).toBe(0);
+    const hash = plan.out.trim();
+    expect(hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(plan.err).toContain(
+      "! set-defaults defaults hidden/metadata-only -> discoverable/commercial-only",
+    );
+    expect(plan.err).toContain("pack apply");
+    expect(
+      (await admin("pack", "apply", "--tenant", tenantId, "--file", file)).code,
+      "no hash",
+    ).toBe(2);
+    const stale = await admin(
+      "pack",
+      "apply",
+      "--tenant",
+      tenantId,
+      "--file",
+      file,
+      "--plan-hash",
+      "0".repeat(64),
+    );
+    expect(stale.code).toBe(1);
+    const applied = await admin(
+      "pack",
+      "apply",
+      "--tenant",
+      tenantId,
+      "--file",
+      file,
+      "--plan-hash",
+      hash,
+    );
+    expect(applied.code, applied.err).toBe(0);
+    expect(applied.err).toContain("Applied: pack tiny 1.0.0");
+    expect(
+      (await admin("pack", "plan", "--tenant", tenantId, "--file", join(dir, "none.json"))).code,
+    ).toBe(1);
+    const events = await inspect(async (db) => {
+      const lines: string[] = [];
+      await exportAudit(db, tenantId, {}, "ndjson", (s: string) => void lines.push(s));
+      return lines
+        .join("")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { action: string; decision: string; detail?: object });
+    });
+    expect(
+      events.filter((e) => e.action === "pack.apply").map((e) => [e.decision, e.detail]),
+    ).toEqual([
+      ["deny", { reason: "stale-plan" }],
+      ["allow", { pack: "tiny", version: "1.0.0", planHash: hash, loosening: 1 }],
     ]);
   });
 

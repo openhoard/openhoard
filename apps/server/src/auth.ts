@@ -7,8 +7,11 @@ import {
   IdentityError,
   localPath,
   parseSessionToken,
+  parseSignInLink,
   PrincipalCache,
+  redeemSignInLink,
   revokeSession,
+  SIGN_IN_LINK_PROVIDER,
   signIn,
   startSession,
   touchSession,
@@ -18,12 +21,13 @@ import {
 } from "@openhoard/core-identity";
 import type { AuthzClient, AuthzPrincipal } from "@openhoard/core-policy";
 import type { Hono, MiddlewareHandler } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as oidc from "openid-client";
 import type { Logger } from "pino";
 import { adminGroupOf, externalIdClaim, type AuthConfig, type ProviderConfig } from "./config.js";
 import { loginCookieName, loginKey, openLogin, sealLogin } from "./login-state.js";
-import { signInPage } from "./oauth/pages.js";
+import { signInLinkPage, signInPage, signedInPage } from "./oauth/pages.js";
 
 /*
  * Signing in (T-102): OpenID Connect, authorization code with PKCE, as a relying party of the
@@ -36,6 +40,14 @@ import { signInPage } from "./oauth/pages.js";
  *   GET  /auth/callback/:provider  ← back: checks everything, starts a session
  *   GET  /auth/me                  who is signed in
  *   POST /auth/logout              ends the session
+ *   GET  /auth/link?token=…        a one-time sign-in link: a page with a button (auth.signInLinks)
+ *   POST /auth/link                uses it: starts a session
+ *
+ * - One-time sign-in links (core/identity sign-in-links.ts) are for a server without an identity
+ *   provider, listening on this machine only (the config refuses them otherwise). The GET only
+ *   shows a button, so a link a browser or a scanner prefetches isn't used up; the POST must come
+ *   from this origin. Every use, allowed or refused, is audited as `auth.sign-in` with provider
+ *   `sign-in-link`.
  *
  * - A sign-in under way lives in an encrypted cookie of its own (login-state.ts): the state, the
  *   PKCE verifier, the nonce, the provider and where to return. Starting one writes nothing. The
@@ -221,6 +233,8 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
   // Where anything that needs a signed-in person sends the browser (the OAuth consent, T-105).
   app.get("/auth/sign-in", (c) => {
     const back = returnPath(c.req.query("return_to"));
+    // Signed in meanwhile (a sign-in link, in another tab): straight back.
+    if (c.get("auth")) return c.redirect(back, 302);
     if (auth.providers.length === 1) {
       const only = auth.providers[0] as ProviderConfig;
       return c.redirect(`/auth/login/${only.id}?return_to=${encodeURIComponent(back)}`, 302);
@@ -228,10 +242,105 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
     const shown = signInPage(
       auth.providers.map((p) => ({ id: p.id, label: p.label ?? p.id })),
       back,
+      { links: auth.signInLinks },
     );
     c.header("content-security-policy", shown.csp);
     return c.html(shown.html);
   });
+
+  if (auth.signInLinks) {
+    app.use(
+      "/auth/link",
+      bodyLimit({ maxSize: 4096, onError: (c) => c.json({ error: "body too large" }, 413) }),
+    );
+    app.get("/auth/link", (c) => {
+      const token = c.req.query("token");
+      if (parseSignInLink(token) === null) return c.json(FAILED, 400);
+      c.header("cache-control", "no-store");
+      const shown = signInLinkPage(token as string);
+      c.header("content-security-policy", shown.csp);
+      return c.html(shown.html);
+    });
+
+    app.post("/auth/link", async (c) => {
+      c.header("cache-control", "no-store");
+      // A sign-in from another site (login CSRF) is refused, cookie or not.
+      if (!sameOrigin(c.req.header("origin"), c.req.header("sec-fetch-site"))) {
+        return c.json({ error: "forbidden" }, 403);
+      }
+      const type = (c.req.header("content-type") ?? "").split(";")[0]?.trim().toLowerCase();
+      if (type !== "application/x-www-form-urlencoded") return c.json(FAILED, 400);
+      const form = await c.req.parseBody().catch(() => null);
+      const token = form?.token;
+      const named = parseSignInLink(token);
+      if (!named || typeof token !== "string") return c.json(FAILED, 400);
+      const { tenantId } = named;
+      const previous = c.get("auth");
+      const result = await db
+        .withTenant(tenantId, async (tx) => {
+          const done = await redeemSignInLink(tx, tenantId, token, {
+            idleSeconds: auth.sessionIdleMinutes * 60,
+            maxSeconds: auth.sessionMaxHours * 3600,
+          });
+          // Audit last: its lock is the last one taken (core/audit). Only for a tenant that
+          // exists: a token naming another is just unknown.
+          if (done.ok || done.refused !== "unknown") {
+            await audit(tx, tenantId, {
+              actor: done.userId ? userPrincipal(done.userId) : `${SIGN_IN_LINK_PROVIDER}:unknown`,
+              action: "auth.sign-in",
+              decision: done.ok ? "allow" : "deny",
+              detail: {
+                provider: SIGN_IN_LINK_PROVIDER,
+                link: named.linkId,
+                ...(done.ok
+                  ? { session: done.session.id }
+                  : {
+                      reason: done.refused,
+                      ...(done.endedSession ? { endedSession: done.endedSession } : {}),
+                    }),
+              },
+            });
+          }
+          return done;
+        })
+        .catch((err: unknown) => {
+          // A tenant that doesn't exist fails its audit's foreign key: an unknown link.
+          log?.warn({ err }, "sign-in link: refused");
+          return null;
+        });
+      if (!result?.ok) return c.json(FAILED, 401);
+      if (previous) {
+        const by = userPrincipal(previous.principal.userId);
+        await db
+          .withTenant(previous.tenantId, async (tx) => {
+            if (await revokeSession(tx, previous.tenantId, previous.sessionId, by)) {
+              await audit(tx, previous.tenantId, {
+                actor: by,
+                action: "auth.sign-out",
+                decision: "allow",
+                detail: { session: previous.sessionId, replaced: true },
+              });
+            }
+          })
+          .catch((err: unknown) =>
+            log?.error(
+              { err, session: previous.sessionId },
+              "sign-in: ending the previous session failed",
+            ),
+          );
+      }
+      setCookie(c, SESSION_COOKIE, result.session.token, {
+        path: "/",
+        httpOnly: true,
+        secure,
+        sameSite: "Lax",
+        maxAge: Math.max(0, Math.floor((result.session.expiresAt.getTime() - Date.now()) / 1000)),
+      });
+      const shown = signedInPage();
+      c.header("content-security-policy", shown.csp);
+      return c.html(shown.html);
+    });
+  }
 
   app.get("/auth/login/:provider", async (c) => {
     const p = providers.get(c.req.param("provider"));

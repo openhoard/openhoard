@@ -1,5 +1,15 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { appendAudit } from "@openhoard/core-audit";
+import {
+  APPLY_TRANSACTION,
+  applyPack,
+  PackError,
+  planPack,
+  type PackChange,
+  type PackPlan,
+} from "@openhoard/core-catalog";
 import {
   createTenant,
   getTenant,
@@ -9,6 +19,7 @@ import {
   type Database,
 } from "@openhoard/core-db";
 import {
+  createUser,
   findUserByEmail,
   findUserByUserName,
   getGroup,
@@ -16,6 +27,7 @@ import {
   grantAdmin,
   IdentityError,
   issueScimToken,
+  issueSignInLink,
   listAdmins,
   listGroups,
   MAX_LIST,
@@ -25,6 +37,7 @@ import {
   revokeAdmin,
   revokeScimToken,
   SCIM_TOKEN_MAX_DAYS,
+  SIGN_IN_LINK_MAX_MINUTES,
   unlockUser,
   type EndedAccess,
   type User,
@@ -34,6 +47,9 @@ import {
   confirmReconcile,
   discardReconcile,
   listSourceSyncs,
+  resumeSource,
+  startJobs,
+  type SourceSyncState,
 } from "@openhoard/core-jobs";
 import { adminGroupOf, ensureDataDir, loadConfig, type Config } from "./config.js";
 import { retrying } from "./retry.js";
@@ -52,8 +68,15 @@ import { retrying } from "./retry.js";
  *   admin user list-admins  --tenant ten_…
  *   admin user lock         --tenant ten_… --user <usr_… | email | userName>
  *   admin user unlock       --tenant ten_… --user <usr_… | email | userName>
+ *   admin user create       --tenant ten_… --email <email> --name <display name>
+ *   admin user sign-in-link --tenant ten_… --user <usr_… | email | userName> [--minutes 15]
  *   admin group list        --tenant ten_…
+ *   admin pack plan               --tenant ten_… --file <pack.json>
+ *   admin pack apply              --tenant ten_… --file <pack.json> --plan-hash <hash>
  *   admin source list             --tenant ten_…
+ *   admin source status           --tenant ten_… [--source <name>]
+ *   admin source run-now          --tenant ten_… --source <name>
+ *   admin source resume           --tenant ten_… --source <name>
  *   admin source confirm-reconcile --tenant ten_… --source <name>
  *   admin source discard-reconcile --tenant ten_… --source <name>
  *   admin source accept-identity   --tenant ten_… --source <name>
@@ -73,6 +96,22 @@ import { retrying } from "./retry.js";
  * account's API keys stop until `user unlock`. Unlocking brings back none of what the lock ended,
  * and never lifts a provider disable. Both are audited (`user.lock`, `user.unlock`), with what
  * the lock ended.
+ *
+ * `user create` makes a local person (a member) for a tenant without an identity provider, and
+ * `user sign-in-link` issues them a one-time link to sign in with (core/identity
+ * sign-in-links.ts), on a server with `auth.signInLinks` (loopback only). Both are audited
+ * (`user.create`, `sign-in-link.issue`); the link is printed once.
+ *
+ * `pack plan` shows what applying a pack (packs/README.md) would change in a tenant, every
+ * loosening flagged, its tests, and the plan's hash; `pack apply` applies exactly that plan
+ * (refused if anything changed since, or a test fails), audited as `pack.apply` with the hash.
+ * The starter pack (packs/general-business) is how a tenant gets defaults other than
+ * hidden / metadata-only, and so how AI clients get content at all.
+ *
+ * `source status` shows how each source's last scheduled sync ended (T-303); `source run-now`
+ * queues a run now (audited `source.run-now`; on the embedded database the server runs it when
+ * it starts again); `source resume` lets the schedule run a source a failure stopped
+ * (`source.resume`).
  *
  * `source …` is about connector syncs (T-301). A crawl from the beginning that would remove a
  * large part of a source (a folder not mounted, a lost state) is held until an operator looks
@@ -110,6 +149,8 @@ export interface AdminIo {
   err: (text: string) => void;
   /** Opens the database (tests); the default opens the configured one. */
   open?: (config: Config) => Promise<Database>;
+  /** Starts the job queue to send on (tests); the default is core/jobs startJobs(). */
+  startJobs?: typeof startJobs;
 }
 
 const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
@@ -132,7 +173,17 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
                                                    lift the lock (what it ended stays ended)
   group list --tenant <ten_…>                      list the tenant's groups (the grp_… id
                                                    names the admin group in auth.adminGroups)
+  user create --tenant <ten_…> --email <email> --name <name>
+                                                   make a local person (no identity provider)
+  user sign-in-link --tenant <ten_…> --user <usr_…|email|userName> [--minutes <1-${SIGN_IN_LINK_MAX_MINUTES}>]
+                                                   a one-time sign-in link (auth.signInLinks)
+  pack plan --tenant <ten_…> --file <pack.json>   what applying a pack would change, and its hash
+  pack apply --tenant <ten_…> --file <pack.json> --plan-hash <hash>
+                                                   apply exactly the plan shown
   source list --tenant <ten_…>                     list the tenant's connector syncs
+  source status --tenant <ten_…> [--source <name>] how each source's last scheduled sync ended
+  source run-now --tenant <ten_…> --source <name>  queue a sync of the source now
+  source resume --tenant <ten_…> --source <name>   schedule a source a failure stopped again
   source confirm-reconcile --tenant <ten_…> --source <name>
                                                    let a held reconcile remove what it counted
   source discard-reconcile --tenant <ten_…> --source <name>
@@ -161,6 +212,10 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         days: { type: "string" },
         user: { type: "string" },
         source: { type: "string" },
+        email: { type: "string" },
+        minutes: { type: "string" },
+        file: { type: "string" },
+        "plan-hash": { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -185,8 +240,15 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "user list-admins",
     "user lock",
     "user unlock",
+    "user create",
+    "user sign-in-link",
     "group list",
+    "pack plan",
+    "pack apply",
     "source list",
+    "source status",
+    "source run-now",
+    "source resume",
     "source confirm-reconcile",
     "source discard-reconcile",
     "source accept-identity",
@@ -262,8 +324,40 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         );
       case "group list":
         return await groupList(db, config, tenantArg(values.tenant), io);
+      case "user create":
+        return await userCreate(
+          db,
+          tenantArg(values.tenant),
+          need(values.email, "--email"),
+          need(values.name, "--name"),
+          io,
+        );
+      case "user sign-in-link":
+        return await signInLink(db, config, values, io);
+      case "pack plan":
+      case "pack apply":
+        return await packCommand(
+          db,
+          command === "pack plan" ? "plan" : "apply",
+          tenantArg(values.tenant),
+          need(values.file, "--file"),
+          values["plan-hash"],
+          io,
+          io.cwd,
+        );
       case "source list":
         return await sourceList(db, tenantArg(values.tenant), io);
+      case "source status":
+        return await sourceStatus(
+          db,
+          tenantArg(values.tenant),
+          values.source === undefined ? undefined : sourceArg(values.source),
+          io,
+        );
+      case "source run-now":
+        return await sourceRunNow(db, tenantArg(values.tenant), sourceArg(values.source), io);
+      case "source resume":
+        return await sourceResume(db, tenantArg(values.tenant), sourceArg(values.source), io);
       case "source confirm-reconcile":
       case "source discard-reconcile":
       case "source accept-identity":
@@ -771,21 +865,416 @@ async function sourceList(db: Database, tenantId: string, io: AdminIo): Promise<
     return 1;
   }
   for (const s of syncs) {
-    const reconcile =
-      s.reconcileHeld !== null
-        ? `reconcile held: ${s.reconcileHeld} to remove` +
-          (s.reconcileConfirmed !== null ? ` (confirmed ${s.reconcileConfirmed})` : "")
-        : s.reconcileDeferred
-          ? "reconcile deferred: a place couldn't be read"
-          : s.reconciling
-            ? "reconciling"
-            : "";
+    const reconcile = reconcileText(s);
     io.out(
-      [s.source, s.connector, s.zoneId, s.phase, s.updatedAt.toISOString(), reconcile].join("\t") +
-        "\n",
+      [
+        s.source,
+        s.connector,
+        s.zoneId,
+        s.phase,
+        s.updatedAt.toISOString(),
+        s.stoppedAt !== null
+          ? `stopped: ${s.stoppedError ?? "failed"}`
+          : (s.lastStatus ?? "never run"),
+        reconcile,
+      ].join("\t") + "\n",
     );
   }
   if (syncs.length === 0) io.err(`tenant ${tenantId} has no connector syncs\n`);
+  return 0;
+}
+
+function reconcileText(s: SourceSyncState): string {
+  return s.reconcileHeld !== null
+    ? `reconcile held: ${s.reconcileHeld} to remove` +
+        (s.reconcileConfirmed !== null ? ` (confirmed ${s.reconcileConfirmed})` : "")
+    : s.reconcileDeferred
+      ? "reconcile deferred: a place couldn't be read"
+      : s.reconciling
+        ? "reconciling"
+        : "";
+}
+
+/** One line per change a pack plan makes, `!` before a loosening. */
+function changeText(c: PackChange): string {
+  const mark = "loosens" in c && c.loosens ? "! " : "  ";
+  const what =
+    c.kind === "set-defaults"
+      ? `defaults ${c.from.visibility}/${c.from.exposure} -> ${c.to.visibility}/${c.to.exposure}`
+      : "tag" in c
+        ? c.tag
+        : "facet" in c
+          ? c.facet
+          : c.kind === "set-rules"
+            ? `${c.added.length} added, ${c.removed.length} removed`
+            : "";
+  return `${mark}${c.kind} ${what}`.trimEnd();
+}
+
+/** `pack plan` and `pack apply`: see the header. */
+async function packCommand(
+  db: Database,
+  step: "plan" | "apply",
+  tenantId: string,
+  file: string,
+  planHash: string | undefined,
+  io: AdminIo,
+  cwd = process.cwd(),
+): Promise<number> {
+  if (step === "apply" && (planHash === undefined || !/^[0-9a-f]{64}$/.test(planHash))) {
+    throw new UsageError("--plan-hash is the hash `pack plan` printed");
+  }
+  let pack: unknown;
+  try {
+    pack = JSON.parse(readFileSync(resolve(cwd, file), "utf8"));
+  } catch (e) {
+    io.err(`cannot read the pack: ${(e as Error).message}\n`);
+    return 1;
+  }
+  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  let plan: PackPlan;
+  try {
+    plan =
+      step === "plan"
+        ? await db.withTenant(tenantId, (tx) => planPack(tx, tenantId, pack), {
+            accessMode: "read only",
+          })
+        : await retrying(() =>
+            db.withTenant(
+              tenantId,
+              async (tx) => {
+                const applied = await applyPack(tx, tenantId, pack, {
+                  planHash: planHash as string,
+                  by: ADMIN_ACTOR,
+                });
+                await appendAudit(tx, tenantId, {
+                  actor: ADMIN_ACTOR,
+                  action: "pack.apply",
+                  decision: "allow",
+                  detail: {
+                    pack: applied.name,
+                    version: applied.version,
+                    ...(applied.previous === null ? {} : { previous: applied.previous }),
+                    planHash: applied.planHash,
+                    loosening: applied.changes.filter((c) => "loosens" in c && c.loosens).length,
+                  },
+                });
+                return applied;
+              },
+              APPLY_TRANSACTION,
+            ),
+          );
+  } catch (e) {
+    if (!(e instanceof PackError)) throw e;
+    if (step === "apply") {
+      await db.withTenant(tenantId, (tx) =>
+        appendAudit(tx, tenantId, {
+          actor: ADMIN_ACTOR,
+          action: "pack.apply",
+          decision: "deny",
+          detail: { reason: e.code },
+        }),
+      );
+    }
+    io.err(`${e.message}\n`);
+    return 1;
+  }
+  const lines = [
+    `${step === "plan" ? "Plan" : "Applied"}: pack ${plan.name} ${plan.version}` +
+      (plan.previous === null ? "" : ` (now ${plan.previous})`),
+    ...plan.changes.map(changeText),
+    ...plan.warnings.map((w) => `warning: ${w}`),
+    ...plan.tests.map((t) => `test ${t.passed ? "passed" : "FAILED"}: ${t.name}`),
+  ];
+  io.err(lines.join("\n") + "\n");
+  io.out(`${plan.planHash}\n`);
+  if (step === "plan") {
+    io.err(
+      `To apply exactly this: openhoard admin pack apply --tenant ${tenantId} --file ${file} --plan-hash ${plan.planHash}\n`,
+    );
+  }
+  return 0;
+}
+
+/** `source status`: each source (or one), a block of `key: value` lines. */
+async function sourceStatus(
+  db: Database,
+  tenantId: string,
+  source: string | undefined,
+  io: AdminIo,
+): Promise<number> {
+  const syncs = await db.withTenant(tenantId, async (tx) =>
+    (await getTenant(tx, tenantId)) ? listSourceSyncs(tx, tenantId) : null,
+  );
+  if (!syncs) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  const shown = syncs.filter((s) => source === undefined || s.source === source);
+  if (shown.length === 0) {
+    io.err(
+      source === undefined
+        ? `tenant ${tenantId} has no connector syncs\n`
+        : `tenant ${tenantId} has no source ${source}\n`,
+    );
+    return 1;
+  }
+  for (const s of shown) {
+    const counts = s.lastCounts
+      ? Object.entries(s.lastCounts)
+          .map(([k, v]) => `${k} ${v}`)
+          .join(", ")
+      : "";
+    const lines: [string, string][] = [
+      ["source", s.source],
+      ["connector", s.connector],
+      ["zone", s.zoneId],
+      [
+        "state",
+        s.stoppedAt !== null
+          ? `STOPPED since ${s.stoppedAt.toISOString()} (${s.stoppedError ?? "failed"}): fix the cause, then source resume`
+          : "scheduled",
+      ],
+      ["phase", s.phase],
+      ["last run", s.lastRunAt?.toISOString() ?? "never"],
+      [
+        "last status",
+        s.lastStatus === null ? "" : s.lastStatus + (s.lastError ? ` (${s.lastError})` : ""),
+      ],
+      ["last counts", counts],
+      ["reconcile", reconcileText(s)],
+    ];
+    io.out(
+      lines
+        .filter(([, v]) => v !== "")
+        .map(([k, v]) => `${k}: ${v}`)
+        .join("\n") + "\n\n",
+    );
+  }
+  return 0;
+}
+
+/** `source run-now`: queues a run of a bound, running source (audited). */
+async function sourceRunNow(
+  db: Database,
+  tenantId: string,
+  source: string,
+  io: AdminIo,
+): Promise<number> {
+  const found = await db.withTenant(tenantId, async (tx) => {
+    if (!(await getTenant(tx, tenantId))) return "no-tenant" as const;
+    const state = (await listSourceSyncs(tx, tenantId)).find((s) => s.source === source);
+    const reason = !state ? "unknown-source" : state.stoppedAt !== null ? "stopped" : null;
+    if (reason !== null) {
+      await appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "source.run-now",
+        decision: "deny",
+        detail: { source, reason },
+      });
+    }
+    return reason ?? ("ok" as const);
+  });
+  if (found === "no-tenant") {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  if (found !== "ok") {
+    io.err(
+      found === "stopped"
+        ? `source ${source} is stopped: fix what failed (source status), then source resume\n`
+        : `tenant ${tenantId} has no source ${source} (the server binds configured sources when it starts)\n`,
+    );
+    return 1;
+  }
+  // This process only sends: it works no queue and keeps no schedule.
+  const jobs = await (io.startJobs ?? startJobs)(db, { worker: false, maintenance: false });
+  let id: string | null;
+  try {
+    id = await jobs.requestSync(tenantId, source);
+  } finally {
+    await jobs.stop({ timeoutMs: 1_000 });
+  }
+  await db.withTenant(tenantId, (tx) =>
+    appendAudit(tx, tenantId, {
+      actor: ADMIN_ACTOR,
+      action: "source.run-now",
+      decision: "allow",
+      detail: { source, ...(id === null ? { joined: true } : {}) },
+    }),
+  );
+  io.err(
+    `Queued a sync of ${source}${id === null ? " (one was waiting already: brought forward)" : ""}. ` +
+      `A running server's worker picks it up within seconds; on the embedded database, when the server starts.\n`,
+  );
+  return 0;
+}
+
+/** `source resume`: the schedule runs a stopped source again (audited). */
+async function sourceResume(
+  db: Database,
+  tenantId: string,
+  source: string,
+  io: AdminIo,
+): Promise<number> {
+  const was = await db.withTenant(tenantId, async (tx) => {
+    if (!(await getTenant(tx, tenantId))) return "no-tenant" as const;
+    const resumed = await resumeSource(tx, tenantId, source);
+    await appendAudit(tx, tenantId, {
+      actor: ADMIN_ACTOR,
+      action: "source.resume",
+      decision: resumed === null ? "deny" : "allow",
+      detail: { source, ...(resumed === null ? { reason: "not-stopped" } : { was: resumed }) },
+    });
+    return resumed;
+  });
+  if (was === "no-tenant") {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  if (was === null) {
+    io.err(`source ${source} isn't stopped\n`);
+    return 1;
+  }
+  io.err(
+    `Resumed ${source} (it was stopped for ${was}): it runs at its next schedule, or now with source run-now.\n`,
+  );
+  return 0;
+}
+
+/** `user create`: a local person (a member), for a tenant without an identity provider. */
+async function userCreate(
+  db: Database,
+  tenantId: string,
+  email: string,
+  name: string,
+  io: AdminIo,
+): Promise<number> {
+  const made = await db
+    .withTenant(tenantId, async (tx) => {
+      if (!(await getTenant(tx, tenantId))) return "no-tenant" as const;
+      const user = await createUser(tx, tenantId, {
+        email,
+        displayName: name,
+        source: "local",
+      });
+      await appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "user.create",
+        decision: "allow",
+        detail: { user: user.id, source: "local" },
+      });
+      return user;
+    })
+    .catch((e: unknown) => {
+      if (e instanceof IdentityError) return e;
+      throw e;
+    });
+  if (made === "no-tenant") {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  if (made instanceof IdentityError) {
+    await db.withTenant(tenantId, (tx) =>
+      appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "user.create",
+        decision: "deny",
+        detail: { reason: made.code },
+      }),
+    );
+    io.err(
+      made.code === "conflict"
+        ? `someone in tenant ${tenantId} has that email already\n`
+        : `${made.message}\n`,
+    );
+    return 1;
+  }
+  io.out(`${made.id}\n`);
+  io.err(
+    `Created ${made.displayName} (${made.id}).\n` +
+      `Next: openhoard admin user sign-in-link --tenant ${tenantId} --user ${made.id}\n`,
+  );
+  return 0;
+}
+
+/** `user sign-in-link`: a one-time link to sign in with, printed once (audited). */
+async function signInLink(
+  db: Database,
+  config: Config,
+  values: { tenant?: string; user?: string; minutes?: string },
+  io: AdminIo,
+): Promise<number> {
+  const tenantId = tenantArg(values.tenant);
+  const named = need(values.user, "--user");
+  const minutesText = values.minutes ?? "15";
+  const minutes = /^\d{1,2}$/.test(minutesText) ? Number(minutesText) : Number.NaN;
+  if (!(minutes >= 1 && minutes <= SIGN_IN_LINK_MAX_MINUTES)) {
+    throw new UsageError(`--minutes is a whole number from 1 to ${SIGN_IN_LINK_MAX_MINUTES}`);
+  }
+  if (!config.auth?.signInLinks) {
+    io.err(
+      `sign-in links are off: set auth.signInLinks to true in the server's config (on a server ` +
+        `that listens on 127.0.0.1 only), and restart it\n`,
+    );
+    return 1;
+  }
+  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  const refused = async (reason: string, message: string, userId?: string) => {
+    await db.withTenant(tenantId, (tx) =>
+      appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "sign-in-link.issue",
+        decision: "deny",
+        detail: { ...(userId ? { user: userId } : {}), reason },
+      }),
+    );
+    io.err(`${message}\n`);
+    return 1;
+  };
+  const user = await namedUser(db, tenantId, named);
+  if (user === "none") {
+    return refused("unknown-user", `tenant ${tenantId} has no current person ${named}`);
+  }
+  if (user === "ambiguous") {
+    return refused(
+      "ambiguous",
+      `${named} is one person's email and another's userName: use the id`,
+    );
+  }
+  let link;
+  try {
+    link = await db.withTenant(tenantId, async (tx) => {
+      const issued = await issueSignInLink(tx, tenantId, {
+        userId: user.id,
+        by: ADMIN_ACTOR,
+        minutes,
+      });
+      await appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "sign-in-link.issue",
+        decision: "allow",
+        detail: { user: user.id, link: issued.id, expiresAt: issued.expiresAt.toISOString() },
+      });
+      return issued;
+    });
+  } catch (e) {
+    if (!(e instanceof IdentityError)) throw e;
+    return refused(e.code, e.message, user.id);
+  }
+  const url = new URL("/auth/link", config.auth.publicUrl);
+  url.searchParams.set("token", link.token);
+  io.out(`${url.href}\n`);
+  io.err(
+    `A sign-in link for ${user.displayName} (${user.id}), shown once, good once, until ` +
+      `${link.expiresAt.toISOString()}: open it in the browser you'll use with OpenHoard.\n`,
+  );
   return 0;
 }
 

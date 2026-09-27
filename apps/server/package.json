@@ -22,6 +22,7 @@
   "dependencies": {
     "@hono/node-server": "^2.1.1",
     "@modelcontextprotocol/sdk": "^1.30.1",
+    "@openhoard/connector-fs": "workspace:^",
     "@openhoard/core-audit": "workspace:^",
     "@openhoard/core-catalog": "workspace:^",
     "@openhoard/core-db": "workspace:^",
@@ -29,6 +30,7 @@
     "@openhoard/core-jobs": "workspace:^",
     "@openhoard/core-models": "workspace:^",
     "@openhoard/core-policy": "workspace:^",
+    "@openhoard/core-storage": "workspace:^",
     "@openhoard/sdk": "workspace:^",
     "drizzle-orm": "^0.45.3",
     "hono": "^4.8.0",

@@ -19,6 +19,7 @@ import {
   type OAuthClient,
   type User,
 } from "@openhoard/core-identity";
+import { listSourceSyncs } from "@openhoard/core-jobs";
 import { mayAdminister, type AuthzClient, type ClientTrust } from "@openhoard/core-policy";
 import type { Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -39,6 +40,7 @@ import { retrying } from "./retry.js";
  *   GET    /api/admin/admins                  the tenant's admins
  *   POST   /api/admin/admins                  {"userId": "usr_…"} or {"email": …} or {"userName": …}
  *   DELETE /api/admin/admins/:userId
+ *   GET    /api/admin/sources                 each connector sync and its last scheduled run
  *
  * - Signed in with the session cookie (T-102), as an admin (core/policy mayAdminister(): an
  *   active member with the admin role or in the tenant's admin group, through OpenHoard's own
@@ -387,6 +389,38 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
       },
     );
     return result instanceof Response ? result : c.json(result, 200, NO_STORE);
+  });
+
+  // --- Sources (T-303) -------------------------------------------------------------------------
+
+  // Where each connector sync stands and how its last scheduled run ended: read-only (the admin
+  // CLI confirms, discards, resumes and runs them).
+  app.get("/api/admin/sources", async (c) => {
+    const { tenantId } = c.get("auth") as SignedIn;
+    const syncs = await db.withTenant(tenantId, (tx) => listSourceSyncs(tx, tenantId), {
+      isolationLevel: "repeatable read",
+      accessMode: "read only",
+    });
+    return c.json({
+      sources: syncs.map((s) => ({
+        source: s.source,
+        connector: s.connector,
+        zoneId: s.zoneId,
+        phase: s.phase,
+        scheduled: s.stoppedAt === null,
+        stoppedAt: s.stoppedAt?.toISOString() ?? null,
+        stoppedError: s.stoppedError,
+        lastRunAt: s.lastRunAt?.toISOString() ?? null,
+        lastStatus: s.lastStatus,
+        lastError: s.lastError,
+        lastCounts: s.lastCounts,
+        reconciling: s.reconciling,
+        reconcileHeld: s.reconcileHeld,
+        reconcileConfirmed: s.reconcileConfirmed,
+        reconcileDeferred: s.reconcileDeferred,
+        updatedAt: s.updatedAt.toISOString(),
+      })),
+    });
   });
 
   log?.debug("admin API mounted at /api/admin");
