@@ -14,6 +14,15 @@ import type { EmbedStepOptions } from "./embed.js";
 import type { ExtractStepOptions } from "./extract.js";
 import type { SummarizeStepOptions } from "./summarize.js";
 import {
+  isSyncPayload,
+  runSyncJob,
+  syncKey,
+  syncSettings,
+  SYNC_EXPIRE_SECONDS,
+  type SyncPayload,
+  type SyncQueueOptions,
+} from "./sync-schedule.js";
+import {
   maintainTenant,
   maintenanceSettings,
   type MaintenanceOptions,
@@ -44,6 +53,9 @@ import {
  *                       stays unprocessed, hidden from non-readers: fail-closed.
  *   maintenance         the cron job (hourly by default): fans out one job per tenant.
  *   maintenance-tenant  one tenant's maintenance (maintenance.ts); `stately`, keyed by tenant.
+ *   sync                one connector run over one source (sync-schedule.ts, T-303); `stately`,
+ *                       keyed by tenant and source, sent by each source's own schedule and by
+ *                       requestSync().
  *
  * Every process that ingests enqueues; `worker: true` processes also work the queues and keep
  * the schedule (pg-boss coordinates several such processes through the database).
@@ -59,6 +71,7 @@ export const QUEUES = {
   enrichFailed: "enrich-failed",
   maintenance: "maintenance",
   maintenanceTenant: "maintenance-tenant",
+  sync: "sync",
 } as const;
 
 /** A pino-shaped logger (the server passes its own); every method is optional. */
@@ -122,6 +135,12 @@ export interface JobsOptions {
   enrich?: EnrichQueueOptions;
   /** Scheduled maintenance, or false for none. */
   maintenance?: (MaintenanceOptions & { cron?: string }) | false;
+  /**
+   * Connector syncs on a schedule (T-303): the sources this cluster syncs, each with its cron.
+   * A worker keeps their schedules (and drops schedules of sources no longer listed) and works
+   * the queue; every process can requestSync().
+   */
+  sync?: SyncQueueOptions;
   /** How often an idle worker looks for jobs, in seconds (at least 0.5). Default 2. */
   pollingIntervalSeconds?: number;
   /**
@@ -158,6 +177,12 @@ export interface Jobs {
   ): Promise<boolean>;
   /** Starts a maintenance run now, as the schedule does. Returns the job's id. */
   runMaintenance(): Promise<string | null>;
+  /**
+   * Asks for a sync of one source now (T-303): a job already waiting for it is brought forward
+   * (and null returned), else one is queued, to run after one running now. A stopped source's
+   * job does nothing. Never inside withTenant().
+   */
+  requestSync(tenantId: string, source: string): Promise<string | null>;
   /**
    * Stops working and closes pg-boss's connections. Running jobs get up to `timeoutMs` (default
    * 20 s) to finish; any still running then fail, to run again later, and are told to stop
@@ -214,6 +239,7 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
       ? undefined
       : (options.maintenance?.cron ?? DEFAULT_MAINTENANCE_CRON);
   const enrich = enrichQueue(options.enrich, db.kind);
+  const sync = options.sync === undefined ? undefined : syncSettings(options.sync);
   const polling = options.pollingIntervalSeconds ?? 2;
   if (!(polling >= 0.5)) throw new RangeError("pollingIntervalSeconds must be at least 0.5");
   const supervise = options.superviseIntervalSeconds ?? 60;
@@ -280,6 +306,28 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
       retryDelay: 60,
       expireInSeconds: 3600,
     });
+    // One job per source waits and one runs (runSync() relies on it); its lease is above the
+    // run's time budget. Created on every node: any may send.
+    await ensureQueue(boss, QUEUES.sync, {
+      policy: "stately",
+      retryLimit: 2,
+      retryDelay: 60,
+      expireInSeconds: sync?.expireInSeconds ?? SYNC_EXPIRE_SECONDS,
+    });
+
+    /** Sends a source's run after `delayMs`, reusing (and moving) a job that waits for it. */
+    const sendSync = async (payload: SyncPayload, delayMs: number) => {
+      if (!isSyncPayload(payload)) {
+        throw new TypeError("requestSync: expects a tenant id and a source slug");
+      }
+      if (insideWithTenant()) throw new NestedWorkError("requestSync()");
+      const done = await boss.upsert(
+        QUEUES.sync,
+        { tenantId: payload.tenantId, source: payload.source },
+        { singletonKey: syncKey(payload), startAfter: Math.ceil(delayMs / 1000) },
+      );
+      return done.inserted > 0 ? (done.jobs[0] ?? null) : null;
+    };
 
     /**
      * A job waiting for the key (created, or in its retry delay) is reused rather than joined
@@ -316,6 +364,32 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
           runEnrichJob(db, steps, job as JobWithMetadata<unknown>, enqueueVersion, log),
         ),
       );
+      if (sync) {
+        const tenantKey = (options.sync as SyncQueueOptions).tenantKey;
+        await boss.work<unknown>(
+          QUEUES.sync,
+          { localConcurrency: sync.concurrency, pollingIntervalSeconds: polling },
+          tracked(async ([job]) =>
+            runSyncJob(
+              {
+                db,
+                settings: sync,
+                tenantKey,
+                enqueue: async (tenantId, result) => {
+                  if (needsEnrichment(result)) await enqueueVersion(tenantId, result.versionId);
+                },
+                next: sendSync,
+                log,
+              },
+              job?.data,
+              job?.signal ?? new AbortController().signal,
+            ),
+          ),
+        );
+        await keepSyncSchedules(boss, sync.sources.values(), log);
+        // A first run for each at start, rather than at the next tick of its schedule.
+        for (const s of sync.sources.values()) await sendSync(s, 0);
+      }
       if (maintenance) {
         await boss.work<unknown>(
           QUEUES.maintenance,
@@ -365,6 +439,9 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
       runMaintenance() {
         if (insideWithTenant()) throw new NestedWorkError("runMaintenance()");
         return boss.send(QUEUES.maintenance, {});
+      },
+      requestSync(tenantId, source) {
+        return sendSync({ tenantId, source }, 0);
       },
       async stop({ timeoutMs = 20_000, graceMs = 2_000 } = {}) {
         await boss.stop({ graceful: true, timeout: timeoutMs, close: true });
@@ -422,6 +499,34 @@ async function runEnrichJob(
     log.debug?.({ job: job.id, tenantId, versionId, outcome }, "enrichment job done");
   }
   return withheld.length > 0 ? { outcome, withheld } : { outcome };
+}
+
+/**
+ * Keeps one schedule per configured source (keyed by tenant and source, in UTC), and drops the
+ * schedules of sources no longer configured: the configuration is the cluster's.
+ */
+async function keepSyncSchedules(
+  boss: PgBoss,
+  sources: Iterable<{ tenantId: string; source: string; cron: string }>,
+  log: JobsLogger,
+) {
+  const keys = new Set<string>();
+  for (const s of sources) {
+    const key = syncKey(s);
+    keys.add(key);
+    await boss.schedule(
+      QUEUES.sync,
+      s.cron,
+      { tenantId: s.tenantId, source: s.source },
+      { key, singletonKey: key, tz: "UTC" },
+    );
+  }
+  for (const old of await boss.getSchedules(QUEUES.sync)) {
+    if (!keys.has(old.key)) {
+      await boss.unschedule(QUEUES.sync, old.key);
+      log.info?.({ key: old.key }, "sync schedule dropped: the source is no longer configured");
+    }
+  }
 }
 
 /**

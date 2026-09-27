@@ -389,6 +389,9 @@ importers:
 
   core/jobs:
     dependencies:
+      '@openhoard/core-audit':
+        specifier: workspace:^
+        version: link:../audit
       '@openhoard/core-catalog':
         specifier: workspace:^
         version: link:../catalog

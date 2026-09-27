@@ -21,6 +21,7 @@
     "clean": "rimraf dist coverage"
   },
   "dependencies": {
+    "@openhoard/core-audit": "workspace:^",
     "@openhoard/core-catalog": "workspace:^",
     "@openhoard/core-db": "workspace:^",
     "@openhoard/core-identity": "workspace:^",
