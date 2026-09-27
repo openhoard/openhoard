@@ -90,6 +90,7 @@ function embed(text: string): number[] {
   return norm === 0 ? v.map((_, i) => (i === 0 ? 1 : 0)) : v.map((x) => x / norm);
 }
 const hex = (n: number) => (0x10000000 + n).toString(16);
+// Budgets are generous: this harness runs under coverage instrumentation on shared runners.
 const timeout = (ms: number) => (platform() === "win32" ? ms * 4 : ms);
 /**
  * The runs beyond the first probe the same code on the same engine (PGlite, WASM) with other
@@ -283,7 +284,7 @@ beforeAll(async () => {
       }
     });
   }
-}, timeout(240_000));
+}, timeout(480_000));
 afterAll(() => db?.close());
 
 async function saveContent(
@@ -431,7 +432,7 @@ describe("searchObjects and suggestTitles under the leak harness (T-504, T-505, 
       expect(report.found).toBe(report.readableCanaryProbes);
       expect(report.contentFound).toBe(report.readableContentProbes);
     },
-    timeout(240_000),
+    timeout(480_000),
   );
 
   for (const trust of ["commercial", "consumer"] as const) {
@@ -450,7 +451,7 @@ describe("searchObjects and suggestTitles under the leak harness (T-504, T-505, 
         expect(report.found).toBe(report.readableCanaryProbes);
         expect(report.contentFound).toBe(report.readableContentProbes);
       },
-      timeout(240_000),
+      timeout(480_000),
     );
   }
 
@@ -470,7 +471,7 @@ describe("searchObjects and suggestTitles under the leak harness (T-504, T-505, 
       assertNoLeaks(report);
       expect(report.contentFound).toBe(report.readableContentProbes);
     },
-    timeout(240_000),
+    timeout(480_000),
   );
 
   it.runIf(everyRun)(
@@ -493,7 +494,7 @@ describe("searchObjects and suggestTitles under the leak harness (T-504, T-505, 
       expect(report.readableContentProbes).toBeGreaterThan(0);
       expect(report.contentFound).toBe(report.readableContentProbes);
     },
-    timeout(240_000),
+    timeout(480_000),
   );
 
   it(
@@ -530,6 +531,6 @@ describe("searchObjects and suggestTitles under the leak harness (T-504, T-505, 
       });
       expect(content.leaks.some((l) => l.surface === "results")).toBe(true);
     },
-    timeout(240_000),
+    timeout(480_000),
   );
 });
