@@ -15,7 +15,8 @@ import { revokeSession, startSession, type Session } from "./sessions.js";
  *   SHA-256 is kept. It lives `minutes` (default 15, at most 60, by the database's clock), and
  *   starts one session: its use is recorded with the session it started.
  * - A used link presented again is refused, and ends the session it started (someone else may
- *   hold the link: as a replayed OAuth code revokes what it made). An expired one is refused.
+ *   hold the link: as a replayed OAuth code revokes what it made), except by the browser holding
+ *   that session (a double submit: `already`). An expired one is refused.
  * - Only a current person (a member or a guest, not locked, disabled or retired) signs in: the
  *   same check a session makes when it starts (startSession()).
  * - The session is recorded as signed in through `sign-in-link`, issuer `openhoard:sign-in-link`,
@@ -88,6 +89,11 @@ export type SignInLinkRefusal =
 
 export type SignInLinkResult =
   | { ok: true; userId: string; linkId: string; session: Session & { token: string } }
+  /**
+   * Used already, by the browser presenting it now (the session it started is the caller's): a
+   * double submit, nothing to do.
+   */
+  | { ok: true; already: true; userId: string; linkId: string; sessionId: string }
   | {
       ok: false;
       refused: SignInLinkRefusal;
@@ -105,7 +111,12 @@ export async function redeemSignInLink(
   tx: Tx,
   tenantId: string,
   token: string,
-  limits: { idleSeconds?: number; maxSeconds?: number } = {},
+  limits: {
+    idleSeconds?: number;
+    maxSeconds?: number;
+    /** The session the request already carries: a link that started it is not a replay. */
+    currentSession?: string;
+  } = {},
 ): Promise<SignInLinkResult> {
   const named = parseSignInLink(token);
   if (!named || named.tenantId !== tenantId) return { ok: false, refused: "unknown" };
@@ -128,6 +139,9 @@ export async function redeemSignInLink(
     return { ok: false, refused: "wrong-secret", ...who };
   }
   if (link.usedAt !== null) {
+    if (link.sessionId !== null && link.sessionId === limits.currentSession) {
+      return { ok: true, already: true, ...who, sessionId: link.sessionId };
+    }
     const ended =
       link.sessionId !== null &&
       (await revokeSession(tx, tenantId, link.sessionId, "system:sign-in-link-replay"));

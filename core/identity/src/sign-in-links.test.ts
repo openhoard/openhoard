@@ -60,7 +60,7 @@ describe("sign-in links", () => {
     expect(JSON.stringify(stored)).not.toContain(link.token.split(".")[3]);
 
     const used = await redeem(link.token);
-    if (!used.ok) throw new Error(`refused: ${used.refused}`);
+    if (!used.ok || "already" in used) throw new Error("not signed in");
     expect(used.userId).toBe(bo.id);
     const check = await write((tx) => checkSession(tx, t.tenantId, used.session.token));
     expect(check.ok).toBe(true);
@@ -81,6 +81,29 @@ describe("sign-in links", () => {
       endedSession: used.session.id,
     });
     expect((await write((tx) => checkSession(tx, t.tenantId, used.session.token))).ok).toBe(false);
+  });
+
+  it("answers the browser it signed in as done: a double submit, not a replay", async () => {
+    const link = await issue();
+    const used = await redeem(link.token);
+    if (!used.ok || "already" in used) throw new Error("not signed in");
+    const again = await write((tx) =>
+      redeemSignInLink(tx, t.tenantId, link.token, { currentSession: used.session.id }),
+    );
+    expect(again).toEqual({
+      ok: true,
+      already: true,
+      linkId: link.id,
+      userId: bo.id,
+      sessionId: used.session.id,
+    });
+    expect((await write((tx) => checkSession(tx, t.tenantId, used.session.token))).ok).toBe(true);
+    // Another session presenting it is a replay.
+    expect(
+      await write((tx) =>
+        redeemSignInLink(tx, t.tenantId, link.token, { currentSession: "ses_other" }),
+      ),
+    ).toMatchObject({ ok: false, refused: "used", endedSession: used.session.id });
   });
 
   it("refuses what isn't a live link of this tenant's", async () => {

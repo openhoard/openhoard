@@ -7,6 +7,7 @@ import {
   connectorContentSource,
   ensureSourceSync,
   firstOf,
+  pinSourceOwner,
   type ScheduledSource,
 } from "@openhoard/core-jobs";
 import { fsConnector } from "@openhoard/connector-fs";
@@ -29,8 +30,9 @@ import { retrying } from "./retry.js";
  * - builds its connector (the fs connector over `root`, its state in
  *   `<dataDir>/connectors/<tenant>/<source>`, owner-only permissions: nothing but the owner's
  *   OpenHoard access reaches its files);
- * - resolves its owner (an email or a user id) to an active member when a run starts: until
- *   that person exists (their first sign-in, or `admin user create`) runs wait.
+ * - resolves its owner (an email or a user id) to an active member on its first run, and pins
+ *   that person (ownerOf()): until they exist (`admin user create`, SCIM) runs wait, and a later
+ *   configuration naming someone else is refused.
  *
  * Any of those failing stops the server with a message naming the source: a folder half set up
  * would sync into the wrong place or not at all, silently.
@@ -55,7 +57,7 @@ export async function prepareSources(
   db: Database,
   config: Pick<Config, "sources" | "dataDir">,
   options: {
-    tenantKey: (tenantId: string) => Uint8Array;
+    tenantKey: (tenantId: string) => Promise<Uint8Array>;
     blobs?: ContentSource;
     log?: Logger;
     /** Builds a source's connector; the fs connector by default (tests pass their own). */
@@ -113,6 +115,21 @@ export async function prepareSources(
               : `it was first synced by another connector: give it another id to start afresh`,
           );
         }
+        // The owner is pinned on the first run: a configuration naming another person now must
+        // be a new source, never a takeover of this one's files.
+        const pinned = await pinSourceOwner(tx, s.tenantId, s.id, null);
+        if (pinned !== null) {
+          const named = isId("user", s.owner)
+            ? `user:${s.owner}`
+            : await findUserByEmail(tx, s.tenantId, s.owner).then((u) =>
+                u ? `user:${u.id}` : null,
+              );
+          if (named !== null && named !== pinned) {
+            return fail(
+              `its owner is ${pinned.slice("user:".length)} since its first run, and "${s.owner}" names someone else: give it another id to start afresh`,
+            );
+          }
+        }
         return id as string;
       }),
     );
@@ -122,7 +139,7 @@ export async function prepareSources(
       zoneId,
       cron: s.schedule,
       connector,
-      owner: () => ownerOf(db, s),
+      owner: () => ownerOf(db, { ...s, source: s.id }),
       ...(s.reconcileGuard === undefined
         ? {}
         : { reconcileGuard: stripUndefined(s.reconcileGuard) }),
@@ -163,24 +180,35 @@ function fsSource(s: SourceConfig, stateDir: string): Connector {
 }
 
 /**
- * The source's owner as a principal (`user:usr_…`), or null while there is no such active
- * member: an email nobody has yet, a guest, a service account, a locked or retired person.
+ * The source's owner as a principal (`user:usr_…`), or null while there is none to own it.
+ *
+ * On the first run the configured owner (an email, or an id) is resolved to a current member and
+ * pinned in source_syncs (core/jobs pinSourceOwner()); from then on only that person owns the
+ * source: never someone the email names later (an address reused after its owner left). While
+ * the pinned person isn't an active member (locked, disabled, retired), runs wait.
  */
 export async function ownerOf(
   db: Database,
-  s: Pick<SourceConfig, "tenantId" | "owner">,
+  s: Pick<SourceConfig, "tenantId" | "owner"> & { source: string },
 ): Promise<string | null> {
-  const user: User | null = await db.withTenant(
-    s.tenantId,
-    (tx) =>
-      isId("user", s.owner)
-        ? getUser(tx, s.tenantId, s.owner)
-        : findUserByEmail(tx, s.tenantId, s.owner),
-    { accessMode: "read only" },
-  );
-  return user && user.kind === "member" && user.active && user.retired === null
-    ? `user:${user.id}`
-    : null;
+  return db.withTenant(s.tenantId, async (tx) => {
+    let pinned = await pinSourceOwner(tx, s.tenantId, s.source, null);
+    if (pinned === null) {
+      const found = isId("user", s.owner)
+        ? await getUser(tx, s.tenantId, s.owner)
+        : await findUserByEmail(tx, s.tenantId, s.owner);
+      if (!usable(found)) return null;
+      pinned = await pinSourceOwner(tx, s.tenantId, s.source, `user:${found.id}`);
+      if (pinned === null) return null;
+    }
+    const user = await getUser(tx, s.tenantId, pinned.slice("user:".length));
+    return usable(user) ? pinned : null;
+  });
+}
+
+/** An active member: never a guest, a service account, or someone locked or retired. */
+function usable(user: User | null): user is User {
+  return user !== null && user.kind === "member" && user.active && user.retired === null;
 }
 
 function stripUndefined<T extends object>(o: T): { [K in keyof T]?: Exclude<T[K], undefined> } {

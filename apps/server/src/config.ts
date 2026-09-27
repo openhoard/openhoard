@@ -1,5 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 
@@ -434,12 +434,17 @@ export const ConfigSchema = z
   })
   .strict()
   .superRefine((c, ctx) => {
-    if (c.auth?.signInLinks === true && !LOOPBACK_HOSTS.has(c.host)) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["auth", "signInLinks"],
-        message: "sign-in links need a server that listens on this machine only (host 127.0.0.1)",
-      });
+    if (c.auth?.signInLinks === true) {
+      // Both where it listens and where people reach it: a tunnel or a proxy in front (a public
+      // publicUrl) would put the links on the internet.
+      if (!LOOPBACK_HOSTS.has(c.host) || !isLoopback(new URL(c.auth.publicUrl))) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["auth", "signInLinks"],
+          message:
+            "sign-in links need a server on this machine only: host and publicUrl on 127.0.0.1 (no tunnel or proxy)",
+        });
+      }
     }
     const ids = new Set<string>();
     c.sources.forEach((s, i) => {
@@ -453,11 +458,12 @@ export const ConfigSchema = z
       }
       ids.add(key);
       // The connector keeps its state under the data directory, which must be outside the root.
-      if (isAbsolute(s.root) && within(resolve(s.root), resolve(c.dataDir))) {
+      if (isAbsolute(s.root) && overlap(s.root, c.dataDir)) {
         ctx.addIssue({
           code: "custom",
           path: ["sources", i, "root"],
-          message: "the data directory can't be inside a source's folder",
+          message:
+            "a source's folder and the data directory can't be inside one another (links and junctions included)",
         });
       }
     });
@@ -467,6 +473,34 @@ export type Config = z.infer<typeof ConfigSchema>;
 
 /** The addresses `host` may name for a server that listens on this machine only. */
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+/**
+ * Whether two folders are one, or one is inside the other: as written, and as the file system
+ * resolves them (symbolic links, junctions, mapped drives), for the part of each that exists.
+ */
+function overlap(a: string, b: string): boolean {
+  const pairs: [string, string][] = [[resolve(a), resolve(b)]];
+  const ra = real(a);
+  const rb = real(b);
+  if (ra !== null && rb !== null) pairs.push([ra, rb]);
+  return pairs.some(([x, y]) => within(x, y) || within(y, x));
+}
+
+/** The path as the file system resolves it: its longest existing part, then the rest. */
+function real(p: string): string | null {
+  let head = resolve(p);
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      return join(realpathSync.native(head), ...rest.reverse());
+    } catch {
+      const up = dirname(head);
+      if (up === head) return null;
+      rest.push(basename(head));
+      head = up;
+    }
+  }
+}
 
 /** Whether `inner` is `outer` or inside it (case-insensitively on Windows and macOS). */
 function within(outer: string, inner: string): boolean {

@@ -100,7 +100,9 @@ import { retrying } from "./retry.js";
  * `user create` makes a local person (a member) for a tenant without an identity provider, and
  * `user sign-in-link` issues them a one-time link to sign in with (core/identity
  * sign-in-links.ts), on a server with `auth.signInLinks` (loopback only). Both are audited
- * (`user.create`, `sign-in-link.issue`); the link is printed once.
+ * (`user.create`, `sign-in-link.issue`); the link is printed once. A link can be issued for any
+ * current person, SCIM-provisioned ones too, and bypasses the identity provider and its MFA: the
+ * operator running admin commands is trusted with every account.
  *
  * `pack plan` shows what applying a pack (packs/README.md) would change in a tenant, every
  * loosening flagged, its tests, and the plan's hash; `pack apply` applies exactly that plan

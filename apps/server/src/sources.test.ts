@@ -1,17 +1,26 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAudit } from "@openhoard/core-audit";
 import { readExtract } from "@openhoard/core-catalog";
 import { newId, objects, sourceRefs, versions, zones, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
-import { createUser, lockUser, type User } from "@openhoard/core-identity";
+import { createUser, lockUser, retireUser, type User } from "@openhoard/core-identity";
 import { listSourceSyncs, startJobs, type Jobs } from "@openhoard/core-jobs";
 import { and, eq, isNotNull } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ConfigSchema, loadConfig } from "./config.js";
 import { ownerOf, prepareSources } from "./sources.js";
-import { tenantKeyStore } from "./tenant-keys.js";
+import { blobsIn, tenantKeyStore } from "./tenant-keys.js";
 
 /*
  * T-303 in the server: configured folders become zones, bindings and scheduled syncs; the
@@ -60,7 +69,10 @@ const source = (more: Record<string, unknown> = {}) => ({
 const configOf = (...sources: Record<string, unknown>[]) =>
   ConfigSchema.parse({ dataDir, sources });
 const prepare = (...sources: Record<string, unknown>[]) =>
-  prepareSources(db, configOf(...sources), { tenantKey: tenantKeyStore(dataDir) });
+  prepareSources(db, configOf(...sources), { tenantKey: keys() });
+/** A key store for the tests' tenant, which starts with no key file (its blob is the seed's). */
+const keys = (hasContent = false) =>
+  tenantKeyStore(dataDir, { hasContent: async () => hasContent });
 const zoneRows = () =>
   db.withTenant(t.tenantId, (tx) =>
     tx.select().from(zones).where(eq(zones.name, "Steve's documents")),
@@ -78,7 +90,7 @@ async function waitFor<T>(probe: () => Promise<T | null | undefined>, what: stri
 
 // Each test migrates a database, and one crawls folders and runs enrichment through pg-boss:
 // minutes on the Windows runner.
-describe("configured sources", { timeout: process.platform === "win32" ? 180_000 : 60_000 }, () => {
+describe("configured sources", { timeout: process.platform === "win32" ? 600_000 : 90_000 }, () => {
   it("make their zone once (audited) and bind the source to it", async () => {
     const first = await prepare(source());
     expect(first.scheduled).toHaveLength(1);
@@ -117,13 +129,21 @@ describe("configured sources", { timeout: process.platform === "win32" ? 180_000
       prepareSources(
         db,
         { dataDir, sources: [{ ...configOf(source()).sources[0], root: "relative" } as never] },
-        { tenantKey: tenantKeyStore(dataDir) },
+        { tenantKey: keys() },
       ),
     ).rejects.toThrow(/sources fs-docs: root must be an absolute path/);
   });
 
-  it("resolve their owner to an active member only", async () => {
-    const owner = (o: string) => ownerOf(db, { tenantId: t.tenantId, owner: o });
+  it("resolve their owner to an active member only, and pin that person", async () => {
+    // Each call names a source of its own: the first resolution pins it.
+    let n = 0;
+    const bind = async () => {
+      const name = `fs-${++n}`;
+      await prepare(source({ id: name, root: join(base, name), zone: "Owners" }));
+      return name;
+    };
+    const owner = async (o: string, name?: string) =>
+      ownerOf(db, { tenantId: t.tenantId, owner: o, source: name ?? (await bind()) });
     expect(await owner("steve@example.com")).toBe(`user:${steve.id}`);
     expect(await owner("STEVE@example.com")).toBe(`user:${steve.id}`);
     expect(await owner(steve.id)).toBe(`user:${steve.id}`);
@@ -137,15 +157,28 @@ describe("configured sources", { timeout: process.platform === "win32" ? 180_000
       }),
     );
     expect(await owner(guest.id)).toBeNull();
-    await db.withTenant(t.tenantId, (tx) => lockUser(tx, t.tenantId, steve.id, "system:test"));
-    expect(await owner("steve@example.com")).toBeNull();
+    // Pinned: Steve leaves, and his address goes to someone new, who never owns the source.
+    const pinned = await bind();
+    expect(await owner("steve@example.com", pinned)).toBe(`user:${steve.id}`);
+    await db.withTenant(t.tenantId, (tx) => retireUser(tx, t.tenantId, steve.id, "system:test"));
+    const newcomer = await db.withTenant(t.tenantId, (tx) =>
+      createUser(tx, t.tenantId, { email: "steve@example.com", displayName: "N", source: "local" }),
+    );
+    expect(await owner("steve@example.com", pinned)).toBeNull();
+    // And a configuration naming the newcomer for that source is refused at start.
+    await expect(
+      prepare(source({ id: pinned, root: join(base, pinned), zone: "Owners" })),
+    ).rejects.toThrow(/its owner is .* since its first run/);
+    expect(await owner(newcomer.id)).toBe(`user:${newcomer.id}`);
+    await db.withTenant(t.tenantId, (tx) => lockUser(tx, t.tenantId, newcomer.id, "system:test"));
+    expect(await owner(newcomer.id)).toBeNull();
   });
 
   it("sync on schedule into the owner's files, and extract text only where opted in", async () => {
     writeFileSync(join(root, "plan.txt"), "The garden plan: tomatoes by the fence.");
     mkdirSync(join(base, "Other"));
     writeFileSync(join(base, "Other", "list.txt"), "Groceries: eggs.");
-    const tenantKey = tenantKeyStore(dataDir);
+    const tenantKey = keys();
     const sources = await prepareSources(
       db,
       configOf(
@@ -209,17 +242,27 @@ describe("configured sources", { timeout: process.platform === "win32" ? 180_000
 });
 
 describe("tenant blob keys", () => {
-  it("are made once, kept, and never replaced by something that isn't a key", () => {
-    const one = tenantKeyStore(dataDir)(t.tenantId);
+  it("are made once, kept, and never replaced by something that isn't a key", async () => {
+    const one = await keys()(t.tenantId);
     expect(one.byteLength).toBe(32);
-    // Another process (another store) reads the same key.
-    expect(tenantKeyStore(dataDir)(t.tenantId)).toEqual(one);
+    // Another process (another store) reads the same key, content or not.
+    expect(await keys(true)(t.tenantId)).toEqual(one);
     const file = join(dataDir, "keys", `${t.tenantId}.blob-key`);
     expect(readFileSync(file, "utf8").trim()).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    // Nothing but the key is left behind (the file it was written to first).
+    expect(readdirSync(join(dataDir, "keys"))).toEqual([`${t.tenantId}.blob-key`]);
     const other = newId("tenant");
     writeFileSync(join(dataDir, "keys", `${other}.blob-key`), "garbage");
-    expect(() => tenantKeyStore(dataDir)(other)).toThrow(/is not a tenant key/);
-    expect(() => tenantKeyStore(dataDir)("ten_bad")).toThrow(TypeError);
+    await expect(keys()(other)).rejects.toThrow(/is not a tenant key/);
+    await expect(keys()("ten_bad")).rejects.toThrow(TypeError);
+  });
+
+  it("are never made anew for a tenant with content: the lost one must be restored", async () => {
+    await expect(keys(true)(t.tenantId)).rejects.toThrow(/is missing.*restore the file/);
+    expect(existsSync(join(dataDir, "keys", `${t.tenantId}.blob-key`))).toBe(false);
+    // From the database: the seeded tenant has a blob, a new one has none.
+    expect(await blobsIn(db)(t.tenantId)).toBe(true);
+    expect(await blobsIn(db)(newId("tenant"))).toBe(false);
   });
 });
 
@@ -240,7 +283,17 @@ describe("the sources config", () => {
     expect(issues(unc)).toContain("network share");
     expect(parse(source({ root: "docs" })).success).toBe(false);
     const inside = parse(source({ root: base }));
-    expect(issues(inside)).toContain("data directory can't be inside");
+    expect(issues(inside)).toContain("can't be inside one another");
+    // The other way round: a source inside the data directory (its keys, say).
+    expect(issues(parse(source({ root: join(dataDir, "keys") })))).toContain(
+      "can't be inside one another",
+    );
+    // Through a link (a junction on Windows) to the data directory.
+    const link = join(base, "via-link");
+    symlinkSync(dataDir, link, "junction");
+    expect(issues(parse(source({ root: join(link, "keys") })))).toContain(
+      "can't be inside one another",
+    );
     expect(parse(source({ schedule: "every day" })).success).toBe(false);
     expect(parse(source({ connector: "sharepoint" })).success).toBe(false);
     expect(parse(source({ rooot: root })).success).toBe(false);

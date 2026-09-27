@@ -51,22 +51,24 @@ To try it on your own machine, follow [docs/dogfood.md](../../docs/dogfood.md).
 }
 ```
 
-| Field            | What                                                                                                                                                                                    |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `id`             | the connection's name, a lower-case slug: the `source` of its items, and what `admin source …` takes                                                                                    |
-| `connector`      | `fs` (SharePoint comes with T-302)                                                                                                                                                      |
-| `root`           | an absolute path on this machine: a local disk or a mapped drive. A network share or device path (`\\server\share`, `\\?\…`) is refused, and so is a data directory inside the root     |
-| `zone`           | the zone's name: an indexed zone, made at start (audited `zone.create`) if the tenant has none of that name; a zone of that name of another kind is refused                             |
-| `owner`          | an email or a user id: the person who owns, and so reads, its files (the fs connector imports no permissions: owner-only). Until that person exists, runs wait (`unknown-owner`)        |
-| `schedule`       | standard cron, in UTC; default every 15 minutes. The fs connector's delta compares the whole folder with its last snapshot, so deletions are seen too: no separate full crawl is needed |
-| `extract`        | default false: names and metadata only. True: the server reads the files' content for text extraction, then summaries and embeddings as far as each file's exposure allows              |
-| `reconcileGuard` | `maxFraction`, `minItems`: when a reconcile is held for an admin (core/jobs)                                                                                                            |
+| Field            | What                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`             | the connection's name, a lower-case slug: the `source` of its items, and what `admin source …` takes                                                                                                                                                                                                                                                                     |
+| `connector`      | `fs` (SharePoint comes with T-302)                                                                                                                                                                                                                                                                                                                                       |
+| `root`           | an absolute path on this machine: a local disk or a mapped drive. A network share or device path (`\\server\share`, `\\?\…`) is refused, and so is a root and data directory inside one another (links and junctions resolved)                                                                                                                                           |
+| `zone`           | the zone's name: an indexed zone, made at start (audited `zone.create`) if the tenant has none of that name; a zone of that name of another kind is refused                                                                                                                                                                                                              |
+| `owner`          | an email or a user id: the person who owns, and so reads, its files (the fs connector imports no permissions: owner-only). Until that person exists, runs wait (`unknown-owner`). The person it names on the first run is pinned: an email reused later by someone else never takes the source over, and a config naming someone else for the source is refused at start |
+| `schedule`       | standard cron, in UTC; default every 15 minutes. The fs connector's delta compares the whole folder with its last snapshot, so deletions are seen too: no separate full crawl is needed                                                                                                                                                                                  |
+| `extract`        | default false: names and metadata only. True: the server reads the files' content for text extraction, then summaries and embeddings as far as each file's exposure allows. Turning it off later isn't retroactive: text, summaries and vectors already stored stay, and `open`, search, `resummarize` and `reembed` still use them; only new versions are left unread   |
+| `reconcileGuard` | `maxFraction`, `minItems`: when a reconcile is held for an admin (core/jobs)                                                                                                                                                                                                                                                                                             |
 
 At start the server checks each source's tenant, finds or makes its zone, binds the source to it
 (a source later pointed at another zone is refused: give it a new id), builds its connector (its
 state in `<dataDir>/connectors/<tenant>/<source>`) and schedules it; any failure stops the server,
 naming the source. A worker (`jobs.worker`) keeps one pg-boss schedule per source, runs each once
-at start, and drops schedules of sources no longer listed. A run that fails for good (refused
+at start, and drops schedules of sources no longer listed (all of them when none is). Every node
+sharing the database must have the same `sources`: a worker that doesn't know a source
+completes its jobs without running them. A run that fails for good (refused
 credentials, a held reconcile, another folder at the root) stops that source's runs, audited
 (`source.sync-stopped`), until an admin acts (`admin source resume`, or the reconcile and
 identity commands). `admin source status` and `GET /api/admin/sources` show how each source's
@@ -74,7 +76,9 @@ last run ended.
 
 Content is read through the source's connector, checked against the version's size and BLAKE3
 blob id with the tenant's blob key. **Tenant blob keys** live in `<dataDir>/keys/<tenant>.blob-key`
-(32 random bytes, made on first use, 0600): outside the database, so the database alone can't tell
+(32 random bytes, made on first use, 0600; written whole, then linked into place; never made for
+a tenant that has content already: a missing key there stops the server, pointing at the backup):
+outside the database, so the database alone can't tell
 two tenants hold the same file. Back them up with the database; losing one makes every blob id of
 that tenant unverifiable. Servers sharing one database must share them (a KMS-backed store is for
 later).
@@ -191,11 +195,17 @@ only a hash is stored.
 
 **One-time sign-in links** are for a server with no identity provider, for one person trying
 OpenHoard on their own machine ([docs/dogfood.md](../../docs/dogfood.md)). `auth.signInLinks: true`
-turns them on, and the config refuses it unless `host` is a loopback address (a tunnel in front
-is fine; a server listening on the network is not). An operator makes the person (`admin user
-create`) and issues a link (`admin user sign-in-link`, 15 minutes by default, at most 60); the
-link's page only shows a button, so a prefetch doesn't use it up, and the POST must come from
-this origin. A link starts one session; the same link again is refused and ends that session.
+turns them on, and the config refuses it unless both `host` and `publicUrl` are loopback
+addresses: **no tunnel or proxy in front**. Each request to `/auth/link` must also come from a
+loopback peer and carry no forwarding header (`Forwarded`, `X-Forwarded-For`,
+`X-Forwarded-Host`, `X-Real-IP`, `CF-Connecting-IP`), or it is refused (403): a tunnel or proxy
+running on this machine forwards requests from anywhere. An operator makes the person (`admin
+user create`) and issues a link (`admin user sign-in-link`, 15 minutes by default, at most 60);
+the link's page only shows a button, so a prefetch doesn't use it up, and the POST must come from
+this origin. A link starts one session; the same link again is refused and ends that session,
+unless the browser presenting it holds that very session (a double submit, answered as done).
+The operator is trusted: a link can be issued for any current person, a SCIM-provisioned one
+too, and signing in with it bypasses the identity provider and its MFA.
 No identity is linked, so signing in again takes a new link. Every use is audited
 (`auth.sign-in`, provider `sign-in-link`). `GET /auth/sign-in` sends a browser that is signed in
 already straight back to `return_to` (an MCP client's authorization, after a link was used in
@@ -660,7 +670,9 @@ node apps/server/dist/main.js admin source accept-identity --tenant ten_… --so
   what each deprovisioning step ends, and when.
 - **Local people and sign-in links.** `user create` makes a local member (no identity
   provider), audited `user.create`; `user sign-in-link` prints a one-time link for them (on a
-  server with `auth.signInLinks`), audited `sign-in-link.issue` without the token.
+  server with `auth.signInLinks`), audited `sign-in-link.issue` without the token. It works for
+  any current person, SCIM-provisioned ones included, and bypasses the identity provider (and its
+  MFA): whoever runs admin commands is trusted with every account.
 - **Packs.** `pack plan` prints what applying a pack would change (`!` marks a loosening), its
   warnings and tests, and the plan's hash on standard output; `pack apply` with that hash applies
   exactly that plan (refused when anything changed since, or a test fails), audited `pack.apply`.

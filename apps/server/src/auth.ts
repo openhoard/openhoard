@@ -20,7 +20,8 @@ import {
   type SessionCheck,
 } from "@openhoard/core-identity";
 import type { AuthzClient, AuthzPrincipal } from "@openhoard/core-policy";
-import type { Hono, MiddlewareHandler } from "hono";
+import { getConnInfo } from "@hono/node-server/conninfo";
+import type { Context, Hono, MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import * as oidc from "openid-client";
@@ -44,7 +45,10 @@ import { signInLinkPage, signInPage, signedInPage } from "./oauth/pages.js";
  *   POST /auth/link                uses it: starts a session
  *
  * - One-time sign-in links (core/identity sign-in-links.ts) are for a server without an identity
- *   provider, listening on this machine only (the config refuses them otherwise). The GET only
+ *   provider, on this machine only: the config refuses them unless host and publicUrl are
+ *   loopback, and each request must come from a loopback peer with no forwarding header (a
+ *   tunnel or proxy in front is refused). A double submit by the browser the link signed in is
+ *   answered as done, not as a replay. The GET only
  *   shows a button, so a link a browser or a scanner prefetches isn't used up; the POST must come
  *   from this origin. Every use, allowed or refused, is audited as `auth.sign-in` with provider
  *   `sign-in-link`.
@@ -254,6 +258,7 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
       bodyLimit({ maxSize: 4096, onError: (c) => c.json({ error: "body too large" }, 413) }),
     );
     app.get("/auth/link", (c) => {
+      if (!fromThisMachine(c)) return c.json({ error: "forbidden" }, 403);
       const token = c.req.query("token");
       if (parseSignInLink(token) === null) return c.json(FAILED, 400);
       c.header("cache-control", "no-store");
@@ -264,6 +269,7 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
 
     app.post("/auth/link", async (c) => {
       c.header("cache-control", "no-store");
+      if (!fromThisMachine(c)) return c.json({ error: "forbidden" }, 403);
       // A sign-in from another site (login CSRF) is refused, cookie or not.
       if (!sameOrigin(c.req.header("origin"), c.req.header("sec-fetch-site"))) {
         return c.json({ error: "forbidden" }, 403);
@@ -281,6 +287,7 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
           const done = await redeemSignInLink(tx, tenantId, token, {
             idleSeconds: auth.sessionIdleMinutes * 60,
             maxSeconds: auth.sessionMaxHours * 3600,
+            ...(previous?.tenantId === tenantId ? { currentSession: previous.sessionId } : {}),
           });
           // Audit last: its lock is the last one taken (core/audit). Only for a tenant that
           // exists: a token naming another is just unknown.
@@ -293,7 +300,9 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
                 provider: SIGN_IN_LINK_PROVIDER,
                 link: named.linkId,
                 ...(done.ok
-                  ? { session: done.session.id }
+                  ? "already" in done
+                    ? { session: done.sessionId, already: true }
+                    : { session: done.session.id }
                   : {
                       reason: done.refused,
                       ...(done.endedSession ? { endedSession: done.endedSession } : {}),
@@ -309,6 +318,12 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
           return null;
         });
       if (!result?.ok) return c.json(FAILED, 401);
+      if ("already" in result) {
+        // A double submit: this browser holds the session the link started.
+        const shown = signedInPage();
+        c.header("content-security-policy", shown.csp);
+        return c.html(shown.html);
+      }
       if (previous) {
         const by = userPrincipal(previous.principal.userId);
         await db
@@ -541,6 +556,29 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
     }
     return c.body(null, 204);
   });
+}
+
+/**
+ * Whether a request comes straight from this machine: its socket's peer is a loopback address,
+ * and it carries no forwarding header (a tunnel or proxy on this machine forwards requests from
+ * anywhere). Fails closed without a socket.
+ */
+function fromThisMachine(c: Context): boolean {
+  const forwarded = [
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-real-ip",
+    "cf-connecting-ip",
+  ];
+  if (forwarded.some((h) => c.req.header(h) !== undefined)) return false;
+  let peer: string | undefined;
+  try {
+    peer = getConnInfo(c).remote.address;
+  } catch {
+    return false;
+  }
+  return peer !== undefined && (peer === "::1" || /^(::ffff:)?127\.\d+\.\d+\.\d+$/.test(peer));
 }
 
 /** Refuses a request nobody signed in to. */

@@ -10,7 +10,7 @@ import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { createServerModels, modelsStartupWarning } from "./models.js";
 import { prepareSources, type ServerSources } from "./sources.js";
-import { tenantKeyStore } from "./tenant-keys.js";
+import { blobsIn, tenantKeyStore } from "./tenant-keys.js";
 
 // `main.js [options] admin …` runs an admin command (admin.ts) instead of the server, then exits.
 // `admin` is the first argument that isn't an option (`--data-dir x admin …` is admin too).
@@ -48,7 +48,8 @@ try {
 log.info({ database: db.kind }, "database ready");
 
 // Each tenant's blob key, kept in <dataDir>/keys (outside the database).
-const tenantKey = tenantKeyStore(config.dataDir);
+// Made only for a tenant with no content yet; a lost one stops the server (tenant-keys.ts).
+const tenantKey = tenantKeyStore(config.dataDir, { hasContent: blobsIn(db) });
 
 // The configured folders (T-303): their zones, bindings and connectors. A source that can't be
 // set up stops the server, naming it.
@@ -62,6 +63,9 @@ try {
     }),
     log: log.child({ component: "sources" }),
   });
+  // Every syncing tenant's key now, so a lost one is said at start, not in every job.
+  for (const tenantId of new Set(sources.scheduled.map((s) => s.tenantId)))
+    await tenantKey(tenantId);
 } catch (err) {
   log.fatal({ err }, "cannot set up the configured sources");
   await db.close().catch(() => {});

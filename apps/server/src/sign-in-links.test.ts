@@ -49,12 +49,27 @@ const link = async (userId = steve.id) =>
     )
   ).token;
 
-const post = (token: string, headers: Record<string, string> = { origin: PUBLIC }) =>
-  app.request("/auth/link", {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
-    body: new URLSearchParams({ token }).toString(),
-  });
+/** The node socket a request came in on: this machine's by default. */
+const peer = (remoteAddress = "127.0.0.1") => ({ incoming: { socket: { remoteAddress } } });
+
+/** A request as a browser on this machine sends it. */
+const get = (path: string, init: RequestInit = {}, from = "127.0.0.1") =>
+  app.request(path, init, peer(from));
+
+const post = (
+  token: string,
+  headers: Record<string, string> = { origin: PUBLIC },
+  from = "127.0.0.1",
+) =>
+  app.request(
+    "/auth/link",
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
+      body: new URLSearchParams({ token }).toString(),
+    },
+    peer(from),
+  );
 
 /** The session cookie a response set, as a Cookie header. */
 const cookieOf = (res: Response) => {
@@ -78,7 +93,7 @@ async function audit() {
 describe("sign-in links", () => {
   it("shows a button, signs in once, and a replay ends that session", async () => {
     const token = await link();
-    const page = await app.request(`/auth/link?token=${encodeURIComponent(token)}`);
+    const page = await get(`/auth/link?token=${encodeURIComponent(token)}`);
     expect(page.status).toBe(200);
     expect(page.headers.get("content-security-policy")).toContain("form-action 'self'");
     expect(await page.text()).toContain('action="/auth/link"');
@@ -111,28 +126,68 @@ describe("sign-in links", () => {
     expect((await post(token, { origin: "https://evil.example" })).status).toBe(403);
     expect((await post(token, {})).status).toBe(403);
     expect((await post("ohl.nope")).status).toBe(400);
-    expect((await app.request("/auth/link?token=nope")).status).toBe(400);
+    expect((await get("/auth/link?token=nope")).status).toBe(400);
     const forged = `${token.slice(0, token.lastIndexOf(".") + 1)}${"A".repeat(43)}`;
     expect((await post(forged)).status).toBe(401);
     // The genuine one still works: a refused attempt doesn't use it up.
     expect((await post(token)).status).toBe(200);
 
     app = build(false);
-    expect((await app.request(`/auth/link?token=${encodeURIComponent(token)}`)).status).toBe(404);
+    expect((await get(`/auth/link?token=${encodeURIComponent(token)}`)).status).toBe(404);
     const page = await app.request("/auth/sign-in");
     expect(await page.text()).toContain("No sign-in is configured.");
     app = build(true);
     expect(await (await app.request("/auth/sign-in")).text()).toContain("admin user sign-in-link");
   });
 
-  it("is refused by the config unless the server listens on this machine only", () => {
-    const parse = (host: string) =>
-      ConfigSchema.safeParse({ host, auth: { publicUrl: PUBLIC, signInLinks: true } });
+  it("answers a double submit by the browser it signed in as done, not as a replay", async () => {
+    const token = await link();
+    const first = await post(token);
+    const cookie = cookieOf(first);
+    expect(first.status).toBe(200);
+    const again = await post(token, { origin: PUBLIC, cookie });
+    expect(again.status).toBe(200);
+    expect(cookieOf(again)).toBe("");
+    expect((await app.request("/auth/me", { headers: { cookie } })).status).toBe(200);
+    // Anyone else presenting it is a replay: refused, and the session ends.
+    expect((await post(token)).status).toBe(401);
+    expect((await app.request("/auth/me", { headers: { cookie } })).status).toBe(401);
+  });
+
+  it("refuses a request that didn't come straight from this machine", async () => {
+    const token = await link();
+    const url = `/auth/link?token=${encodeURIComponent(token)}`;
+    expect((await get(url, {}, "192.0.2.7")).status).toBe(403);
+    expect((await app.request(url)).status).toBe(403); // no socket: fail closed
+    for (const header of [
+      "x-forwarded-for",
+      "forwarded",
+      "x-forwarded-host",
+      "x-real-ip",
+      "cf-connecting-ip",
+    ]) {
+      expect((await get(url, { headers: { [header]: "198.51.100.1" } })).status, header).toBe(403);
+      expect((await post(token, { origin: PUBLIC, [header]: "198.51.100.1" })).status).toBe(403);
+    }
+    expect((await post(token, { origin: PUBLIC }, "10.0.0.2")).status).toBe(403);
+    // IPv6 loopback and the IPv4-mapped form are this machine.
+    expect((await get(url, {}, "::1")).status).toBe(200);
+    expect((await get(url, {}, "::ffff:127.0.0.1")).status).toBe(200);
+    // Nothing was used up.
+    expect((await post(token)).status).toBe(200);
+  });
+
+  it("is refused by the config unless both host and publicUrl are this machine", () => {
+    const parse = (host: string, publicUrl = PUBLIC) =>
+      ConfigSchema.safeParse({ host, auth: { publicUrl, signInLinks: true } });
     expect(parse("127.0.0.1").success).toBe(true);
     expect(parse("::1").success).toBe(true);
+    expect(parse("127.0.0.1", "http://localhost:7420").success).toBe(true);
     const open = parse("0.0.0.0");
     expect(open.success).toBe(false);
-    expect(JSON.stringify(open.error?.issues)).toContain("listens on this machine only");
+    expect(JSON.stringify(open.error?.issues)).toContain("on this machine only");
+    // A tunnel in front: refused.
+    expect(parse("127.0.0.1", "https://words.trycloudflare.com").success).toBe(false);
   });
 });
 

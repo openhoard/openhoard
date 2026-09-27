@@ -2,7 +2,9 @@
 
 This is the shortest path, as of M1, to indexing folders on your own PC and using them from Claude
 over MCP: one person, one machine, no identity provider, no Docker. It is a trial setup: the
-server listens on `127.0.0.1` only, and you sign in with one-time links instead of Entra.
+server listens on `127.0.0.1` only, and you sign in with one-time links instead of Entra. Sign-in
+links work only when the server is reached directly on `127.0.0.1`: never through a tunnel or a
+proxy, which the server refuses for them.
 
 What you get: each folder is synced every 15 minutes; its files' text is extracted, summarized by
 Claude Haiku and made searchable; Claude finds, describes and opens them through OpenHoard's MCP
@@ -103,7 +105,15 @@ whole.
    - `models`: the `anthropic` adapter defaults to Claude Haiku (`claude-haiku-4-5`).
      `dailyTokenBudget` caps what summaries may spend per day (tokens, all files together).
    - `auth.clients` approves Claude Desktop's bridge (step 6) in advance, as `commercial`: what
-     Claude reads goes to Anthropic. On `127.0.0.1` any port matches.
+     Claude reads goes to Anthropic. **This trusts every program on this PC**: the entry names a
+     client by where its answer goes, `http://127.0.0.1/oauth/callback` on any port (loopback
+     ports aren't fixed, RFC 8252), and `mcp-remote`'s callback path can't be changed, so any
+     local program can register the same way and, once you click Allow on its consent page, read
+     your files as you. The consent page always says when a program on this computer is asking:
+     allow only when you just started Claude Desktop. Without this entry, each new client waits
+     for your approval instead (step 6).
+   - Turning `extract` off later isn't retroactive: text and summaries already stored stay, and
+     Claude still searches and opens them; only new versions go unread.
 
    The API key goes in the environment only, never in the file:
 
@@ -112,7 +122,8 @@ whole.
    # then open a new PowerShell window (and define `oh` again)
    ```
 
-4. **Get a sign-in link** (the server still stopped):
+4. **Get a sign-in link** (the server still stopped). Whoever can run admin commands can sign in as
+   anyone this way, bypassing any identity provider and its MFA: keep the data directory yours.
 
    ```powershell
    oh admin user sign-in-link --tenant $t --user steve@example.com --minutes 60
@@ -213,10 +224,13 @@ resume`; for a held deletion use `source confirm-reconcile` or `discard-reconcil
   fresh data directory.
 - **One server per data directory.** Tenant blob keys live in the data directory; several servers
   sharing a PostgreSQL database would need to share them (a KMS-backed store is for later).
-- **claude.ai (web) and the Claude Desktop connector screen** need a public https address: a
-  tunnel (`cloudflared tunnel --url http://127.0.0.1:7420`, then that URL as `auth.publicUrl`),
-  and an approval of Claude's client as above. A quick tunnel's URL changes on every run, which
-  ends every grant; fine for a test, not for daily use.
+- **claude.ai (web) and the Claude Desktop connector screen** need a public https address (a
+  tunnel such as `cloudflared tunnel --url http://127.0.0.1:7420`, then that URL as
+  `auth.publicUrl`). **Sign-in links don't work through a tunnel** (the config and the server
+  refuse them), so this needs a real identity provider: Entra with SCIM (apps/server README,
+  "Testing with a new Entra tenant"), or a generic OIDC provider matched to a SCIM user. There is
+  no other way to sign in through a tunnel yet (built-in accounts are T-108). A quick tunnel's URL
+  also changes on every run, which ends every grant.
 - **No web UI** for sign-in links, sources or approvals yet: the admin CLI and the admin API
   (T-901..T-905).
 - **Opening files in their Windows app** (`open` with mode native) waits for the local agent
