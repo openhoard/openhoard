@@ -706,6 +706,32 @@ describe("provider failures", () => {
     }
   });
 
+  it("a salvage run sends nothing, records unavailable, and keeps a summary it already has", async () => {
+    const { client, calls } = stub("ollama", "local", answer({}));
+    const steps = pipeline(createModelRouter([client]));
+    const salvage = (versionId: string) =>
+      enrichVersion(
+        db,
+        steps,
+        { tenantId: t.tenantId, versionId },
+        { signal: new AbortController().signal, requeue: async () => {}, salvage: true },
+      );
+    const f = await file("Report.txt", "A report.");
+    expect(await salvage(f.versionId)).toBe("processed");
+    expect(calls).toHaveLength(0);
+    expect(await card(f.versionId)).toMatchObject({ status: "skipped", reason: "unavailable" });
+    // resummarize() finds it again.
+    expect(await inTenant((tx) => cardSkipCounts(tx, t.tenantId))).toMatchObject({
+      unavailable: 1,
+    });
+    // A version summarized already keeps its summary through a salvage run.
+    const g = await file("Invoice.txt", "Invoice from Acme.");
+    expect(await run(steps, g.versionId)).toBe("processed");
+    expect(await salvage(g.versionId)).toBe("already-processed");
+    expect(await card(g.versionId)).toMatchObject({ status: "summarized" });
+    expect(calls).toHaveLength(1);
+  });
+
   it("the worker tells the step when no retry is left: the version is processed, not dead-lettered", async () => {
     const api = await fakeProvider(reply(503, { error: "busy" }));
     const jobs = await startJobs(db, {

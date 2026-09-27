@@ -95,6 +95,21 @@ export function summarizeStep(options: SummarizeStepOptions): EnrichStep {
   return {
     name: "summarize",
     providers: candidates,
+    // The salvage run of a dead-lettered job: `unavailable`, which resummarize() takes again.
+    async giveUp({ target, read, write }) {
+      const { tenantId, objectId, versionId } = target;
+      const done = await read((tx) => readCard(tx, tenantId, versionId));
+      if (done?.promptVersion === PROMPT_VERSION) return;
+      await write((tx) =>
+        saveCard(tx, tenantId, {
+          objectId,
+          versionId,
+          status: "skipped",
+          reason: "unavailable",
+          promptVersion: PROMPT_VERSION,
+        }),
+      );
+    },
     async run(context) {
       const { target, read, write } = context;
       const { tenantId, objectId, versionId } = target;

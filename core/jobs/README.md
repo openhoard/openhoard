@@ -3,7 +3,8 @@
 Part of the OpenHoard trusted core. See [../README.md](../README.md) and
 [docs/architecture.md](../../docs/architecture.md). Background jobs on
 [pg-boss](https://github.com/timgit/pg-boss) ([ADR-0008](../../docs/adr/0008-job-queue.md)): the
-enrichment pipeline (T-401), scheduled maintenance, and the connector sync runner (T-301).
+enrichment pipeline (T-401), scheduled maintenance, the connector sync runner (T-301) and its
+schedules (T-303).
 
 ```ts
 import { startJobs } from "@openhoard/core-jobs";
@@ -19,6 +20,7 @@ await jobs.stop(); // before db.close()
 - [`maintenance.ts`](src/maintenance.ts): pruning and the sweep, per tenant, in bounded batches.
 - [`jobs.ts`](src/jobs.ts): pg-boss, the queues, the workers and the schedule.
 - [`sync.ts`](src/sync.ts): `runSync()`, one connector over one source into the catalog.
+- [`sync-schedule.ts`](src/sync-schedule.ts): the `sync` queue, one scheduled run of one source.
 - [`connector-content.ts`](src/connector-content.ts): `connectorContentSource()`, indexed
   zones' bytes read through their connector for enrichment.
 
@@ -193,11 +195,19 @@ one call, and stores them with core/catalog `saveEmbeddings()` under `<provider 
   logged and the version is processed without vectors; a provider down or rate-limited fails the
   step so the job retries, except on its last attempt. A spent budget skips it with a warning.
 
-**Known gap: a job whose lease expires on its last attempt.** The model step's own time budget
-(8 minutes, enforced with an abort) keeps it inside the lease, so a lease expiry means the
-extract step or the host; but if one happens on a job's last attempt, the job is dead-lettered
-and the version stays unprocessed (hidden) until an operator redrives it. Recording the optional
-model step as `unavailable` from the dead-letter path is a follow-up.
+**A job that runs out of attempts is salvaged.** A job whose last attempt fails, or whose lease
+expires on its last attempt (a model step past its budget, a worker that died), goes to the dead
+letter queue, `enrich-failed`, and a worker there runs it once more as a **salvage run**
+(`enrichVersion({ salvage: true })`): the steps that send content to a model don't run (each
+records why through its `giveUp`, the summarize step's card as `unavailable`, which
+`resummarize()` takes again later), and the others run as always. So a version is never left
+hidden for want of a summary, and still gets processed only once extraction, the injection
+flag and the rule tags are on it. A salvage run that fails too (a step that isn't a model's
+keeps failing: the source can't be read, the rules can't be applied) is tried once more after 5
+minutes, then fails for good: the version stays unprocessed (hidden, fail-closed), and the
+dead letter waits in `enrich-failed` for an operator (`jobs.boss.retry()` once the cause is
+fixed). `enrich.salvage: false` turns salvage runs off (dead letters then wait, as before, for
+`jobs.boss.redrive()`).
 
 **Text extraction** (`extract-text`, [extract.ts](src/extract.ts), T-402). The step reads the
 version's bytes through the `ContentSource` (core/catalog), extracts them in a limited child
@@ -323,9 +333,9 @@ step). It runs again after `retryDelaySeconds` (default 30), doubling each time 
 `retryDelayMaxSeconds` (default 1 hour), at most `retryLimit` more times (default 5). A job that
 runs longer than `expireInSeconds` (default 25 minutes), because its worker died, is put back
 for a retry by the next supervisor pass (`superviseIntervalSeconds`, default 60). A job that runs
-out of retries goes to `enrich-failed`, the dead letter queue (in a partition of its own), which
-nothing works: an operator looks at it and redrives it (`jobs.boss.redrive()`). Its version
-stays unprocessed, so hidden from non-readers: fail-closed.
+out of retries goes to `enrich-failed`, the dead letter queue (in a partition of its own), whose
+worker salvages it (above); what a salvage run can't process stays unprocessed, so hidden from
+non-readers: fail-closed.
 
 Two known gaps. The rule tagger sees the title and media type, not the path or site: neither is
 stored yet, and a step must decide from stored facts only, or a re-run would take off tags the
@@ -444,18 +454,59 @@ this way (a managed zone's bytes, a deleted object, a source no connector serves
 with core/storage's `blobContentSource()` using `firstOf(blobs, connectors)`. Indexed zones are
 extracted only with `startJobs({ extract: { indexedZones: true } })`.
 
-**Scheduling it (T-303).** Not wired into `startJobs()` yet; the plan:
+**Scheduling it (T-303).** `startJobs({ sync: { sources, tenantKey } })` syncs each source on
+a schedule of its own ([sync-schedule.ts](src/sync-schedule.ts)):
 
-- a `sync` queue, `stately`, keyed by tenant and source (one run per source at a time, which
-  `runSync()` relies on), with a lease (`expireInSeconds`) above the `budgetMs` it passes;
-- the server's connection config names each source's connector, root or site, zone, owner and
-  schedule; a per-source cron (pg-boss `schedule`) sends the job, and `onStale` sends one early;
-- the handler builds the connector and calls `runSync()` with the job's signal, then acts on the
-  status: `partial` sends the next job now, `retry` one after `retryAfterMs`, `failed` records
-  the error for admins (audited) and stops scheduling until they fix it;
-- out-of-process connectors (the local agent's folders) push the same events through an ingest
-  API instead, authenticated as the tenant's service account with a key scoped to their zones
-  (T-111; the `ingest` action is still to add).
+- **The `sync` queue** is `stately`, keyed by tenant and source: one run per source at a time
+  (which `runSync()` relies on) and at most one waiting. Its lease (`sync.expireInSeconds`,
+  default 15 minutes) is above the time budget each run gets (`sync.budgetMs`, default 10
+  minutes; `startJobs()` refuses a lease less than a minute over it), so a run stops at a
+  checkpoint before its lease ends. The queue is created on every node, so any may send.
+- **Schedules.** Each source (`{ tenantId, source, zoneId, cron, connector, owner,
+reconcileGuard }`) gets a pg-boss schedule keyed by tenant and source, in UTC, which sends its
+  job; a worker also drops the schedules of sources no longer configured (the configuration is
+  the cluster's), and sends one run per source at start. `jobs.requestSync(tenant, source)`
+  sends one now: an admin's `run-now`, `connectorContentSource`'s `onStale` (an item changed
+  since it was recorded), the start. A job already waiting for the source is reused and brought
+  forward, never doubled. A node with `worker: false` sends, but neither works the queue nor
+  touches the schedules.
+- **One run** builds nothing: the server hands each source's connector in. The job checks the
+  source isn't stopped, asks for the owner (`owner()`: the server resolves the configured
+  person; null while nobody knows them, when the run is recorded as `retry` / `unknown-owner`
+  and the schedule tries again), and calls `runSync()` with the job's signal and the budget.
+  Then, by the report's status:
+
+  | status      | the job                                                                        |
+  | ----------- | ------------------------------------------------------------------------------ |
+  | `done`      | waits for the next schedule                                                    |
+  | `partial`   | sends the next run now (after this one; a waiting one is brought forward)      |
+  | `retry`     | sends the next run after `retryAfterMs` (at least a second; a waiting one too) |
+  | `failed`    | stops the source, audited: runs skip it until an admin acts                    |
+  | `cancelled` | nothing: the next run resumes from the last checkpoint                         |
+
+- **What admins see.** Every run records how it ended in `source_syncs` (core/db migration
+  0055): `last_run_at`, `last_status`, `last_error` (a code) and `last_counts` (numbers only).
+  `listSourceSyncs()` returns them.
+- **Stopping.** A `failed` run (credentials refused, a configuration the runner refuses, a held
+  reconcile or delta, another folder at the root) sets `stopped_at` and `stopped_error` and
+  writes `source.sync-stopped` (actor `system:sync`, the code as `reason`) to the audit log, in
+  one transaction. Runs of a stopped source return `stopped` without touching it (the schedule
+  keeps firing; each run is one read). `resumeSource()` (`openhoard admin source resume`)
+  clears the stop; so do `confirmReconcile()`, `discardReconcile()` and
+  `acceptSourceIdentity()`, which act on what failed. A run that fails again stops it again. A
+  run that fails before the source was ever bound (an unknown zone) is audited with
+  `unbound: true`, and stops nothing (there is no row to stop; the server binds each source
+  with `ensureSourceSync()` at start, so this means a configuration the runner refuses).
+- **Failures of the run itself.** `runSync()` throws only for its own failures (the database
+  unreachable, a bug): the job fails and pg-boss retries it after a minute, twice.
+- **Out-of-process connectors** (the local agent's folders) will push the same events through
+  an ingest API instead, authenticated as the tenant's service account with a key scoped to
+  their zones (T-111; the `ingest` action is still to add).
+
+The fs connector's delta walks the whole folder and compares it with its last snapshot, so it
+sees deletions too: a source needs one schedule (every 15 minutes, say), no separate full crawl.
+A crawl from the beginning happens by itself after a `resync`, and when an admin discards a
+held reconcile.
 
 ## Maintenance
 
@@ -510,8 +561,9 @@ transaction that returns ids. The work itself goes through `withTenant()`, one t
 | `steps`                    | `defaultEnrichSteps()` | the enrichment steps, in order                                      |
 | `content`                  | none                   | where versions' bytes are read; the default steps then extract text |
 | `extract`                  | managed zones only     | the extract step's settings: `indexedZones`, `limits`, `budgetMs`   |
-| `enrich`                   | see above              | concurrency (2, or 1 on PGlite), retries, expiry                    |
+| `enrich`                   | see above              | concurrency (2, or 1 on PGlite), retries, expiry, `salvage`         |
 | `maintenance`              | the defaults above     | or false                                                            |
+| `sync`                     | none                   | scheduled connector syncs: `sources`, `tenantKey`, `budgetMs`, …    |
 | `pollingIntervalSeconds`   | 2                      | how often an idle worker looks for jobs                             |
 | `superviseIntervalSeconds` | 60                     | how often expired jobs are put back                                 |
 | `poolSize`                 | 4                      | pg-boss's connections on PostgreSQL                                 |
@@ -548,4 +600,10 @@ restores, a killed crawl resumed from its checkpoint without duplicates, simulat
 retried, lost state (resync and reconcile), a reconcile finished after a crash, zone and
 connector bindings, throttles (waited out, or ending the run), refused credentials, a
 connector without delta, bad events and tokens, the time budget, and indexed zones read through
-the connector: exact bytes, changed ones refused, and text extracted by the pipeline.
+the connector: exact bytes, changed ones refused, and text extracted by the pipeline. The
+schedule tests (sync-schedule.test.ts) run the `sync` queue over a folder (its schedule, the run
+at start, enrichment after it, run-now reusing a waiting job, a node that isn't a worker), stop a
+failing source through the queue (audited, skipped, resumed), and one run's decisions: the next
+run now after a partial one and later after a throttle, an owner not known yet, a failure before
+the source was bound, and admin actions that lift a stop. A dead-lettered job whose lease ran out
+on its last attempt is salvaged (jobs.test.ts), and one whose step keeps failing stays hidden.

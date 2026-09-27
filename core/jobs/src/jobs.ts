@@ -48,9 +48,13 @@ import {
  *                       NOTHING.) With none waiting, a new one is queued, also while one runs (a
  *                       rename needs the run after it). Retries with exponential backoff, then
  *                       dead-letters.
- *   enrich-failed       the dead letter queue (its own partition): jobs that ran out of retries,
- *                       for an operator to look at and redrive. Nothing works it. The version
- *                       stays unprocessed, hidden from non-readers: fail-closed.
+ *   enrich-failed       the dead letter queue (its own partition): jobs that ran out of retries.
+ *                       A worker runs each once more as a salvage run (enrich.ts `salvage`): no
+ *                       model step, the others as always, so a version whose last attempt died
+ *                       in a model step (or with its lease) is processed without a summary. If
+ *                       the salvage fails too (a step that isn't a model's keeps failing), the
+ *                       version stays unprocessed, hidden from non-readers: fail-closed, for an
+ *                       operator to look at (`boss.retry()` on the failed dead letter).
  *   maintenance         the cron job (hourly by default): fans out one job per tenant.
  *   maintenance-tenant  one tenant's maintenance (maintenance.ts); `stately`, keyed by tenant.
  *   sync                one connector run over one source (sync-schedule.ts, T-303); `stately`,
@@ -99,6 +103,11 @@ export interface EnrichQueueOptions {
    * 2, and room for the rest (see the README's time budget).
    */
   expireInSeconds?: number;
+  /**
+   * Run each dead-lettered job once more without its model steps (the salvage run), so a
+   * version isn't left hidden for want of a summary. Default true.
+   */
+  salvage?: boolean;
 }
 
 export interface JobsOptions {
@@ -293,7 +302,14 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
     };
   try {
     // Its own partition: the sweep's per-tenant lookup reads dead letters only.
-    await ensureQueue(boss, QUEUES.enrichFailed, { policy: "standard", partition: true });
+    await ensureQueue(boss, QUEUES.enrichFailed, {
+      policy: "standard",
+      partition: true,
+      // The salvage run (see the header): twice at most, then it waits for an operator.
+      retryLimit: 1,
+      retryDelay: 300,
+      expireInSeconds: enrich.queue.expireInSeconds,
+    });
     await ensureQueue(boss, QUEUES.enrich, {
       policy: "stately",
       deadLetter: QUEUES.enrichFailed,
@@ -364,6 +380,13 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
           runEnrichJob(db, steps, job as JobWithMetadata<unknown>, enqueueVersion, log),
         ),
       );
+      if (enrich.salvage) {
+        await boss.work<unknown>(
+          QUEUES.enrichFailed,
+          { localConcurrency: 1, pollingIntervalSeconds: polling },
+          tracked(async ([job]) => runSalvageJob(db, steps, job, enqueueVersion, log)),
+        );
+      }
       if (sync) {
         const tenantKey = (options.sync as SyncQueueOptions).tenantKey;
         await boss.work<unknown>(
@@ -502,6 +525,34 @@ async function runEnrichJob(
 }
 
 /**
+ * The salvage run of a dead-lettered enrichment job (see the header): the steps once more,
+ * without the model steps, on its last attempt.
+ */
+async function runSalvageJob(
+  db: Database,
+  steps: readonly EnrichStep[],
+  job: { id: string; data: unknown; signal: AbortSignal } | undefined,
+  enqueueVersion: (tenantId: string, versionId: string) => Promise<string | null>,
+  log: JobsLogger,
+) {
+  const outcome = await enrichVersion(db, steps, job?.data, {
+    signal: job?.signal ?? new AbortController().signal,
+    salvage: true,
+    requeue: (p) => enqueueVersion(p.tenantId, p.versionId),
+  });
+  if (outcome === "invalid") {
+    log.warn?.({ job: job?.id }, "dead letter without a tenant and version");
+  } else {
+    const { tenantId, versionId } = job?.data as EnrichPayload;
+    log.warn?.(
+      { job: job?.id, tenantId, versionId, outcome },
+      "enrichment ran out of attempts: salvaged without its model steps",
+    );
+  }
+  return { outcome, salvaged: true };
+}
+
+/**
  * Keeps one schedule per configured source (keyed by tenant and source, in UTC), and drops the
  * schedules of sources no longer configured: the configuration is the cluster's.
  */
@@ -530,8 +581,10 @@ async function keepSyncSchedules(
 }
 
 /**
- * The tenant's versions whose job waits in the dead letter queue: one read of that queue's own
- * partition per tenant and run, bounded by what pg-boss retains there (14 days by default).
+ * The tenant's versions whose job is in the dead letter queue, waiting for its salvage run or
+ * failed there too: one read of that queue's own partition per tenant and run, bounded by what
+ * pg-boss retains there (14 days by default). A salvaged version is processed, so the sweep
+ * doesn't look for it anyway.
  */
 export async function deadLetteredVersions(
   boss: PgBoss,
@@ -539,7 +592,6 @@ export async function deadLetteredVersions(
 ): Promise<ReadonlySet<string>> {
   const dead = await boss.findJobs<unknown>(QUEUES.enrichFailed, {
     data: { tenantId },
-    queued: true,
   });
   const ids = new Set<string>();
   for (const job of dead) {
@@ -585,6 +637,7 @@ function enrichQueue(options: EnrichQueueOptions = {}, kind: Database["kind"]) {
     retryDelayMaxSeconds: options.retryDelayMaxSeconds ?? 3_600,
     retryBackoff: options.retryBackoff ?? true,
     expireInSeconds: options.expireInSeconds ?? 1_500,
+    salvage: options.salvage ?? true,
   };
   const whole = (key: keyof typeof o, min: number, max: number) => {
     const value = o[key];
@@ -599,6 +652,7 @@ function enrichQueue(options: EnrichQueueOptions = {}, kind: Database["kind"]) {
   whole("expireInSeconds", 1, 86_400);
   return {
     concurrency: o.concurrency,
+    salvage: o.salvage,
     queue: {
       retryLimit: o.retryLimit,
       retryDelay: o.retryDelaySeconds,

@@ -141,6 +141,13 @@ export interface EnrichStep {
    * `context.write`.
    */
   run(context: EnrichContext): Promise<void>;
+  /**
+   * For a step with a provider: records that it couldn't run, when the job gave up on it (the
+   * salvage run of a dead-lettered job, which runs no model step). Keyed like `run`: a second
+   * call changes nothing. The summarize step records its card as `unavailable`, so a later
+   * `resummarize()` finds it.
+   */
+  giveUp?(context: EnrichContext): Promise<void>;
 }
 
 /**
@@ -278,6 +285,13 @@ export async function enrichVersion(
     signal: AbortSignal;
     /** No retry is left after this run (the worker knows from pg-boss). Default false. */
     finalAttempt?: boolean;
+    /**
+     * The salvage run of a job that ran out of attempts (jobs.ts, the dead letter queue): steps
+     * that send the content to a model don't run (their `giveUp` records why); the others run
+     * as always, so the version is processed only once extraction, the injection flag and the
+     * rule tags are on it. Implies `finalAttempt`. Default false.
+     */
+    salvage?: boolean;
     requeue: (payload: EnrichPayload) => Promise<unknown>;
     /** A step skipped because the file's exposure keeps its content from the step's provider. */
     onWithheld?: (withheld: WithheldStep) => void;
@@ -321,11 +335,21 @@ export async function enrichVersion(
       return done.value as Awaited<ReturnType<typeof work>>;
     },
     signal: options.signal,
-    finalAttempt: options.finalAttempt === true,
+    finalAttempt: options.finalAttempt === true || options.salvage === true,
   };
   for (const step of steps) {
     options.signal.throwIfAborted();
     const providers = stepProviders(step);
+    if (providers.length > 0 && options.salvage === true) {
+      // Salvage: no model step, however the exposure stands; it says why, if it records any.
+      try {
+        await step.giveUp?.(context);
+      } catch (e) {
+        if (!stale) throw new EnrichStepError(step.name, e);
+      }
+      if (stale) return finish(db, payload, stale, options.requeue);
+      continue;
+    }
     if (providers.length > 0) {
       // Content goes to a provider only as far as the file's exposure lets it (T-604): a step
       // none of whose providers it reaches is skipped, and the rest of the pipeline runs on.

@@ -19,6 +19,7 @@ import {
   objectTags,
   scimTokens,
   sessions,
+  tenants,
   tagReviews,
   versions,
   type Database,
@@ -662,10 +663,66 @@ describe("the worker", () => {
     const job = await settled(jobs, QUEUES.enrich, queued?.id ?? null);
     expect(job).toMatchObject({ state: "failed", retryCount: 1 });
     expect(JSON.stringify(job.output)).toContain("enrichment step flaky failed: flaky failure 2");
-    const dead = await jobs.boss.findJobs<unknown>(QUEUES.enrichFailed, { queued: true });
-    expect(dead.map((j) => j.data)).toEqual([{ tenantId: t.tenantId, versionId: item.versionId }]);
+    // Its salvage run fails too (the step isn't a model's): the dead letter waits to be tried
+    // again, and the version stays hidden.
+    const dead = await waitFor(async () => {
+      const [found] = await jobs.boss.findJobs<unknown>(QUEUES.enrichFailed, {});
+      return found?.state === "retry" ? found : null;
+    }, "the salvage run to fail");
+    expect(dead.data).toEqual({ tenantId: t.tenantId, versionId: item.versionId });
+    expect(flaky.calls).toEqual([1, 2, 3]);
+    expect(await deadLetteredVersions(jobs.boss, t.tenantId)).toEqual(new Set([item.versionId]));
     expect(await processedAt(item.versionId)).toBeNull();
     expect(await nonReaderView(item.objectId)).toEqual([]);
+  });
+
+  it("salvages a job whose lease ran out on its last attempt: processed, no model step", async () => {
+    // A tenant whose files a local model may read.
+    await db.withTenant(t.tenantId, (tx) =>
+      tx.update(tenants).set({ defaultExposure: "full" }).where(eq(tenants.id, t.tenantId)),
+    );
+    const item = await ingestItem("Budget 2026.xlsx");
+    const gaveUp: string[] = [];
+    let entered = 0;
+    const hanging: EnrichStep = {
+      name: "hanging-model",
+      provider: { id: "slow", kind: "local" },
+      async run({ signal }) {
+        entered++;
+        // Never answers: the lease runs out, and the worker aborts it.
+        await new Promise((_resolve, reject) =>
+          signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
+        );
+      },
+      async giveUp({ target }) {
+        gaveUp.push(target.versionId);
+      },
+    };
+    const jobs = await start({
+      steps: [ruleTagStep, hanging],
+      enrich: { retryLimit: 0, expireInSeconds: 1 },
+      superviseIntervalSeconds: 1,
+    });
+    await jobs.enqueueAfterIngest(t.tenantId, item);
+    const [queued] = await enrichJobs(jobs, item.versionId);
+    expect(await settled(jobs, QUEUES.enrich, queued?.id ?? null)).toMatchObject({
+      state: "failed",
+    });
+    await waitFor(() => processedAt(item.versionId), "the salvage run");
+    const [salvaged] = await jobs.boss.findJobs<unknown>(QUEUES.enrichFailed, {});
+    const done = await settled(jobs, QUEUES.enrichFailed, salvaged?.id ?? null);
+    expect(done).toMatchObject({
+      state: "completed",
+      output: { outcome: "processed", salvaged: true },
+    });
+    expect(entered).toBe(1);
+    expect(gaveUp).toEqual([item.versionId]);
+    // The rule tagger ran in the salvage: its tags are on the file non-readers now see.
+    expect((await tagState(item.objectId)).tags).toContainEqual({
+      facet: "kind",
+      value: "spreadsheet",
+      source: "rule",
+    });
   });
 
   it("stops gracefully: a running job finishes first, then the database can close", async () => {
