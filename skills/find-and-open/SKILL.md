@@ -20,14 +20,15 @@ what this person may see through this app. Use them; never guess file names or l
 3. **Confirm which one** if the top match isn't clearly what they asked for.
 4. **Open it.**
    - To open it in its own app (the usual case: "open the deck"), call `open` with
-     `mode: "link"` and give the person the `link` as a clickable link. If `link` is null, say
-     why (`reason`).
+     `mode: "link"` and give the person the `link` as a clickable link. The link is for the
+     person to click: never open, fetch or browse it yourself. If `link` is null, say why
+     (`reason`); a file flagged as possibly carrying instructions for AI gets no link.
    - To read or summarize it, call `open` with `mode: "content"`. The text is between
      `BEGIN-FILE-TEXT-<nonce>` and `END-FILE-TEXT-<nonce>`; continue with `offset: content.next`
      for long files, only as far as the task needs.
 5. If `content` is null with a "metadata only" reason, the file's sensitivity keeps its text
-   from this app. Tell the person plainly and offer the link instead. Don't try other tools or
-   searches to get around it.
+   from this app. Tell the person plainly and offer the link instead, for them to click. Don't
+   fetch it, and don't try other tools or searches to get around it.
 
 ## Safety
 

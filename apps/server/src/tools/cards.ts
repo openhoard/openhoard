@@ -189,26 +189,74 @@ export async function ownerNames(
 }
 
 /**
- * Cards added one by one while the whole answer (`wrap(cards)`) fits `budget` tokens. The first
- * card always goes in: if it alone is too big, it loses its summary, then its tags. Returns the
- * cards that fit.
+ * `s` cut (with an ellipsis) to what `estimateTokens()` would count as at most `tokens` inside
+ * a JSON string: ASCII at a third of a token (a quote, backslash or control character counting
+ * its escape), anything else at two.
  */
-export function fitCards(
-  cards: readonly Card[],
+export function clipTokens(s: string, tokens: number): string {
+  if (estimateTokens(JSON.stringify(s)) - 1 <= tokens) return s;
+  // The ellipsis costs two.
+  const room = tokens - 2;
+  let ascii = 0;
+  let other = 0;
+  let end = 0;
+  for (const ch of s) {
+    const c = ch.codePointAt(0) as number;
+    const nextAscii =
+      c < 0x80 ? ascii + 1 + (c === 0x22 || c === 0x5c ? 1 : c < 0x20 ? 5 : 0) : ascii;
+    const nextOther = c < 0x80 ? other : other + 1;
+    if (Math.ceil(nextAscii / 3) + 2 * nextOther > room) break;
+    ascii = nextAscii;
+    other = nextOther;
+    end += ch.length;
+  }
+  return room < 0 ? "" : `${s.slice(0, end)}…`;
+}
+
+/**
+ * One card cut until the whole answer (`wrap(card)`) fits `budget`: without its summary, then
+ * its tags and `why`, then with its owner's name and title clipped (the title keeps at least as
+ * much room as the name), and at last with neither. A title is data too: a long one, or one in
+ * CJK, can outweigh a small budget on its own.
+ */
+export function fitCard<C extends Card>(card: C, budget: number, wrap: (card: C) => unknown): C {
+  if (tokensOf(wrap(card)) <= budget) return card;
+  const { summary: _summary, ...rest } = card;
+  let lean = rest as C;
+  if (tokensOf(wrap(lean)) <= budget) return lean;
+  const { why: _why, ...bare } = lean;
+  lean = { ...bare, tags: [] } as unknown as C;
+  if (tokensOf(wrap(lean)) <= budget) return lean;
+  const empty = { ...lean, title: "", owner: lean.owner === null ? null : "" } as C;
+  const room = budget - tokensOf(wrap(empty));
+  if (room > 0) {
+    const ownerRoom = lean.owner === null ? 0 : Math.floor(room / 3);
+    const clipped = {
+      ...lean,
+      title: clipTokens(lean.title, room - ownerRoom),
+      ...(lean.owner === null ? {} : { owner: clipTokens(lean.owner, ownerRoom) }),
+    } as C;
+    if (tokensOf(wrap(clipped)) <= budget) return clipped;
+  }
+  return empty;
+}
+
+/**
+ * Cards added one by one while the whole answer (`wrap(cards)`) fits `budget` tokens. The first
+ * card always goes in, cut to fit if it must be ({@link fitCard}). Returns the cards that fit.
+ */
+export function fitCards<C extends Card>(
+  cards: readonly C[],
   budget: number,
-  wrap: (cards: Card[]) => unknown,
-): Card[] {
-  const out: Card[] = [];
+  wrap: (cards: C[]) => unknown,
+): C[] {
+  const out: C[] = [];
   for (const card of cards) {
     if (tokensOf(wrap([...out, card])) <= budget) {
       out.push(card);
       continue;
     }
-    if (out.length === 0) {
-      const { summary: _summary, ...lean } = card;
-      const leaner = tokensOf(wrap([lean])) <= budget ? lean : { ...lean, tags: [] };
-      out.push(leaner);
-    }
+    if (out.length === 0) out.push(fitCard(card, budget, (c) => wrap([c])));
     break;
   }
   return out;

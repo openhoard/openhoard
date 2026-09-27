@@ -9,7 +9,7 @@ import { isId } from "@openhoard/core-db";
 import { findUserByEmail, getUser } from "@openhoard/core-identity";
 import { mayAdminister } from "@openhoard/core-policy";
 import { z } from "zod";
-import { clip, DEFAULT_TOKENS, maxTokensArg, TITLE_MAX, tokensOf } from "./cards.js";
+import { clip, clipTokens, DEFAULT_TOKENS, maxTokensArg, TITLE_MAX, tokensOf } from "./cards.js";
 import { answer, readRequest, refuse, type McpTool } from "./context.js";
 
 /*
@@ -22,6 +22,12 @@ import { answer, readRequest, refuse, type McpTool } from "./context.js";
  * own app, T-106). Explanations name groups, people, grants and the real title, which a mere
  * reader must not learn. Anyone else gets a refusal; a file they may not know about answers as
  * an unknown id does.
+ *
+ * A named `person` is explained only when they have a path to the file: they own it, or a grant
+ * covers it (theirs, or a group's they belong to). Anyone else, and an address nobody here has,
+ * get the same neutral "no grant or ownership" answer, so the tool can't be used to find out
+ * who has an account. Denials say only "blocked by policy": whether someone is locked, retired
+ * or a guest, and which pack rule stops them, is for admins, in OpenHoard's app.
  */
 
 export const ExplainInput = {
@@ -70,6 +76,10 @@ export const ExplainOutput = {
 
 type AccessRow = z.infer<typeof Access>;
 
+/** For a person with no grant or ownership, and for an address nobody here has, alike. */
+const NO_PATH =
+  "No grant or ownership gives them access to this file (a pack rule still might; admins can check in OpenHoard).";
+
 export const explain: McpTool = {
   name: "explain",
   title: "Who can see this",
@@ -101,16 +111,27 @@ export const explain: McpTool = {
           const who = isId("user", a.person)
             ? await getUser(tx, tenantId, a.person)
             : await findUserByEmail(tx, tenantId, a.person);
-          if (who) {
-            const e = await explainAccess(tx, tenantId, authz, {
-              userId: who.id,
-              objectId: view.id,
-            });
+          const e = who
+            ? await explainAccess(tx, tenantId, authz, { userId: who.id, objectId: view.id })
+            : null;
+          // Only someone with a path to the file (it's theirs, or a grant covers it, theirs or a
+          // group's) is explained. Anyone else, and anyone who doesn't exist, gets the same
+          // neutral answer: the owner can't use this to learn who has an account.
+          if (who && e && (e.owner || e.coveringGrants.length > 0)) {
             person = {
               name: who.displayName,
               canRead: e.allowed,
-              sees: e.view,
-              explanation: e.summary,
+              sees: e.allowed ? e.view : "none",
+              // Their account's state (locked, retired, a guest) and a pack's rule names are
+              // theirs and the admins' to know: a denial is just "blocked by policy".
+              explanation: e.allowed ? e.summary : "Blocked by policy.",
+            };
+          } else {
+            person = {
+              name: a.person,
+              canRead: false,
+              sees: "unknown",
+              explanation: NO_PATH,
             };
           }
         }
@@ -129,16 +150,7 @@ export const explain: McpTool = {
           access: list.grants.map(row),
           pendingTagAccess: list.unreviewedTagGrants.map(row),
           omitted: 0,
-          ...(a.person !== undefined
-            ? {
-                person: person ?? {
-                  name: a.person,
-                  canRead: false,
-                  sees: "none",
-                  explanation: "No such person in this organization.",
-                },
-              }
-            : {}),
+          ...(person !== null ? { person } : {}),
           note: "Grants and the file's own levels; pack rules can add or remove access, and a locked account reads nothing. Name a person for their exact decision.",
         };
       },
@@ -158,6 +170,14 @@ export const explain: McpTool = {
       if (out.pendingTagAccess.length > 0) out.pendingTagAccess.pop();
       else out.access.pop();
       out.omitted++;
+    }
+    // Still over (a long title, or a long explanation that repeats it): clip them.
+    if (tokensOf(out) > budget && out.person) {
+      out.person.explanation = clipTokens(out.person.explanation, 60);
+    }
+    if (tokensOf(out) > budget) {
+      const room = budget - tokensOf({ ...out, file: { ...out.file, title: "" } });
+      out.file.title = clipTokens(out.file.title, Math.max(0, room));
     }
     ctx.trail.note({ outcome: "ok", object: out.file.id, results: out.access.length });
     return answer(out);

@@ -6,6 +6,7 @@ export { find, FindInput, FindOutput } from "./find.js";
 export { open, OpenInput, OpenOutput } from "./open.js";
 export { recent, RecentInput, RecentOutput } from "./recent.js";
 export {
+  DEFAULT_PERSON_LIMITS,
   DEFAULT_PROPOSAL_LIMITS,
   ProposalLimiter,
   tag,

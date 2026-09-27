@@ -1,5 +1,12 @@
-import { activityEvents, addGrant, facetValues, tagReviews, objectTags } from "@openhoard/core-db";
-import { createGroup, addMember } from "@openhoard/core-identity";
+import {
+  activityEvents,
+  addGrant,
+  facetValues,
+  revokeGrant,
+  tagReviews,
+  objectTags,
+} from "@openhoard/core-db";
+import { addMember, createGroup, createUser, lockUser } from "@openhoard/core-identity";
 import { writeActivity } from "@openhoard/core-catalog";
 import { and, eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,7 +16,7 @@ import { estimateTokens, UNTRUSTED_NOTE } from "./cards.js";
 import { DescribeOutput } from "./describe.js";
 import { ExplainOutput } from "./explain.js";
 import { FindOutput } from "./find.js";
-import { OpenOutput } from "./open.js";
+import { OpenOutput, textPart } from "./open.js";
 import { RecentOutput } from "./recent.js";
 import { ProposalLimiter, TagOutput, tagTool } from "./tag.js";
 import { startOfDay } from "./time.js";
@@ -733,5 +740,213 @@ describe("ProposalLimiter", () => {
     for (let i = 0; i < 10_001; i++) limiter.take(`k${i}`);
     // "a" was the oldest key: forgotten, so it may go again at once.
     expect(limiter.take("a")).toBe(true);
+  });
+});
+
+describe("review fixes: links, budgets, rate limits, explain, recent", () => {
+  it("gives no link for a flagged file, and every other link with a note not to fetch it", async () => {
+    const flagged = await h.addFile({
+      title: "Invoice.pdf",
+      mime: MIME.pdf,
+      tags: ["risk:injection"],
+      url: `${SHAREPOINT}?flagged`,
+    });
+    const sensitive = await h.addFile({
+      title: "Merger.docx",
+      tags: ["sensitivity:confidential"],
+      url: `${SHAREPOINT}?sensitive`,
+    });
+    const plain = await h.addFile({ title: "Plain.docx", url: `${SHAREPOINT}?plain` });
+    const token = await h.token();
+    const none = shaped(
+      "open",
+      (await h.call(token, "open", { id: flagged.objectId, mode: "link" })).data,
+    );
+    expect(none).toMatchObject({ link: null, file: { metadataOnly: true } });
+    expect(none.reason).toMatch(/flagged/);
+    expect(JSON.stringify(none)).not.toMatch(/flagged"|\?flagged/);
+    for (const [id, url] of [
+      [sensitive.objectId, `${SHAREPOINT}?sensitive`],
+      [plain.objectId, `${SHAREPOINT}?plain`],
+    ] as const) {
+      const got = shaped("open", (await h.call(token, "open", { id, mode: "link" })).data);
+      expect(got.link).toBe(url);
+      expect(got.note).toMatch(/for the person to click.*Do not open or fetch it yourself/);
+    }
+    expect(TOOLS.find((t) => t.name === "open")?.description).toMatch(/never open or fetch it/);
+  });
+
+  it("keeps a card with a long CJK title and owner name within a small budget", async () => {
+    const owner = await h.inTenant((tx) =>
+      createUser(tx, h.tenantId, {
+        email: "long@example.com",
+        displayName: "名".repeat(150),
+        source: "local",
+      }),
+    );
+    const title = `forecast ${"预测数据报告".repeat(40)}.xlsx`;
+    const { objectId } = await h.addFile({
+      title,
+      mime: MIME.xlsx,
+      owner,
+      tags: ["client:acme", "project:atlas"],
+      summary: "摘要".repeat(100),
+      text: "数据".repeat(3000),
+    });
+    await h.inTenant((tx) =>
+      addGrant(tx, h.tenantId, {
+        principal: `user:${h.ana.id}`,
+        role: "read",
+        target: { objectId },
+        grantedBy: "user:admin",
+      }),
+    );
+    const token = await h.token();
+    const found = await h.call(token, "find", { query: "forecast", maxTokens: 500 });
+    expect(estimateTokens(found.text)).toBeLessThanOrEqual(500);
+    const card = shaped("find", found.data).top;
+    expect(card?.id).toBe(objectId);
+    expect(card?.title.endsWith("…")).toBe(true);
+    const described = await h.call(token, "describe", { id: objectId, maxTokens: 500 });
+    expect(estimateTokens(described.text)).toBeLessThanOrEqual(500);
+    shaped("describe", described.data);
+    const recentOne = await h.call(token, "recent", { period: "today", maxTokens: 500 });
+    expect(estimateTokens(recentOne.text)).toBeLessThanOrEqual(500);
+    for (const mode of ["link", "content"] as const) {
+      const got = await h.call(token, "open", { id: objectId, mode, maxTokens: 500 });
+      expect(estimateTokens(got.text), mode).toBeLessThanOrEqual(500);
+      shaped("open", got.data);
+    }
+  });
+
+  it("pages nothing past the budget: no room means an empty part and the same offset", () => {
+    const empty = textPart("abc", 1, "nonce", 0);
+    expect(empty).toMatchObject({ offset: 1, end: 1, next: 1, length: 3 });
+    expect(empty.text).toBe("BEGIN-FILE-TEXT-nonce\n\nEND-FILE-TEXT-nonce");
+    expect(textPart("abc", 0, "nonce", 100)).toMatchObject({ end: 3, next: null });
+  });
+
+  it("caps proposals per person across clients too", async () => {
+    const limited = tagTool(
+      new ProposalLimiter({ max: 5, windowMs: 60_000 }),
+      new ProposalLimiter({ max: 2, windowMs: 60_000 }),
+    );
+    const h2 = await openHarness({ tools: [limited] });
+    try {
+      await h2.addFile({
+        title: "Vocab.docx",
+        tags: ["client:acme", "client:globex", "client:initech"],
+      });
+      const doc = await h2.addFile({ title: "Doc.docx" });
+      const one = await h2.token({ scopes: ["files:read", "files:tag"] });
+      const two = await h2.token({ scopes: ["files:read", "files:tag"], trust: "local" });
+      expect(
+        (await h2.call(one, "tag", { id: doc.objectId, tag: "client:acme" })).data.status,
+      ).toBe("proposed");
+      expect(
+        (await h2.call(two, "tag", { id: doc.objectId, tag: "client:globex" })).data.status,
+      ).toBe("proposed");
+      expect((await h2.call(two, "tag", { id: doc.objectId, tag: "client:initech" })).text).toMatch(
+        /Too many/,
+      );
+      expect((await h2.call(one, "tag", { id: doc.objectId, tag: "client:initech" })).text).toMatch(
+        /Too many/,
+      );
+    } finally {
+      await h2.close();
+    }
+  });
+
+  it("explains only people with a path to the file, and a denial only as policy", async () => {
+    const doc = await h.addFile({ title: "Plan.docx" });
+    const cy = await h.inTenant((tx) =>
+      createUser(tx, h.tenantId, {
+        email: "cy@example.com",
+        displayName: "Cy Diaz",
+        source: "local",
+      }),
+    );
+    await h.inTenant(async (tx) => {
+      await addGrant(tx, h.tenantId, {
+        principal: `user:${h.bo.id}`,
+        role: "read",
+        target: { objectId: doc.objectId },
+        grantedBy: `user:${h.ana.id}`,
+      });
+      await lockUser(tx, h.tenantId, h.bo.id, "user:admin");
+    });
+    const token = await h.token();
+    const ask = async (person: string) =>
+      shaped("explain", (await h.call(token, "explain", { id: doc.objectId, person })).data).person;
+    // Someone without a grant, and an address nobody has: the same neutral answer.
+    const noGrant = await ask("cy@example.com");
+    const nobody = await ask("nobody@example.com");
+    expect({ ...noGrant, name: "x" }).toEqual({ ...nobody, name: "x" });
+    expect(noGrant).toMatchObject({ name: "cy@example.com", canRead: false, sees: "unknown" });
+    expect(await ask(cy.id)).toMatchObject({ name: cy.id, canRead: false, sees: "unknown" });
+    // Bo holds a grant but is locked: blocked by policy, nothing about his account.
+    const bo = await ask("bo@example.com");
+    expect(bo).toEqual({
+      name: "Bo Chen",
+      canRead: false,
+      sees: "none",
+      explanation: "Blocked by policy.",
+    });
+    // The owner is explained as the owner.
+    expect(await ask("ana@example.com")).toMatchObject({ name: "Ana Lima", canRead: true });
+  });
+
+  it("shows a file seen earlier only as the gate shows it now: a title card, or nothing", async () => {
+    await h.inTenant(async (tx) => {
+      await tx.insert(facetValues).values({
+        tenantId: h.tenantId,
+        facet: "sensitivity",
+        value: "secret",
+        label: "Secret",
+        approved: true,
+        visibility: "hidden",
+      });
+    });
+    const shared = await h.addFile({ title: "Bo shared.csv", mime: MIME.csv, owner: h.bo });
+    const hidden = await h.addFile({
+      title: "Bo hidden.csv",
+      mime: MIME.csv,
+      owner: h.bo,
+      tags: ["sensitivity:secret"],
+    });
+    const grants = await h.inTenant(async (tx) => [
+      await addGrant(tx, h.tenantId, {
+        principal: `user:${h.ana.id}`,
+        role: "read",
+        target: { objectId: shared.objectId },
+        grantedBy: `user:${h.bo.id}`,
+      }),
+      await addGrant(tx, h.tenantId, {
+        principal: `user:${h.ana.id}`,
+        role: "read",
+        target: { objectId: hidden.objectId },
+        grantedBy: `user:${h.bo.id}`,
+      }),
+    ]);
+    const token = await h.token();
+    for (const f of [shared, hidden]) await h.call(token, "describe", { id: f.objectId });
+    const before = shaped("recent", (await h.call(token, "recent", { period: "today" })).data);
+    expect(before.files.map((f) => [f.title, f.access]).sort()).toEqual([
+      ["Bo hidden.csv", "read"],
+      ["Bo shared.csv", "read"],
+    ]);
+    await h.inTenant(async (tx) => {
+      for (const g of grants) await revokeGrant(tx, h.tenantId, g, `user:${h.bo.id}`);
+    });
+    const after = shaped("recent", (await h.call(token, "recent", { period: "today" })).data);
+    expect(after.files).toHaveLength(1);
+    expect(after.files[0]).toMatchObject({
+      id: shared.objectId,
+      title: "Bo shared.csv",
+      access: "title-only",
+      owner: null,
+      modified: null,
+      lastAction: "view",
+    });
   });
 });

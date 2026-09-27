@@ -24,6 +24,11 @@ import { MIME, openHarness, type Harness, type ToolAnswer } from "./tools.fixtur
  * AI client: its content never reaches the agent. A missed one does, as data between markers,
  * and the agent obeys it anyway: the tools must then hold on their own (scopes, proposals only,
  * the gate).
+ *
+ * Scope: this covers OpenHoard's own state (tags, vocabulary, grants, review items, opens), not
+ * agents with other tools. An agent that can browse, send email or run commands can still act
+ * on text it read elsewhere; containing that is the client's job (links are for the person to
+ * click, and flagged files get none).
  */
 
 // Many calls through the real endpoint per test: the Windows runner, under coverage, needs room.

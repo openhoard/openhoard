@@ -28,8 +28,9 @@ import { actorOf, answer, readRequest, refuse, type McpTool } from "./context.js
  * - Every proposal lands in the review inbox as a model's item with reason `agent`
  *   (proposeTag's `review: "agent"`), applied by `model:agent/<client id>`, even where a model's
  *   tag would apply straight away. A person approves it in OpenHoard's own app.
- * - Rate-limited per person and client (per server process), so a looping or manipulated agent
- *   can't bury the inbox.
+ * - Rate-limited, so a looping or manipulated agent can't bury the inbox: per person and client
+ *   (30 an hour), and per person across all their clients (60 an hour). The counts live in the
+ *   server process: with several processes behind a balancer, each keeps its own.
  * - Written in one transaction with its audit record (`tag.propose`), after the grant is
  *   checked live again (T-104).
  *
@@ -46,6 +47,8 @@ export interface ProposalLimits {
   windowMs: number;
 }
 export const DEFAULT_PROPOSAL_LIMITS: ProposalLimits = { max: 30, windowMs: 60 * 60 * 1000 };
+/** Proposals per person across all their clients, per window. */
+export const DEFAULT_PERSON_LIMITS: ProposalLimits = { max: 60, windowMs: 60 * 60 * 1000 };
 /** Keys remembered at most; the oldest go first. */
 const KEYS_MAX = 10_000;
 
@@ -58,6 +61,13 @@ export class ProposalLimiter {
   constructor(limits: ProposalLimits = DEFAULT_PROPOSAL_LIMITS, now: () => number = Date.now) {
     this.#limits = limits;
     this.#now = now;
+  }
+
+  /** Whether `key` may take one more now (counts nothing). */
+  hasRoom(key: string): boolean {
+    const now = this.#now();
+    const recent = (this.#seen.get(key) ?? []).filter((t) => now - t < this.#limits.windowMs);
+    return recent.length < this.#limits.max;
   }
 
   /** Counts one for `key`; false (and not counted) when the key is at its limit. */
@@ -94,8 +104,14 @@ export const TagOutput = {
   note: z.string(),
 };
 
-/** The `tag` tool, counting proposals in `limiter`. */
-export function tagTool(limiter = new ProposalLimiter()): McpTool {
+/**
+ * The `tag` tool, counting proposals per person and client in `limiter` and per person in
+ * `personLimiter`.
+ */
+export function tagTool(
+  limiter = new ProposalLimiter(),
+  personLimiter = new ProposalLimiter(DEFAULT_PERSON_LIMITS),
+): McpTool {
   return {
     name: "tag",
     title: "Propose a tag",
@@ -194,7 +210,14 @@ export function tagTool(limiter = new ProposalLimiter()): McpTool {
           { outcome: "decides-access", object: a.id },
         );
       }
-      if (!limiter.take(JSON.stringify([tenantId, bearer.principal.userId, bearer.client.id]))) {
+      const person = JSON.stringify([tenantId, bearer.principal.userId]);
+      const perClient = JSON.stringify([tenantId, bearer.principal.userId, bearer.client.id]);
+      // Both must have room before either counts.
+      if (
+        !personLimiter.hasRoom(person) ||
+        !limiter.take(perClient) ||
+        !personLimiter.take(person)
+      ) {
         return refuse(ctx, "Too many tag proposals from this app lately; try again later.", {
           outcome: "rate-limited",
           object: a.id,

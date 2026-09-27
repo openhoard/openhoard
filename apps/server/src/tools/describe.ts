@@ -6,6 +6,7 @@ import {
   auditSummaries,
   CardSchema,
   DEFAULT_TOKENS,
+  fitCard,
   maxTokensArg,
   ownerNames,
   toCard,
@@ -99,15 +100,11 @@ export const describe: McpTool = {
           versionCount: history.length,
           ...(f.summary !== undefined ? { note: UNTRUSTED_NOTE } : {}),
         });
-        // Over budget: fewer versions first, then no summary.
+        // Over budget: fewer versions first, then the card itself gives way (fitCard).
         const budget = a.maxTokens ?? DEFAULT_TOKENS;
         let list = versions;
-        while (list.length > 1 && tokensOf(shape(file, list)) > budget) list = list.slice(0, -1);
-        let card = file;
-        if (tokensOf(shape(card, list)) > budget) {
-          const { summary: _summary, ...lean } = card;
-          card = lean;
-        }
+        while (list.length > 0 && tokensOf(shape(file, list)) > budget) list = list.slice(0, -1);
+        const card = fitCard(file, budget, (c) => shape(c, list));
         await auditSummaries(tx, ctx, "describe", [card]);
         return shape(card, list);
       },

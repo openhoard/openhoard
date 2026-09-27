@@ -347,17 +347,26 @@ The **admin API** is JSON under `/api/admin`, for the admin UI to come and for s
   - `open` (id, `link` or `content`): the source's web link, checked as it leaves (https only,
     no credentials, canonical: @openhoard/sdk checkUrl/canonicalUrl), or the extracted text
     when exposure allows, cut to the budget and wrapped between `BEGIN-FILE-TEXT-<nonce>` and
-    `END-FILE-TEXT-<nonce>` with a note that it is untrusted data.
+    `END-FILE-TEXT-<nonce>` with a note that it is untrusted data. A link comes with a note that
+    it is for the person to click, never for the agent to fetch; a `risk:injection` file gets
+    no link (a browsing agent could fetch the payload the flag keeps from it).
   - `tag` (id, facet:value; needs `files:tag`): a proposal in the review inbox (reason `agent`),
     never applied; only approved values, never one that sets a visibility or exposure level or
     has a live grant; the person must be allowed to tag the file; 30 per hour per person and
-    client (per process). An agent's write is thereby always a person's decision in
+    client, and 60 per hour per person across clients (counted per server process). An agent's write is thereby always a person's decision in
     OpenHoard's app (T-605, for tags).
-  - `explain` (id, optional person): who has access and why, for the file's owner only.
+  - `explain` (id, optional person): who has access and why, for the file's owner only. A named
+    person is explained only if they own the file or a grant covers them; anyone else (or an
+    unknown address) gets the same neutral answer, and a denial says only "blocked by policy".
 - **Budget and shapes.** Every answer fits a token budget (2,000 by default, `maxTokens` 500 to
   8,000; estimated at a third of a token per ASCII character and two per other), and lists end
   with a cursor. Output schemas are pinned (`src/tools/__snapshots__`): a changed shape fails CI
   until the snapshot is updated on purpose.
+- **Injection suite (T-805).** `src/tools/injection.test.ts` serves spike S8's corpus through
+  find, describe and open to an agent that obeys every file, and checks OpenHoard's own state
+  (tags, vocabulary, grants, review items, opens). It says nothing about agents with other
+  tools (browsing, email, a shell): what such an agent does with text it read is the client's
+  to contain.
 - **Audit (T-704).** Every tool call is audited as `mcp.tool` (tool, outcome, file, client, trust,
   reported model; never its arguments). Every AI read is audited as `ai.read` with the client,
   the reported model (`_meta["openhoard/model"]`, `_meta.model` or `_meta.clientInfo.model`,

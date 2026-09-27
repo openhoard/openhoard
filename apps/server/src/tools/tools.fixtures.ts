@@ -304,9 +304,16 @@ export async function openHarness(
             ),
           );
         if (!known) {
-          await tx
-            .insert(facetValues)
-            .values({ tenantId, facet, value, label: value, approved: true });
+          // risk:injection is built-in vocabulary: metadata-only, as core/db keeps it.
+          const builtIn = facet === "risk" && value === "injection";
+          await tx.insert(facetValues).values({
+            tenantId,
+            facet,
+            value,
+            label: value,
+            approved: true,
+            ...(builtIn ? { exposure: "metadata-only" as const } : {}),
+          });
         }
         await tx.insert(objectTags).values({
           tenantId,
