@@ -70,6 +70,10 @@ provable access control, and AI you can actually trust with company data.
 
 </details>
 
+**Presenting OpenHoard to your IT team?** Use the [IT overview deck](docs/presentations/openhoard-it-overview.pptx)
+([PDF](docs/presentations/openhoard-it-overview.pdf)): architecture, data flow, storage, tags,
+security and status in 15 slides with speaker notes.
+
 ## How it works
 
 ```
