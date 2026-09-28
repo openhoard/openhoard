@@ -5,6 +5,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-F2A93B"></a>
   <a href="https://scorecard.dev/viewer/?uri=github.com/openhoard/openhoard"><img alt="OpenSSF Scorecard" src="https://api.scorecard.dev/projects/github.com/openhoard/openhoard/badge"></a>
+  <a href="https://www.bestpractices.dev/projects/15005"><img alt="OpenSSF Best Practices" src="https://www.bestpractices.dev/projects/15005/badge"></a>
   <a href="https://github.com/openhoard/openhoard/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/openhoard/openhoard/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-B23A1F">
   <img alt="Works with any MCP agent" src="https://img.shields.io/badge/MCP-any%20agent-15110D">
