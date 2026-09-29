@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -7,7 +7,8 @@ import { pinFolder, quickAccessScript, type Run } from "./pin.js";
 
 let home: string;
 beforeEach(() => {
-  home = mkdtempSync(join(tmpdir(), "oh-pin-"));
+  // The long form: a Windows runner's temp folder is an 8.3 short path (C:\Users\RUNNER~1\…).
+  home = realpathSync.native(mkdtempSync(join(tmpdir(), "oh-pin-")));
 });
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 

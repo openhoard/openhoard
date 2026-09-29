@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -39,7 +40,8 @@ let home: string;
 let claudeFile: string;
 let shared: Database | undefined;
 beforeEach(async () => {
-  root = mkdtempSync(join(tmpdir(), "oh-connect-"));
+  // The long form: a Windows runner's temp folder is an 8.3 short path (C:\Users\RUNNER~1\…).
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "oh-connect-")));
   dir = join(root, "data");
   home = join(root, "home");
   mkdirSync(home);

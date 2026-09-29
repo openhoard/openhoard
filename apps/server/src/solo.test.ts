@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -49,7 +50,8 @@ let dir: string;
 let home: string;
 let shared: Database | undefined;
 beforeEach(async () => {
-  root = mkdtempSync(join(tmpdir(), "oh-solo-"));
+  // The long form: a Windows runner's temp folder is an 8.3 short path (C:\Users\RUNNER~1\…).
+  root = realpathSync.native(mkdtempSync(join(tmpdir(), "oh-solo-")));
   dir = join(root, "data");
   home = join(root, "home");
   mkdirSync(home);
@@ -350,7 +352,8 @@ describe("init --solo", { timeout: process.platform === "win32" ? 600_000 : 180_
     const missing = await init("--folder", join(root, "nope"));
     expect(missing.code).toBe(1);
     expect(missing.err).toContain("isn't a folder");
-    expect(missing.err).not.toContain("~");
+    // No hint for a path without "~" (the temp folder itself may hold one: 8.3 short names).
+    expect(missing.err).not.toContain(`a "~" in quotes`);
     // A quoted ~ reaches it unexpanded: said.
     const tilde = await init("--folder", "~/Notes");
     expect(tilde.code).toBe(1);
