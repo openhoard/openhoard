@@ -1,10 +1,11 @@
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { constants, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { getTenant, isId } from "@openhoard/core-db";
-import { openAdminDatabase, signInLink } from "./admin.js";
-import { type Config } from "./config.js";
+import { appendAudit } from "@openhoard/core-audit";
+import { getTenant, isId, type Database } from "@openhoard/core-db";
+import { ADMIN_ACTOR, openAdminDatabase, signInLink } from "./admin.js";
+import { stripBom, type Config } from "./config.js";
 import {
   commandLine,
   pathFor,
@@ -24,10 +25,29 @@ import {
  *
  * It approves Claude Desktop's bridge (mcp-remote) for the tenant in the server's config.json
  * (`auth.clients`, trust `commercial`), adds the `openhoard` server to Claude Desktop's config
- * (keeping everything else in it, and the previous file as `.bak`), and issues a one-time
- * sign-in link (60 minutes) for the folders' owner, audited as the admin command is. Running it
- * again changes nothing that is already right, and issues a new link.
+ * (keeping everything else in it, and the first previous file as `.bak`), and issues a one-time
+ * sign-in link (60 minutes) for the folders' owner, audited as the admin command is. The
+ * approval is audited `oauth-client.approve` as `system:admin-cli`. If any step fails, the
+ * files written before it are put back. Running it again changes nothing that is already right,
+ * and issues a new link.
  */
+
+/** Records the config approval (or its refusal) in the tenant's audit log. */
+async function audit(
+  db: Database,
+  tenantId: string,
+  decision: "allow" | "deny",
+  detail: Record<string, string>,
+): Promise<void> {
+  await db.withTenant(tenantId, (tx) =>
+    appendAudit(tx, tenantId, {
+      actor: ADMIN_ACTOR,
+      action: "oauth-client.approve",
+      decision,
+      detail,
+    }),
+  );
+}
 
 /** The approved client entry for Claude Desktop through mcp-remote (docs/dogfood.md). */
 export const MCP_REMOTE_REDIRECT = "http://127.0.0.1/oauth/callback";
@@ -136,7 +156,7 @@ export async function runConnect(argv: readonly string[], io: SoloIo): Promise<n
   let raw: Json;
   try {
     config = soloConfig(dataDir, io);
-    const text: unknown = JSON.parse(readFileSync(configFile, "utf8"));
+    const text: unknown = JSON.parse(stripBom(readFileSync(configFile, "utf8")));
     if (!isObject(text)) throw new Error(`${configFile} isn't a JSON object`);
     raw = text;
   } catch (e) {
@@ -197,10 +217,12 @@ export async function runConnect(argv: readonly string[], io: SoloIo): Promise<n
     return 2;
   }
   let claude: Json = {};
-  const claudeExists = existsSync(claudeFile);
-  if (claudeExists) {
+  // The file as it was (null: none), to put back if a later step fails.
+  let claudeText: string | null = null;
+  if (existsSync(claudeFile)) {
     try {
-      const text = readFileSync(claudeFile, "utf8");
+      claudeText = readFileSync(claudeFile, "utf8");
+      const text = stripBom(claudeText);
       const read: unknown = text.trim() === "" ? {} : JSON.parse(text);
       if (!isObject(read)) throw new Error("it isn't a JSON object");
       if (read.mcpServers !== undefined && !isObject(read.mcpServers)) {
@@ -226,75 +248,139 @@ export async function runConnect(argv: readonly string[], io: SoloIo): Promise<n
       return 1;
     }
 
-    // 1. The client approved in OpenHoard's config.
+    // The approval there is already, if any: only as commercial, never relabelled here.
     const auth = isObject(raw.auth) ? raw.auth : {};
     const clients = Array.isArray(auth.clients) ? (auth.clients as unknown[]) : [];
-    const approved = clients.some(
-      (c) =>
+    const listed = clients.find(
+      (c): c is Json =>
         isObject(c) &&
         c.tenantId === tenantId &&
         Array.isArray(c.redirectUris) &&
         c.redirectUris.length === 1 &&
         c.redirectUris[0] === MCP_REMOTE_REDIRECT,
     );
-    if (approved) {
-      io.err(`Claude Desktop is approved for tenant ${tenantId} already.\n`);
-    } else {
-      const previous = readFileSync(configFile, "utf8");
-      const next = {
-        ...raw,
-        auth: {
-          ...auth,
-          clients: [
-            ...clients,
-            {
-              tenantId,
-              redirectUris: [MCP_REMOTE_REDIRECT],
-              trust: "commercial",
-              note: MCP_REMOTE_NOTE,
-            },
-          ],
-        },
-      };
-      writeFileAtomic(configFile, JSON.stringify(next, null, 2) + "\n");
-      try {
-        config = soloConfig(dataDir, io);
-      } catch (e) {
-        writeFileAtomic(configFile, previous);
-        io.err(`${(e as Error).message}\n(${configFile} is back as it was.)\n`);
-        return 1;
+    if (listed !== undefined && listed.trust !== "commercial") {
+      await audit(db, tenantId, "deny", { reason: "trust-differs", trust: String(listed.trust) });
+      io.err(
+        `${configFile} approves ${MCP_REMOTE_REDIRECT} for tenant ${tenantId} already, with ` +
+          `trust "${String(listed.trust)}", not "commercial": Claude sends what it reads to ` +
+          `Anthropic, so it is commercial. Change or remove that entry yourself, then run this ` +
+          `again; nothing was changed.\n`,
+      );
+      return 1;
+    }
+
+    // What is written, to put back if a later step fails: nothing is left half done (above
+    // all, not the approval, which trusts every program on this computer).
+    const undo: (() => void)[] = [];
+    const rollBack = () => {
+      for (const step of undo.reverse()) {
+        try {
+          step();
+        } catch (e) {
+          io.err(`could not put a file back as it was: ${(e as Error).message}\n`);
+        }
       }
-      io.err(
-        `Approved Claude Desktop (mcp-remote) for tenant ${tenantId} in ${configFile}, as ` +
-          `commercial: what Claude reads goes to Anthropic.\n`,
-      );
-    }
+    };
+    try {
+      // 1. OpenHoard in Claude Desktop's config.
+      const publicUrl = config.auth?.publicUrl ?? SOLO_PUBLIC_URL;
+      const server = claudeDesktopServer(publicUrl);
+      const servers = isObject(claude.mcpServers) ? claude.mcpServers : {};
+      const before = servers.openhoard;
+      let claudeSaid: string;
+      if (JSON.stringify(before) === JSON.stringify(server)) {
+        claudeSaid = `Claude Desktop's config has OpenHoard already (${claudeFile}).\n`;
+      } else {
+        mkdirSync(dirname(claudeFile), { recursive: true });
+        // The first backup is kept: a later run never overwrites it with an already-merged file.
+        const bak = `${claudeFile}.bak`;
+        const madeBak = claudeText !== null && !existsSync(bak);
+        if (madeBak) {
+          copyFileSync(claudeFile, bak, constants.COPYFILE_EXCL);
+          undo.push(() => rmSync(bak, { force: true }));
+        }
+        const next = { ...claude, mcpServers: { ...servers, openhoard: server } };
+        // Through a link to the real file, keeping its mode; owner-only when new (other MCP
+        // servers' entries in it often carry tokens).
+        writeFileAtomic(claudeFile, JSON.stringify(next, null, 2) + "\n");
+        undo.push(() =>
+          claudeText === null
+            ? rmSync(claudeFile, { force: true })
+            : writeFileAtomic(claudeFile, claudeText),
+        );
+        claudeSaid =
+          (before === undefined
+            ? `Added OpenHoard to Claude Desktop's config (${claudeFile})`
+            : `Replaced the "openhoard" server in Claude Desktop's config (${claudeFile}), ` +
+              `which ran something else`) +
+          (madeBak
+            ? `; the previous file is ${bak}.\n`
+            : claudeText !== null
+              ? `; ${bak} (the first backup) is kept as it was.\n`
+              : `.\n`);
+      }
 
-    // 2. OpenHoard in Claude Desktop's config.
-    const publicUrl = config.auth?.publicUrl ?? SOLO_PUBLIC_URL;
-    const server = claudeDesktopServer(publicUrl);
-    const servers = isObject(claude.mcpServers) ? claude.mcpServers : {};
-    const before = servers.openhoard;
-    if (JSON.stringify(before) === JSON.stringify(server)) {
-      io.err(`Claude Desktop's config has OpenHoard already (${claudeFile}).\n`);
-    } else {
-      mkdirSync(dirname(claudeFile), { recursive: true });
-      if (claudeExists) copyFileSync(claudeFile, `${claudeFile}.bak`);
-      const next = { ...claude, mcpServers: { ...servers, openhoard: server } };
-      // Not owner-only: Claude Desktop's file holds no secret of ours, and is the user's own.
-      writeFileAtomic(claudeFile, JSON.stringify(next, null, 2) + "\n", 0o644);
-      io.err(
-        (before === undefined
-          ? `Added OpenHoard to Claude Desktop's config (${claudeFile})`
-          : `Replaced the "openhoard" server in Claude Desktop's config (${claudeFile}), which ` +
-            `ran something else`) +
-          (claudeExists ? `; the previous file is ${claudeFile}.bak.\n` : `.\n`),
-      );
-    }
+      // 2. The client approved in OpenHoard's config (audited once all steps are done).
+      let approvalSaid: string;
+      let approvedNow = false;
+      if (listed !== undefined) {
+        approvalSaid = `Claude Desktop is approved for tenant ${tenantId} already.\n`;
+      } else {
+        const previous = readFileSync(configFile, "utf8");
+        const next = {
+          ...raw,
+          auth: {
+            ...auth,
+            clients: [
+              ...clients,
+              {
+                tenantId,
+                redirectUris: [MCP_REMOTE_REDIRECT],
+                trust: "commercial",
+                note: MCP_REMOTE_NOTE,
+              },
+            ],
+          },
+        };
+        writeFileAtomic(configFile, JSON.stringify(next, null, 2) + "\n");
+        undo.push(() => writeFileAtomic(configFile, previous));
+        config = soloConfig(dataDir, io);
+        approvedNow = true;
+        approvalSaid =
+          `Approved Claude Desktop (mcp-remote) for tenant ${tenantId} in ${configFile}, as ` +
+          `commercial: what Claude reads goes to Anthropic.\n`;
+      }
 
-    // 3. A sign-in link (audited as `admin user sign-in-link`), on standard output.
-    const code = await signInLink(db, config, { tenant: tenantId, user, minutes: "60" }, io);
-    if (code !== 0) return code;
+      // 3. A sign-in link (audited as `admin user sign-in-link`), on standard output.
+      // Held back, so what was done is said first, and a refusal after the undo.
+      let linkOut = "";
+      let linkErr = "";
+      const code = await signInLink(
+        db,
+        config,
+        { tenant: tenantId, user, minutes: "60" },
+        { ...io, out: (s) => void (linkOut += s), err: (s) => void (linkErr += s) },
+      );
+      if (code !== 0) {
+        rollBack();
+        io.err(`${linkErr}Nothing was changed.\n`);
+        return code;
+      }
+      if (approvedNow) {
+        await audit(db, tenantId, "allow", {
+          redirectUri: MCP_REMOTE_REDIRECT,
+          trust: "commercial",
+          via: "config",
+        });
+      }
+      io.err(claudeSaid + approvalSaid + linkErr);
+      io.out(linkOut);
+    } catch (e) {
+      rollBack();
+      io.err(`${(e as Error).message}\nNothing was changed.\n`);
+      return 1;
+    }
   } catch (e) {
     io.err(`${(e as Error).message}\n`);
     return 1;

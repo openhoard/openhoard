@@ -515,13 +515,21 @@ function within(outer: string, inner: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+/** The byte order mark Windows editors (Notepad, PowerShell 5's Out-File) put before JSON. */
+const BOM = 0xfeff;
+
+/** `text` without a leading byte order mark, which JSON.parse refuses. */
+export function stripBom(text: string): string {
+  return text.charCodeAt(0) === BOM ? text.slice(1) : text;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): Config {
   const dataDir = resolve(cwd, env.OPENHOARD_DATA_DIR ?? ".openhoard");
   const file = join(dataDir, "config.json");
   let fromFile: unknown = {};
   if (existsSync(file)) {
     try {
-      fromFile = JSON.parse(readFileSync(file, "utf8"));
+      fromFile = JSON.parse(stripBom(readFileSync(file, "utf8")));
     } catch (e) {
       throw new Error(`invalid OpenHoard config:\n  ${file}: ${(e as Error).message}`, {
         cause: e,

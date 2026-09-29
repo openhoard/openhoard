@@ -1,4 +1,16 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAudit } from "@openhoard/core-audit";
@@ -10,13 +22,16 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ADMIN_ACTOR, runAdmin } from "./admin.js";
 import { loadConfig } from "./config.js";
 import {
+  createFileExclusive,
   defaultDataDir,
   findStarterPack,
   PLACEHOLDER_EMAIL,
   runInit,
   soloArgument,
   soloConfigFile,
+  soloPublicUrl,
   sourceId,
+  writeFileAtomic,
   type SoloIo,
 } from "./solo.js";
 
@@ -144,8 +159,74 @@ describe("solo helpers", () => {
   it("finds the starter pack from the source and the build", () => {
     expect(findStarterPack()).toMatch(/packs[\\/]general-business[\\/]pack\.json$/);
     expect(findStarterPack(tmpdir())).toBeNull();
+    // Only three folders up from src/ or dist/, never further.
+    const clone = mkdtempSync(join(tmpdir(), "oh-pack-"));
+    try {
+      mkdirSync(join(clone, "packs", "general-business"), { recursive: true });
+      writeFileSync(join(clone, "packs", "general-business", "pack.json"), "{}");
+      expect(findStarterPack(join(clone, "apps", "server", "dist"))).toBe(
+        join(clone, "packs", "general-business", "pack.json"),
+      );
+      expect(findStarterPack(join(clone, "a", "apps", "server", "dist"))).toBeNull();
+    } finally {
+      rmSync(clone, { recursive: true, force: true });
+    }
+  });
+
+  it("builds the public URL from where the server listens", () => {
+    expect(soloPublicUrl("127.0.0.1", 7420)).toBe("http://127.0.0.1:7420");
+    expect(soloPublicUrl("::1", 9000)).toBe("http://[::1]:9000");
+    expect(soloPublicUrl("localhost", 8080)).toBe("http://localhost:8080");
+    expect(soloPublicUrl("127.0.0.1", 0)).toBeNull();
   });
 });
+
+describe("file writing", () => {
+  let d: string;
+  beforeEach(() => void (d = mkdtempSync(join(tmpdir(), "oh-write-"))));
+  afterEach(() => rmSync(d, { recursive: true, force: true }));
+
+  it.skipIf(process.platform === "win32")(
+    "replaces a linked file through the link, keeping its mode",
+    () => {
+      const real = join(d, "real.json");
+      const link = join(d, "link.json");
+      writeFileSync(real, "{}", { mode: 0o600 });
+      chmodSync(real, 0o600);
+      symlinkSync(real, link);
+      writeFileAtomic(link, '{"a":1}', 0o644);
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(readFileSync(real, "utf8")).toBe('{"a":1}');
+      expect(statSync(real).mode & 0o777).toBe(0o600);
+      // A new file gets the mode asked for; an existing one keeps its own.
+      writeFileAtomic(join(d, "new.json"), "{}");
+      expect(statSync(join(d, "new.json")).mode & 0o777).toBe(0o600);
+      chmodSync(real, 0o640);
+      writeFileAtomic(real, "{}");
+      expect(statSync(real).mode & 0o777).toBe(0o640);
+      // A link to nothing is refused, not replaced.
+      symlinkSync(join(d, "gone.json"), join(d, "dangling.json"));
+      expect(() => writeFileAtomic(join(d, "dangling.json"), "{}")).toThrow("doesn't exist");
+      expect(lstatSync(join(d, "dangling.json")).isSymbolicLink()).toBe(true);
+    },
+  );
+
+  it("creates a file only when there is none", () => {
+    const file = join(d, "config.json");
+    createFileExclusive(file, "first");
+    expect(() => createFileExclusive(file, "second")).toThrow(
+      expect.objectContaining({ code: "EEXIST" }),
+    );
+    expect(readFileSync(file, "utf8")).toBe("first");
+    if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
+    // No temporary file is left behind.
+    expect(existsSync(d) && readdirNames(d)).toEqual(["config.json"]);
+  });
+});
+
+function readdirNames(dir: string): string[] {
+  return readdirSync(dir).sort();
+}
 
 // Several cold PGlite starts per test: the Windows runners need far more than the suite's 30 s.
 describe("init --solo", { timeout: process.platform === "win32" ? 600_000 : 180_000 }, () => {
@@ -161,9 +242,13 @@ describe("init --solo", { timeout: process.platform === "win32" ? 600_000 : 180_
 
     // The plan was printed, loosenings marked, and it was applied.
     expect(res.err).toContain("! set-defaults defaults hidden/metadata-only -> discoverable");
-    expect(res.err).toContain("Applied pack general-business");
+    expect(res.err).toContain("Applied: pack general-business");
+    // Said once, after the transaction committed (never once per retry).
+    expect(res.err.match(/Created tenant/g)).toHaveLength(1);
+    expect(res.err.match(/Applied: pack/g)).toHaveLength(1);
     expect(res.err).toContain(`tenant:   ${tenantId}`);
-    expect(res.err).toContain("OPENHOARD_MODEL_CLAUDE_API_KEY isn't set");
+    expect(res.err).toContain("OPENHOARD_MODEL_CLAUDE_API_KEY isn't set: the server starts");
+    expect(res.err).toContain("search still works by keywords");
     expect(res.err).toContain("export OPENHOARD_MODEL_CLAUDE_API_KEY=<your key>");
     expect(res.err).toContain("connect claude-desktop");
 
@@ -242,6 +327,17 @@ describe("init --solo", { timeout: process.platform === "win32" ? 600_000 : 180_
     const missing = await init("--folder", join(root, "nope"));
     expect(missing.code).toBe(1);
     expect(missing.err).toContain("isn't a folder");
+    expect(missing.err).not.toContain("~");
+    // A quoted ~ reaches it unexpanded: said.
+    const tilde = await init("--folder", "~/Notes");
+    expect(tilde.code).toBe(1);
+    expect(tilde.err).toContain(`a "~" in quotes isn't your home folder`);
+    // One folder named twice, through a link (a junction on Windows): one folder.
+    const linked = join(root, "linked");
+    symlinkSync(a, linked, "junction");
+    const twice = await init("--folder", a, "--folder", linked);
+    expect(twice.code).toBe(1);
+    expect(twice.err).toContain("links included");
     const nested = await init("--folder", root, "--folder", a);
     expect(nested.code).toBe(1);
     expect(nested.err).toContain("inside the other");
@@ -291,6 +387,51 @@ describe("init --solo", { timeout: process.platform === "win32" ? 600_000 : 180_
     expect(again.err).toContain("You were its admin already.");
     expect(again.err).toContain("is applied already");
     expect(loadConfig({ OPENHOARD_DATA_DIR: dir }).sources[0]?.tenantId).toBe(tenantId);
+  });
+
+  it("refuses a database other than the embedded one, before opening it", async () => {
+    let opened = false;
+    const { io: value, seen } = io({
+      env: { OPENHOARD_DATABASE_URL: "postgres://u:secret@db.example/openhoard" },
+      open: async () => {
+        opened = true;
+        throw new Error("not reached");
+      },
+    });
+    expect(await runInit(["--solo", "--data-dir", dir], value)).toBe(1);
+    expect(seen.err).toContain("embedded database only");
+    expect(seen.err).not.toContain("secret");
+    expect(opened).toBe(false);
+    expect(existsSync(join(dir, "config.json"))).toBe(false);
+  });
+
+  it("writes the public URL for the port and host the server will use", async () => {
+    const { io: value, seen } = io({ env: { OPENHOARD_PORT: "9123", OPENHOARD_HOST: "::1" } });
+    expect(await runInit(["--solo", "--data-dir", dir], value), seen.err).toBe(0);
+    const written = JSON.parse(readFileSync(join(dir, "config.json"), "utf8")) as {
+      auth: { publicUrl: string };
+    };
+    expect(written.auth.publicUrl).toBe("http://[::1]:9123");
+    const zero = io({ env: { OPENHOARD_PORT: "0" } });
+    rmSync(join(dir, "config.json"));
+    expect(await runInit(["--solo", "--data-dir", dir], zero.io)).toBe(1);
+    expect(zero.seen.err).toContain("fixed port");
+  });
+
+  it("never overwrites a config.json that appeared while it ran", async () => {
+    // Made between the check at the start and the write at the end (by another init, say).
+    const { io: value, seen } = io({
+      open: async (config) => {
+        writeFileSync(join(dir, "config.json"), '{"theirs":true}');
+        return shared
+          ? { ...shared, close: async () => {} }
+          : openDatabase({ url: "pglite", dataDir: config.dataDir });
+      },
+    });
+    mkdirSync(dir, { recursive: true });
+    expect(await runInit(["--solo", "--data-dir", dir], value)).toBe(1);
+    expect(seen.err).toContain("appeared while this ran");
+    expect(readFileSync(join(dir, "config.json"), "utf8")).toBe('{"theirs":true}');
   });
 
   it("refuses a bad email or misuse without making anything", async () => {

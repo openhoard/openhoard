@@ -728,11 +728,14 @@ node apps/server/dist/main.js init --solo [--folder <path>]… [--name <display 
 
 - **What it makes**, in one database transaction: a tenant named after the person, the person (a
   local member, `--name` or the OS user name), their admin role, and the starter pack
-  (`packs/general-business`, found beside the server). The pack's plan is printed, every
-  loosening marked `!`, and applied at once: running the command is the consent. Then it writes
-  `<dataDir>/config.json` (atomically, owner-only where the OS has modes): `publicUrl`
-  `http://127.0.0.1:7420`, `signInLinks`, one `fs` source per `--folder` (ids `fs-<folder name>`,
-  made unique; zone the folder's name; owner the person; `extract` unless `--no-extract`), and
+  (`packs/general-business` of the clone the server runs from). The pack is applied at once
+  (running the command is the consent) and every change it made is printed, each loosening marked
+  `!`. Then it creates `<dataDir>/config.json` (whole, owner-only where the OS has modes, and
+  never over a file made meanwhile): `publicUrl` where the server will listen
+  (`http://127.0.0.1:7420`, or `OPENHOARD_HOST` and `OPENHOARD_PORT`), `signInLinks`, one `fs`
+  source per `--folder` (ids `fs-<folder name>`, made unique; zone the folder's name; owner the
+  person; `extract` unless `--no-extract`; one folder named twice, through a link or junction
+  too, is refused), and
   Claude (`anthropic`, commercial) for summaries with a daily budget of 2,000,000 tokens. The file
   is loaded as the server loads it before the command succeeds. All of it is audited as
   `system:admin-cli` (`tenant.create`, `user.create`, `admin.grant`, `pack.apply`).
@@ -744,15 +747,17 @@ node apps/server/dist/main.js init --solo [--folder <path>]… [--name <display 
   `~/.local/share/openhoard`), never inside a folder it indexes. That default is only the solo
   commands'; the server itself still defaults to `.openhoard` in its working directory, so pass
   the same `--data-dir` when starting it (the commands it prints do).
-- **Once only.** It refuses when `config.json` exists (add folders to `sources` by hand, or use
-  another data directory), and while the server holds the embedded database, as admin commands
-  do. The database work is all or nothing and `config.json` is written last. If writing it fails,
+- **Once only, embedded database only.** It refuses when `config.json` exists (add folders to
+  `sources` by hand, or use another data directory), and while the server holds the embedded
+  database, as admin commands do. It refuses `OPENHOARD_DATABASE_URL` naming PostgreSQL: a
+  shared database has no lock keeping a second run out, and a team sets one up by hand. The
+  database work is all or nothing and `config.json` is written last. If writing it fails,
   running the same command again picks the tenant up, but only when that is unambiguous: the
   database holds that one tenant, with the same name and nobody but that person. Anything else
   is refused, with what to do: the manual setup, or another data directory.
 - **The API key** stays in the environment (`OPENHOARD_MODEL_CLAUDE_API_KEY`): the command says
-  whether it is set, and how to set it on this OS, and never asks for it. The server refuses to
-  start with the `claude` provider and no key.
+  whether it is set, and how to set it on this OS, and never asks for it. Without it the server
+  starts with a warning and no summaries; search still works by keywords.
 
 ### Claude Desktop: `connect claude-desktop` (T-1202)
 
@@ -764,18 +769,26 @@ node apps/server/dist/main.js connect claude-desktop [--tenant ten_…] [--user 
 After `init --solo` (it needs `config.json` with `auth.signInLinks`, and the same data directory
 default), with the server stopped as for admin commands:
 
-1. **Approves the client** in `config.json`: an `auth.clients` entry for the tenant with
-   `redirectUris: ["http://127.0.0.1/oauth/callback"]` (mcp-remote's), trust `commercial`, unless
-   one is there already. The rest of the file is kept, and it is loaded again before going on (put
-   back as it was if that fails). The tenant is the one `sources` names, or `--tenant`.
-2. **Adds `openhoard` to Claude Desktop's config** (`%APPDATA%\Claude\claude_desktop_config.json`,
+1. **Adds `openhoard` to Claude Desktop's config** (`%APPDATA%\Claude\claude_desktop_config.json`,
    `~/Library/Application Support/Claude/claude_desktop_config.json`; Linux has no official Claude
    Desktop, so there `--claude-config` is required), running mcp-remote with the arguments
-   docs/dogfood.md gives. Other keys and servers are kept, and the previous file is kept as
-   `.bak`. A file that isn't a JSON object is refused and left alone; an `openhoard` entry that
-   runs something else is replaced, and it says so.
+   docs/dogfood.md gives. Other keys and servers are kept (their entries often hold tokens): a
+   linked file is written through to the file it points to, keeping its mode, and a new one is
+   owner-only. The first previous file is kept as `.bak`, never overwritten by later runs. A file
+   that isn't a JSON object is refused and left alone; an `openhoard` entry that runs something
+   else is replaced, and it says so.
+2. **Approves the client** in `config.json`: an `auth.clients` entry for the tenant with
+   `redirectUris: ["http://127.0.0.1/oauth/callback"]` (mcp-remote's), trust `commercial`, unless
+   one is there already. An entry for that redirect with another trust is refused, naming it,
+   before anything is written: change it yourself. The rest of the file is kept, and it is loaded
+   again before going on. The tenant is the one `sources` names, or `--tenant`. Audited
+   `oauth-client.approve` as `system:admin-cli`.
 3. **Issues a one-time sign-in link** (60 minutes) for the folders' owner (or `--user`), on
    standard output, audited `sign-in-link.issue` as `user sign-in-link` is.
+
+If a step fails, the files the steps before it wrote are put back as they were (and no approval
+is audited), so a failed run leaves no approval behind. Both configs may start with a byte order
+mark (Windows editors write one); the server's `config.json` loads with one too.
 
 It then prints what is left: start the server, open the link and press Sign in, restart Claude
 Desktop, press Allow on the consent page. Approving `http://127.0.0.1/oauth/callback` trusts

@@ -1,8 +1,11 @@
 import {
   chmodSync,
   existsSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -42,11 +45,12 @@ import { retrying } from "./retry.js";
  * In one run it creates a tenant (named after the person), the person (a local member), makes
  * them its admin, applies the starter pack (packs/general-business), and writes
  * <dataDir>/config.json: sign-in links on, one fs source per folder owned by the person, and
- * Claude (Haiku) for summaries. The command itself is the consent to the pack: its plan, every
- * loosening marked `!`, is printed and applied without a second prompt.
+ * Claude (Haiku) for summaries. The command itself is the consent to the pack: it is applied
+ * without a second prompt, and every change it made is printed, each loosening marked `!`.
  *
+ * Only on the embedded database (PGlite), whose lock keeps the server and a second run out.
  * All the database work is one transaction, so it happens entirely or not at all; config.json is
- * written last. If writing it fails, the tenant stays: running `init --solo` again picks it up,
+ * created last, never over one made meanwhile. If writing it fails, the tenant stays: running `init --solo` again picks it up,
  * but only when that is unambiguous (the data directory holds exactly that one tenant, of the
  * same name, with nobody in it but that person). Anything else is refused with what to do.
  * Changes are audited as `system:admin-cli`, as the admin commands audit them.
@@ -114,19 +118,92 @@ export function commandLine(io: SoloIo, dataDir: string, rest: string): string {
 }
 
 /**
+ * The file a write to `file` should land in: `file` itself, or, when it is a symbolic link, the
+ * file it points to, so that replacing it keeps the link (a dotfiles repository, say). A link to
+ * nothing is refused rather than replaced.
+ */
+function writeTarget(file: string): { path: string; mode: number | null } {
+  let link: boolean;
+  try {
+    link = lstatSync(file).isSymbolicLink();
+  } catch {
+    return { path: file, mode: null }; // No file yet.
+  }
+  let path = file;
+  if (link) {
+    try {
+      path = realpathSync.native(file);
+    } catch (e) {
+      throw new Error(`${file} is a link to a file that doesn't exist`, { cause: e });
+    }
+  }
+  return { path, mode: statSync(path).mode & 0o777 };
+}
+
+/** A temporary file's name beside `file`, unique to this process and moment. */
+const tempBeside = (file: string) =>
+  `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+
+/** A file written in full, owner-only where the OS has mode bits. */
+function writeTemp(temp: string, text: string, mode: number): void {
+  writeFileSync(temp, text, { mode, flag: "wx" });
+  if (process.platform !== "win32") chmodSync(temp, mode);
+}
+
+/**
+ * renameSync, tried again a few times on EPERM, EBUSY or EACCES: on Windows another program
+ * (an antivirus scan, a sync client, an editor) briefly holding the target makes a rename fail.
+ */
+function renameRetrying(from: string, to: string): void {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      renameSync(from, to);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (attempt >= 5 || !(code === "EPERM" || code === "EBUSY" || code === "EACCES")) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50 * attempt);
+    }
+  }
+}
+
+/**
  * Writes a file in one step: a temporary file beside it, then renamed over it, so a reader sees
- * the old content or the new, never half. Owner-only (0600) where the OS has mode bits; on
- * Windows the file inherits the folder's ACL (the user profile's).
+ * the old content or the new, never half. A file that exists keeps its mode, and a symbolic link
+ * keeps pointing where it did (the file it points to is the one replaced); a new file is
+ * owner-only (`mode`, 0600) where the OS has mode bits. On Windows the file inherits the
+ * folder's ACL (the user profile's).
  */
 export function writeFileAtomic(file: string, text: string, mode = 0o600): void {
-  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  const target = writeTarget(file);
+  const temp = tempBeside(target.path);
   try {
-    writeFileSync(temp, text, { mode, flag: "wx" });
-    if (process.platform !== "win32") chmodSync(temp, mode);
-    renameSync(temp, file);
+    writeTemp(temp, text, target.mode ?? mode);
+    renameRetrying(temp, target.path);
   } catch (e) {
     rmSync(temp, { force: true });
     throw e;
+  }
+}
+
+/**
+ * Creates a file that doesn't exist yet, whole, owner-only: written to a temporary file, then
+ * hard-linked to its name, which fails (EEXIST, thrown) if something made it meanwhile. Nothing
+ * is overwritten. Where the file system has no hard links, an exclusive create instead.
+ */
+export function createFileExclusive(file: string, text: string, mode = 0o600): void {
+  const temp = tempBeside(file);
+  try {
+    writeTemp(temp, text, mode);
+    try {
+      linkSync(temp, file);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ENOTSUP" && code !== "EOPNOTSUPP" && code !== "ENOSYS") throw e;
+      writeFileSync(file, text, { mode, flag: "wx" });
+    }
+  } finally {
+    rmSync(temp, { force: true });
   }
 }
 
@@ -136,23 +213,27 @@ export const PLACEHOLDER_EMAIL = "owner@solo.openhoard.invalid";
 /** Summaries by Claude: the key comes from OPENHOARD_MODEL_CLAUDE_API_KEY, never the file. */
 export const CLAUDE_KEY_ENV = "OPENHOARD_MODEL_CLAUDE_API_KEY";
 
-/** Where the server listens in a solo setup: this machine only, as sign-in links require. */
+/** Where the server listens in a solo setup by default: this machine only, as links require. */
 export const SOLO_PUBLIC_URL = "http://127.0.0.1:7420";
 
 /**
- * The starter pack, found from this module upwards: from apps/server/src or apps/server/dist of
- * a clone (packs/ is at the repository's root), however deep it is installed.
+ * The starter pack, where a clone keeps it: this module is apps/server/src or apps/server/dist,
+ * and packs/ is at the repository's root, three folders up. Only there: never a pack.json some
+ * folder further up happens to hold. (A packaged `openhoard` will bring its own copy.)
  */
 export function findStarterPack(from = dirname(fileURLToPath(import.meta.url))): string | null {
-  let dir = from;
-  for (let i = 0; i < 8; i++) {
-    const file = join(dir, "packs", "general-business", "pack.json");
-    if (existsSync(file)) return file;
-    const up = dirname(dir);
-    if (up === dir) break;
-    dir = up;
-  }
-  return null;
+  const file = resolve(from, "..", "..", "..", "packs", "general-business", "pack.json");
+  return existsSync(file) ? file : null;
+}
+
+/**
+ * The public URL for a server listening on `host`:`port` on this machine: an IPv6 loopback
+ * address in brackets. Null for port 0 (a port chosen at start, which no link can name).
+ */
+export function soloPublicUrl(host: string, port: number): string | null {
+  if (port === 0) return null;
+  const name = host === "::1" ? "[::1]" : host;
+  return `http://${name}:${port}`;
 }
 
 /** A source id from a folder's name: `fs-` and a lower-case slug, unique among `taken`. */
@@ -256,6 +337,9 @@ export async function runInit(argv: readonly string[], io: SoloIo): Promise<numb
     }
     folders.push(folder);
   } else {
+    // Each as written, and as the file system resolves it (links, junctions, mapped drives), so
+    // one folder named two ways is still one.
+    const real: string[] = [];
     for (const f of given) {
       const folder = resolve(cwd, f);
       let dir = false;
@@ -265,17 +349,32 @@ export async function runInit(argv: readonly string[], io: SoloIo): Promise<numb
         // Said below.
       }
       if (!dir) {
-        io.err(`${folder} isn't a folder on this machine\n`);
+        io.err(
+          `${folder} isn't a folder on this machine` +
+            (f.startsWith("~")
+              ? ` (a "~" in quotes isn't your home folder: write the path out)`
+              : "") +
+            `\n`,
+        );
         return 1;
       }
-      const clash = folders.find(
-        (other) => within(other, folder, platform) || within(folder, other, platform),
+      const resolved = realpathSync.native(folder);
+      const clash = folders.findIndex(
+        (other, i) =>
+          within(other, folder, platform) ||
+          within(folder, other, platform) ||
+          within(real[i] as string, resolved, platform) ||
+          within(resolved, real[i] as string, platform),
       );
-      if (clash !== undefined) {
-        io.err(`${folder} and ${clash} are one folder, or one is inside the other: name one\n`);
+      if (clash !== -1) {
+        io.err(
+          `${folder} and ${folders[clash] as string} are one folder, or one is inside the ` +
+            `other (links included): name one\n`,
+        );
         return 1;
       }
       folders.push(folder);
+      real.push(resolved);
     }
   }
 
@@ -289,12 +388,27 @@ export async function runInit(argv: readonly string[], io: SoloIo): Promise<numb
     return 1;
   }
 
-  // The database, as the server would open it (refused while the server holds it).
+  // The database, as the server would open it (refused while the server holds it). Only the
+  // embedded one: its lock keeps a running server and a second init out, and config.json has no
+  // database URL. A shared PostgreSQL is for a team, set up by hand.
   let config;
   try {
     config = soloConfig(dataDir, io);
   } catch (e) {
     io.err(`${(e as Error).message}\n`);
+    return 1;
+  }
+  if (config.database.url !== "pglite") {
+    io.err(
+      `init --solo sets up the embedded database only, and OPENHOARD_DATABASE_URL names ` +
+        `another one: unset it to use the embedded database, or set PostgreSQL up by hand ` +
+        `(docs/dogfood.md, "Manual setup").\n`,
+    );
+    return 1;
+  }
+  const publicUrl = soloPublicUrl(config.host, config.port);
+  if (publicUrl === null) {
+    io.err(`OPENHOARD_PORT is 0: a sign-in link needs a fixed port. Set another, or unset it.\n`);
     return 1;
   }
   const db = await openAdminDatabase(config, io);
@@ -311,11 +425,12 @@ export async function runInit(argv: readonly string[], io: SoloIo): Promise<numb
 
     // The config, checked before anything is written: a folder around the data directory, or an
     // environment that can't have sign-in links, fails now, with nothing made.
-    const file = soloConfigFile(tenantId, folders, email, extract);
+    const file = soloConfigFile(tenantId, folders, email, extract, publicUrl);
     const checked = ConfigSchema.safeParse({
       ...file,
       dataDir,
-      ...(env.OPENHOARD_HOST ? { host: env.OPENHOARD_HOST } : {}),
+      host: config.host,
+      port: config.port,
     });
     if (!checked.success) {
       const issues = checked.error.issues.map(
@@ -333,10 +448,11 @@ export async function runInit(argv: readonly string[], io: SoloIo): Promise<numb
     }
     let applied;
     try {
+      // What it did is said once it is committed, not in each try.
       applied = await retrying(() =>
         db.withTenant(
           tenantId,
-          (tx) => setUp(tx, tenantId, existing === undefined, name, email, packJson, io),
+          (tx) => setUp(tx, tenantId, existing === undefined, name, email, packJson),
           APPLY_TRANSACTION,
         ),
       );
@@ -361,12 +477,23 @@ export async function runInit(argv: readonly string[], io: SoloIo): Promise<numb
     }
     io.err(applied);
 
-    // config.json, last: written whole, then loaded as the server will load it.
+    // config.json, last: created whole, never over one made meanwhile, then loaded as the
+    // server will load it.
+    let created = false;
     try {
-      writeFileAtomic(configFile, JSON.stringify(file, null, 2) + "\n");
+      createFileExclusive(configFile, JSON.stringify(file, null, 2) + "\n");
+      created = true;
       soloConfig(dataDir, io);
     } catch (e) {
-      rmSync(configFile, { force: true });
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+        io.err(
+          `${configFile} appeared while this ran (another init --solo?), so it was left as it ` +
+            `is. Tenant ${tenantId} is set up in the database; if that config isn't for it, ` +
+            `start afresh with another --data-dir.\n`,
+        );
+        return 1;
+      }
+      if (created) rmSync(configFile, { force: true });
       io.err(
         `Tenant ${tenantId} is set up in the database, but config.json couldn't be written: ` +
           `${(e as Error).message}\nFix that, then run the same init --solo again: it picks up ` +
@@ -451,7 +578,6 @@ async function setUp(
   name: string,
   email: string,
   pack: unknown,
-  io: SoloIo,
 ): Promise<string> {
   const lines: string[] = [];
   if (fresh) {
@@ -489,16 +615,16 @@ async function setUp(
     lines.push(`The starter pack ${plan.name} ${plan.version} is applied already.`);
     return lines.join("\n") + "\n";
   }
-  // Printed now, before it is applied: running init --solo is the consent to it.
-  io.err(
-    lines.join("\n") +
-      "\n" +
-      `The starter pack makes files discoverable and lets their content reach commercial AI ` +
-      `(Claude); "!" marks a loosening:\n` +
-      packPlanText("Plan", plan),
-  );
+  // Running init --solo is the consent to the pack; every change it made is shown.
   const applied = await applyPackAudited(tx, tenantId, pack, plan.planHash);
-  return `Applied pack ${applied.name} ${applied.version} (plan ${applied.planHash}).\n`;
+  return (
+    lines.join("\n") +
+    "\n" +
+    `The starter pack makes files discoverable and lets their content reach commercial AI ` +
+    `(Claude); "!" marks a loosening:\n` +
+    packPlanText("Applied", applied) +
+    `(plan ${applied.planHash})\n`
+  );
 }
 
 /** config.json for a solo setup (what is written: the server fills in the defaults). */
@@ -507,6 +633,7 @@ export function soloConfigFile(
   folders: readonly string[],
   owner: string,
   extract: boolean,
+  publicUrl = SOLO_PUBLIC_URL,
 ) {
   const ids = new Set<string>();
   const zones = new Set<string>();
@@ -520,7 +647,7 @@ export function soloConfigFile(
     return { id, connector: "fs" as const, tenantId, root, zone, owner, extract };
   });
   return {
-    auth: { publicUrl: SOLO_PUBLIC_URL, signInLinks: true },
+    auth: { publicUrl, signInLinks: true },
     sources,
     models: {
       providers: [{ id: "claude", kind: "commercial" as const, adapter: "anthropic" as const }],
@@ -560,9 +687,9 @@ function summary(
     ),
     keySet
       ? `  Claude:   ${CLAUDE_KEY_ENV} is set: summaries will run.`
-      : `  Claude:   ${CLAUDE_KEY_ENV} isn't set, and the server won't start without it ` +
-        `(summaries use Claude). Set it to your Anthropic API key, in the environment only, ` +
-        `never in config.json:\n` +
+      : `  Claude:   ${CLAUDE_KEY_ENV} isn't set: the server starts without it, with no ` +
+        `summaries (search still works by keywords). For summaries, set it to your Anthropic ` +
+        `API key, in the environment only, never in config.json, and restart the server:\n` +
         keyHow,
     ``,
     `Next, connect Claude Desktop, then start the server:`,

@@ -56,8 +56,9 @@ it up as a whole.
    `--folder` can be repeated; without it, `%USERPROFILE%\OpenHoard` is made and used. Without
    `--email` you get `owner@solo.openhoard.invalid`, which receives nothing. `--no-extract` indexes
    names and metadata only. It creates the tenant and you (its admin), applies the starter pack,
-   and writes `config.json`: see [what it does](#what-init---solo-does) below. It prints the plan
-   of the starter pack before applying it, every loosening marked `!`.
+   and writes `config.json`: see [what it does](#what-init---solo-does) below. It prints every
+   change the starter pack made, each loosening marked `!`. Write paths out in full: a `~` in
+   quotes isn't your home folder.
 
    Then put the API key in the environment only, never in the file:
 
@@ -66,7 +67,7 @@ it up as a whole.
    # then open a new PowerShell window (and define `oh` again)
    ```
 
-   The server doesn't start without it while Claude is configured.
+   Without it the server still starts, with a warning: no summaries, and search by keywords only.
 
 2. **Connect Claude Desktop:**
 
@@ -74,9 +75,10 @@ it up as a whole.
    oh connect claude-desktop
    ```
 
-   It approves Claude Desktop's bridge for your tenant in `config.json`, adds OpenHoard to
-   `%APPDATA%\Claude\claude_desktop_config.json` (keeping your other servers, and the previous
-   file as `.bak`), and prints a one-time sign-in link, good for one sign-in within the hour.
+   It adds OpenHoard to `%APPDATA%\Claude\claude_desktop_config.json` (keeping your other servers,
+   and the file as it first was as `.bak`), approves Claude Desktop's bridge for your tenant in
+   `config.json` (audited), and prints a one-time sign-in link, good for one sign-in within the
+   hour. If a step fails, both files are put back as they were.
 
 3. **Start the server**, then finish in the browser and in Claude Desktop:
 
@@ -106,7 +108,9 @@ session lasts 12 hours unused, 7 days at most; after that, stop the server and g
 ### What `init --solo` does
 
 - It refuses if `config.json` exists in the data directory: add folders by hand (below), or use
-  another `--data-dir` for a fresh start.
+  another `--data-dir` for a fresh start. It uses the embedded database only (it refuses
+  `OPENHOARD_DATABASE_URL`), and the port and host the server will use (`OPENHOARD_PORT`,
+  `OPENHOARD_HOST`; 7420 on 127.0.0.1 by default).
 - In one database transaction: the tenant (named after you), you (a local person), your admin
   role, and the starter pack (`packs\general-business`). A new tenant is fail-closed (hidden,
   metadata-only): the pack makes untagged files `discoverable` and `commercial-only` (content may
@@ -114,8 +118,8 @@ session lasts 12 hours unused, 7 days at most; after that, stop the server and g
   Running the command is your consent to it.
 - Then `config.json`, the same file the manual setup below writes, with one source per folder
   (`fs-<folder name>`, its zone the folder's name, you its owner) and Claude with a daily budget of
-  2,000,000 tokens. It is written last, and loaded as the server loads it before the command
-  succeeds.
+  2,000,000 tokens. It is written last, never over a file made meanwhile, and loaded as the
+  server loads it before the command succeeds.
 - If it fails after the database work (it says so, with the tenant id), fix the cause and run the
   same command again: it picks up that tenant when it can tell it is the one it made (the only
   one, with your name, and nobody else in it). Otherwise it refuses, and you use the manual

@@ -1,4 +1,15 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAudit } from "@openhoard/core-audit";
@@ -179,7 +190,9 @@ describe(
       expect(replaced.code, replaced.err).toBe(0);
       expect(replaced.err).toContain(`Replaced the "openhoard" server`);
       expect(readJson(claudeFile).mcpServers.openhoard?.command).toBe("npx");
-      expect(readJson(`${claudeFile}.bak`).mcpServers.openhoard?.command).toBe("old");
+      // The first backup stays: the original, never a later, already-merged file.
+      expect(replaced.err).toContain("(the first backup) is kept as it was");
+      expect(readJson(`${claudeFile}.bak`)).toEqual(before);
 
       // The links were audited as the admin command's are, without the token.
       const events = await (async () => {
@@ -199,6 +212,95 @@ describe(
       expect(events.match(/"sign-in-link\.issue"/g)).toHaveLength(3);
       expect(events).toContain('"actor":"system:admin-cli"');
       expect(events).not.toContain(res.out.trim().split("token=")[1]);
+      // The approval, once (the runs after found it there).
+      expect(events.match(/"oauth-client\.approve"/g)).toHaveLength(1);
+      expect(events).toContain('"trust":"commercial"');
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "writes through a linked Claude config, keeping its mode",
+      async () => {
+        await initSolo();
+        mkdirSync(join(root, "claude"));
+        const real = join(root, "dotfiles.json");
+        const secret = { mcpServers: { gh: { command: "gh", env: { GITHUB_TOKEN: "ghp_x" } } } };
+        writeFileSync(real, JSON.stringify(secret), { mode: 0o600 });
+        chmodSync(real, 0o600);
+        symlinkSync(real, claudeFile);
+        const res = await connect("--claude-config", claudeFile);
+        expect(res.code, res.err).toBe(0);
+        expect(lstatSync(claudeFile).isSymbolicLink()).toBe(true);
+        expect(statSync(real).mode & 0o777).toBe(0o600);
+        expect(readJson(real).mcpServers.gh).toEqual(secret.mcpServers.gh);
+        expect(readJson(real).mcpServers.openhoard?.command).toBe("npx");
+        expect(statSync(`${claudeFile}.bak`).mode & 0o777).toBe(0o600);
+      },
+    );
+
+    it("writes a new Claude config owner-only", async () => {
+      await initSolo();
+      expect((await connect("--claude-config", claudeFile)).code).toBe(0);
+      if (process.platform !== "win32") expect(statSync(claudeFile).mode & 0o777).toBe(0o600);
+    });
+
+    it("reads both configs through a byte order mark", async () => {
+      await initSolo();
+      const bom = String.fromCharCode(0xfeff);
+      const ours = join(dir, "config.json");
+      writeFileSync(ours, bom + readFileSync(ours, "utf8"));
+      mkdirSync(join(root, "claude"));
+      writeFileSync(claudeFile, bom + JSON.stringify({ mcpServers: { other: { command: "o" } } }));
+      expect(loadConfig({ OPENHOARD_DATA_DIR: dir }).sources).toHaveLength(1);
+      const res = await connect("--claude-config", claudeFile);
+      expect(res.code, res.err).toBe(0);
+      expect(Object.keys(readJson(claudeFile).mcpServers)).toEqual(["other", "openhoard"]);
+    });
+
+    it("refuses an approval of the same redirect with another trust, changing nothing", async () => {
+      const tenantId = await initSolo();
+      const ours = join(dir, "config.json");
+      const config = readJson(ours) as unknown as Record<string, Record<string, unknown>>;
+      (config.auth as Record<string, unknown>).clients = [
+        { tenantId, redirectUris: [MCP_REMOTE_REDIRECT], trust: "local" },
+      ];
+      writeFileSync(ours, JSON.stringify(config));
+      const before = readFileSync(ours, "utf8");
+      const res = await connect("--claude-config", claudeFile);
+      expect(res.code).toBe(1);
+      expect(res.err).toContain(`trust "local", not "commercial"`);
+      expect(readFileSync(ours, "utf8")).toBe(before);
+      expect(existsSync(claudeFile)).toBe(false);
+      expect(res.out).toBe("");
+    });
+
+    it("puts both files back when a later step fails", async () => {
+      const tenantId = await initSolo();
+      mkdirSync(join(root, "claude"));
+      const claudeBefore = JSON.stringify({ mcpServers: { other: { command: "o" } } });
+      writeFileSync(claudeFile, claudeBefore);
+      const oursBefore = readFileSync(join(dir, "config.json"), "utf8");
+      // The link can't be issued: the owner the folders name doesn't exist.
+      const res = await connect("--claude-config", claudeFile, "--user", "nobody@example.com");
+      expect(res.code).toBe(1);
+      expect(res.err).toContain("Nothing was changed");
+      expect(res.out).toBe("");
+      expect(readFileSync(claudeFile, "utf8")).toBe(claudeBefore);
+      expect(existsSync(`${claudeFile}.bak`)).toBe(false);
+      expect(readFileSync(join(dir, "config.json"), "utf8")).toBe(oursBefore);
+      // Not audited as approved.
+      const db = shared ?? (await openDatabase({ url: "pglite", dataDir: dir }));
+      try {
+        const lines: string[] = [];
+        await exportAudit(db, tenantId, {}, "ndjson", (s: string) => void lines.push(s));
+        expect(lines.join("")).not.toContain("oauth-client.approve");
+      } finally {
+        if (!shared) await db.close();
+      }
+      // With no Claude config before, none is left after.
+      rmSync(claudeFile);
+      const fresh = await connect("--claude-config", claudeFile, "--user", "nobody@example.com");
+      expect(fresh.code).toBe(1);
+      expect(existsSync(claudeFile)).toBe(false);
     });
 
     it("writes a new Claude config where there is none", async () => {
