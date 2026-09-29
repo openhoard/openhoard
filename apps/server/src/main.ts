@@ -9,19 +9,27 @@ import { closeApp, createApp } from "./app.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { createServerModels, modelsStartupWarning } from "./models.js";
+import { runInit, soloArgument } from "./solo.js";
 import { prepareSources, type ServerSources } from "./sources.js";
 import { blobsIn, tenantKeyStore } from "./tenant-keys.js";
 import { watchSources } from "./watch.js";
 
 // `main.js [options] admin …` runs an admin command (admin.ts) instead of the server, then exits.
 // `admin` is the first argument that isn't an option (`--data-dir x admin …` is admin too).
+// `init --solo` (solo.ts) is dispatched the same way.
 const adminAt = adminArgument(process.argv.slice(2));
-if (adminAt !== undefined) {
+const solo = soloArgument(process.argv.slice(2));
+if (adminAt !== undefined || solo !== undefined) {
   const args = process.argv.slice(2);
-  const code = await runAdmin([...args.slice(0, adminAt), ...args.slice(adminAt + 1)], {
-    out: (s) => void process.stdout.write(s),
-    err: (s) => void process.stderr.write(s),
-  });
+  const at = adminAt ?? (solo as { at: number }).at;
+  const rest = [...args.slice(0, at), ...args.slice(at + 1)];
+  const io = {
+    out: (s: string) => void process.stdout.write(s),
+    err: (s: string) => void process.stderr.write(s),
+    // How to run this again, for the next commands printed.
+    command: `node "${process.argv[1] ?? "main.js"}"`,
+  };
+  const code = adminAt !== undefined ? await runAdmin(rest, io) : await runInit(rest, io);
   // Let what was written (the one-time token) reach a pipe before exiting: on Windows pipes
   // are asynchronous, and exit() would cut it off.
   await Promise.all(

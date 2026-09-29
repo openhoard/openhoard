@@ -714,6 +714,43 @@ node apps/server/dist/main.js admin source accept-identity --tenant ten_… --so
   locking or unlocking someone (refusals too) are audited as `system:admin-cli`; a lock's record
   says what it ended.
 
+## One person on one machine: `init --solo` (T-1201)
+
+For a single person trying OpenHoard on their own folders (docs/dogfood.md), the entry point
+sets everything up in one command, dispatched like `admin` (options may come before it):
+
+```sh
+node apps/server/dist/main.js init --solo [--folder <path>]… [--name <display name>] \
+  [--email <email>] [--no-extract] [--data-dir <dir>]
+```
+
+- **What it makes**, in one database transaction: a tenant named after the person, the person (a
+  local member, `--name` or the OS user name), their admin role, and the starter pack
+  (`packs/general-business`, found beside the server). The pack's plan is printed, every
+  loosening marked `!`, and applied at once: running the command is the consent. Then it writes
+  `<dataDir>/config.json` (atomically, owner-only where the OS has modes): `publicUrl`
+  `http://127.0.0.1:7420`, `signInLinks`, one `fs` source per `--folder` (ids `fs-<folder name>`,
+  made unique; zone the folder's name; owner the person; `extract` unless `--no-extract`), and
+  Claude (`anthropic`, commercial) for summaries with a daily budget of 2,000,000 tokens. The file
+  is loaded as the server loads it before the command succeeds. All of it is audited as
+  `system:admin-cli` (`tenant.create`, `user.create`, `admin.grant`, `pack.apply`).
+- **Defaults.** `--folder`: `<home>/OpenHoard`, made if missing. `--email`:
+  `owner@solo.openhoard.invalid`, under the reserved `.invalid` top-level domain (RFC 2606): it
+  receives nothing, and core/identity accepts it. The data directory, without `--data-dir` or
+  `OPENHOARD_DATA_DIR`: the OS's app-data folder (`%LOCALAPPDATA%\OpenHoard`,
+  `~/Library/Application Support/OpenHoard`, `$XDG_DATA_HOME/openhoard` or
+  `~/.local/share/openhoard`), never inside a folder it indexes. That default is only the solo
+  commands'; the server itself still defaults to `.openhoard` in its working directory, so pass
+  the same `--data-dir` when starting it (the commands it prints do).
+- **Once only.** It refuses when `config.json` exists (add folders to `sources` by hand, or use
+  another data directory), and while the server holds the embedded database, as admin commands
+  do. The database work is all or nothing and `config.json` is written last. If writing it fails,
+  running the same command again picks the tenant up, but only when that is unambiguous: the
+  database holds that one tenant, with the same name and nobody but that person. Anything else
+  is refused, with what to do: the manual setup, or another data directory.
+- **The API key** stays in the environment (`OPENHOARD_MODEL_CLAUDE_API_KEY`): the command says
+  whether it is set, and how to set it on this OS, and never asks for it.
+
 ## Testing with a new Entra tenant (T-102 and T-103 together)
 
 Entra's provisioning service calls the Tenant URL from Microsoft's cloud, so it must be public

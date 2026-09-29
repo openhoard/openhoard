@@ -17,6 +17,7 @@ import {
   newId,
   openDatabase,
   type Database,
+  type Tx,
 } from "@openhoard/core-db";
 import {
   createUser,
@@ -270,28 +271,8 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     return 1;
   }
 
-  let db: Database;
-  try {
-    if (io.open) db = await io.open(config);
-    else {
-      ensureDataDir(config.dataDir);
-      db = await openDatabase({ url: config.database.url, dataDir: config.dataDir });
-    }
-  } catch (e) {
-    const message = (e as Error).message;
-    if (/already open|locked by another process/.test(message)) {
-      io.err(
-        `The embedded database in ${config.dataDir} is in use, most likely by the running ` +
-          `OpenHoard server: only one process may open it at a time. Stop the server, run this ` +
-          `command, then start the server again. (With PostgreSQL, admin commands run beside ` +
-          `the server.)\n`,
-      );
-    } else {
-      // Never the URL: it may hold a password.
-      io.err(`cannot open the database: ${message}\n`);
-    }
-    return 1;
-  }
+  const db = await openAdminDatabase(config, io);
+  if (db === null) return 1;
 
   try {
     switch (command) {
@@ -382,6 +363,33 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     return 1;
   } finally {
     await db.close();
+  }
+}
+
+/**
+ * Opens the configured database for a command run beside (or instead of) the server; null, with
+ * the reason said, when it can't: on the embedded database, most likely because the server holds
+ * it. Also used by `init --solo` and `connect` (solo.ts, connect.ts).
+ */
+export async function openAdminDatabase(config: Config, io: AdminIo): Promise<Database | null> {
+  try {
+    if (io.open) return await io.open(config);
+    ensureDataDir(config.dataDir);
+    return await openDatabase({ url: config.database.url, dataDir: config.dataDir });
+  } catch (e) {
+    const message = (e as Error).message;
+    if (/already open|locked by another process/.test(message)) {
+      io.err(
+        `The embedded database in ${config.dataDir} is in use, most likely by the running ` +
+          `OpenHoard server: only one process may open it at a time. Stop the server, run this ` +
+          `command, then start the server again. (With PostgreSQL, admin commands run beside ` +
+          `the server.)\n`,
+      );
+    } else {
+      // Never the URL: it may hold a password.
+      io.err(`cannot open the database: ${message}\n`);
+    }
+    return null;
   }
 }
 
@@ -898,7 +906,7 @@ function reconcileText(s: SourceSyncState): string {
 }
 
 /** One line per change a pack plan makes, `!` before a loosening. */
-function changeText(c: PackChange): string {
+export function changeText(c: PackChange): string {
   const mark = "loosens" in c && c.loosens ? "! " : "  ";
   const what =
     c.kind === "set-defaults"
@@ -911,6 +919,47 @@ function changeText(c: PackChange): string {
             ? `${c.added.length} added, ${c.removed.length} removed`
             : "";
   return `${mark}${c.kind} ${what}`.trimEnd();
+}
+
+/**
+ * A pack plan for the person: its changes (`!` before a loosening), warnings and tests, under
+ * `heading` ("Plan", "Applied").
+ */
+export function packPlanText(heading: string, plan: PackPlan): string {
+  const lines = [
+    `${heading}: pack ${plan.name} ${plan.version}` +
+      (plan.previous === null ? "" : ` (now ${plan.previous})`),
+    ...plan.changes.map(changeText),
+    ...plan.warnings.map((w) => `warning: ${w}`),
+    ...plan.tests.map((t) => `test ${t.passed ? "passed" : "FAILED"}: ${t.name}`),
+  ];
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * Applies exactly the plan `planHash` names, audited `pack.apply` as `system:admin-cli`, in the
+ * caller's transaction (APPLY_TRANSACTION). Also used by `init --solo` (solo.ts).
+ */
+export async function applyPackAudited(
+  tx: Tx,
+  tenantId: string,
+  pack: unknown,
+  planHash: string,
+): Promise<PackPlan> {
+  const applied = await applyPack(tx, tenantId, pack, { planHash, by: ADMIN_ACTOR });
+  await appendAudit(tx, tenantId, {
+    actor: ADMIN_ACTOR,
+    action: "pack.apply",
+    decision: "allow",
+    detail: {
+      pack: applied.name,
+      version: applied.version,
+      ...(applied.previous === null ? {} : { previous: applied.previous }),
+      planHash: applied.planHash,
+      loosening: applied.changes.filter((c) => "loosens" in c && c.loosens).length,
+    },
+  });
+  return applied;
 }
 
 /** `pack plan` and `pack apply`: see the header. */
@@ -947,25 +996,7 @@ async function packCommand(
         : await retrying(() =>
             db.withTenant(
               tenantId,
-              async (tx) => {
-                const applied = await applyPack(tx, tenantId, pack, {
-                  planHash: planHash as string,
-                  by: ADMIN_ACTOR,
-                });
-                await appendAudit(tx, tenantId, {
-                  actor: ADMIN_ACTOR,
-                  action: "pack.apply",
-                  decision: "allow",
-                  detail: {
-                    pack: applied.name,
-                    version: applied.version,
-                    ...(applied.previous === null ? {} : { previous: applied.previous }),
-                    planHash: applied.planHash,
-                    loosening: applied.changes.filter((c) => "loosens" in c && c.loosens).length,
-                  },
-                });
-                return applied;
-              },
+              (tx) => applyPackAudited(tx, tenantId, pack, planHash as string),
               APPLY_TRANSACTION,
             ),
           );
@@ -984,14 +1015,7 @@ async function packCommand(
     io.err(`${e.message}\n`);
     return 1;
   }
-  const lines = [
-    `${step === "plan" ? "Plan" : "Applied"}: pack ${plan.name} ${plan.version}` +
-      (plan.previous === null ? "" : ` (now ${plan.previous})`),
-    ...plan.changes.map(changeText),
-    ...plan.warnings.map((w) => `warning: ${w}`),
-    ...plan.tests.map((t) => `test ${t.passed ? "passed" : "FAILED"}: ${t.name}`),
-  ];
-  io.err(lines.join("\n") + "\n");
+  io.err(packPlanText(step === "plan" ? "Plan" : "Applied", plan));
   io.out(`${plan.planHash}\n`);
   if (step === "plan") {
     io.err(
@@ -1203,8 +1227,11 @@ async function userCreate(
   return 0;
 }
 
-/** `user sign-in-link`: a one-time link to sign in with, printed once (audited). */
-async function signInLink(
+/**
+ * `user sign-in-link`: a one-time link to sign in with, printed once (audited). Also how
+ * `connect claude-desktop` (connect.ts) issues one.
+ */
+export async function signInLink(
   db: Database,
   config: Config,
   values: { tenant?: string; user?: string; minutes?: string },
