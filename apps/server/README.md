@@ -723,7 +723,7 @@ sets everything up in one command, dispatched like `admin` (options may come bef
 
 ```sh
 node apps/server/dist/main.js init --solo [--folder <path>]… [--name <display name>] \
-  [--email <email>] [--no-extract] [--data-dir <dir>]
+  [--email <email>] [--no-extract] [--no-pin] [--data-dir <dir>]
 ```
 
 - **What it makes**, in one database transaction: a tenant named after the person, the person (a
@@ -747,6 +747,11 @@ node apps/server/dist/main.js init --solo [--folder <path>]… [--name <display 
   `~/.local/share/openhoard`), never inside a folder it indexes. That default is only the solo
   commands'; the server itself still defaults to `.openhoard` in its working directory, so pass
   the same `--data-dir` when starting it (the commands it prints do).
+- **Save dialogs.** Each folder is pinned where Save As dialogs list it (T-1204), unless
+  `--no-pin`: Quick Access on Windows (the Shell's own "Pin to Quick access", skipped when it is
+  there already), a GTK bookmark on Linux (`$XDG_CONFIG_HOME/gtk-3.0/bookmarks`, added once).
+  macOS has no supported way to add to Finder's sidebar, so it says how to drag it there. A
+  failure is printed and never fails the setup.
 - **Once only, embedded database only.** It refuses when `config.json` exists (add folders to
   `sources` by hand, or use another data directory), and while the server holds the embedded
   database, as admin commands do. It refuses `OPENHOARD_DATABASE_URL` naming PostgreSQL: a

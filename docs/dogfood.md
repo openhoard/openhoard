@@ -55,7 +55,9 @@ it up as a whole.
 
    `--folder` can be repeated; without it, `%USERPROFILE%\OpenHoard` is made and used. Without
    `--email` you get `owner@solo.openhoard.invalid`, which receives nothing. `--no-extract` indexes
-   names and metadata only. It creates the tenant and you (its admin), applies the starter pack,
+   names and metadata only. Each folder is pinned to Quick Access, so it shows in every app's
+   Save As dialog: save a file there and Claude can find it seconds later (`--no-pin` skips
+   this; unpin it in Explorer like any folder). It creates the tenant and you (its admin), applies the starter pack,
    and writes `config.json`: see [what it does](#what-init---solo-does) below. It prints every
    change the starter pack made, each loosening marked `!`. Write paths out in full: a `~` in
    quotes isn't your home folder.

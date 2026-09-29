@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { exportAudit } from "@openhoard/core-audit";
 import { openDatabase, type Database } from "@openhoard/core-db";
 import { openTestDatabase, TEST_POSTGRES_ENV } from "@openhoard/core-db/testing";
@@ -67,6 +68,8 @@ function io(extra: Partial<SoloIo> = {}) {
     username: "steve",
     platform: "linux",
     cwd: root,
+    // Never PowerShell from a test (the win32 cases): pinning fails, and says so.
+    run: async () => 1,
     out: (s) => void (seen.out += s),
     err: (s) => void (seen.err += s),
     ...(shared
@@ -230,6 +233,26 @@ function readdirNames(dir: string): string[] {
 
 // Several cold PGlite starts per test: the Windows runners need far more than the suite's 30 s.
 describe("init --solo", { timeout: process.platform === "win32" ? 600_000 : 180_000 }, () => {
+  it.skipIf(postgres)(
+    "pins its folder where Save dialogs show it, unless told not to",
+    async () => {
+      const bookmarks = join(home, ".config", "gtk-3.0", "bookmarks");
+      const pinned = await init();
+      expect(pinned.code).toBe(0);
+      expect(readFileSync(bookmarks, "utf8")).toBe(
+        `${pathToFileURL(join(home, "OpenHoard")).href} OpenHoard\n`,
+      );
+      expect(pinned.err).toContain("saving:   bookmarked");
+
+      rmSync(bookmarks);
+      dir = join(root, "data2");
+      const unpinned = await init("--no-pin", "--folder", join(home, "OpenHoard"));
+      expect(unpinned.code).toBe(0);
+      expect(existsSync(bookmarks)).toBe(false);
+      expect(unpinned.err).not.toContain("saving:");
+    },
+  );
+
   it("creates the tenant, the person, their admin role, the pack and a config that loads", async () => {
     const res = await init("--name", "Steve Cook");
     expect(res.code, res.err).toBe(0);

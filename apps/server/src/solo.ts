@@ -33,6 +33,7 @@ import {
   type AdminIo,
 } from "./admin.js";
 import { ConfigSchema, loadConfig } from "./config.js";
+import { pinFolder, type Run } from "./pin.js";
 import { retrying } from "./retry.js";
 
 /*
@@ -90,6 +91,8 @@ export interface SoloIo extends AdminIo {
   username?: string;
   /** How the person runs this entry point, for the next commands printed (`node …/main.js`). */
   command?: string;
+  /** Runs the program that pins a folder (pin.ts; tests). */
+  run?: Run;
 }
 
 /**
@@ -269,6 +272,8 @@ const USAGE = `usage: openhoard init --solo [options]
   --name <display name>  your name (default: your OS user name)
   --email <email>        your email (default: ${PLACEHOLDER_EMAIL}, which receives nothing)
   --no-extract           index names and metadata only: no text, no summaries
+  --no-pin               don't pin the folders where Save dialogs show them (Quick Access on
+                         Windows, a GTK bookmark on Linux)
   --data-dir <dir>       where OpenHoard keeps its data (default: the OS's app-data folder;
                          OPENHOARD_DATA_DIR also sets it)
 `;
@@ -288,6 +293,7 @@ export async function runInit(argv: readonly string[], io: SoloIo): Promise<numb
         name: { type: "string" },
         email: { type: "string" },
         extract: { type: "boolean", default: true },
+        pin: { type: "boolean", default: true },
         "data-dir": { type: "string" },
         help: { type: "boolean", short: "h" },
       },
@@ -502,8 +508,23 @@ export async function runInit(argv: readonly string[], io: SoloIo): Promise<numb
       return 1;
     }
 
+    // Where Save dialogs show them (T-1204): a convenience, never a reason to fail.
+    const pinned: string[] = [];
+    if (values.pin) {
+      for (const folder of folders) {
+        const result = await pinFolder(folder, {
+          platform,
+          home,
+          env,
+          ...(io.run === undefined ? {} : { run: io.run }),
+        });
+        pinned.push(result.note);
+      }
+    }
     io.out(`${tenantId}\n`);
-    io.err(summary(io, { dataDir, tenantId, name, email, folders: file.sources, platform, env }));
+    io.err(
+      summary(io, { dataDir, tenantId, name, email, folders: file.sources, platform, env, pinned }),
+    );
     return 0;
   } catch (e) {
     io.err(`${(e as Error).message}\n`);
@@ -666,6 +687,7 @@ function summary(
     folders: readonly { id: string; root: string; zone: string; extract: boolean }[];
     platform: NodeJS.Platform;
     env: NodeJS.ProcessEnv;
+    pinned: readonly string[];
   },
 ): string {
   const keySet = Boolean(s.env[CLAUDE_KEY_ENV]);
@@ -685,6 +707,7 @@ function summary(
       (f) =>
         `  folder:   ${f.root} (source ${f.id}, zone "${f.zone}"${f.extract ? "" : ", names and metadata only"})`,
     ),
+    ...s.pinned.map((note) => `  saving:   ${note}`),
     keySet
       ? `  Claude:   ${CLAUDE_KEY_ENV} is set: summaries will run.`
       : `  Claude:   ${CLAUDE_KEY_ENV} isn't set: the server starts without it, with no ` +
