@@ -32,7 +32,7 @@ import {
   packPlanText,
   type AdminIo,
 } from "./admin.js";
-import { ConfigSchema, loadConfig } from "./config.js";
+import { ConfigSchema, ensureDataDir, loadConfig } from "./config.js";
 import { pinFolder, type Run } from "./pin.js";
 import { retrying } from "./retry.js";
 
@@ -415,6 +415,14 @@ export async function runInit(argv: readonly string[], io: SoloIo): Promise<numb
   const publicUrl = soloPublicUrl(config.host, config.port);
   if (publicUrl === null) {
     io.err(`OPENHOARD_PORT is 0: a sign-in link needs a fixed port. Set another, or unset it.\n`);
+    return 1;
+  }
+  // config.json goes into the data directory: made here (owner-only), not left to however the
+  // database is opened (an injected or external one makes no directory).
+  try {
+    ensureDataDir(dataDir);
+  } catch (e) {
+    io.err(`cannot make the data directory ${dataDir}: ${(e as Error).message}\n`);
     return 1;
   }
   const db = await openAdminDatabase(config, io);

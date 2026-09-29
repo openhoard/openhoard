@@ -441,6 +441,23 @@ describe("init --solo", { timeout: process.platform === "win32" ? 600_000 : 180_
     expect(zero.seen.err).toContain("fixed port");
   });
 
+  // The CI postgres job's failure: an injected database (the shared test database there) makes
+  // no data directory, so config.json had nowhere to go.
+  it("makes the data directory itself, whatever opens the database", async () => {
+    const db = shared ?? (await openTestDatabase());
+    try {
+      const { io: value, seen } = io({
+        open: async () => ({ ...db, close: async () => {} }),
+      });
+      expect(existsSync(dir)).toBe(false);
+      expect(await runInit(["--solo", "--data-dir", dir, "--no-pin"], value), seen.err).toBe(0);
+      expect(existsSync(join(dir, "config.json"))).toBe(true);
+      if (process.platform !== "win32") expect(statSync(dir).mode & 0o777).toBe(0o700);
+    } finally {
+      if (!shared) await db.close();
+    }
+  });
+
   it("never overwrites a config.json that appeared while it ran", async () => {
     // Made between the check at the start and the write at the end (by another init, say).
     const { io: value, seen } = io({
