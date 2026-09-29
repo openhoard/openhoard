@@ -11,6 +11,7 @@ import { createLogger } from "./logger.js";
 import { createServerModels, modelsStartupWarning } from "./models.js";
 import { prepareSources, type ServerSources } from "./sources.js";
 import { blobsIn, tenantKeyStore } from "./tenant-keys.js";
+import { watchSources } from "./watch.js";
 
 // `main.js [options] admin …` runs an admin command (admin.ts) instead of the server, then exits.
 // `admin` is the first argument that isn't an option (`--data-dir x admin …` is admin too).
@@ -119,6 +120,15 @@ sources.onStale((tenantId, source) => {
     .requestSync(tenantId, source)
     .catch((err: unknown) => log.warn({ err, tenantId, source }, "could not request a sync"));
 });
+// A file saved into a folder: sync its source within seconds, not at its next schedule (T-1203).
+// Only on a worker, which runs the syncs: any node could request one, but one set of watchers
+// per cluster is enough, and a serving-only node needn't hold the folders open.
+const watching = config.jobs.worker
+  ? watchSources(config.sources, {
+      request: (tenantId, source) => jobs.requestSync(tenantId, source),
+      log: log.child({ component: "watch" }),
+    })
+  : null;
 
 // The MCP `find` tool embeds queries with the same providers (local ones only, by default).
 const app = createApp(config, log, {
@@ -153,8 +163,9 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     }, SHUTDOWN_TIMEOUT_MS).unref();
     const closed = new Promise<void>((resolve) => server.close(() => resolve()));
     if ("closeIdleConnections" in server) server.closeIdleConnections();
-    const stopped = jobs
-      .stop({ timeoutMs: JOBS_STOP_TIMEOUT_MS, graceMs: JOBS_GRACE_MS })
+    // The watchers first: no sync is requested of a queue that is stopping.
+    const stopped = (watching?.close() ?? Promise.resolve())
+      .then(() => jobs.stop({ timeoutMs: JOBS_STOP_TIMEOUT_MS, graceMs: JOBS_GRACE_MS }))
       .catch((err: unknown) => log.error({ err }, "stopping the job queue failed"));
     void Promise.all([closed, stopped])
       // What the app still holds for the database (SCIM's audit summaries), then the database.

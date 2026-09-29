@@ -6,8 +6,9 @@ server listens on `127.0.0.1` only, and you sign in with one-time links instead 
 links work only when the server is reached directly on `127.0.0.1`: never through a tunnel or a
 proxy, which the server refuses for them.
 
-What you get: each folder is synced every 15 minutes; its files' text is extracted, summarized by
-Claude Haiku and made searchable; Claude finds, describes and opens them through OpenHoard's MCP
+What you get: each folder is synced within seconds of a file being saved into it (and every 15
+minutes anyway, to catch what watching missed); its files' text is extracted, summarized by Claude
+Haiku and made searchable; Claude finds, describes and opens them through OpenHoard's MCP
 tools, as you, and every AI read is audited.
 
 ## What you need
@@ -98,8 +99,11 @@ whole.
    }
    ```
 
-   - `sources`: one entry per folder. `schedule` (cron, UTC) defaults to every 15 minutes; the fs
-     connector compares the whole folder each time, so deletions are seen too. `extract: true`
+   - `sources`: one entry per folder. The server watches each folder and syncs it a few seconds
+     after something in it changes (`"watch": false` turns that off). `schedule` (cron, UTC) still
+     syncs it every 15 minutes by default, as a safety net: changes on a mapped network drive,
+     or made while the server was stopped, aren't always seen by watching. The fs connector
+     compares the whole folder each time, so deletions are seen too. `extract: true`
      lets the server read the files' text (without it, names and metadata only). The owner owns,
      and so reads, everything synced; nobody else does.
    - `models`: the `anthropic` adapter defaults to Claude Haiku (`claude-haiku-4-5`).

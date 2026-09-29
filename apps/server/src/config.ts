@@ -364,6 +364,12 @@ export const SourceSchema = z
       .regex(CRON, "a cron expression with five fields")
       .default("*/15 * * * *"),
     /**
+     * Also sync soon (seconds) after something in the folder changes, not only on `schedule`
+     * (watch.ts, on a worker only). Default true. The schedule stays the safety net: changes on
+     * network drives, or while nothing watched, are seen at its next run.
+     */
+    watch: z.boolean().default(true),
+    /**
      * Read its files' content on this server for text extraction, summaries and embeddings (as
      * far as each file's exposure lets content reach a model). Default false: names and
      * metadata only.
