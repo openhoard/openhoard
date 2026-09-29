@@ -6,6 +6,7 @@ import { startJobs, type Jobs } from "@openhoard/core-jobs";
 import { BlobStore, blobContentSource } from "@openhoard/core-storage";
 import { adminArgument, runAdmin } from "./admin.js";
 import { closeApp, createApp } from "./app.js";
+import { runConnect } from "./connect.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { createServerModels, modelsStartupWarning } from "./models.js";
@@ -16,7 +17,7 @@ import { watchSources } from "./watch.js";
 
 // `main.js [options] admin …` runs an admin command (admin.ts) instead of the server, then exits.
 // `admin` is the first argument that isn't an option (`--data-dir x admin …` is admin too).
-// `init --solo` (solo.ts) is dispatched the same way.
+// `init --solo` (solo.ts) and `connect claude-desktop` (connect.ts) are dispatched the same way.
 const adminAt = adminArgument(process.argv.slice(2));
 const solo = soloArgument(process.argv.slice(2));
 if (adminAt !== undefined || solo !== undefined) {
@@ -29,7 +30,12 @@ if (adminAt !== undefined || solo !== undefined) {
     // How to run this again, for the next commands printed.
     command: `node "${process.argv[1] ?? "main.js"}"`,
   };
-  const code = adminAt !== undefined ? await runAdmin(rest, io) : await runInit(rest, io);
+  const code =
+    adminAt !== undefined
+      ? await runAdmin(rest, io)
+      : solo?.command === "connect"
+        ? await runConnect(rest, io)
+        : await runInit(rest, io);
   // Let what was written (the one-time token) reach a pipe before exiting: on Windows pipes
   // are asynchronous, and exit() would cut it off.
   await Promise.all(

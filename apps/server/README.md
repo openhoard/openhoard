@@ -749,7 +749,37 @@ node apps/server/dist/main.js init --solo [--folder <path>]… [--name <display 
   database holds that one tenant, with the same name and nobody but that person. Anything else
   is refused, with what to do: the manual setup, or another data directory.
 - **The API key** stays in the environment (`OPENHOARD_MODEL_CLAUDE_API_KEY`): the command says
-  whether it is set, and how to set it on this OS, and never asks for it.
+  whether it is set, and how to set it on this OS, and never asks for it. The server refuses to
+  start with the `claude` provider and no key.
+
+### Claude Desktop: `connect claude-desktop` (T-1202)
+
+```sh
+node apps/server/dist/main.js connect claude-desktop [--tenant ten_…] [--user <usr_… | email>] \
+  [--claude-config <file>] [--data-dir <dir>]
+```
+
+After `init --solo` (it needs `config.json` with `auth.signInLinks`, and the same data directory
+default), with the server stopped as for admin commands:
+
+1. **Approves the client** in `config.json`: an `auth.clients` entry for the tenant with
+   `redirectUris: ["http://127.0.0.1/oauth/callback"]` (mcp-remote's), trust `commercial`, unless
+   one is there already. The rest of the file is kept, and it is loaded again before going on (put
+   back as it was if that fails). The tenant is the one `sources` names, or `--tenant`.
+2. **Adds `openhoard` to Claude Desktop's config** (`%APPDATA%\Claude\claude_desktop_config.json`,
+   `~/Library/Application Support/Claude/claude_desktop_config.json`; Linux has no official Claude
+   Desktop, so there `--claude-config` is required), running mcp-remote with the arguments
+   docs/dogfood.md gives. Other keys and servers are kept, and the previous file is kept as
+   `.bak`. A file that isn't a JSON object is refused and left alone; an `openhoard` entry that
+   runs something else is replaced, and it says so.
+3. **Issues a one-time sign-in link** (60 minutes) for the folders' owner (or `--user`), on
+   standard output, audited `sign-in-link.issue` as `user sign-in-link` is.
+
+It then prints what is left: start the server, open the link and press Sign in, restart Claude
+Desktop, press Allow on the consent page. Approving `http://127.0.0.1/oauth/callback` trusts
+every program on the machine (MCP clients, above): any local program can register the same way
+and, once Allowed, read the person's files as them. Running it again changes nothing already
+right and issues a new link.
 
 ## Testing with a new Entra tenant (T-102 and T-103 together)
 

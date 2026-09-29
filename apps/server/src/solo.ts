@@ -560,8 +560,9 @@ function summary(
     ),
     keySet
       ? `  Claude:   ${CLAUDE_KEY_ENV} is set: summaries will run.`
-      : `  Claude:   ${CLAUDE_KEY_ENV} isn't set, so no summaries (search still works). Set it ` +
-        `to your Anthropic API key, in the environment only, never in config.json:\n` +
+      : `  Claude:   ${CLAUDE_KEY_ENV} isn't set, and the server won't start without it ` +
+        `(summaries use Claude). Set it to your Anthropic API key, in the environment only, ` +
+        `never in config.json:\n` +
         keyHow,
     ``,
     `Next, connect Claude Desktop, then start the server:`,
@@ -587,5 +588,7 @@ export function soloArgument(
   });
   const first = tokens.find((t) => t.kind === "positional");
   if (first?.kind !== "positional") return undefined;
-  return first.value === "init" ? { command: first.value, at: first.index } : undefined;
+  return first.value === "init" || first.value === "connect"
+    ? { command: first.value, at: first.index }
+    : undefined;
 }
