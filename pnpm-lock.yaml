@@ -294,6 +294,9 @@ importers:
       '@openhoard/testkit':
         specifier: workspace:*
         version: link:../../packages/testkit
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
 
   connectors/fs:
     dependencies:

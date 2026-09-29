@@ -18,7 +18,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
     },
     "name": "whoami",
     "outputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "client": {
@@ -95,7 +95,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
       "taskSupport": "forbidden",
     },
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "cursor": {
           "description": "\`more.cursor\` from the previous answer.",
@@ -165,7 +165,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
     },
     "name": "find",
     "outputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "alternatives": {
@@ -396,7 +396,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
       "taskSupport": "forbidden",
     },
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "actions": {
           "description": "Which of their actions count (default all).",
@@ -478,7 +478,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
     },
     "name": "recent",
     "outputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "files": {
@@ -654,7 +654,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
       "taskSupport": "forbidden",
     },
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "id": {
           "description": "The file's id, from a card.",
@@ -675,7 +675,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
     },
     "name": "describe",
     "outputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "file": {
@@ -826,7 +826,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
       "taskSupport": "forbidden",
     },
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "id": {
           "description": "The file's id, from a card.",
@@ -862,7 +862,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
     },
     "name": "open",
     "outputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "content": {
@@ -1042,7 +1042,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
       "taskSupport": "forbidden",
     },
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "id": {
           "description": "The file's id, from a card.",
@@ -1063,7 +1063,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
     },
     "name": "tag",
     "outputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "id": {
@@ -1107,7 +1107,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
       "taskSupport": "forbidden",
     },
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "properties": {
         "id": {
           "description": "The file's id, from a card.",
@@ -1133,7 +1133,7 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
     },
     "name": "explain",
     "outputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
         "access": {

@@ -1,6 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import {
+  ListToolsRequestSchema,
+  type CallToolResult,
+  type Tool,
+} from "@modelcontextprotocol/sdk/types.js";
 import { appendAudit, type AuditRecord } from "@openhoard/core-audit";
 import {
   ACTIVITY_PAGE,
@@ -364,7 +368,8 @@ function buildServer(deps: McpDeps, ctx: RequestContext): McpServer {
         "asked for.",
     },
   );
-  for (const tool of deps.tools ?? TOOLS) {
+  const tools = deps.tools ?? TOOLS;
+  for (const tool of tools) {
     const run = guarded(deps, tool, ctx);
     const config = {
       title: tool.title,
@@ -381,7 +386,40 @@ function buildServer(deps: McpDeps, ctx: RequestContext): McpServer {
       server.registerTool(tool.name, config, ((extra: Extra) => run({}, extra)) as never);
     }
   }
+  if (tools.length > 0) {
+    // Replaces the SDK's tools/list (registered by the first registerTool above).
+    const listed = toolList(tools);
+    server.server.setRequestHandler(ListToolsRequestSchema, () => ({ tools: listed }));
+  }
   return server;
+}
+
+const EMPTY_INPUT = { type: "object", properties: {} } as const;
+const listCache = new WeakMap<readonly McpTool[], Tool[]>();
+
+/**
+ * tools/list as clients get it, with the schemas in JSON Schema 2020-12. The SDK (1.30) renders
+ * zod shapes as draft-07 and says so in `$schema`, with no option to change it; MCP 2025-11-25
+ * makes 2020-12 the dialect, and strict clients (Claude's) refuse to call a tool whose schema
+ * declares draft-07. Rendered once per tool set.
+ */
+export function toolList(tools: readonly McpTool[]): Tool[] {
+  const cached = listCache.get(tools);
+  if (cached) return cached;
+  const schema = (shape: z.ZodRawShape, io: "input" | "output") =>
+    z.toJSONSchema(z.object(shape), { target: "draft-2020-12", io }) as Tool["inputSchema"];
+  const listed = tools.map((tool): Tool => ({
+    name: tool.name,
+    title: tool.title,
+    description: tool.description,
+    inputSchema: tool.inputSchema ? schema(tool.inputSchema, "input") : EMPTY_INPUT,
+    ...(tool.outputSchema ? { outputSchema: schema(tool.outputSchema, "output") } : {}),
+    ...(tool.annotations ? { annotations: tool.annotations } : {}),
+    // As the SDK says of every tool: no MCP tasks.
+    execution: { taskSupport: "forbidden" },
+  }));
+  listCache.set(tools, listed);
+  return listed;
 }
 
 /**
