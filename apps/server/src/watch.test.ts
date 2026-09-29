@@ -1,10 +1,19 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SourceSchema } from "./config.js";
 import {
   createDebouncer,
+  createFolderTreeWatch,
   defaultWatchFactory,
   isWatchNoise,
   recursiveWatch,
@@ -33,6 +42,8 @@ function fakeWatcher() {
     closed: boolean;
   }[] = [];
   let failNext: unknown = undefined;
+  let nextReady: Promise<void> | undefined;
+  let rootId: string | undefined;
   const factory: WatchFactory = (_root, onEvent, onError) => {
     if (failNext !== undefined) {
       const err = failNext;
@@ -41,11 +52,23 @@ function fakeWatcher() {
     }
     const w = { onEvent, onError, closed: false };
     live.push(w);
-    return { close: () => void (w.closed = true) };
+    const ready = nextReady;
+    nextReady = undefined;
+    const id = rootId;
+    rootId = undefined;
+    return {
+      close: () => void (w.closed = true),
+      ...(ready === undefined ? {} : { ready }),
+      ...(id === undefined ? {} : { rootId: id }),
+    };
   };
   return {
     factory,
     live,
+    /** The next watcher is ready when this settles. */
+    readyWhen: (p: Promise<void>) => void (nextReady = p),
+    /** The next watcher reports this root identity (folderIdentity()). */
+    setRootId: (id: string) => void (rootId = id),
     emit: (p: string | null = "a.txt") => live.at(-1)?.onEvent(p),
     error: (e: unknown) => live.at(-1)?.onError(e),
     failNextStart: (e: unknown) => void (failNext = e),
@@ -66,6 +89,12 @@ describe("isWatchNoise", () => {
     "pics/thumbs.db",
     "desktop.ini",
     "Desktop.ini",
+    ".notes.md.swp",
+    ".notes.md.swx",
+    "4913",
+    "notes.md~",
+    "big.iso.crdownload",
+    "big.iso.part",
   ])("ignores %s", (p) => expect(isWatchNoise(p)).toBe(true));
   it.each([
     "report.docx",
@@ -75,6 +104,8 @@ describe("isWatchNoise", () => {
     "a.tmp/real.txt",
     ".~lock.notes.odt",
     "tmp",
+    "49130",
+    "partial.md",
   ])("keeps %s", (p) => expect(isWatchNoise(p)).toBe(false));
 });
 
@@ -164,9 +195,11 @@ describe("watchSources (fake watcher)", () => {
       { request, log, watcher: w.factory, debounceMs: 2_000, maxWaitMs: 10_000 },
     );
     expect(w.live).toHaveLength(1);
-    expect(log.info).toHaveBeenCalledWith(
-      { source: "fs-docs", tenantId: src().tenantId },
-      "watching the folder",
+    await vi.waitFor(() =>
+      expect(log.info).toHaveBeenCalledWith(
+        { source: "fs-docs", tenantId: src().tenantId },
+        "watching the folder",
+      ),
     );
     w.emit("~$a.docx");
     w.emit(".DS_Store");
@@ -274,9 +307,113 @@ describe("watchSources (fake watcher)", () => {
   });
 });
 
+describe("watchSources (fake watcher, review fixes)", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "oh-watch-"));
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
+  });
+
+  it("a retry whose watcher fails before it is ready neither warns again nor syncs", async () => {
+    const w = fakeWatcher();
+    const request = vi.fn(async () => null);
+    const log = logger();
+    const watching = watchSources([src({ root: dir })], {
+      request,
+      log,
+      watcher: w.factory,
+      debounceMs: 100,
+      retryMs: 60_000,
+    });
+    w.error(Object.assign(new Error("inotify"), { code: "ENOSPC" }));
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    // The retry's walk runs out again, before it is ready.
+    let ready!: () => void;
+    w.readyWhen(new Promise<void>((r) => (ready = r)));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(w.live).toHaveLength(2);
+    w.error(Object.assign(new Error("inotify"), { code: "ENOSPC" }));
+    ready();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(request).not.toHaveBeenCalled();
+    expect(log.info).not.toHaveBeenCalledWith(expect.anything(), "watching the folder again");
+    await watching.close();
+  });
+
+  it("watches a replaced root folder afresh instead of requesting a sync", async () => {
+    const w = fakeWatcher();
+    w.setRootId("an older folder");
+    const request = vi.fn(async () => null);
+    const log = logger();
+    const watching = watchSources([src({ root: dir })], {
+      request,
+      log,
+      watcher: w.factory,
+      debounceMs: 100,
+    });
+    w.emit(null);
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.waitFor(() => expect(w.live).toHaveLength(2));
+    expect(w.live[0]?.closed).toBe(true);
+    expect(log.info).toHaveBeenCalledWith(
+      expect.anything(),
+      "the folder was replaced: watching the new one",
+    );
+    // The new watcher asks for a sync of what the old one missed.
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+    await watching.close();
+  });
+
+  it("close() waits for a request in flight, but not forever", async () => {
+    vi.useRealTimers();
+    const w = fakeWatcher();
+    let resolve!: () => void;
+    const request = vi.fn(() => new Promise<null>((r) => (resolve = () => r(null))));
+    const watching = watchSources([src({ root: dir })], {
+      request,
+      log: logger(),
+      watcher: w.factory,
+      debounceMs: 10,
+      closeWaitMs: 5_000,
+    });
+    w.emit();
+    await vi.waitFor(() => expect(request).toHaveBeenCalled());
+    let closed = false;
+    const closing = watching.close().then(() => (closed = true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(closed).toBe(false);
+    resolve();
+    await closing;
+    expect(closed).toBe(true);
+
+    // A request that never settles: close() gives up after closeWaitMs.
+    const w2 = fakeWatcher();
+    const stuck = watchSources([src({ root: dir })], {
+      request: vi.fn(() => new Promise<null>(() => {})),
+      log: logger(),
+      watcher: w2.factory,
+      debounceMs: 10,
+      closeWaitMs: 100,
+    });
+    w2.emit();
+    await new Promise((r) => setTimeout(r, 100));
+    const started = Date.now();
+    await stuck.close();
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+});
+
 // Real file system: the platform's watcher, as the server runs it. The Windows runner is slow.
 const slow = process.platform === "win32" ? 60_000 : 15_000;
-describe("watchSources (real folders)", { timeout: slow * 2 }, () => {
+const settle = () => new Promise((r) => setTimeout(r, process.platform === "win32" ? 1_000 : 400));
+
+describe("watchSources (real folders)", { timeout: slow * 3 }, () => {
   let base: string;
   beforeEach(() => {
     base = mkdtempSync(join(tmpdir(), "oh-watch-real-"));
@@ -287,35 +424,39 @@ describe("watchSources (real folders)", { timeout: slow * 2 }, () => {
   // Node's own recursive watch too, where it is native.
   if (process.platform !== "linux") cases.push(["recursive", recursiveWatch]);
 
-  it.each(cases)("%s: a saved file requests a sync; a removed folder only warns", async (_n, f) => {
-    const root = join(base, "Docs");
-    mkdirSync(join(root, "a", "b"), { recursive: true });
+  /** Starts watching `root`; `more()` waits for more requests than there are now. */
+  function start(root: string, watcher: WatchFactory = defaultWatchFactory) {
     const request = vi.fn(async () => null);
     const log = logger();
     const watching = watchSources([src({ root })], {
       request,
       log,
-      watcher: f,
+      watcher,
       debounceMs: 200,
       maxWaitMs: 1_000,
     });
+    const more = async (what: () => void) => {
+      await settle();
+      const before = request.mock.calls.length;
+      what();
+      await vi.waitFor(() => expect(request.mock.calls.length).toBeGreaterThan(before), {
+        timeout: slow,
+        interval: 50,
+      });
+    };
+    return { request, log, watching, more };
+  }
+
+  it.each(cases)("%s: a saved file requests a sync; a removed folder only warns", async (_n, f) => {
+    const root = join(base, "Docs");
+    mkdirSync(join(root, "a", "b"), { recursive: true });
+    const { request, log, watching, more } = start(root, f);
     try {
-      // Let the tree's subfolders be watched (asynchronous on Linux).
-      await new Promise((r) => setTimeout(r, 300));
-      writeFileSync(join(root, "a", "b", "new.txt"), "hello");
-      await vi.waitFor(() => expect(request).toHaveBeenCalledWith(src().tenantId, "fs-docs"), {
-        timeout: slow,
-        interval: 50,
-      });
-      // A folder made later is watched too.
-      const calls = request.mock.calls.length;
+      await more(() => writeFileSync(join(root, "a", "b", "new.txt"), "hello"));
+      expect(request).toHaveBeenCalledWith(src().tenantId, "fs-docs");
+      // A folder made later is watched too: once its own event has settled, a file in it.
       mkdirSync(join(root, "later"));
-      await new Promise((r) => setTimeout(r, 500));
-      writeFileSync(join(root, "later", "x.txt"), "x");
-      await vi.waitFor(() => expect(request.mock.calls.length).toBeGreaterThan(calls), {
-        timeout: slow,
-        interval: 50,
-      });
+      await more(() => writeFileSync(join(root, "later", "x.txt"), "x"));
 
       rmSync(root, { recursive: true, force: true, maxRetries: 5 });
       await vi.waitFor(
@@ -330,6 +471,112 @@ describe("watchSources (real folders)", { timeout: slow * 2 }, () => {
       await watching.close();
     }
   });
+
+  it.each(cases)("%s: a replaced subfolder is watched again", async (_n, f) => {
+    const root = join(base, "Docs");
+    mkdirSync(join(root, "a"), { recursive: true });
+    const { watching, more } = start(root, f);
+    try {
+      await settle();
+      // rm -rf a && mkdir a (ext4 often hands the same inode back).
+      rmSync(join(root, "a"), { recursive: true });
+      mkdirSync(join(root, "a"));
+      await more(() => writeFileSync(join(root, "a", "x.txt"), "x"));
+      // mv new a
+      mkdirSync(join(root, "new"));
+      await settle();
+      rmSync(join(root, "a"), { recursive: true });
+      renameSync(join(root, "new"), join(root, "a"));
+      await more(() => writeFileSync(join(root, "a", "y.txt"), "y"));
+    } finally {
+      await watching.close();
+    }
+  });
+
+  it.each(cases)("%s: a replaced root folder is watched again", async (_n, f) => {
+    const root = join(base, "Docs");
+    mkdirSync(root);
+    const { log, watching, more } = start(root, f);
+    try {
+      await settle();
+      rmSync(root, { recursive: true });
+      mkdirSync(root);
+      // The replacement is noticed, and a sync requested for it (or, where the old watcher
+      // failed first, watching resumes on the retry: not within this test).
+      await vi.waitFor(
+        () =>
+          expect(
+            log.info.mock.calls.some(
+              ([, m]) => m === "the folder was replaced: watching the new one",
+            ) || log.warn.mock.calls.length > 0,
+          ).toBe(true),
+        { timeout: slow, interval: 50 },
+      );
+      if (log.warn.mock.calls.length === 0) {
+        await more(() => writeFileSync(join(root, "x.txt"), "x"));
+      }
+    } finally {
+      await watching.close();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("a root reached through a link is watched", async () => {
+    const real = join(base, "Real");
+    mkdirSync(join(real, "a"), { recursive: true });
+    const root = join(base, "Docs");
+    symlinkSync(real, root, "dir");
+    const { log, watching, more } = start(root);
+    try {
+      await more(() => writeFileSync(join(root, "a", "x.txt"), "x"));
+      expect(log.warn).not.toHaveBeenCalled();
+    } finally {
+      await watching.close();
+    }
+  });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "an unreadable subfolder is left out; the rest is still watched",
+    async () => {
+      const root = join(base, "Docs");
+      mkdirSync(join(root, "locked", "inner"), { recursive: true });
+      mkdirSync(join(root, "open"));
+      chmodSync(join(root, "locked"), 0o000);
+      const { log, watching, more } = start(root);
+      try {
+        await more(() => writeFileSync(join(root, "open", "x.txt"), "x"));
+        expect(log.warn).not.toHaveBeenCalled();
+      } finally {
+        chmodSync(join(root, "locked"), 0o700);
+        await watching.close();
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "Linux: a tree over the watch budget fails whole, once, and requests nothing",
+    async () => {
+      const root = join(base, "Docs");
+      for (let i = 0; i < 5; i++) mkdirSync(join(root, `d${i}`), { recursive: true });
+      const request = vi.fn(async () => null);
+      const log = logger();
+      const watching = watchSources([src({ root })], {
+        request,
+        log,
+        watcher: createFolderTreeWatch({ budget: 3 }),
+        debounceMs: 50,
+      });
+      try {
+        await vi.waitFor(() => expect(log.warn).toHaveBeenCalledTimes(1), { timeout: slow });
+        expect(log.warn.mock.calls[0]?.[0]).toMatchObject({ code: "EWATCHLIMIT" });
+        writeFileSync(join(root, "x.txt"), "x");
+        await settle();
+        expect(request).not.toHaveBeenCalled();
+        expect(log.info).not.toHaveBeenCalledWith(expect.anything(), "watching the folder");
+      } finally {
+        await watching.close();
+      }
+    },
+  );
 });
 
 describe("config", () => {
