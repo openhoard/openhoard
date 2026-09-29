@@ -261,36 +261,55 @@ describe("false positives", () => {
 });
 
 /*
- * Timing, robust on slow, shared CI runners under coverage. Linearity is asserted by ratio: the
- * time for four times the input stays under nine times the time for the input (linear gives
- * about four, quadratic sixteen), each the best of five runs. Other suites run beside these on
- * the same runner, so the ratio is only checked when the small run is long enough to rise above
- * that noise, and not on Windows, whose runners are too noisy for any ratio; a generous
- * absolute ceiling holds everywhere.
+ * Timing, robust on slow, shared CI runners under coverage. Linearity is asserted on equal work:
+ * one scan of a big input (1 MiB = MAX_SCAN_CHARS, so it is still scanned whole) against 16
+ * scans of an input 16 times smaller (64 KiB). Linear, the two take the same time: measured 1.0
+ * to 1.2 for every pattern here. Quadratic, the big scan takes 16 times as long. The bound, 4,
+ * leaves 3x for noise above linear and sits 4x below quadratic.
+ *
+ * Two things made the earlier check (one small run against one 8x run, wall clock, bound 24)
+ * fail on busy Ubuntu runners with ratios of 26 to 38 and no change in the code:
+ * - The wall clock counts the moments this thread waits for a CPU while other suites run beside
+ *   it. This times the thread's own CPU time (process.threadCpuUsage) instead: the work done.
+ * - A single small run took a few ms, where any hiccup is a large fraction; the thread CPU clock
+ *   also ticks in steps of about 4 ms (16 ms on Windows). Each side now takes 50 to 450 ms.
+ * Each side is warmed up once (compiled patterns, inline caches), then timed 7 times in
+ * alternation, keeping each one's best, so what is left of a burst lands on both.
+ *
+ * The ratio isn't checked on Windows, whose runners are too noisy for any ratio; a generous
+ * absolute ceiling (wall time) holds everywhere.
  */
 const WIN = process.platform === "win32";
 const SLOW = WIN ? 240_000 : 120_000;
-/**
- * Times the small and the big input in alternation, keeping each one's best of 7, so a burst of
- * load on a shared runner lands on both rather than on one. 8x the input separates linear (about
- * 8x the time) from quadratic (about 64x) with room for noise either way.
- */
+
+/** This thread's CPU time, in ms. */
+const cpuMs = () => {
+  const { user, system } = process.threadCpuUsage();
+  return (user + system) / 1000;
+};
+
 const grows = (build: (chars: number) => string, run: (text: string) => void) => {
-  const n = 128 * 1024;
+  const n = 64 * 1024;
+  const times = 16;
   const smallText = build(n);
-  const bigText = build(8 * n);
+  const bigText = build(times * n);
+  run(smallText);
+  run(bigText);
   let small = Number.POSITIVE_INFINITY;
   let big = Number.POSITIVE_INFINITY;
+  let bigWall = Number.POSITIVE_INFINITY;
   for (let i = 0; i < 7; i++) {
-    let started = performance.now();
-    run(smallText);
-    small = Math.min(small, performance.now() - started);
-    started = performance.now();
+    let started = cpuMs();
+    for (let k = 0; k < times; k++) run(smallText);
+    small = Math.min(small, cpuMs() - started);
+    const wall = performance.now();
+    started = cpuMs();
     run(bigText);
-    big = Math.min(big, performance.now() - started);
+    big = Math.min(big, cpuMs() - started);
+    bigWall = Math.min(bigWall, performance.now() - wall);
   }
-  expect(big).toBeLessThan(WIN ? 60_000 : 30_000);
-  if (!WIN && small > 10) expect(big / small).toBeLessThan(24);
+  expect(bigWall).toBeLessThan(WIN ? 60_000 : 30_000);
+  if (!WIN) expect(big / small).toBeLessThan(4);
 };
 
 describe("linear time on hostile input", () => {
