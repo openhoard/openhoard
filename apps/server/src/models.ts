@@ -1,5 +1,6 @@
 import {
   apiKeyVariable,
+  checkProviderConfig,
   createModelClient,
   createModelRouter,
   dailyTokenBudget,
@@ -36,9 +37,15 @@ export interface ServerModels {
 }
 
 /**
- * The configured providers, router and budget, or null when no provider is configured. Throws
- * an Error listing what is wrong (a missing model, a missing key's variable name, an http URL
- * for a commercial provider…), never a key.
+ * The configured providers, router and budget, or null when no provider is usable. Throws an
+ * Error listing what is wrong (a missing model, an http URL for a commercial provider…), never a
+ * key.
+ *
+ * A provider whose only problem is a missing API key is left out instead, with a warning naming
+ * its variable (`log.warn`): the server starts, that provider runs nothing, and search still
+ * works by keywords. A person trying OpenHoard out gets a working server before they have a
+ * key; any other misconfiguration still refuses. Task orders (`models.tasks`) naming a provider
+ * left out skip it; with no provider left, there is no model at all (null).
  */
 export function createServerModels(
   models: Config["models"],
@@ -47,6 +54,7 @@ export function createServerModels(
 ): ServerModels | null {
   if (models.providers.length === 0) return null;
   const problems: string[] = [];
+  const keyless = new Set<string>();
   const clients = models.providers.flatMap((p) => {
     const chatModel =
       p.chatModel ??
@@ -63,6 +71,21 @@ export function createServerModels(
       chatModel,
       ...(baseUrl === undefined ? {} : { baseUrl }),
     };
+    // Missing its key and nothing else: fine with any key, not without one.
+    if (
+      !apiKey &&
+      checkProviderConfig(config).length > 0 &&
+      checkProviderConfig(config, "a key").length === 0
+    ) {
+      keyless.add(p.id);
+      const variable = apiKeyVariable(p.id);
+      log?.warn?.(
+        { provider: p.id, variable },
+        `model provider ${p.id} has no API key (${variable} isn't set): it runs nothing until ` +
+          `the key is set and the server restarted; search still works by keywords`,
+      );
+      return [];
+    }
     try {
       return [
         createModelClient(config, {
@@ -75,10 +98,17 @@ export function createServerModels(
       return [];
     }
   });
+  if (problems.length === 0 && clients.length === 0) return null;
   let router: ModelRouter | undefined;
   if (problems.length === 0) {
     try {
-      router = createModelRouter(clients, stripUndefined(models.tasks));
+      const tasks = Object.fromEntries(
+        Object.entries(stripUndefined(models.tasks)).map(([task, ids]) => [
+          task,
+          ids.filter((id) => !keyless.has(id)),
+        ]),
+      );
+      router = createModelRouter(clients, tasks);
     } catch (e) {
       problems.push((e as Error).message);
     }

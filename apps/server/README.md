@@ -104,8 +104,10 @@ URL and models, and optional timeouts, retries, caps and concurrency. See
 ```
 
 API keys come only from the environment, `OPENHOARD_MODEL_<ID>_API_KEY` (here
-`OPENHOARD_MODEL_CLAUDE_API_KEY`); the configuration file has no field for one, and a missing
-one stops the server naming the variable. Summaries run only where the server also reads
+`OPENHOARD_MODEL_CLAUDE_API_KEY`); the configuration file has no field for one. A provider whose
+key is missing is left out with a warning naming the variable: the server starts, that provider
+runs nothing (task orders skip it), and search still works by keywords; set the key and restart.
+Any other problem with a provider still stops the server. Summaries run only where the server also reads
 versions' bytes (a source with `extract: true`); local-only content only ever reaches a `local`
 provider.
 

@@ -75,18 +75,43 @@ describe("models configuration", () => {
     ).toThrow(/unrecognized key|apiKey/i);
   });
 
-  it("names the missing key's variable, never a value", () => {
+  it("starts without a provider whose key is missing, warning with its variable, never a value", () => {
     const c = config({
       providers: [{ id: "claude-eu", kind: "commercial", adapter: "anthropic" }],
     });
-    let message = "";
-    try {
-      createServerModels(c.models, { OPENHOARD_MODEL_OTHER_API_KEY: KEY });
-    } catch (e) {
-      message = (e as Error).message;
-    }
+    const warnings: [object, string][] = [];
+    const log = {
+      warn: (fields: object, message: string) => void warnings.push([fields, message]),
+    };
+    expect(createServerModels(c.models, { OPENHOARD_MODEL_OTHER_API_KEY: KEY }, log)).toBe(null);
+    expect(warnings).toHaveLength(1);
+    const [fields, message] = warnings[0] as [object, string];
+    expect(fields).toEqual({
+      provider: "claude-eu",
+      variable: "OPENHOARD_MODEL_CLAUDE_EU_API_KEY",
+    });
     expect(message).toContain("OPENHOARD_MODEL_CLAUDE_EU_API_KEY");
-    expect(message).not.toContain(KEY);
+    expect(message).toContain("keywords");
+    expect(JSON.stringify(warnings)).not.toContain(KEY);
+  });
+
+  it("keeps the other providers, and drops the keyless one from task orders", () => {
+    const c = config({
+      providers: [
+        { id: "claude", kind: "commercial", adapter: "anthropic" },
+        { id: "ci", kind: "local", adapter: "stub" },
+      ],
+      tasks: { summarize: ["claude", "ci"] },
+    });
+    const models = createServerModels(c.models, {}, { warn: () => {} });
+    expect(models?.router.candidates("summarize").map((m) => m.id)).toEqual(["ci"]);
+    // No logger: still starts.
+    expect(createServerModels(c.models, {})?.router.clients.has("claude")).toBe(false);
+  });
+
+  it("still refuses a keyless provider that is wrong in another way too", () => {
+    const c = config({ providers: [{ id: "c", kind: "local", adapter: "anthropic" }] });
+    expect(() => createServerModels(c.models, {})).toThrow("not a local provider");
   });
 
   it.each([
