@@ -29,7 +29,7 @@
     "@openhoard/core-policy": "workspace:^"
   },
   "peerDependencies": {
-    "vitest": "^5.0.1"
+    "vitest": "^5.0.2"
   },
   "peerDependenciesMeta": {
     "vitest": {
@@ -38,7 +38,7 @@
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*",
-    "vitest": "^5.0.1"
+    "vitest": "^5.0.2"
   },
   "license": "Apache-2.0"
 }
