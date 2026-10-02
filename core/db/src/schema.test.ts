@@ -302,6 +302,8 @@ describe("schema", () => {
   });
 });
 
+const MIGRATE_ALL_TIMEOUT = process.platform === "win32" ? 180_000 : 60_000;
+
 describe("migrations", () => {
   it("are all listed in the journal, in order", () => {
     const journal = JSON.parse(
@@ -319,66 +321,72 @@ describe("migrations", () => {
     expect(new Set(when).size).toBe(when.length);
   });
 
-  it("clear external ids from local users and groups before SCIM owns them (0015)", async () => {
-    // A database migrated up to 0014, with a local user and group that had external ids.
-    const journal = JSON.parse(
-      readFileSync(join(migrationsFolder, "meta", "_journal.json"), "utf8"),
-    ) as { entries: { tag: string }[] };
-    const upTo = journal.entries.findIndex((e) => e.tag === "0015_local_external_ids");
-    const older = mkdtempSync(join(tmpdir(), "openhoard-migrations-"));
-    const driver = await openPglite({});
-    try {
-      cpSync(migrationsFolder, older, { recursive: true });
-      writeFileSync(
-        join(older, "meta", "_journal.json"),
-        JSON.stringify({ ...journal, entries: journal.entries.slice(0, upTo) }),
-      );
-      await migratePglite(driver.db as never, { migrationsFolder: older });
-      const db = fromDriver(driver);
-      // Only the tables this migration touches, in their 0014 form: seedTenant() writes today's
-      // columns, which later migrations add.
-      const s = { tenantId: newId("tenant"), userId: newId("user"), groupId: newId("group") };
-      const scimUser = newId("user");
-      await db.withTenant(s.tenantId, async (tx) => {
-        await tx.execute(sql`insert into tenants (id, name) values (${s.tenantId}, 'Tenant 1')`);
-        await tx.execute(
-          sql`insert into users (tenant_id, id, email, email_key, display_name, source, external_id)
+  it(
+    "clear external ids from local users and groups before SCIM owns them (0015)",
+    async () => {
+      // A database migrated up to 0014, with a local user and group that had external ids.
+      const journal = JSON.parse(
+        readFileSync(join(migrationsFolder, "meta", "_journal.json"), "utf8"),
+      ) as { entries: { tag: string }[] };
+      const upTo = journal.entries.findIndex((e) => e.tag === "0015_local_external_ids");
+      const older = mkdtempSync(join(tmpdir(), "openhoard-migrations-"));
+      const driver = await openPglite({});
+      try {
+        cpSync(migrationsFolder, older, { recursive: true });
+        writeFileSync(
+          join(older, "meta", "_journal.json"),
+          JSON.stringify({ ...journal, entries: journal.entries.slice(0, upTo) }),
+        );
+        await migratePglite(driver.db as never, { migrationsFolder: older });
+        const db = fromDriver(driver);
+        // Only the tables this migration touches, in their 0014 form: seedTenant() writes today's
+        // columns, which later migrations add.
+        const s = { tenantId: newId("tenant"), userId: newId("user"), groupId: newId("group") };
+        const scimUser = newId("user");
+        await db.withTenant(s.tenantId, async (tx) => {
+          await tx.execute(sql`insert into tenants (id, name) values (${s.tenantId}, 'Tenant 1')`);
+          await tx.execute(
+            sql`insert into users (tenant_id, id, email, email_key, display_name, source, external_id)
               values (${s.tenantId}, ${s.userId}, 'ana@example.com', 'ana@example.com', 'Ana',
                       'local', 'local-1')`,
-        );
-        await tx.execute(
-          sql`insert into groups (tenant_id, id, name, source, external_id)
+          );
+          await tx.execute(
+            sql`insert into groups (tenant_id, id, name, source, external_id)
               values (${s.tenantId}, ${s.groupId}, 'Readers', 'local', 'local-g')`,
-        );
-        await tx.execute(
-          sql`insert into users (tenant_id, id, email, email_key, display_name, source, external_id)
+          );
+          await tx.execute(
+            sql`insert into users (tenant_id, id, email, email_key, display_name, source, external_id)
               values (${s.tenantId}, ${scimUser}, 'bo@example.com', 'bo@example.com', 'Bo',
                       'scim', 'scim-1')`,
+          );
+        });
+        await driver.migrate();
+        const rows = await db.withTenant(s.tenantId, async (tx) => ({
+          users: await tx.select({ id: users.id, externalId: users.externalId }).from(users),
+          groups: await tx.select({ externalId: groups.externalId }).from(groups),
+        }));
+        expect(rows.users).toEqual(
+          expect.arrayContaining([
+            { id: s.userId, externalId: null },
+            { id: scimUser, externalId: "scim-1" },
+          ]),
         );
-      });
-      await driver.migrate();
-      const rows = await db.withTenant(s.tenantId, async (tx) => ({
-        users: await tx.select({ id: users.id, externalId: users.externalId }).from(users),
-        groups: await tx.select({ externalId: groups.externalId }).from(groups),
-      }));
-      expect(rows.users).toEqual(
-        expect.arrayContaining([
-          { id: s.userId, externalId: null },
-          { id: scimUser, externalId: "scim-1" },
-        ]),
-      );
-      expect(rows.groups).toEqual([{ externalId: null }]);
-      // Row-level security is forced again.
-      const [forced] = await driver.query(
-        `select bool_and(relforcerowsecurity) as forced from pg_class
+        expect(rows.groups).toEqual([{ externalId: null }]);
+        // Row-level security is forced again.
+        const [forced] = await driver.query(
+          `select bool_and(relforcerowsecurity) as forced from pg_class
           where relname in ('users', 'groups') and relnamespace = 'public'::regnamespace`,
-      );
-      expect(forced?.forced).toBe(true);
-    } finally {
-      await driver.close();
-      rmSync(older, { recursive: true, force: true });
-    }
-  });
+        );
+        expect(forced?.forced).toBe(true);
+      } finally {
+        await driver.close();
+        rmSync(older, { recursive: true, force: true });
+      }
+      // Runs every migration from nothing, twice over, in the test itself: it grows with each one,
+      // and the Windows runner is several times slower.
+    },
+    MIGRATE_ALL_TIMEOUT,
+  );
 
   it("give every test an empty database", async () => {
     const db = await openTestDatabase();
