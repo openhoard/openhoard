@@ -335,6 +335,20 @@ and tokens are good for it and nothing else.
 label (`local`, `commercial` or `consumer`). The label becomes the request's client trust, which
 policy (`context.client.trust` in Cedar) and exposure (T-604) check on every request.
 
+An admin approves a waiting client in one of three places: the config (`auth.clients`, below),
+the admin API (T-106), or **the page itself**. When the person connecting a client that waits is
+an admin, the "isn't approved yet" page shows them what the client calls itself, the addresses
+its answers go to, the three trust labels (none chosen for them, least trusting first), and
+Refuse and Approve (`POST /oauth/approve`). A client an admin refused can be approved there
+after all, and so can one the config approved once and no longer lists. What the config lists,
+the config decides: the page only lifts a refusal made in the app, with the config's label. The page says plainly that the name is the client's own claim and that anyone can
+send an admin a link to it: approve only what you just started connecting yourself. It is the
+admin API's decision by another door: checked again in its own transaction (still an admin),
+only with a sign-in within `adminSignInMinutes` to approve, sealed to the session that saw the
+form, audited `oauth-client.approve` or `oauth-client.refuse` with `via: "authorize"`. After
+approving, the admin goes on to their own consent like anyone. Everyone else is told to wait.
+This is how one person on their own server approves claude.ai: there is no one else to ask.
+
 - Admins approve, refuse and revoke clients in the app, with the admin API (T-106, below).
 - The config can approve clients too, as a bootstrap or an override (`auth.clients`):
 
@@ -563,8 +577,9 @@ cloudflared tunnel --url http://127.0.0.1:7420
 1. Set `auth.publicUrl` to the printed URL and restart the server. Register
    `<publicUrl>/auth/callback/<provider id>` as a redirect URI with the sign-in provider.
 2. Add `<publicUrl>/mcp` to the client as a connector and sign in: the client waits for an
-   admin. Approve it with the admin API (`GET /api/admin/clients`, then
-   `POST /api/admin/clients/<key>/approve`), or in `auth.clients` (above), and connect again.
+   admin. An admin connecting it approves it on that page; otherwise approve it with the admin
+   API (`GET /api/admin/clients`, then `POST /api/admin/clients/<key>/approve`), or in
+   `auth.clients` (above), and connect again.
 
 Quick tunnels are for testing: the URL changes on every run, and there is no uptime guarantee.
 OpenHoard depends on no domain of ours. A self-hoster serves it at their own `publicUrl`, behind
@@ -905,6 +920,9 @@ openhoard tunnel                                             # a quick tunnel, t
 openhoard tunnel --name home --hostname files.example.com    # your own tunnel, to keep
 ```
 
+The first time an AI client connects, the page that opens asks you, as the tenant's admin, to
+approve it ("MCP clients", above).
+
 It prints the address, the connector address to give the AI client (`<address>/mcp`), and, when
 the person who signs in has no passkey for that address, an invite link (alone on standard
 output) that makes one. Then it runs until Ctrl+C. Run it instead of starting the server: the
@@ -945,12 +963,14 @@ changed: start the server without `tunnel` and it is local again. Two consequenc
 **Sign-in.** `--user` (default: the one owner of the tenant's folders) is who the invite is for.
 A passkey belongs to the address it was made at, so a quick tunnel needs a new one every run
 (passkeys left at old quick-tunnel addresses are removed), and a named tunnel's passkey keeps
-working. The invite is good for 24 hours on a quick tunnel, 7 days on a named one, once.
+working. The invite is good for an hour on a quick tunnel, 7 days on a named one, once. Every
+start revokes that person's invites not yet used, so a link an earlier run printed (in a
+terminal's history, a log) is no way in afterwards.
 
 **Exposure.** Anyone who has the address reaches the server's public routes: the sign-in page,
 the OAuth and MCP endpoints, SCIM. Everything behind them needs a passkey, an approved client's
-token, or a SCIM token. The server keeps listening on this machine only; cloudflared connects
-out. A quick tunnel's address is unguessable but not secret: don't post it.
+token, or a SCIM token. The server must listen on this machine only (`tunnel` refuses any other
+`host`); cloudflared connects out. A quick tunnel's address is unguessable but not secret: don't post it.
 
 **Audit.** `tunnel.start` (the address, quick or named) and `invite.issue`, as
 `system:admin-cli`.

@@ -492,7 +492,9 @@ export async function runTunnel(argv: readonly string[], io: TunnelIo): Promise<
     );
     if (link) io.out(`${link.url}\n`);
     io.err(
-      `  While the tunnel runs, one-time sign-in links are off, and Claude Desktop set up with ` +
+      `  The first time an AI client connects, the page that opens asks you, as the admin, to ` +
+        `approve it.\n` +
+        `  While the tunnel runs, one-time sign-in links are off, and Claude Desktop set up with ` +
         `"connect claude-desktop" (which uses this machine's address) doesn't connect: use the ` +
         `connector address above. Stop with Ctrl+C.\n\n`,
     );

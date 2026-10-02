@@ -10,7 +10,7 @@
 const STYLE = `body{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem;color:#1d1d1f;background:#fafaf7}
 h1{font-size:1.4rem}code,.host{font-family:ui-monospace,monospace;background:#eee;padding:0 .25rem;border-radius:3px}
 .warn{background:#fff3cd;border:1px solid #e0c060;padding:.5rem .75rem;border-radius:6px}
-ul{padding-left:1.2rem}button,a.button{font:inherit;padding:.5rem 1rem;margin:.25rem .5rem .25rem 0;border-radius:6px;border:1px solid #888;background:#fff;cursor:pointer;text-decoration:none;color:inherit}
+ul{padding-left:1.2rem}label{display:block;margin:.4rem 0}button,a.button{font:inherit;padding:.5rem 1rem;margin:.25rem .5rem .25rem 0;border-radius:6px;border:1px solid #888;background:#fff;cursor:pointer;text-decoration:none;color:inherit}
 button.primary{background:#8a5a00;border-color:#8a5a00;color:#fff}
 @media (prefers-color-scheme:dark){body{background:#17171a;color:#eee}code,.host{background:#333}button,a.button{background:#222;color:#eee}}`;
 
@@ -277,11 +277,60 @@ ${loopback ? `<p class="warn">It answers to a program on this computer (<code>${
   return page("Allow access", body, [redirect.origin]);
 }
 
-export function pendingPage(clientName: string, clientRef: string): Page {
-  return page(
-    "Waiting for approval",
-    `<h1>${escapeHtml(clientName)} isn't approved yet</h1>
+/**
+ * A client no admin has approved yet. Someone who is an admin gets to decide here (`approval`:
+ * the sealed request the form carries back, where the client's answers go, and whether an admin
+ * refused it before); anyone else is told to wait.
+ */
+export function pendingPage(
+  clientName: string,
+  clientRef: string,
+  approval?: {
+    request: string;
+    redirectUris: readonly string[];
+    /** `refused`: an admin refused it before. `approved`: the config approved it once. */
+    status: "pending" | "refused" | "approved";
+    /** The label the server's config gives it: approving lifts a refusal, with that label. */
+    configTrust?: string;
+  },
+): Page {
+  if (!approval) {
+    return page(
+      "Waiting for approval",
+      `<h1>${escapeHtml(clientName)} isn't approved yet</h1>
 <p>Your admin has to approve <span class="host">${escapeHtml(clientRef)}</span> before it can connect to OpenHoard. Your request is recorded for them; try again once they have approved it.</p>`,
+    );
+  }
+  const uris = approval.redirectUris
+    .map((u) => `<li><span class="host">${escapeHtml(u)}</span></li>`)
+    .join("");
+  const loopback = approval.redirectUris.some((u) => new URL(u).protocol === "http:");
+  const refused = approval.status === "refused";
+  const why = refused
+    ? " again: an admin refused this client before"
+    : approval.status === "approved"
+      ? " again: the server's config approved this client once, and no longer lists it"
+      : "";
+  const labels =
+    approval.configTrust === undefined
+      ? `<p>To approve, choose how far to trust it with what is in files:</p>
+<label><input type="radio" name="trust" value="consumer"> <strong>Consumer</strong>: an AI service on consumer terms. Gets only files whose exposure is full.</label>
+<label><input type="radio" name="trust" value="commercial"> <strong>Commercial</strong>: an AI service under business terms. Also gets commercial-only files.</label>
+<label><input type="radio" name="trust" value="local"> <strong>Local</strong>: runs on your own machines. Also gets local-only files.</label>`
+      : `<p>The server's config approves it, trusted as <strong>${escapeHtml(approval.configTrust)}</strong>. Approving lifts the refusal, with that label.</p>`;
+  return page(
+    "Approve this client?",
+    `<h1>${escapeHtml(clientName)} ${refused ? "was refused" : "isn't approved yet"}</h1>
+<p>You administer this OpenHoard, so this is yours to decide${why}. The client identifies as <span class="host">${escapeHtml(clientRef)}</span>, and its answers go to:</p>
+<ul>${uris}</ul>
+${loopback ? `<p class="warn">It answers to a program on the computer of whoever connects it. Approve it only if that is what you expect.</p>` : ""}
+<p class="warn">The name is what the client calls itself, and anyone can send you a link to this page. Approve it only if you just started connecting that app yourself; otherwise refuse.</p>
+<p>Approving lets people here connect it. Each of them still gives their own consent, and it sees nothing they can't. You can revoke it later.</p>
+<form method="post" action="/oauth/approve">
+<input type="hidden" name="request" value="${escapeHtml(approval.request)}">
+${labels}
+<p>${approval.status === "pending" ? `<button type="submit" name="decision" value="refuse">Refuse</button>\n` : ""}<button type="submit" name="decision" value="approve">Approve</button></p>
+</form>`,
   );
 }
 

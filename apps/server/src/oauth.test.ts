@@ -2,11 +2,19 @@ import { createHash, randomBytes } from "node:crypto";
 import { exportAudit } from "@openhoard/core-audit";
 import { oauthClients, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
-import { createUser, decideClient, getClient, lockUser, type User } from "@openhoard/core-identity";
+import {
+  createUser,
+  decideClient,
+  getClient,
+  grantAdmin,
+  lockUser,
+  revokeAdmin,
+  type User,
+} from "@openhoard/core-identity";
 import { generateTenant, startDevOidc, type DevOidc, type FakeUser } from "@openhoard/testkit";
 import { sql } from "drizzle-orm";
 import type { Hono } from "hono";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import type { AuthEnv } from "./auth.js";
 import { ConfigSchema, type Config } from "./config.js";
@@ -420,7 +428,11 @@ describe("clients need an admin", () => {
     app = build([]);
     const page = await new Browser().follow(authorizeUrl().url, person.upn, () => false);
     expect(page.status).toBe(403);
-    expect(await page.text()).toContain("isn't approved yet");
+    const waiting = await page.text();
+    expect(waiting).toContain("isn't approved yet");
+    // Someone who isn't an admin is told to wait, and offered nothing to decide.
+    expect(waiting).toContain("Your admin has to approve");
+    expect(waiting).not.toContain("/oauth/approve");
     const [row] = await db.withTenant(t.tenantId, (tx) => tx.select().from(oauthClients));
     expect(row).toMatchObject({
       status: "pending",
@@ -444,6 +456,315 @@ describe("clients need an admin", () => {
     const tokens = await fullFlow();
     expect(await (await mcp(tokens.access_token)).json()).toMatchObject({
       client: { trust: "local" },
+    });
+  });
+
+  describe("who is signed in", () => {
+    const makeAdmin = (userId = ana.id) =>
+      db.withTenant(t.tenantId, (tx) => grantAdmin(tx, t.tenantId, userId, "system:admin-cli"));
+    /** The page an admin gets for a client that waits, and the request its form carries. */
+    async function asked(browser: Browser, url = authorizeUrl().url) {
+      const page = await browser.follow(url, person.upn, () => false);
+      const html = await page.text();
+      return {
+        status: page.status,
+        html,
+        request: /name="request" value="([^"]+)"/.exec(html)?.[1] ?? "",
+      };
+    }
+    const decide = (
+      browser: Browser,
+      body: Record<string, string>,
+      headers: Record<string, string> = { origin: PUBLIC },
+    ) =>
+      browser.go(`${PUBLIC}/oauth/approve`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", ...headers },
+        body: new URLSearchParams(body).toString(),
+      });
+    const status = async () =>
+      (await db.withTenant(t.tenantId, (tx) => tx.select().from(oauthClients)))[0];
+
+    beforeEach(() => {
+      app = build([]);
+    });
+    afterEach(() => vi.useRealTimers());
+
+    it("approves the client there and then, and goes on to their own consent", async () => {
+      await makeAdmin();
+      const browser = new Browser();
+      const { url, verifier } = authorizeUrl();
+      const page = await asked(browser, url);
+      expect(page.status).toBe(403);
+      expect(page.html).toContain("You administer this OpenHoard");
+      expect(page.html).toContain('action="/oauth/approve"');
+      // Where its answers go, whole, and that the name is only what it calls itself.
+      expect(page.html).toContain(`<li><span class="host">${CLIENT_REDIRECT}</span></li>`);
+      expect(page.html).toContain("anyone can send you a link to this page");
+      expect(page.html).not.toContain("a program on the computer");
+      // Nothing is chosen for them: a trust label is theirs to pick, least first.
+      expect(page.html).not.toContain("checked");
+      expect([...page.html.matchAll(/name="trust" value="(\w+)"/g)].map((m) => m[1])).toEqual([
+        "consumer",
+        "commercial",
+        "local",
+      ]);
+      expect(page.html.indexOf('value="refuse"')).toBeLessThan(
+        page.html.indexOf('value="approve"'),
+      );
+
+      const answer = await decide(browser, {
+        request: page.request,
+        decision: "approve",
+        trust: "local",
+      });
+      // Back to the same authorization request, on this server.
+      expect(answer.status).toBe(303);
+      const back = answer.headers.get("location") ?? "";
+      expect(back).toBe(url.slice(PUBLIC.length));
+      expect(await status()).toMatchObject({
+        status: "approved",
+        trust: "local",
+        decidedBy: `user:${ana.id}`,
+      });
+      // Their own consent next, as for anyone; then the client works, with that label.
+      const { answer: consented } = await consent(browser, `${PUBLIC}${back}`);
+      const code = new URL(consented.headers.get("location") ?? "").searchParams.get("code") ?? "";
+      const tokens = await tokenFor(code, verifier);
+      expect(tokens.status).toBe(200);
+      expect(await (await mcp(tokens.body.access_token as string)).json()).toMatchObject({
+        client: { trust: "local" },
+      });
+      const approvals = (await auditActions()).filter((e) => e.action === "oauth-client.approve");
+      expect(approvals).toHaveLength(1);
+      expect(approvals[0]).toMatchObject({
+        decision: "allow",
+        detail: { via: "authorize", trust: "local", was: "pending" },
+      });
+      // The same form sent again changes nothing: the client isn't waiting any more.
+      const again = await decide(browser, {
+        request: page.request,
+        decision: "approve",
+        trust: "consumer",
+      });
+      expect(again.status).toBe(303);
+      expect((await status())?.trust).toBe("local");
+    });
+
+    it("refuses the client there, for everyone", async () => {
+      await makeAdmin();
+      const browser = new Browser();
+      const page = await asked(browser);
+      const answer = await decide(browser, { request: page.request, decision: "refuse" });
+      expect(answer.status).toBe(200);
+      expect(await answer.text()).toContain("You refused this client");
+      expect(await status()).toMatchObject({ status: "refused", decidedBy: `user:${ana.id}` });
+      expect((await auditActions()).find((e) => e.action === "oauth-client.refuse")).toMatchObject({
+        decision: "allow",
+        detail: { via: "authorize", was: "pending" },
+      });
+      // Refusing it again (the form sent twice) changes nothing, and says so.
+      const twice = await decide(browser, { request: page.request, decision: "refuse" });
+      expect(await twice.text()).toContain("nothing was changed");
+
+      // A refusal by mistake is theirs to undo: the page offers to approve after all, only.
+      const { url, verifier } = authorizeUrl();
+      const again = await asked(browser, url);
+      expect(again.status).toBe(403);
+      expect(again.html).toContain("was refused");
+      expect(again.html).toContain("an admin refused this client before");
+      expect(again.html).not.toContain('value="refuse"');
+      expect((await decide(browser, { request: again.request, decision: "refuse" })).status).toBe(
+        400,
+      );
+      const undone = await decide(browser, {
+        request: again.request,
+        decision: "approve",
+        trust: "consumer",
+      });
+      expect(undone.status).toBe(303);
+      expect(await status()).toMatchObject({ status: "approved", trust: "consumer" });
+      const { answer: consented } = await consent(browser, url);
+      const code = new URL(consented.headers.get("location") ?? "").searchParams.get("code") ?? "";
+      expect((await tokenFor(code, verifier)).status).toBe(200);
+      expect(
+        (await auditActions()).filter((e) => e.action === "oauth-client.approve").at(-1),
+      ).toMatchObject({ decision: "allow", detail: { was: "refused", trust: "consumer" } });
+    });
+
+    it("lifts a refusal of a client the config lists, with the config's label, and nothing else of the config's", async () => {
+      await makeAdmin();
+      const browser = new Browser();
+      const first = await asked(browser);
+      await decide(browser, { request: first.request, decision: "refuse" });
+      // Now the config lists it: its refusal in the app still stands, until an admin lifts it.
+      app = build([{ tenantId: t.tenantId, clientId: CLIENT_ID, trust: "local" }]);
+      const { url } = authorizeUrl();
+      const page = await asked(browser, url);
+      expect(page.status).toBe(403);
+      expect(page.html).toContain("trusted as <strong>local</strong>");
+      expect(page.html).not.toContain('name="trust"');
+      // Whatever label is sent, the config's is the one it gets.
+      const lifted = await decide(browser, {
+        request: page.request,
+        decision: "approve",
+        trust: "consumer",
+      });
+      expect(lifted.status).toBe(303);
+      expect(await status()).toMatchObject({ status: "approved", trust: "local" });
+      expect((await asked(browser, url)).html).toContain("Allow Example MCP client");
+      // An approval the config gave isn't this page's to take away or relabel.
+      const again = await decide(browser, { request: first.request, decision: "refuse" });
+      expect([again.status, await again.text()]).toEqual([
+        403,
+        expect.stringContaining("The server&#39;s config (auth.clients) decides for this client"),
+      ]);
+      expect((await status())?.status).toBe("approved");
+    });
+
+    it("approves again a client the config approved once and no longer lists", async () => {
+      await makeAdmin();
+      app = build([{ tenantId: t.tenantId, clientId: CLIENT_ID, trust: "commercial" }]);
+      const browser = new Browser();
+      await consent(browser, authorizeUrl().url);
+      expect(await status()).toMatchObject({ status: "approved", decidedBy: "system:config" });
+      app = build([]);
+      const { url } = authorizeUrl();
+      const page = await asked(browser, url);
+      expect(page.status).toBe(403);
+      expect(page.html).toContain("config approved this client once");
+      expect(page.html).not.toContain('value="refuse"');
+      const done = await decide(browser, {
+        request: page.request,
+        decision: "approve",
+        trust: "commercial",
+      });
+      expect(done.status).toBe(303);
+      expect(await status()).toMatchObject({
+        status: "approved",
+        trust: "commercial",
+        decidedBy: `user:${ana.id}`,
+      });
+      expect((await asked(browser, url)).html).toContain("Allow Example MCP client");
+    });
+
+    it("tells anyone else that a refused client is refused", async () => {
+      const browser = new Browser();
+      await asked(browser);
+      const row = await status();
+      await db.withTenant(t.tenantId, (tx) =>
+        decideClient(tx, t.tenantId, row?.clientKey as string, { approve: false }, "user:admin"),
+      );
+      const next = await asked(browser);
+      expect([next.status, next.html]).toEqual([
+        403,
+        expect.stringContaining("Your admin refused this client"),
+      ]);
+      expect(next.html).not.toContain("/oauth/approve");
+    });
+
+    it("warns about a client that answers on the connecting computer, and says why it can't ask", async () => {
+      await makeAdmin();
+      metadata.redirect_uris = [CLIENT_REDIRECT, "http://127.0.0.1:33418/oauth/callback"];
+      const browser = new Browser();
+      const page = await asked(browser);
+      expect(page.html).toContain("It answers to a program on the computer of whoever connects it");
+      expect(page.html).toContain(
+        '<li><span class="host">http://127.0.0.1:33418/oauth/callback</span></li>',
+      );
+      // A request too long to come back to: said, not shown as someone else's to approve.
+      const long = await asked(
+        browser,
+        authorizeUrl({ state: "s".repeat(1024), scope: "files:read ".repeat(90).trim() }).url,
+      );
+      expect(long.status).toBe(403);
+      expect(long.html).toContain("too long to be put to you for approval");
+      expect(long.html).not.toContain("Your admin has to approve");
+      // Only a form, never a file upload.
+      const multipart = new FormData();
+      multipart.set("request", page.request);
+      multipart.set("decision", "approve");
+      multipart.set("trust", "local");
+      const sent = await browser.go(`${PUBLIC}/oauth/approve`, {
+        method: "POST",
+        headers: { origin: PUBLIC },
+        body: multipart,
+      });
+      expect(sent.status).toBe(415);
+      expect((await status())?.status).toBe("pending");
+    });
+
+    it("takes only its own form, whole, from this site, from someone still an admin", async () => {
+      await makeAdmin();
+      const browser = new Browser();
+      const page = await asked(browser);
+      const ok = { request: page.request, decision: "approve", trust: "commercial" };
+      // Another site's page can't answer for the admin (the session's Origin check).
+      expect((await decide(browser, ok, { origin: "https://evil.test" })).status).toBe(403);
+      expect((await decide(browser, ok, {})).status).toBe(403);
+      // Not a decision, not a trust label, not a request, nobody signed in.
+      for (const body of [
+        { ...ok, decision: "maybe" },
+        { ...ok, trust: "first-party" },
+        { request: page.request, decision: "approve" },
+        { ...ok, request: "nonsense" },
+        { decision: "approve", trust: "local" },
+      ]) {
+        expect((await decide(browser, body)).status).toBe(400);
+      }
+      expect((await decide(new Browser(), ok)).status).toBe(400);
+      // Another session of the same person: the form was sealed to the one that saw it.
+      const second = new Browser();
+      await asked(second);
+      expect((await decide(second, ok)).status).toBe(400);
+      expect((await status())?.status).toBe("pending");
+
+      // No longer an admin when the form comes back (someone else took over meanwhile).
+      const bo = await db.withTenant(t.tenantId, (tx) =>
+        createUser(tx, t.tenantId, { email: "bo@example.com", displayName: "Bo", source: "local" }),
+      );
+      await makeAdmin(bo.id);
+      await db.withTenant(t.tenantId, (tx) =>
+        revokeAdmin(tx, t.tenantId, ana.id, "system:admin-cli"),
+      );
+      const late = await decide(browser, ok);
+      expect([late.status, await late.text()]).toEqual([
+        403,
+        expect.stringContaining("Only an admin decides this"),
+      ]);
+      expect((await status())?.status).toBe("pending");
+      expect(
+        (await auditActions()).filter((e) => e.action === "oauth-client.approve"),
+      ).toMatchObject([{ decision: "deny", detail: { reason: "not-admin", via: "authorize" } }]);
+      // And the page they get now offers nothing to decide.
+      expect((await asked(browser)).html).not.toContain("/oauth/approve");
+    });
+
+    it("asks for a recent sign-in to approve, not to refuse", async () => {
+      await makeAdmin();
+      const browser = new Browser();
+      await asked(browser);
+      // Sixteen minutes on (auth.adminSignInMinutes is 15): a new form, from the same session.
+      vi.useFakeTimers({ now: Date.now() + 16 * 60_000, toFake: ["Date"] });
+      const page = await asked(browser);
+      expect(page.html).toContain('action="/oauth/approve"');
+      const stale = await decide(browser, {
+        request: page.request,
+        decision: "approve",
+        trust: "commercial",
+      });
+      expect([stale.status, await stale.text()]).toEqual([
+        403,
+        expect.stringContaining("You signed in a while ago"),
+      ]);
+      expect((await status())?.status).toBe("pending");
+      expect((await auditActions()).find((e) => e.action === "oauth-client.approve")).toMatchObject(
+        { decision: "deny", detail: { reason: "sign-in-again" } },
+      );
+      // Refusing only cuts off: no wait.
+      const refused = await decide(browser, { request: page.request, decision: "refuse" });
+      expect(refused.status).toBe(200);
+      expect((await status())?.status).toBe("refused");
     });
   });
 
