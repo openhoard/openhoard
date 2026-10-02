@@ -80,6 +80,11 @@ export interface TunnelIo extends SoloIo {
   startMs?: number;
   /** How long a program gets to stop before it is ended (tests; default 10 s, the server 12). */
   stopMs?: number;
+  /**
+   * How long after set-up the tunnel must still be running before it is announced and the server
+   * started, in milliseconds (default 250): a tunnel that came up and went at once isn't one.
+   */
+  settleMs?: number;
   /** Stops the command when aborted (tests; the default listens for SIGINT and SIGTERM). */
   signal?: AbortSignal;
 }
@@ -463,7 +468,8 @@ export async function runTunnel(argv: readonly string[], io: TunnelIo): Promise<
     await close();
     // One whole turn of the event loop first: the embedded database works without yielding to
     // it, so a signal, or the tunnel's exit, during that work hasn't been heard yet.
-    await new Promise<void>((turn) => setTimeout(() => setImmediate(turn), 0));
+    // And a moment more: an operating system may take that long to say a program has ended.
+    await new Promise<void>((turn) => setTimeout(() => setImmediate(turn), io.settleMs ?? 250));
     if (stopping) return 1;
     // Gone meanwhile: nothing is announced, and no server started, for an address that is dead.
     if (tunnel.exitCode !== null || tunnel.signalCode !== null) {

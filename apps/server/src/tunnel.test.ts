@@ -293,8 +293,8 @@ describe("tunnel", () => {
     const waiting = tunnel([], { FAKE: "unconnected" }, { startMs: 500 });
     expect(await waiting.code).toBe(1);
     expect(waiting.seen.err).toContain("cloudflared didn't connect within");
-    // Gone again before anything was announced.
-    const flash = tunnel([], { FAKE: "flash" });
+    // Gone again at once: not announced. (However slowly this machine reports a program's end.)
+    const flash = tunnel([], { FAKE: "flash" }, { settleMs: 5000 });
     expect(await flash.code).toBe(1);
     expect(flash.seen.err).not.toContain("OpenHoard is reachable");
     for (const run of [refused, waiting, flash]) {
