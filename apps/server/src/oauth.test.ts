@@ -427,7 +427,7 @@ describe("clients need an admin", () => {
   it("records an unknown client as pending and tells the person", async () => {
     app = build([]);
     const page = await new Browser().follow(authorizeUrl().url, person.upn, () => false);
-    expect(page.status).toBe(403);
+    expect(page.status).toBe(200);
     const waiting = await page.text();
     expect(waiting).toContain("isn't approved yet");
     // Someone who isn't an admin is told to wait, and offered nothing to decide.
@@ -495,7 +495,7 @@ describe("clients need an admin", () => {
       const browser = new Browser();
       const { url, verifier } = authorizeUrl();
       const page = await asked(browser, url);
-      expect(page.status).toBe(403);
+      expect(page.status).toBe(200);
       expect(page.html).toContain("You administer this OpenHoard");
       expect(page.html).toContain('action="/oauth/approve"');
       // Where its answers go, whole, and that the name is only what it calls itself.
@@ -570,7 +570,7 @@ describe("clients need an admin", () => {
       // A refusal by mistake is theirs to undo: the page offers to approve after all, only.
       const { url, verifier } = authorizeUrl();
       const again = await asked(browser, url);
-      expect(again.status).toBe(403);
+      expect(again.status).toBe(200);
       expect(again.html).toContain("was refused");
       expect(again.html).toContain("an admin refused this client before");
       expect(again.html).not.toContain('value="refuse"');
@@ -601,7 +601,7 @@ describe("clients need an admin", () => {
       app = build([{ tenantId: t.tenantId, clientId: CLIENT_ID, trust: "local" }]);
       const { url } = authorizeUrl();
       const page = await asked(browser, url);
-      expect(page.status).toBe(403);
+      expect(page.status).toBe(200);
       expect(page.html).toContain("trusted as <strong>local</strong>");
       expect(page.html).not.toContain('name="trust"');
       // Whatever label is sent, the config's is the one it gets.
@@ -631,7 +631,7 @@ describe("clients need an admin", () => {
       app = build([]);
       const { url } = authorizeUrl();
       const page = await asked(browser, url);
-      expect(page.status).toBe(403);
+      expect(page.status).toBe(200);
       expect(page.html).toContain("config approved this client once");
       expect(page.html).not.toContain('value="refuse"');
       const done = await decide(browser, {
@@ -657,7 +657,7 @@ describe("clients need an admin", () => {
       );
       const next = await asked(browser);
       expect([next.status, next.html]).toEqual([
-        403,
+        200,
         expect.stringContaining("Your admin refused this client"),
       ]);
       expect(next.html).not.toContain("/oauth/approve");
@@ -677,7 +677,7 @@ describe("clients need an admin", () => {
         browser,
         authorizeUrl({ state: "s".repeat(1024), scope: "files:read ".repeat(90).trim() }).url,
       );
-      expect(long.status).toBe(403);
+      expect(long.status).toBe(200);
       expect(long.html).toContain("too long to be put to you for approval");
       expect(long.html).not.toContain("Your admin has to approve");
       // Only a form, never a file upload.
@@ -787,7 +787,7 @@ describe("clients need an admin", () => {
     );
     const res = await new Browser().follow(authorizeUrl().url, person.upn, () => false);
     // Shown here: nothing goes back to a client the admin refused.
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
     expect(res.headers.get("location")).toBeNull();
     expect(await res.text()).toContain("refused this client");
   });
@@ -881,7 +881,7 @@ describe("bad requests", () => {
     // A client nobody approved gets no redirect, not even an error (no open redirect).
     app = build([]);
     const res = await browser.go(authorizeUrl({ response_type: "token" }).url);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
     expect(res.headers.get("location")).toBeNull();
   });
 

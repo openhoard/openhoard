@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, rmSync, type Dirent } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +7,16 @@ import { exportAudit } from "@openhoard/core-audit";
 import type { IngestResult } from "@openhoard/core-catalog";
 import { blobs, newId, objects, users, versions, zones, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
-import { createUser, startSession, type User } from "@openhoard/core-identity";
+import {
+  createUser,
+  decideClient,
+  issueCode,
+  noteClient,
+  redeemCode,
+  startSession,
+  type OAuthScope,
+  type User,
+} from "@openhoard/core-identity";
 import { BlobStore } from "@openhoard/core-storage";
 import { and, eq } from "drizzle-orm";
 import type { Hono } from "hono";
@@ -14,7 +24,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import type { AuthEnv } from "./auth.js";
 import { ConfigSchema } from "./config.js";
-import { UPLOAD_SOURCE, uploadTitle } from "./uploads.js";
+import { SOURCE_HEADER, sourceUrl, UPLOAD_SOURCE, uploadTitle } from "./uploads.js";
 import { APP_SCRIPT, iconPng, SERVICE_WORKER } from "./web-app.js";
 
 /*
@@ -414,6 +424,256 @@ describe("POST /api/uploads", () => {
     expect(((await list.json()) as { uploads: { title: string }[] }).uploads).toEqual([
       expect.objectContaining({ object: theirs.object, title: "theirs.txt" }),
     ]);
+  });
+});
+
+describe("a client's token (T-1207)", () => {
+  const CLIENT = "https://extension.example/oauth/client.json";
+  const REDIRECT = "https://abcdefghijklmnop.chromiumapp.org/";
+  const RESOURCE = `${PUBLIC}/mcp`;
+  let clientKey: string;
+  beforeEach(async () => {
+    clientKey = await db.withTenant(t.tenantId, async (tx) => {
+      const noted = await noteClient(
+        tx,
+        t.tenantId,
+        { kind: "cimd", clientRef: CLIENT, name: "Extension", redirectUris: [REDIRECT] },
+        `user:${ana.id}`,
+      );
+      const key = noted?.clientKey as string;
+      await decideClient(tx, t.tenantId, key, { approve: true, trust: "consumer" }, "system:test");
+      return key;
+    });
+  });
+
+  /** An access token for a person through the approved client, as the token endpoint issues it. */
+  async function tokenOf(user: User, scopes: OAuthScope[]) {
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    return db.withTenant(t.tenantId, async (tx) => {
+      const code = await issueCode(tx, t.tenantId, {
+        userId: user.id,
+        clientKey,
+        redirectUri: REDIRECT,
+        codeChallenge: challenge,
+        scopes,
+        resource: RESOURCE,
+      });
+      const set = await redeemCode(tx, t.tenantId, code, {
+        clientKey,
+        redirectUri: REDIRECT,
+        codeVerifier: verifier,
+        resource: RESOURCE,
+      });
+      if (!set.ok) throw new Error(set.reason);
+      return set.accessToken;
+    });
+  }
+
+  /** As the extension sends it: the token, no cookie, its own origin. */
+  const send = (token: string, name: string, body: string, from?: string) =>
+    app.request(`/api/uploads?name=${encodeURIComponent(name)}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "text/markdown",
+        origin: "chrome-extension://abcdefghijklmnop",
+        ...(from === undefined ? {} : { [SOURCE_HEADER]: from }),
+      },
+      body,
+    });
+
+  it("adds a file for the person who allowed it, with where it is from", async () => {
+    const token = await tokenOf(ana, ["files:add"]);
+    const from = "https://example.com/article?id=7&ref=x";
+    const res = await send(
+      token,
+      "An article.md",
+      "# An article",
+      // (Its fragment isn't kept: a place in the page, or a token a sign-in left there.)
+      `${from}#access_token=s3cret`,
+    );
+    expect(res.status).toBe(201);
+    const sent = (await res.json()) as Sent;
+    expect((await stored())[0]).toMatchObject({ id: sent.object, owner: `user:${ana.id}` });
+    expect((await audit("object.upload")).at(-1)).toMatchObject({
+      actor: `user:${ana.id}`,
+      decision: "allow",
+      detail: { object: sent.object, client: expect.any(String), grant: expect.any(String) },
+    });
+    expect(JSON.stringify(await audit("object.upload"))).not.toMatch(/token|oat_/);
+    // The person's own list links back to it.
+    const list = await app.request("/api/uploads", { headers: { cookie: await cookieOf(ana) } });
+    expect(((await list.json()) as { uploads: unknown[] }).uploads).toEqual([
+      expect.objectContaining({ object: sent.object, title: "An article.md", url: from }),
+    ]);
+  });
+
+  it("makes a page saved again a new version of the same file", async () => {
+    const token = await tokenOf(ana, ["files:add"]);
+    const query = "https://example.com/news";
+    const first = (await (await send(token, "News.md", "Monday", query)).json()) as Sent;
+    const again = await send(token, "News.md", "Tuesday", query);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({
+      object: first.object,
+      created: false,
+      newVersion: true,
+    });
+    const same = await send(token, "News.md", "Tuesday", query);
+    expect(await same.json()).toMatchObject({ object: first.object, newVersion: false });
+    // Another page with the same name is another file; so is the same text with no address.
+    const other = await send(token, "News.md", "Tuesday", "https://other.example/");
+    expect(((await other.json()) as Sent).object).not.toBe(first.object);
+    expect(((await (await send(token, "News.md", "Tuesday")).json()) as Sent).object).not.toBe(
+      first.object,
+    );
+    expect(await stored()).toHaveLength(3);
+    // An address too long to file a page under is kept, and the file goes by its content.
+    const long = `https://example.com/${"p".repeat(2000)}`;
+    const filed = await send(token, "Long.md", "long", long);
+    expect(filed.status).toBe(201);
+  });
+
+  it("refuses an address that isn't a web one", async () => {
+    const token = await tokenOf(ana, ["files:add"]);
+    for (const bad of [
+      "javascript:alert(1)",
+      "file:///etc/passwd",
+      "https://me:pw@example.com/",
+      "nope",
+    ]) {
+      const res = await send(token, "x.md", "x", bad);
+      expect([bad, res.status]).toEqual([bad, 400]);
+    }
+    expect(await stored()).toEqual([]);
+    expect(sourceUrl("https://example.com/a b")).toBe("https://example.com/a%20b");
+    expect(sourceUrl(`https://example.com/${"x".repeat(5000)}`)).toBeNull();
+    expect(sourceUrl(undefined)).toBeNull();
+    expect(sourceUrl("https://example.com/a?b=1#frag")).toBe("https://example.com/a?b=1");
+  });
+
+  it("takes only a token that may add, for adding only", async () => {
+    const reading = await tokenOf(ana, ["files:read", "files:tag"]);
+    const refused = await send(reading, "x.md", "x");
+    expect(refused.status).toBe(403);
+    expect(refused.headers.get("www-authenticate")).toContain("insufficient_scope");
+    expect((await send("ohat.nope", "x.md", "x")).status).toBe(401);
+    const adding = await tokenOf(ana, ["files:add"]);
+    // Not the list (that is the person's own page's), and not the MCP server.
+    const list = await app.request("/api/uploads", {
+      headers: { authorization: `Bearer ${adding}` },
+    });
+    expect(list.status).toBe(401);
+    const mcp = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${adding}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(mcp.status).toBe(403);
+    expect(await stored()).toEqual([]);
+  });
+
+  it("stops when the client is revoked, and never takes a guest's token", async () => {
+    const token = await tokenOf(ana, ["files:add"]);
+    expect((await send(token, "before.md", "x")).status).toBe(201);
+    await db.withTenant(t.tenantId, (tx) =>
+      decideClient(tx, t.tenantId, clientKey, { approve: false }, "system:test"),
+    );
+    expect((await send(token, "after.md", "y")).status).toBe(401);
+    await db.withTenant(t.tenantId, (tx) =>
+      decideClient(tx, t.tenantId, clientKey, { approve: true, trust: "consumer" }, "system:test"),
+    );
+    const guest = await db.withTenant(t.tenantId, (tx) =>
+      createUser(tx, t.tenantId, {
+        email: "g@example.com",
+        displayName: "G",
+        source: "local",
+        kind: "guest",
+      }),
+    );
+    const guests = await tokenOf(guest, ["files:add"]);
+    expect((await send(guests, "guest.md", "z")).status).toBe(403);
+    expect((await stored()).map((o) => o.title)).toEqual(["before.md"]);
+    expect((await audit("object.upload")).at(-1)).toMatchObject({
+      actor: `user:${guest.id}`,
+      decision: "deny",
+      detail: { reason: "not-member", client: expect.any(String) },
+    });
+  });
+
+  it("checks the grant again when the file is recorded, not only when it began to arrive", async () => {
+    const token = await tokenOf(ana, ["files:add"]);
+    // The body arrives slowly; the client is revoked before it ends.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    let reading: () => void = () => {};
+    const started = new Promise<void>((r) => (reading = r));
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        // The server reads the body only once the token was accepted.
+        reading();
+        await gate;
+        controller.enqueue(new TextEncoder().encode("late"));
+        controller.close();
+      },
+    });
+    const pending = app.request("/api/uploads?name=late.md", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "text/markdown" },
+      body,
+      duplex: "half",
+    } as RequestInit);
+    await started;
+    await db.withTenant(t.tenantId, (tx) =>
+      decideClient(tx, t.tenantId, clientKey, { approve: false }, "system:test"),
+    );
+    release();
+    expect((await pending).status).toBe(403);
+    expect(await stored()).toEqual([]);
+    expect((await audit("object.upload")).at(-1)).toMatchObject({
+      decision: "deny",
+      detail: { reason: "grant-ended" },
+    });
+  });
+
+  it("lets the session decide when a request carries both it and a token", async () => {
+    const token = await tokenOf(ana, ["files:read"]);
+    const res = await app.request("/api/uploads?name=both.md", {
+      method: "POST",
+      headers: {
+        cookie: await cookieOf(ben),
+        origin: PUBLIC,
+        authorization: `Bearer ${token}`,
+        "content-type": "text/markdown",
+      },
+      body: "x",
+    });
+    expect(res.status).toBe(201);
+    expect((await stored())[0]).toMatchObject({ owner: `user:${ben.id}` });
+  });
+
+  it("offers the scope only where files can be added", async () => {
+    const meta = async (a: Hono<AuthEnv>) =>
+      (
+        (await (await a.request("/.well-known/oauth-authorization-server")).json()) as {
+          scopes_supported: string[];
+        }
+      ).scopes_supported;
+    expect(await meta(app)).toEqual(["files:read", "files:tag", "files:add"]);
+    const off = createApp(
+      ConfigSchema.parse({
+        dataDir: "/tmp/unused",
+        auth: { publicUrl: PUBLIC, cookieKey: "k".repeat(43), passkeys: true },
+      }),
+      undefined,
+      { db },
+    );
+    expect(await meta(off)).toEqual(["files:read", "files:tag"]);
   });
 });
 

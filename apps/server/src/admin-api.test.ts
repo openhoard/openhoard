@@ -209,8 +209,13 @@ const form = (body: Record<string, string>) => ({
 async function connect(browser: Browser) {
   const { url, verifier } = authorizeUrl();
   const page = await browser.follow(url, memberPerson.upn);
-  if (page.status !== 200) return { status: page.status, text: await page.text() };
-  const request = /name="request" value="([^"]+)"/.exec(await page.text())?.[1] ?? "";
+  const shown = await page.text();
+  // Not the consent form: an error, or the page that says the client waits (a 200: it is an
+  // answer to the person, T-1207).
+  if (page.status !== 200 || !shown.includes('value="allow"')) {
+    return { status: page.status, text: shown };
+  }
+  const request = /name="request" value="([^"]+)"/.exec(shown)?.[1] ?? "";
   const answer = await browser.go(`${PUBLIC}/oauth/authorize`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", origin: PUBLIC },
@@ -284,7 +289,7 @@ describe("the AI-client allowlist (T-106)", () => {
     const person = await signedIn(memberPerson);
     // Unlisted: pending, and nothing goes back to the client.
     const pending = await connect(person);
-    expect(pending.status).toBe(403);
+    expect(pending.tokens).toBeUndefined();
     expect(pending.text).toContain("isn't approved yet");
     // The admin sees what identifies it: its metadata URL and redirect URIs, and its claimed
     // name only as such.
@@ -352,7 +357,7 @@ describe("the AI-client allowlist (T-106)", () => {
     );
     expect(refreshed.status).toBeGreaterThanOrEqual(400);
     const again = await connect(person);
-    expect(again.status).toBe(403);
+    expect(again.tokens).toBeUndefined();
     expect(again.text).toContain("refused this client");
     // Revoking twice isn't a thing: it was refused already.
     expect((await boss.api("POST", `/clients/${key}/revoke`, {})).status).toBe(409);
@@ -383,7 +388,7 @@ describe("the AI-client allowlist (T-106)", () => {
       200,
     );
     expect((await boss.api("POST", `/clients/${key}/refuse`, {})).status).toBe(409);
-    expect((await connect(await signedIn(memberPerson))).status).toBe(200);
+    expect((await connect(await signedIn(memberPerson))).tokens).toBeDefined();
   });
 
   it("leaves a client the config approves to the config", async () => {

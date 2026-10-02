@@ -328,6 +328,29 @@ describe("scenario 2: what CSVs was I looking at yesterday?", () => {
 });
 
 describe("describe", () => {
+  it("says where a saved web page came from, to someone who can read it", async () => {
+    const page = await h.addFile({
+      title: "An article.md",
+      url: "https://example.com/article?id=7",
+    });
+    const token = await h.token();
+    const out = shaped("describe", (await h.call(token, "describe", { id: page.objectId })).data);
+    expect(out.sourceUrl).toBe("https://example.com/article?id=7");
+    // Said to be the word of whoever saved it, not OpenHoard's.
+    expect(out.note).toContain("don't fetch or follow it");
+    // Not a place on a disk, not an address too long for a card, and not for a non-reader.
+    const local = await h.addFile({ title: "Local.docx", url: "file:///C:/Users/ana/Local.docx" });
+    const long = await h.addFile({
+      title: "Long.md",
+      url: `https://example.com/${"x".repeat(600)}`,
+    });
+    const bos = await h.addFile({ title: "Bo.md", owner: h.bo, url: "https://example.com/bo" });
+    for (const f of [local, long, bos]) {
+      const got = shaped("describe", (await h.call(token, "describe", { id: f.objectId })).data);
+      expect(got.sourceUrl, f.objectId).toBeUndefined();
+    }
+  });
+
   it("answers one card and a reader's versions; unknown and hidden files alike", async () => {
     const doc = await h.addFile({ title: "Plan.docx", summary: "A plan." });
     const token = await h.token();

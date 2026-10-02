@@ -76,6 +76,8 @@ export interface OAuthDeps {
   db: Database;
   key: Buffer;
   log?: Logger;
+  /** Whether files can be added here (`uploads` in the config): then `files:add` can be asked for. */
+  uploads?: boolean;
   /** Fetches client metadata documents; tests pass their own. */
   fetchMetadata?: MetadataFetcher;
 }
@@ -100,6 +102,9 @@ interface ApprovalRequest {
   expiresAt: number;
 }
 const DEFAULT_SCOPES: OAuthScope[] = ["files:read"];
+/** `files:add` only where there is something to add to (uploads, T-1206). */
+const scopesSupported = (uploads: boolean) =>
+  uploads ? ["files:read", "files:tag", "files:add"] : ["files:read", "files:tag"];
 const SNAPSHOT = { isolationLevel: "repeatable read", accessMode: "read only" } as const;
 const NO_STORE = { "cache-control": "no-store", pragma: "no-cache" } as const;
 
@@ -163,6 +168,7 @@ export function mountOAuth(
   const { auth, db, key, log } = deps;
   const issuer = new URL(auth.publicUrl).origin;
   const resource = `${issuer}/mcp`;
+  const SCOPES_SUPPORTED = scopesSupported(deps.uploads === true);
   const clients = new ClientResolver(deps.fetchMetadata);
   const cache = new PrincipalCache();
 
@@ -233,7 +239,7 @@ export function mountOAuth(
     c.json({
       resource,
       authorization_servers: [issuer],
-      scopes_supported: ["files:read", "files:tag"],
+      scopes_supported: SCOPES_SUPPORTED,
       bearer_methods_supported: ["header"],
       resource_name: "OpenHoard",
     });
@@ -253,7 +259,7 @@ export function mountOAuth(
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["none"],
       revocation_endpoint_auth_methods_supported: ["none"],
-      scopes_supported: ["files:read", "files:tag"],
+      scopes_supported: SCOPES_SUPPORTED,
       client_id_metadata_document_supported: true,
       authorization_response_iss_parameter_supported: true,
     }),
@@ -354,6 +360,9 @@ export function mountOAuth(
       return { noted: decided, trust: t, user: who };
     });
     // Until an admin approved the client, nothing goes back to it (no redirect for anyone's URL).
+    // These pages are answers to the person, not failures of the request, so they are 200: a
+    // browser's own sign-in window for extensions (identity.launchWebAuthFlow, T-1207) shows
+    // nothing at all for an error status, and the admin's form must be seen to be answered.
     if (trust === null) {
       // An admin decides here; the form says so only to someone the session knows as one, and
       // the decision checks again. A client an admin refused can be approved here after all.
@@ -368,7 +377,6 @@ export function mountOAuth(
                 ? "This request is too long to be put to you for approval. Approve the client with the admin API, or in the server's config."
                 : "Too many clients are waiting for a decision, so this one wasn't recorded. Decide on the others first (the admin API lists them), then try again.",
             ),
-            403,
           );
         }
         const approval: ApprovalRequest = {
@@ -392,13 +400,12 @@ export function mountOAuth(
             // Listed in the config (and refused here, or it wouldn't wait): the config's label.
             ...(listed ? { configTrust: listed.trust } : {}),
           }),
-          403,
         );
       }
       if (noted?.status === "refused") {
-        return show(c, errorPage("Your admin refused this client."), 403);
+        return show(c, errorPage("Your admin refused this client."));
       }
-      return show(c, pendingPage(client.name, client.clientRef), 403);
+      return show(c, pendingPage(client.name, client.clientRef));
     }
     const state = q.state ?? null;
     const back = (error: string, description: string) =>
@@ -411,7 +418,9 @@ export function mountOAuth(
       return back("invalid_target", `tokens are for ${resource} only`);
     }
     const scopes = q.scope === undefined || q.scope === "" ? DEFAULT_SCOPES : parseScopes(q.scope);
-    if (!scopes) return back("invalid_scope", "scopes are files:read and files:tag");
+    if (!scopes || !scopes.every((s) => SCOPES_SUPPORTED.includes(s))) {
+      return back("invalid_scope", `scopes are ${SCOPES_SUPPORTED.join(", ")}`);
+    }
     if (state !== null && state.length > 1024) return back("invalid_request", "state is too long");
     const request: ConsentRequest = {
       tenantId,

@@ -417,7 +417,9 @@ This is how one person on their own server approves claude.ai: there is no one e
 - Locking, disabling or retiring a person revokes their grants, as it ends their sessions. So
   does unlinking any of their sign-in identities: they consent again.
 
-**Scopes:** `files:read` (search, read, open) and `files:tag` (propose tags). They become the
+**Scopes:** `files:read` (search, read, open), `files:tag` (propose tags) and, where `uploads` is
+configured, `files:add` (add files as the person: the upload API, not the MCP server; it reads
+nothing). They become the
 request's credential scope, so policy refuses anything else. A token without the scope a route
 needs gets 403 with `error="insufficient_scope"` and the scopes to ask for.
 
@@ -520,7 +522,8 @@ The **admin API** is JSON under `/api/admin`, for the admin UI to come and for s
     are embedded by local providers only, when an embeddings model is configured.
   - `recent` (period or from/to in an IANA `timeZone`, actions, kind, media type): the files the
     person themself viewed, opened or edited, from the activity log (T-506). Reads no content.
-  - `describe` (id): one card and, for a reader, its versions.
+  - `describe` (id): one card and, for a reader, its versions and, for a file saved from the
+    web, the address it came from (`sourceUrl`).
   - `open` (id, `link` or `content`): the source's web link, checked as it leaves (https only,
     no credentials, canonical: @openhoard/sdk checkUrl/canonicalUrl), or the extracted text
     when exposure allows, cut to the budget and wrapped between `BEGIN-FILE-TEXT-<nonce>` and
@@ -996,9 +999,26 @@ holds, in a **managed zone**.
   Installing needs https, so on a phone that means the tunnel's address (`openhoard tunnel`
   prints the page's address) or your own domain. iOS Safari can't be a share target: there, open
   the page and pick the files.
+- **The browser extension** (clients/extension: Chrome, Edge, Firefox) saves the page you are
+  on, a PDF or a selection, with the address it came from. It connects as an OAuth client that
+  an admin approves and you allow, with the `files:add` scope only: it adds files as you and
+  can read nothing. A page saved again is a new version of the same file.
 - **`POST /api/uploads?name=<file name>`** takes one file as the request's body, with its type
   as `Content-Type`, from a signed-in member's browser session (201, or 200 when the file was
-  there already, with `{object, version, title, size, created}`). `GET /api/uploads` lists the caller's own.
+  there already, with `{object, version, title, size, created, newVersion}`). `GET /api/uploads` lists the caller's own.
+
+The upload API also takes an approved client's token (`Authorization: Bearer`, scope
+`files:add`) in place of the session: POST only, with no cookie, for an active member. The
+token is checked as the MCP server checks it, when the request arrives and again when the file
+is recorded, so revoking the client or the grant stops it there and then; the audit record
+names the client.
+
+`X-OpenHoard-Source-URL` (http or https, no credentials; its fragment is dropped) says where
+the file is from: kept as the file's link, never fetched. It is a header, not a query
+parameter, because addresses can hold secrets and queries are what proxies log. A file sent
+again from the same address under the same name is a new version of that file (the person's,
+whichever client or session first added it), so `files:add` also adds versions to such files,
+and brings back one that was removed.
 
 What happens to an upload:
 
@@ -1031,8 +1051,7 @@ not an account's: on a shared device, someone who signs in next sees it there.
 
 **Back up `<dataDir>/blobs` with the database and the keys**: for uploads, it is the only copy.
 
-Limits for now: members only (no guests, no service accounts, no AI client: an MCP client
-can't upload); one file per request, within an hour; no quota per person or tenant, so a
+Limits for now: members only (no guests, no service accounts); one file per request, within an hour; no quota per person or tenant, so a
 member can fill the disk; bytes whose recording failed, or that a crash left half-written, stay
 in the store unreferenced until maintenance learns to remove them; with uploads on, a folder
 (`sources`) can't be named `uploads` or sync into the uploads' zone; there is no way yet to

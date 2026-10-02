@@ -257,6 +257,8 @@ export interface ConsentView {
 const SCOPE_TEXT: Record<string, string> = {
   "files:read": "find and read the files you can read, as you",
   "files:tag": "suggest tags on files you can tag (people review them)",
+  "files:add":
+    "add files to OpenHoard as you, and new versions of the pages it saved (it can't read what is there)",
 };
 
 export function consentPage(v: ConsentView): Page {

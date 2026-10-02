@@ -1,7 +1,7 @@
 import { appendAudit } from "@openhoard/core-audit";
 import { ingest, INGEST_LIMITS, IngestError, type IngestResult } from "@openhoard/core-catalog";
 import { newId, objects, sourceRefs, zones, type Database, type Tx } from "@openhoard/core-db";
-import { getUser, userPrincipal } from "@openhoard/core-identity";
+import { getUser, grantIsLive, userPrincipal, type OAuthScope } from "@openhoard/core-identity";
 import {
   blobPath,
   BlobTooLargeError,
@@ -9,9 +9,9 @@ import {
   type PutResult,
 } from "@openhoard/core-storage";
 import { and, desc, eq, isNull } from "drizzle-orm";
-import type { Hono } from "hono";
+import type { Context, Hono, MiddlewareHandler } from "hono";
 import type { Logger } from "pino";
-import type { AuthEnv, SignedIn } from "./auth.js";
+import type { AuthEnv, BearerAuth, SignedIn } from "./auth.js";
 import type { UploadsConfig } from "./config.js";
 import { retrying } from "./retry.js";
 
@@ -20,7 +20,8 @@ import { retrying } from "./retry.js";
  * content the server holds itself: it goes to a managed zone (`uploads.zone`, "Uploads" by
  * default, made in the tenant on its first upload and audited as `zone.create`).
  *
- *   POST /api/uploads?name=<file name>   the request's body is the file, its Content-Type the type
+ *   POST /api/uploads?name=<file name>   the request's body is the file, its Content-Type the type;
+ *                                        X-OpenHoard-Source-URL: where it is from, if it says
  *   GET  /api/uploads                    the caller's own uploads, newest first
  *
  * - One file per request, as the raw body: it streams to the blob store (core/storage), hashed
@@ -31,6 +32,15 @@ import { retrying } from "./retry.js";
  *   account, checked again in the upload's transaction. The request carries the cookie, so the
  *   server's CSRF check applies (auth.ts: its Origin must be publicUrl's). A form's encodings
  *   are refused: a form is not a file (the share target's form is unpacked in the browser).
+ * - Or an approved OAuth client's token with the `files:add` scope (T-1207: the browser
+ *   extension), for the member who allowed it: POST only. Such a request carries no cookie, so
+ *   nothing ambient: the token is the whole credential, checked as the MCP server checks it
+ *   (the client still approved, the grant live, the person active). The audit names the client.
+ * - `X-OpenHoard-Source-URL` says where the file is from (a saved web page's address, without
+ *   its fragment): kept as the item's link, never fetched. A header, not the query: addresses
+ *   can hold secrets, and queries are what proxies log. A page saved again from the same
+ *   address (and name) is a new version of the same file, so a client that may add may also
+ *   add versions to what it added.
  * - The uploader owns the file, and nobody else reads it until they share it: an upload has no
  *   grants.
  * - The same bytes under the same name from the same person are the same file: sending it
@@ -52,7 +62,50 @@ export interface UploadDeps {
   tenantKey: (tenantId: string) => Promise<Uint8Array>;
   /** Queues enrichment once an upload committed (core/jobs enqueueAfterIngest). */
   enqueue?: (tenantId: string, result: IngestResult) => Promise<unknown>;
+  /**
+   * The bearer check (oauth/routes.ts): lets an approved client its person allowed to add files
+   * (`files:add`) upload for them (T-1207). Without it, only the session does.
+   */
+  requireBearer?: (scope: OAuthScope) => MiddlewareHandler<AuthEnv>;
   log?: Logger;
+}
+
+/** Who a request acts for: the session's person, or the person a client's token is for. */
+interface Caller {
+  tenantId: string;
+  userId: string;
+  /** The OAuth client, grant and token, when a token (not the session) said who. */
+  via?: { client: string; grant: string; token: string };
+}
+
+/** What the audit says of a token's request: its client and grant (never the token). */
+const viaOf = (who: Caller) => (who.via ? { client: who.via.client, grant: who.via.grant } : {});
+
+/** The longest address a saved page is recorded under (longer ones are kept, as content). */
+const URL_KEY_MAX = 1500;
+
+/**
+ * Where an upload came from, when it says: an http(s) address without credentials, or null.
+ * It is kept as the item's link (what "open the original" goes to), never fetched.
+ */
+/**
+ * The header an upload names its address in. Not the query: addresses can hold secrets, and
+ * queries are what proxies log.
+ */
+export const SOURCE_HEADER = "x-openhoard-source-url";
+
+export function sourceUrl(given: string | undefined): string | null {
+  if (given === undefined || given === "" || given.length > INGEST_LIMITS.url) return null;
+  let u: URL;
+  try {
+    u = new URL(given);
+  } catch {
+    return null;
+  }
+  if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password) return null;
+  // Without its fragment: a place in the page, and where single-page sign-ins leave tokens.
+  u.hash = "";
+  return u.href.length <= INGEST_LIMITS.url ? u.href : null;
 }
 
 /** The `source` of uploaded items. A configured folder can't take this id (config.ts). */
@@ -145,15 +198,17 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
     return zone.id;
   };
 
-  const deny = (signedIn: SignedIn, reason: string) =>
-    db.withTenant(signedIn.tenantId, (tx) =>
-      appendAudit(tx, signedIn.tenantId, {
-        actor: userPrincipal(signedIn.principal.userId),
+  const deny = (who: Caller, reason: string) =>
+    db.withTenant(who.tenantId, (tx) =>
+      appendAudit(tx, who.tenantId, {
+        actor: userPrincipal(who.userId),
         action: "object.upload",
         decision: "deny",
-        detail: { reason },
+        detail: { reason, ...viaOf(who) },
       }),
     );
+  const callers = new WeakMap<Request, Caller>();
+  const callerOf = (c: Context<AuthEnv>) => callers.get(c.req.raw) as Caller;
 
   /** A person's own session: a member, with no narrower credential. */
   const mayUpload = (signedIn: SignedIn): boolean => {
@@ -164,18 +219,44 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
   app.use("/api/uploads", async (c, next) => {
     c.header("cache-control", "no-store");
     const signedIn = c.get("auth");
-    if (!signedIn) return c.json({ error: "not signed in" }, 401);
-    if (!mayUpload(signedIn)) {
-      if (c.req.method !== "GET") await deny(signedIn, "not-member");
-      return c.json({ error: "forbidden" }, 403);
+    if (signedIn) {
+      const who = { tenantId: signedIn.tenantId, userId: signedIn.principal.userId };
+      if (!mayUpload(signedIn)) {
+        if (c.req.method !== "GET") await deny(who, "not-member");
+        return c.json({ error: "forbidden" }, 403);
+      }
+      callers.set(c.req.raw, who);
+      return next();
     }
-    await next();
+    // No session: a client's token, for adding only (the list is the person's own page's).
+    if (
+      deps.requireBearer === undefined ||
+      c.req.method !== "POST" ||
+      c.req.header("authorization") === undefined
+    ) {
+      return c.json({ error: "not signed in" }, 401);
+    }
+    return deps.requireBearer("files:add")(c, async () => {
+      const bearer = c.get("bearer") as BearerAuth;
+      const p = bearer.principal;
+      const who = {
+        tenantId: bearer.tenantId,
+        userId: p.userId,
+        via: { client: bearer.client.id, grant: bearer.grantId, token: bearer.tokenId },
+      };
+      if (!p.active || p.guest || p.service === true) {
+        await deny(who, "not-member");
+        c.res = c.json({ error: "forbidden" }, 403);
+        return;
+      }
+      callers.set(c.req.raw, who);
+      await next();
+    });
   });
 
   app.post("/api/uploads", async (c) => {
-    const signedIn = c.get("auth") as SignedIn;
-    const { tenantId } = signedIn;
-    const userId = signedIn.principal.userId;
+    const who = callerOf(c);
+    const { tenantId, userId } = who;
     const owner = userPrincipal(userId);
     const type = c.req.header("content-type");
     const bare = (type ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
@@ -187,6 +268,11 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
     const declared = Number(c.req.header("content-length") ?? "0");
     if (Number.isFinite(declared) && declared > uploads.maxBytes) return tooLarge();
     const title = uploadTitle(c.req.query("name"));
+    const named = c.req.header(SOURCE_HEADER);
+    const from = sourceUrl(named);
+    if (from === null && (named ?? "") !== "") {
+      return c.json({ error: `${SOURCE_HEADER} is an http or https address` }, 400);
+    }
     if ((type as string).length > INGEST_LIMITS.mime) {
       return c.json({ error: "Content-Type is too long" }, 400);
     }
@@ -201,11 +287,11 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
     };
     const refused = async (e: unknown) => {
       if (e instanceof Refusal) {
-        await deny(signedIn, e.reason);
+        await deny(who, e.reason);
         return c.json({ error: e.message }, e.status);
       }
       if (e instanceof IngestError) {
-        await deny(signedIn, `ingest-${e.code}`);
+        await deny(who, `ingest-${e.code}`);
         return c.json({ error: e.message }, e.code === "invalid" ? 400 : 409);
       }
       throw e;
@@ -233,12 +319,25 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
 
     // One file per person, content and name: the same file sent again (a share tapped twice,
     // a retry after a lost answer) is the file there is. Another name is another file.
-    const sameFile = `${userId}/${stored.blobId.slice("b3t:".length)}/${title}`;
+    // A page saved from an address is one file per person, address and name: saved again, it
+    // gets a new version, not a twin.
+    const sameFile =
+      from !== null && from.length <= URL_KEY_MAX
+        ? `${userId}/url/${title}/${from}`
+        : `${userId}/${stored.blobId.slice("b3t:".length)}/${title}`;
     let result: IngestResult;
     try {
       result = await retrying(() =>
         db.withTenant(tenantId, async (tx) => {
           const zoneId = (await check(tx, true)) as string;
+          // A client's token: still allowed now, not only when the body began to arrive (the
+          // grant or the client revoked meanwhile, as the MCP server checks before answering).
+          if (
+            who.via &&
+            !(await grantIsLive(tx, tenantId, who.via.grant, { tokenId: who.via.token }))
+          ) {
+            throw new Refusal(403, "grant-ended", "forbidden");
+          }
           // Unless that file has since become someone else's: then this is a new one (each
           // time: after a hand-over, the same file sent twice is two files).
           const [known] = await tx
@@ -270,6 +369,7 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
             mime: type as string,
             authorId: owner,
             modifiedAt: new Date(),
+            ...(from === null ? {} : { url: from }),
           });
           await appendAudit(tx, tenantId, {
             actor: owner,
@@ -283,6 +383,7 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
               created: done.created.object,
               ...(done.created.object ? {} : { newVersion: done.created.version }),
               ...(done.restored ? { restored: true } : {}),
+              ...viaOf(who),
             },
           });
           return done;
@@ -305,15 +406,15 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
         title,
         size: stored.size,
         created: result.created.object,
+        newVersion: result.created.version,
       },
       result.created.object ? 201 : 200,
     );
   });
 
   app.get("/api/uploads", async (c) => {
-    const signedIn = c.get("auth") as SignedIn;
-    const { tenantId } = signedIn;
-    const owner = userPrincipal(signedIn.principal.userId);
+    const { tenantId, userId } = callerOf(c);
+    const owner = userPrincipal(userId);
     const rows = await db.withTenant(
       tenantId,
       async (tx) => {
@@ -324,8 +425,22 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
         });
         if (zoneId === null) return [];
         return tx
-          .select({ object: objects.id, title: objects.title, updatedAt: objects.updatedAt })
+          .select({
+            object: objects.id,
+            title: objects.title,
+            updatedAt: objects.updatedAt,
+            // Where it was saved from, when it was (a page the extension saved).
+            url: sourceRefs.url,
+          })
           .from(objects)
+          .leftJoin(
+            sourceRefs,
+            and(
+              eq(sourceRefs.tenantId, objects.tenantId),
+              eq(sourceRefs.objectId, objects.id),
+              eq(sourceRefs.source, UPLOAD_SOURCE),
+            ),
+          )
           .where(
             and(
               eq(objects.tenantId, tenantId),

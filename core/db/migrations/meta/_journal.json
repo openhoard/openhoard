@@ -428,6 +428,13 @@
       "when": 1790942517115,
       "tag": "0060_passkey_host",
       "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "7",
+      "when": 1790971613534,
+      "tag": "0061_oauth_scope_add",
+      "breakpoints": true
     }
   ]
 }

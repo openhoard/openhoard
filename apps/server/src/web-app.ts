@@ -128,6 +128,12 @@ export const APP_SCRIPT = `(() => {
       for (const u of uploads) {
         const li = document.createElement("li");
         li.textContent = u.title;
+        // Saved from the web: a link back to where it is from.
+        if (typeof u.url === "string" && /^https?:\\/\\//.test(u.url)) {
+          const a = document.createElement("a");
+          a.href = u.url; a.rel = "noopener noreferrer"; a.target = "_blank"; a.textContent = "original";
+          li.append(" (", a, ")");
+        }
         recent.append(li);
       }
       if (uploads.length === 0) {

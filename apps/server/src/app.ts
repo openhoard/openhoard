@@ -93,22 +93,25 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
     mountAuth(app, shared);
     // Tenant administration (T-106), behind the session and its CSRF check.
     mountAdminApi(app, { auth: config.auth, db: deps.db, ...(log ? { log } : {}) });
-    // Uploads into a managed zone, and the installable page that shares into them (T-1206).
+    // OpenHoard's OAuth authorization server for MCP clients (T-105), and the resource they reach.
+    const { requireBearer } = mountOAuth(app, {
+      ...shared,
+      uploads: config.uploads !== undefined,
+      ...(deps.fetchMetadata ? { fetchMetadata: deps.fetchMetadata } : {}),
+    });
+    // Uploads into a managed zone, and the installable page that shares into them (T-1206);
+    // an approved client its person let add files uploads too (T-1207).
     if (config.uploads) {
       if (!deps.uploads) throw new Error("uploads need the blob store");
       mountUploads(app, {
         db: deps.db,
         uploads: config.uploads,
         ...deps.uploads,
+        requireBearer,
         ...(log ? { log } : {}),
       });
       mountWebApp(app, { maxBytes: config.uploads.maxBytes });
     }
-    // OpenHoard's OAuth authorization server for MCP clients (T-105), and the resource they reach.
-    const { requireBearer } = mountOAuth(app, {
-      ...shared,
-      ...(deps.fetchMetadata ? { fetchMetadata: deps.fetchMetadata } : {}),
-    });
     // The MCP server (T-801), behind the bearer check.
     mountMcp(app, {
       db: deps.db,

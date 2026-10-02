@@ -1846,7 +1846,7 @@ export const sourceSyncs = pgTable(
 );
 
 /** OAuth scopes an MCP client may ask for (T-105), and the policy actions each allows. */
-export const OAUTH_SCOPES = ["files:read", "files:tag"] as const;
+export const OAUTH_SCOPES = ["files:read", "files:tag", "files:add"] as const;
 /** The trust an admin gives an approved AI client: every client trust but first-party. */
 export const AI_CLIENT_TRUSTS = ["local", "commercial", "consumer"] as const;
 

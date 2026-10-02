@@ -55,6 +55,8 @@ export type OAuthScope = (typeof OAUTH_SCOPES)[number];
 export const SCOPE_ACTIONS: Readonly<Record<OAuthScope, readonly Action[]>> = {
   "files:read": ["search", "read", "open"],
   "files:tag": ["tag"],
+  // Adding a file acts on no object there is: the upload API checks the scope itself (T-1207).
+  "files:add": [],
 };
 
 /** Limits, in seconds. */
