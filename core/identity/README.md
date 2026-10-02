@@ -13,6 +13,8 @@ ask here, never the `users`, `groups` and `group_members` tables in core/db.
 - [`sessions.ts`](src/sessions.ts): signing in and sessions (T-102).
 - [`scim-tokens.ts`](src/scim-tokens.ts): each tenant's SCIM bearer tokens (T-103).
 - [`admins.ts`](src/admins.ts): tenant admins (T-106).
+- [`passkeys.ts`](src/passkeys.ts): built-in accounts' invites and passkeys (T-108), over
+  [`webauthn.ts`](src/webauthn.ts), the checks on what a browser returns.
 
 ## Sources
 
@@ -69,6 +71,9 @@ AI clients ask for consent again.
 | API key (`ohk.`)                     | the service account locked                                                                                                           | suspended (its principal is inactive); unlocking brings it back                                                          | next request, every process (principal epoch)                                                               |
 | API key                              | `revokeApiKey()`, expiry, the service account retired                                                                                | revoked for good                                                                                                         | next request                                                                                                |
 | SCIM token (`ohscim.`)               | `revokeScimToken()` (`openhoard admin scim-token revoke`), expiry                                                                    | refused, each attempt audited (`scim.auth`); its id counts toward the failure limiter again, so a holder is soon blocked | next request (`checkScimToken()` reads the row every time; nothing about tokens is cached)                  |
+| Invite (`ohi.`, T-108)               | any stop; a newer invite for the same person                                                                                         | revoked for good                                                                                                         | at once (`checkInvite()` reads the row every time)                                                          |
+| Passkey (T-108)                      | a lock                                                                                                                               | refused while it lasts (the person is inactive); its sessions end for good                                               | next sign-in                                                                                                |
+| Passkey                              | retirement; `removePasskey()`                                                                                                        | deleted; the sessions it signed in end, and the person's OAuth grants                                                    | at once                                                                                                     |
 | Admin (role or admin group)          | a lock, a provider disable, becoming a guest                                                                                         | not an admin while it lasts (`isAdmin()` counts active members only); the session ends anyway                            | next request                                                                                                |
 | Admin (admin group)                  | removed from the group by the identity provider, or the group no longer a SCIM group                                                 | not an admin; still signed in                                                                                            | next request, every process (principal epoch)                                                               |
 | Admin (role)                         | retirement, `revokeAdmin()`                                                                                                          | the role is removed                                                                                                      | next request                                                                                                |
@@ -110,7 +115,8 @@ of a checked ID token:
 - The first time, a provider may pass `externalId` (Entra's `oid`). It is matched once to a SCIM
   user's external id, and the pair is then linked, so from then on only the pair counts.
 - Anyone else is refused (`unknown`), as is a locked, disabled or retired person (`inactive`).
-  Signing in creates nobody: people come from SCIM (T-103) or invitations (T-108).
+  Signing in creates nobody: people come from SCIM (T-103) or are made by an admin and
+  invited (T-108, below).
 
 Sessions:
 
@@ -133,6 +139,61 @@ through a group, guest status, and whether the user is active. A disabled user c
 inactive, and `authorize()` denies them. Its `at` applies to grants only (which were live
 then); memberships, kind and stops are always the current ones. It also says whether the user is
 a tenant admin (`admin`, below), which `authorize()` never reads.
+
+## Built-in accounts: invites and passkeys (T-108)
+
+How a local person signs in when there is no identity provider.
+
+- **`issueInvite()`** makes an invite for a current local person: a token
+  `ohi.<tenant id>.<invite id>.<secret>` (only a SHA-256 of the secret is kept), good once, for
+  at most 7 days. A newer invite revokes the older; so does any stop on the person, for good.
+  `checkInvite()` says whether a token is good now and whose it is, writing nothing.
+- **`acceptInvite()`** registers the passkey the browser made for the invite's person, marks
+  the invite used and starts their session, in one transaction. A passkey that doesn't check out
+  leaves the invite unused.
+- **`signInWithPasskey()`** finds the credential an assertion names, checks it, records the
+  counter and the use, and starts a session. A passkey is a discoverable credential whose user
+  handle is `<tenant id>.<user id>`, so the assertion itself says which tenant to look in, and
+  nobody types a user name.
+- **`registerPasskey()`**, **`listPasskeys()`**, **`removePasskey()`**: a person's own passkeys
+  (at most 20). Removing one ends the sessions it signed in and their OAuth grants, as
+  `unlinkIdentity()` does.
+- Sessions are recorded with provider `passkey`, issuer `openhoard:passkey` and the passkey's id
+  as subject.
+
+Only local people have invites and passkeys: a SCIM person signs in through the identity
+provider, whose rules a passkey here would bypass (`wrong-source`). A service account never
+signs in. Retiring a person deletes their passkeys; a lock leaves them (unlocked, the person
+signs in again with the same passkey) but ends every session and revokes unused invites.
+
+[`webauthn.ts`](src/webauthn.ts) holds the relying party's checks, WebAuthn sections 7.1 and
+7.2, as pure functions: the client data's type, challenge and origin (and no cross-origin
+frame); the authenticator data's relying party id hash, user presence **and user verification**
+(always required), backup flags and length; the credential's public key (ES256, EdDSA or RS256
+only, exactly that algorithm's parameters, imported by node:crypto, which refuses a point off
+its curve; an RSA exponent below 65,537 or even, an even modulus and a small-order Ed25519 point
+are refused here); the signature; and a
+signature counter that must advance where the authenticator keeps one. Deliberately narrow:
+**no attestation is verified** (none is asked for), so there are no certificate chains to get
+wrong, and CBOR is read by a strict decoder for the subset CTAP2 emits. Each refusal is a
+`WebAuthnError` with a short code, for the audit.
+
+`@openhoard/core-identity/testing` has `SoftAuthenticator`, a software authenticator for tests
+that can bend every field these checks read.
+
+The server issues the challenge and keeps it for the ceremony (apps/server `passkeys.ts`: a
+sealed cookie). **`spendChallenge()`** makes it single-use: `acceptInvite()` and
+`signInWithPasskey()` record the challenge's hash as soon as an answer names a real invite or
+passkey, before checking the answer, and refuse a second answer with the same challenge as a
+`replay`; **`addPasskey()`** is `registerPasskey()` with that, for a signed-in person adding
+their own. Synced passkeys keep no signature
+counter, so this, not the counter, is what stops a copied assertion.
+
+Lock order here: the person's row first (as the stops take it), always; a sign-in then takes
+its passkey's row and the challenge, a registration the challenge and then the invite's row; the
+audit last. `passkeys.test.ts` races a sign-in against a retirement, a
+passkey's removal and the same person adding a passkey, and an invite's use against a lock and
+against itself, on PostgreSQL.
 
 ## Admins
 

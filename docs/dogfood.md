@@ -297,10 +297,12 @@ resume`; for a held deletion use `source confirm-reconcile` or `discard-reconcil
 - **claude.ai (web) and the Claude Desktop connector screen** need a public https address (a
   tunnel such as `cloudflared tunnel --url http://127.0.0.1:7420`, then that URL as
   `auth.publicUrl`). **Sign-in links don't work through a tunnel** (the config and the server
-  refuse them), so this needs a real identity provider: Entra with SCIM (apps/server README,
-  "Testing with a new Entra tenant"), or a generic OIDC provider matched to a SCIM user. There is
-  no other way to sign in through a tunnel yet (built-in accounts are T-108). A quick tunnel's URL
-  also changes on every run, which ends every grant.
+  refuse them). Through a tunnel, sign in with a **passkey** instead (apps/server README,
+  "Built-in accounts"): set `auth.passkeys: true` (and `signInLinks: false`), then
+  `admin user invite` prints a link that makes one. A passkey belongs to the public host, so it
+  needs a **named tunnel or a real domain**: a quick tunnel's URL changes on every run, which
+  strands every passkey and ends every grant. Or use a real identity provider: Entra with SCIM
+  (apps/server README, "Testing with a new Entra tenant").
 - **No web UI** for sign-in links, sources or approvals yet: the commands above and the admin API
   (T-901..T-905).
 - **An `openhoard` command**: for now the commands run through `node …\apps\server\dist\main.js`

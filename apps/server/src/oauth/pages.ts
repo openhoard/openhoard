@@ -1,8 +1,10 @@
 /*
  * The few pages the server itself renders (T-105), until the web app (T-901): choosing how to sign
  * in, consenting to an MCP client, waiting for an admin, and errors. Plain HTML, everything
- * escaped, no scripts; the Content-Security-Policy allows only the inline style, and forms to
- * this server (and, for consent, the client's redirect, which the answer goes to).
+ * escaped; the Content-Security-Policy allows only the inline style, and forms to this server
+ * (and, for consent, the client's redirect, which the answer goes to). No scripts, except on the
+ * two pages that run a passkey ceremony (T-108), which load this server's own `/auth/passkey.js`
+ * and nothing else.
  */
 
 const STYLE = `body{font:16px/1.5 system-ui,sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem;color:#1d1d1f;background:#fafaf7}
@@ -23,19 +25,27 @@ export interface Page {
   csp: string;
 }
 
-function page(title: string, body: string, formTargets: readonly string[] = []): Page {
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="same-origin"><title>${escapeHtml(title)} · OpenHoard</title><style>${STYLE}</style></head><body>${body}</body></html>`;
+function page(
+  title: string,
+  body: string,
+  formTargets: readonly string[] = [],
+  options: { passkeys?: boolean } = {},
+): Page {
+  // The one script there is: the passkey ceremonies, served by this server (passkeys.ts).
+  const script = options.passkeys ? `<script src="/auth/passkey.js" defer></script>` : "";
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="same-origin"><title>${escapeHtml(title)} · OpenHoard</title><style>${STYLE}</style>${script}</head><body>${body}</body></html>`;
   const forms = ["'self'", ...formTargets].join(" ");
+  const scripts = options.passkeys ? " script-src 'self'; connect-src 'self';" : "";
   return {
     html,
-    csp: `default-src 'none'; style-src 'unsafe-inline'; form-action ${forms}; frame-ancestors 'none'; base-uri 'none'`,
+    csp: `default-src 'none'; style-src 'unsafe-inline';${scripts} form-action ${forms}; frame-ancestors 'none'; base-uri 'none'`,
   };
 }
 
 export function signInPage(
   providers: readonly { id: string; label: string }[],
   returnTo: string,
-  options: { links?: boolean } = {},
+  options: { links?: boolean; passkeys?: boolean } = {},
 ): Page {
   const links = providers
     .map(
@@ -46,11 +56,172 @@ export function signInPage(
   const viaLink = options.links
     ? `<p>${providers.length ? "Or sign" : "Sign"} in with a one-time link: run <code>openhoard admin user sign-in-link</code> on the server, open the link it prints in this browser, then reload this page.</p>`
     : "";
+  const viaPasskey = options.passkeys
+    ? `<p><button class="primary" type="button" id="oh-passkey" data-mode="sign-in" data-return="${escapeHtml(returnTo)}">Sign in with a passkey</button></p>
+<p id="oh-status" role="status"></p>
+<noscript><p class="warn">Signing in with a passkey needs JavaScript.</p></noscript>`
+    : "";
+  const nothing = providers.length || options.links || options.passkeys;
   return page(
     "Sign in",
-    `<h1>Sign in to OpenHoard</h1>${providers.length ? `<ul>${links}</ul>` : options.links ? "" : "<p>No sign-in is configured.</p>"}${viaLink}`,
+    `<h1>Sign in to OpenHoard</h1>${viaPasskey}${providers.length ? `<ul>${links}</ul>` : nothing ? "" : "<p>No sign-in is configured.</p>"}${viaLink}`,
+    [],
+    options.passkeys ? { passkeys: true } : {},
   );
 }
+
+/**
+ * An invite's page (T-108): a button that makes a passkey for the invited person. The invite's
+ * token is in the link's fragment, which the script reads; the page itself is the same for
+ * everyone, so opening (or prefetching) it uses nothing up.
+ */
+export function invitePage(): Page {
+  return page(
+    "Set up your passkey",
+    `<h1>Set up your passkey</h1>
+<p>You were invited to OpenHoard. A passkey is how you sign in: your device keeps it, and unlocks it with your fingerprint, face or PIN. There is no password.</p>
+<p><button class="primary" type="button" id="oh-passkey" data-mode="invite">Create a passkey</button></p>
+<p id="oh-status" role="status"></p>
+<noscript><p class="warn">Creating a passkey needs JavaScript.</p></noscript>`,
+    [],
+    { passkeys: true },
+  );
+}
+
+/**
+ * What the two passkey pages run: the WebAuthn ceremony between this server and the browser's
+ * authenticator. Plain JavaScript with no dependencies, served as `/auth/passkey.js`. It talks to
+ * this origin only, puts only fixed text on the page, and takes an invite's token out of the
+ * address bar as soon as it has read it.
+ */
+export const PASSKEY_SCRIPT = `(() => {
+  "use strict";
+  const button = document.getElementById("oh-passkey");
+  const status = document.getElementById("oh-status");
+  if (!button || !status) return;
+  const say = (text) => { status.textContent = text; };
+  const encode = (buffer) => {
+    let text = "";
+    for (const byte of new Uint8Array(buffer)) text += String.fromCharCode(byte);
+    return btoa(text).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/, "");
+  };
+  const decode = (text) => {
+    const raw = atob(text.replace(/-/g, "+").replace(/_/g, "/"));
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return bytes.buffer;
+  };
+  const post = async (path, body) => {
+    const res = await fetch(path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw Object.assign(new Error("refused"), { reason: data.reason, status: res.status });
+    return data;
+  };
+  const REASONS = {
+    used: "This invite was used already. If that was you, sign in with your passkey; if not, ask your admin for a new invite.",
+    expired: "This invite has expired. Ask your admin for a new one.",
+    revoked: "This invite was replaced or withdrawn. Ask your admin for a new one.",
+    inactive: "This account can't sign in. Ask your admin.",
+  };
+  const explain = (err, fallback) => {
+    if (err && err.name === "NotAllowedError") return "Cancelled, or it took too long. Try again.";
+    if (err && err.name === "InvalidStateError") return "This device already has a passkey for your account. Sign in with it.";
+    if (err && err.name === "SecurityError") return "This page isn't on the address OpenHoard is set up for, so passkeys can't be used here.";
+    return (err && REASONS[err.reason]) || fallback;
+  };
+  if (!window.PublicKeyCredential || !navigator.credentials) {
+    button.disabled = true;
+    say("This browser doesn't support passkeys. Use a current browser.");
+    return;
+  }
+
+  async function invite(token) {
+    const options = await post("/auth/passkey/register/options", { invite: token });
+    const credential = await navigator.credentials.create({
+      publicKey: {
+        ...options,
+        challenge: decode(options.challenge),
+        user: { ...options.user, id: decode(options.user.id) },
+        excludeCredentials: options.excludeCredentials.map((c) => ({ ...c, id: decode(c.id) })),
+      },
+    });
+    const r = credential.response;
+    await post("/auth/passkey/register", {
+      invite: token,
+      response: {
+        id: credential.id,
+        type: credential.type,
+        response: {
+          clientDataJSON: encode(r.clientDataJSON),
+          attestationObject: encode(r.attestationObject),
+          transports: typeof r.getTransports === "function" ? r.getTransports() : [],
+        },
+      },
+    });
+  }
+
+  async function signIn(returnTo) {
+    const options = await post("/auth/passkey/options", {});
+    const credential = await navigator.credentials.get({
+      publicKey: { ...options, challenge: decode(options.challenge) },
+    });
+    const r = credential.response;
+    const done = await post("/auth/passkey", {
+      return_to: returnTo,
+      response: {
+        id: credential.id,
+        type: credential.type,
+        response: {
+          clientDataJSON: encode(r.clientDataJSON),
+          authenticatorData: encode(r.authenticatorData),
+          signature: encode(r.signature),
+          userHandle: r.userHandle ? encode(r.userHandle) : null,
+        },
+      },
+    });
+    location.assign(done.returnTo || "/");
+  }
+
+  if (button.dataset.mode === "invite") {
+    // The token never goes to a server in a URL: out of the address bar and the history now.
+    const token = location.hash.slice(1);
+    history.replaceState(null, "", location.pathname);
+    if (!token) {
+      button.disabled = true;
+      say("This page needs an invite link. Open the link you were sent, whole.");
+      return;
+    }
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      say("Follow your device's prompts...");
+      try {
+        await invite(token);
+        button.hidden = true;
+        say("Your passkey is ready, and you're signed in. Go back to the app that asked you to sign in, and try again.");
+      } catch (err) {
+        button.disabled = false;
+        say(explain(err, "That didn't work. Try again, or ask your admin for a new invite."));
+      }
+    });
+  } else {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      say("Follow your device's prompts...");
+      try {
+        await signIn(button.dataset.return || "/");
+      } catch (err) {
+        button.disabled = false;
+        say(explain(err, "That passkey didn't sign you in."));
+      }
+    });
+  }
+})();
+`;
 
 /** A one-time sign-in link's page: a button, so opening (or prefetching) it uses nothing up. */
 export function signInLinkPage(token: string): Page {

@@ -152,7 +152,7 @@ issuer), sign-in answers 503 "sign-in is unavailable", logs why, and tries again
 | Kind      | Issuer                                                                   | A first sign-in is matched by            |
 | --------- | ------------------------------------------------------------------------ | ---------------------------------------- |
 | `entra`   | `https://login.microsoftonline.com/<directory id>/v2.0` (never `common`) | `oid`, unless `matchExternalId: false`   |
-| `google`  | `https://accounts.google.com`                                            | nothing (invitations, T-108/T-109)       |
+| `google`  | `https://accounts.google.com`                                            | nothing (T-109, for invited people)      |
 | `generic` | any issuer (https, or http on this machine only)                         | `sub`, only with `matchExternalId: true` |
 
 - **Matching.** A first sign-in's claim is matched once to a SCIM user's external id, and after
@@ -194,6 +194,8 @@ only a hash is stored.
 | `POST /auth/logout`       | Ends the session (204).                                                                                          |
 | `GET /auth/link?token=…`  | A one-time sign-in link's page: a button (with `auth.signInLinks`).                                              |
 | `POST /auth/link`         | Uses the link: starts a session. Must come from `publicUrl`'s origin.                                            |
+| `GET /auth/invite`        | An invite's page: makes a passkey (with `auth.passkeys`, below).                                                 |
+| `POST /auth/passkey…`     | The passkey ceremonies (below).                                                                                  |
 
 **One-time sign-in links** are for a server with no identity provider, for one person trying
 OpenHoard on their own machine ([docs/dogfood.md](../../docs/dogfood.md)). `auth.signInLinks: true`
@@ -219,6 +221,88 @@ so is every sign-out (`auth.sign-out`). A refused person nobody provisioned is l
 
 Later routes use `requireSignIn` and `c.get("auth")`: the tenant, the session and the
 principal.
+
+## Built-in accounts: invites and passkeys (T-108)
+
+For a server **without an identity provider**: a team that has none, or one person reaching
+their own server from outside (a tunnel, where sign-in links are refused). People are made
+locally (`admin user create`) and sign in with a **passkey**: a key pair their phone, computer or
+security key holds and unlocks with a fingerprint, face or PIN. There is no password, and the
+server keeps only the public key.
+
+```json
+{ "auth": { "publicUrl": "https://files.example.com", "passkeys": true } }
+```
+
+1. `openhoard admin user create --tenant ten_… --email ana@example.com --name "Ana"`
+2. `openhoard admin user invite --tenant ten_… --user ana@example.com` prints an invite link,
+   `<publicUrl>/auth/invite#ohi.…`, once. Send it to the person over a channel you trust (there
+   is no email delivery yet).
+3. They open it, press **Create a passkey**, and are signed in. From then on the sign-in page's
+   **Sign in with a passkey** signs them in, with no user name to type.
+
+**Invites.** Good once, for 7 days by default (`--hours`, 1 to 168). Whoever opens the link makes
+a passkey for that person, so treat it like a password until it is used. A newer invite replaces
+the older one; a lock or retirement revokes it for good. The token rides in the link's
+**fragment**, which browsers send to no server: it reaches this one only in a request body, so
+it is in no URL, proxy log or tunnel log. A used, expired or replaced invite says so to its
+holder; anything else is just refused.
+
+**Passkeys.**
+
+- **Local people only.** Someone provisioned over SCIM signs in through the identity provider:
+  a passkey here would bypass its rules (MFA, conditional access), so invites and passkeys are
+  refused for them.
+- **The person is always verified** (fingerprint, face or PIN): a passkey replaces a password
+  and a second factor at once. An authenticator that can't verify its user is refused.
+- **They belong to `publicUrl`'s host**, the WebAuthn relying party id. It must be a host name
+  (the config refuses an IP address; `http://localhost:…` works on this machine), and **passkeys
+  stop working when the host changes**: invite people again after moving the server. A
+  Cloudflare quick tunnel gets a new host on every run, so passkeys need a named tunnel or a
+  real domain.
+- **No attestation.** The server asks for none and verifies none: it learns that a key pair was
+  made, not which make of authenticator made it. Accepted algorithms: ES256, EdDSA, RS256. A key
+  must be exactly its algorithm's parameters; degenerate ones (an RSA exponent below 65,537, a
+  small-order Ed25519 point) are refused.
+- **Synced or not.** Passkeys that sync between a person's devices (iCloud Keychain, Google
+  Password Manager, 1Password) and ones that don't (a security key) both work. Where the
+  authenticator keeps a signature counter, one that doesn't advance is refused (a copied key).
+- **Several per person** (at most 20). Signed in, a person adds another through
+  `POST /auth/passkey/register/options` and `/register` with no invite; `GET /auth/passkeys`
+  lists theirs and `DELETE /auth/passkeys/<id>` removes one. Adding and removing both need a
+  sign-in within `adminSignInMinutes` (15 by default): a session left open, or stolen later than
+  that, can neither add a way back in nor lock its person out. Within that window a session can
+  do what its person can.
+- **Removing a passkey** ends the sessions it signed in and the person's AI client grants. It
+  doesn't end sessions another passkey signed in. An operator does the same with
+  `admin user list-passkeys` and `admin user remove-passkey` (a lost phone).
+- **A lost only passkey** is a new invite: `admin user invite` again.
+- **If an account may be compromised:** `admin user lock` (every session, grant and unused
+  invite ends at once), `admin user list-passkeys` and `remove-passkey` for each one the person
+  doesn't recognise (or all of them), then `admin user unlock` and a new invite.
+
+**Routes** (all only with `auth.passkeys`; every POST must come from `publicUrl`'s origin):
+
+| Route                                 | What it does                                                                    |
+| ------------------------------------- | ------------------------------------------------------------------------------- |
+| `GET /auth/invite`                    | The invite page: a button, and the script. The same for everyone.               |
+| `GET /auth/passkey.js`                | The one script the server serves: the two ceremonies, this origin only.         |
+| `POST /auth/passkey/register/options` | `{invite}` or signed in: what to make a passkey with.                           |
+| `POST /auth/passkey/register`         | `{invite?, name?, response}`: stores the passkey; an invite signs its person in |
+| `POST /auth/passkey/options`          | What to sign in with (any passkey of this server).                              |
+| `POST /auth/passkey`                  | `{response, return_to?}`: starts a session, answers `{returnTo}`.               |
+| `GET /auth/passkeys`                  | The signed-in person's passkeys.                                                |
+| `DELETE /auth/passkeys/<id>`          | Removes one of theirs.                                                          |
+
+Each ceremony's challenge is in a sealed cookie of its own (as a sign-in under way is), bound to
+the invite or session it was issued for and good for 5 minutes; asking for options writes
+nothing on the server. A challenge is answered once: the first answer that names a real invite
+or passkey records it (a hash, in `passkey_challenges`, for 15 minutes), right or wrong, so a
+copied request (the cookie and the answer, from a proxy's log) signs nobody in again and adds
+nothing to the audit log: each challenge is audited at most once. Audited: `invite.issue`, `passkey.register`, `passkey.remove`, and
+`auth.sign-in` with provider `passkey` (refusals too, once a real invite or passkey is named).
+The two pages that run a ceremony allow one script, this server's own
+(`script-src 'self'`); every other page still allows none.
 
 ## MCP clients: OAuth 2.1 (T-105)
 
@@ -675,6 +759,11 @@ node apps/server/dist/main.js admin source accept-identity --tenant ten_… --so
   server with `auth.signInLinks`), audited `sign-in-link.issue` without the token. It works for
   any current person, SCIM-provisioned ones included, and bypasses the identity provider (and its
   MFA): whoever runs admin commands is trusted with every account.
+- **Invites and passkeys (T-108).** `user invite` prints an invite link for a local person (on
+  a server with `auth.passkeys`), audited `invite.issue` without the token: whoever opens it
+  makes a passkey for them and is signed in. Unlike a sign-in link it works through a tunnel or
+  proxy, and it is refused for SCIM-provisioned people. `user list-passkeys` shows what a person
+  holds; `user remove-passkey` removes one and ends the sessions it signed in.
 - **Packs.** `pack plan` prints what applying a pack would change (`!` marks a loosening), its
   warnings and tests, and the plan's hash on standard output; `pack apply` with that hash applies
   exactly that plan (refused when anything changed since, or a test fails), audited `pack.apply`.

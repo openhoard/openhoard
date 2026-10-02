@@ -27,14 +27,18 @@ import {
   getUser,
   grantAdmin,
   IdentityError,
+  INVITE_MAX_HOURS,
+  issueInvite,
   issueScimToken,
   issueSignInLink,
   listAdmins,
   listGroups,
+  listPasskeys,
   MAX_LIST,
   memberCount,
   listScimTokens,
   lockUser,
+  removePasskey,
   revokeAdmin,
   revokeScimToken,
   SCIM_TOKEN_MAX_DAYS,
@@ -71,6 +75,9 @@ import { retrying } from "./retry.js";
  *   admin user unlock       --tenant ten_… --user <usr_… | email | userName>
  *   admin user create       --tenant ten_… --email <email> --name <display name>
  *   admin user sign-in-link --tenant ten_… --user <usr_… | email | userName> [--minutes 15]
+ *   admin user invite          --tenant ten_… --user <usr_… | email> [--hours 168]
+ *   admin user list-passkeys   --tenant ten_… --user <usr_… | email>
+ *   admin user remove-passkey  --tenant ten_… --user <usr_… | email> --id pky_…
  *   admin group list        --tenant ten_…
  *   admin pack plan               --tenant ten_… --file <pack.json>
  *   admin pack apply              --tenant ten_… --file <pack.json> --plan-hash <hash>
@@ -104,6 +111,14 @@ import { retrying } from "./retry.js";
  * (`user.create`, `sign-in-link.issue`); the link is printed once. A link can be issued for any
  * current person, SCIM-provisioned ones too, and bypasses the identity provider and its MFA: the
  * operator running admin commands is trusted with every account.
+ *
+ * `user invite` issues a local person an invite (core/identity passkeys.ts, T-108), on a server
+ * with `auth.passkeys`: a link, good once and for at most 7 days, whose holder makes a passkey
+ * for that person and is signed in. Send it to them yourself, over a channel you trust; it
+ * replaces any earlier invite of theirs. It works from anywhere publicUrl is reachable, so it is
+ * how a person signs in through a tunnel, where sign-in links are refused. `user list-passkeys`
+ * shows what they hold and `user remove-passkey` removes one (a lost phone), ending the sessions
+ * it signed in. All audited (`invite.issue`, `passkey.remove`); the link is printed once.
  *
  * `pack plan` shows what applying a pack (packs/README.md) would change in a tenant, every
  * loosening flagged, its tests, and the plan's hash; `pack apply` applies exactly that plan
@@ -180,6 +195,13 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
                                                    make a local person (no identity provider)
   user sign-in-link --tenant <ten_…> --user <usr_…|email|userName> [--minutes <1-${SIGN_IN_LINK_MAX_MINUTES}>]
                                                    a one-time sign-in link (auth.signInLinks)
+  user invite --tenant <ten_…> --user <usr_…|email> [--hours <1-${INVITE_MAX_HOURS}>]
+                                                   an invite link: its holder makes a passkey
+                                                   for that person (auth.passkeys)
+  user list-passkeys --tenant <ten_…> --user <usr_…|email>
+                                                   the passkeys a person holds
+  user remove-passkey --tenant <ten_…> --user <usr_…|email> --id <pky_…>
+                                                   remove a passkey (a lost device)
   pack plan --tenant <ten_…> --file <pack.json>   what applying a pack would change, and its hash
   pack apply --tenant <ten_…> --file <pack.json> --plan-hash <hash>
                                                    apply exactly the plan shown
@@ -217,6 +239,7 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         source: { type: "string" },
         email: { type: "string" },
         minutes: { type: "string" },
+        hours: { type: "string" },
         file: { type: "string" },
         "plan-hash": { type: "string" },
         help: { type: "boolean", short: "h" },
@@ -245,6 +268,9 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "user unlock",
     "user create",
     "user sign-in-link",
+    "user invite",
+    "user list-passkeys",
+    "user remove-passkey",
     "group list",
     "pack plan",
     "pack apply",
@@ -317,6 +343,18 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         );
       case "user sign-in-link":
         return await signInLink(db, config, values, io);
+      case "user invite":
+        return await invite(db, config, values, io);
+      case "user list-passkeys":
+        return await passkeyList(db, tenantArg(values.tenant), need(values.user, "--user"), io);
+      case "user remove-passkey":
+        return await passkeyRemove(
+          db,
+          tenantArg(values.tenant),
+          need(values.user, "--user"),
+          need(values.id, "--id"),
+          io,
+        );
       case "pack plan":
       case "pack apply":
         return await packCommand(
@@ -749,6 +787,7 @@ async function lockChange(
                   sessionsEnded: ended.sessions,
                   oauthGrantsRevoked: ended.oauthGrants,
                   oauthCodesUsedUp: ended.oauthCodes,
+                  ...(ended.invites > 0 ? { invitesRevoked: ended.invites } : {}),
                 }
               : {}),
           },
@@ -1303,6 +1342,162 @@ export async function signInLink(
   io.err(
     `A sign-in link for ${user.displayName} (${user.id}), shown once, good once, until ` +
       `${link.expiresAt.toISOString()}: open it in the browser you'll use with OpenHoard.\n`,
+  );
+  return 0;
+}
+
+/**
+ * `user invite`: an invite link for a local person, printed once (audited). Whoever opens it
+ * makes a passkey for that person and is signed in (T-108).
+ */
+export async function invite(
+  db: Database,
+  config: Config,
+  values: { tenant?: string; user?: string; hours?: string },
+  io: AdminIo,
+): Promise<number> {
+  const tenantId = tenantArg(values.tenant);
+  const named = need(values.user, "--user");
+  const hoursText = values.hours ?? String(INVITE_MAX_HOURS);
+  const hours = /^\d{1,3}$/.test(hoursText) ? Number(hoursText) : Number.NaN;
+  if (!(hours >= 1 && hours <= INVITE_MAX_HOURS)) {
+    throw new UsageError(`--hours is a whole number from 1 to ${INVITE_MAX_HOURS}`);
+  }
+  if (!config.auth?.passkeys) {
+    io.err(
+      `passkeys are off: set auth.passkeys to true in the server's config (publicUrl must be a ` +
+        `host name, where people reach the server), and restart it\n`,
+    );
+    return 1;
+  }
+  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  const refused = async (reason: string, message: string, userId?: string) => {
+    await db.withTenant(tenantId, (tx) =>
+      appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "invite.issue",
+        decision: "deny",
+        detail: { ...(userId ? { user: userId } : {}), reason },
+      }),
+    );
+    io.err(`${message}\n`);
+    return 1;
+  };
+  const user = await namedUser(db, tenantId, named);
+  if (user === "none") {
+    return refused("unknown-user", `tenant ${tenantId} has no current person ${named}`);
+  }
+  if (user === "ambiguous") {
+    return refused(
+      "ambiguous",
+      `${named} is one person's email and another's userName: use the id`,
+    );
+  }
+  let issued;
+  try {
+    issued = await db.withTenant(tenantId, async (tx) => {
+      const made = await issueInvite(tx, tenantId, { userId: user.id, by: ADMIN_ACTOR, hours });
+      await appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "invite.issue",
+        decision: "allow",
+        detail: {
+          user: user.id,
+          invite: made.id,
+          expiresAt: made.expiresAt.toISOString(),
+          ...(made.revoked > 0 ? { replaced: made.revoked } : {}),
+        },
+      });
+      return made;
+    });
+  } catch (e) {
+    if (!(e instanceof IdentityError)) throw e;
+    return refused(e.code, e.message, user.id);
+  }
+  // In the fragment: browsers send it to no server, so it reaches no proxy's or tunnel's log.
+  const url = new URL("/auth/invite", config.auth.publicUrl);
+  url.hash = issued.token;
+  io.out(`${url.href}\n`);
+  io.err(
+    `An invite for ${user.displayName} (${user.id}), shown once, good once, until ` +
+      `${issued.expiresAt.toISOString()}: whoever opens it makes a passkey for them and is ` +
+      `signed in, so send it only to them.` +
+      (issued.revoked > 0 ? ` Their earlier invite no longer works.` : ``) +
+      `\n`,
+  );
+  return 0;
+}
+
+/** `user list-passkeys`: what a person signs in with. */
+async function passkeyList(
+  db: Database,
+  tenantId: string,
+  named: string,
+  io: AdminIo,
+): Promise<number> {
+  const user = await namedUser(db, tenantId, named);
+  if (user === "none" || user === "ambiguous") {
+    io.err(`tenant ${tenantId} has no one current person ${named}\n`);
+    return 1;
+  }
+  const held = await db.withTenant(tenantId, (tx) => listPasskeys(tx, tenantId, user.id));
+  for (const p of held) {
+    io.out(
+      [
+        p.id,
+        p.name,
+        `created ${p.createdAt.toISOString()}`,
+        p.lastUsedAt ? `last used ${p.lastUsedAt.toISOString()}` : "never used",
+        p.backedUp ? "synced" : "this device only",
+      ].join("\t") + "\n",
+    );
+  }
+  if (held.length === 0) io.err(`${user.displayName} (${user.id}) has no passkey.\n`);
+  return 0;
+}
+
+/** `user remove-passkey`: removes one, and ends the sessions it signed in (audited). */
+async function passkeyRemove(
+  db: Database,
+  tenantId: string,
+  named: string,
+  passkeyId: string,
+  io: AdminIo,
+): Promise<number> {
+  if (!isId("passkey", passkeyId)) throw new UsageError("--id is a passkey id (pky_…)");
+  const user = await namedUser(db, tenantId, named);
+  if (user === "none" || user === "ambiguous") {
+    io.err(`tenant ${tenantId} has no one current person ${named}\n`);
+    return 1;
+  }
+  const ended = await db.withTenant(tenantId, async (tx) => {
+    const result = await removePasskey(tx, tenantId, user.id, passkeyId, ADMIN_ACTOR);
+    if (result) {
+      await appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "passkey.remove",
+        decision: "allow",
+        detail: {
+          user: user.id,
+          passkey: passkeyId,
+          sessionsEnded: result.sessions,
+          oauthGrantsRevoked: result.oauthGrants,
+          oauthCodesUsedUp: result.oauthCodes,
+        },
+      });
+    }
+    return result;
+  });
+  if (!ended) {
+    io.err(`${user.displayName} (${user.id}) has no passkey ${passkeyId}\n`);
+    return 1;
+  }
+  io.err(
+    `Removed ${passkeyId}: it no longer signs ${user.displayName} in, and ended ` +
+      `${ended.sessions} session(s) and ${ended.oauthGrants} AI client grant(s).\n`,
   );
   return 0;
 }

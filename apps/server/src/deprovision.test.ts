@@ -690,6 +690,6 @@ describe("a service account's API keys (T-104, core: no API-key route yet)", () 
         for (const i of [1, 0]) expect(await check(i, second.token)).toBeNull();
       },
     );
-    expect(ended).toEqual([{ sessions: 0, oauthCodes: 0, oauthGrants: 0, apiKeys: 1 }]);
+    expect(ended).toEqual([{ sessions: 0, oauthCodes: 0, oauthGrants: 0, apiKeys: 1, invites: 0 }]);
   });
 });

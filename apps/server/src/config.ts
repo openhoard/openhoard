@@ -174,10 +174,25 @@ export const AuthSchema = z
      * a single person trying OpenHoard out, never for a team.
      */
     signInLinks: z.boolean().default(false),
+    /**
+     * Passkeys for built-in accounts (T-108): local people, on a server without an identity
+     * provider, sign in with a passkey made from an invite (`openhoard admin user invite`). Off
+     * by default. A passkey belongs to publicUrl's host (its WebAuthn relying party id), so that
+     * must be a name, not an address, and passkeys stop working when it changes.
+     */
+    passkeys: z.boolean().default(false),
   })
   .strict()
   .superRefine((a, ctx) => {
     const url = new URL(a.publicUrl);
+    if (a.passkeys && !isDomain(url.hostname)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["passkeys"],
+        message:
+          "passkeys belong to a host name: publicUrl can't be an IP address (use http://localhost:… on this machine)",
+      });
+    }
     if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopback(url))) {
       ctx.addIssue({
         code: "custom",
@@ -478,6 +493,19 @@ export const ConfigSchema = z
 export type Config = z.infer<typeof ConfigSchema>;
 
 /** The addresses `host` may name for a server that listens on this machine only. */
+/**
+ * Whether a URL's host is a name a passkey can belong to (a WebAuthn relying party id): not an
+ * IPv4 or IPv6 address. `localhost` is one.
+ */
+function isDomain(hostname: string): boolean {
+  return !hostname.startsWith("[") && !/^[0-9.]+$/.test(hostname) && hostname !== "";
+}
+
+/** The WebAuthn relying party id of a server: its public URL's host. */
+export function relyingPartyId(publicUrl: string): string {
+  return new URL(publicUrl).hostname;
+}
+
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
 /**

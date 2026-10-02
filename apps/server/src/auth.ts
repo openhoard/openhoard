@@ -28,6 +28,7 @@ import * as oidc from "openid-client";
 import type { Logger } from "pino";
 import { adminGroupOf, externalIdClaim, type AuthConfig, type ProviderConfig } from "./config.js";
 import { loginCookieName, loginKey, openLogin, sealLogin } from "./login-state.js";
+import { mountPasskeys } from "./passkeys.js";
 import { signInLinkPage, signInPage, signedInPage } from "./oauth/pages.js";
 
 /*
@@ -43,6 +44,8 @@ import { signInLinkPage, signInPage, signedInPage } from "./oauth/pages.js";
  *   POST /auth/logout              ends the session
  *   GET  /auth/link?token=…        a one-time sign-in link: a page with a button (auth.signInLinks)
  *   POST /auth/link                uses it: starts a session
+ *
+ * With `auth.passkeys`, built-in accounts sign in with passkeys (T-108): see passkeys.ts.
  *
  * - One-time sign-in links (core/identity sign-in-links.ts) are for a server without an identity
  *   provider, on this machine only: the config refuses them unless host and publicUrl are
@@ -228,6 +231,58 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
     await next();
   });
 
+  /**
+   * Finishes a sign-in in this browser: the session it had (if any) is replaced, not left alive
+   * beside the new one, and the new session's cookie is set.
+   */
+  const signedInAs = async (
+    c: Context<AuthEnv>,
+    session: { token: string; expiresAt: Date },
+  ): Promise<void> => {
+    const previous = c.get("auth");
+    if (previous) {
+      const by = userPrincipal(previous.principal.userId);
+      try {
+        await db.withTenant(previous.tenantId, async (tx) => {
+          if (await revokeSession(tx, previous.tenantId, previous.sessionId, by)) {
+            await audit(tx, previous.tenantId, {
+              actor: by,
+              action: "auth.sign-out",
+              decision: "allow",
+              detail: { session: previous.sessionId, replaced: true },
+            });
+          }
+        });
+      } catch (err) {
+        // The new session stands; the old one still ends by itself.
+        log?.error(
+          { err, session: previous.sessionId },
+          "sign-in: ending the previous session failed",
+        );
+      }
+    }
+    setCookie(c, SESSION_COOKIE, session.token, {
+      path: "/",
+      httpOnly: true,
+      secure,
+      sameSite: "Lax",
+      maxAge: Math.max(0, Math.floor((session.expiresAt.getTime() - Date.now()) / 1000)),
+    });
+  };
+
+  if (auth.passkeys) {
+    mountPasskeys(app, {
+      auth,
+      db,
+      key,
+      sameOrigin,
+      signedIn: signedInAs,
+      audit,
+      returnPath,
+      ...(log ? { log } : {}),
+    });
+  }
+
   app.get("/auth/providers", (c) =>
     c.json({
       providers: auth.providers.map((p) => ({ id: p.id, label: p.label ?? p.id, kind: p.kind })),
@@ -239,14 +294,14 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
     const back = returnPath(c.req.query("return_to"));
     // Signed in meanwhile (a sign-in link, in another tab): straight back.
     if (c.get("auth")) return c.redirect(back, 302);
-    if (auth.providers.length === 1) {
+    if (auth.providers.length === 1 && !auth.passkeys) {
       const only = auth.providers[0] as ProviderConfig;
       return c.redirect(`/auth/login/${only.id}?return_to=${encodeURIComponent(back)}`, 302);
     }
     const shown = signInPage(
       auth.providers.map((p) => ({ id: p.id, label: p.label ?? p.id })),
       back,
-      { links: auth.signInLinks },
+      { links: auth.signInLinks, passkeys: auth.passkeys },
     );
     c.header("content-security-policy", shown.csp);
     return c.html(shown.html);
@@ -324,33 +379,7 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
         c.header("content-security-policy", shown.csp);
         return c.html(shown.html);
       }
-      if (previous) {
-        const by = userPrincipal(previous.principal.userId);
-        await db
-          .withTenant(previous.tenantId, async (tx) => {
-            if (await revokeSession(tx, previous.tenantId, previous.sessionId, by)) {
-              await audit(tx, previous.tenantId, {
-                actor: by,
-                action: "auth.sign-out",
-                decision: "allow",
-                detail: { session: previous.sessionId, replaced: true },
-              });
-            }
-          })
-          .catch((err: unknown) =>
-            log?.error(
-              { err, session: previous.sessionId },
-              "sign-in: ending the previous session failed",
-            ),
-          );
-      }
-      setCookie(c, SESSION_COOKIE, result.session.token, {
-        path: "/",
-        httpOnly: true,
-        secure,
-        sameSite: "Lax",
-        maxAge: Math.max(0, Math.floor((result.session.expiresAt.getTime() - Date.now()) / 1000)),
-      });
+      await signedInAs(c, result.session);
       const shown = signedInPage();
       c.header("content-security-policy", shown.csp);
       return c.html(shown.html);
@@ -456,7 +485,6 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
     }
     const claim = externalIdClaim(p);
     const externalId = claim === undefined ? undefined : claims[claim];
-    const previous = c.get("auth");
     let result;
     try {
       result = await db.withTenant(p.tenantId, async (tx) => {
@@ -492,35 +520,7 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
       return refuse(inactive ? "inactive" : "invalid-claims");
     }
     if (!result.ok) return refuse(result.refused, claims.sub, result.userId);
-    // The session this browser had (if any) is replaced, not left alive beside the new one.
-    if (previous) {
-      const by = userPrincipal(previous.principal.userId);
-      try {
-        await db.withTenant(previous.tenantId, async (tx) => {
-          if (await revokeSession(tx, previous.tenantId, previous.sessionId, by)) {
-            await audit(tx, previous.tenantId, {
-              actor: by,
-              action: "auth.sign-out",
-              decision: "allow",
-              detail: { session: previous.sessionId, replaced: true },
-            });
-          }
-        });
-      } catch (err) {
-        // The new session stands; the old one still ends by itself.
-        log?.error(
-          { err, session: previous.sessionId },
-          "sign-in: ending the previous session failed",
-        );
-      }
-    }
-    setCookie(c, SESSION_COOKIE, result.session.token, {
-      path: "/",
-      httpOnly: true,
-      secure,
-      sameSite: "Lax",
-      maxAge: Math.max(0, Math.floor((result.session.expiresAt.getTime() - Date.now()) / 1000)),
-    });
+    await signedInAs(c, result.session);
     return c.redirect(login.returnTo, 302);
   });
 

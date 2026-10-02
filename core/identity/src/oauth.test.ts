@@ -499,7 +499,7 @@ describe("access tokens", () => {
     await write((tx) =>
       lockUser(tx, t.tenantId, ana.id, "user:admin", { onEnded: (e) => ended.push(e) }),
     );
-    expect(ended).toEqual([{ sessions: 0, oauthCodes: 1, oauthGrants: 2, apiKeys: 0 }]);
+    expect(ended).toEqual([{ sessions: 0, oauthCodes: 1, oauthGrants: 2, apiKeys: 0, invites: 0 }]);
     expect(await live(a.grantId)).toBe(false);
     expect((await redeem(pending)).ok).toBe(false);
     // Locked already: nothing ends, and nothing is reported.
@@ -530,7 +530,9 @@ describe("access tokens", () => {
     await write((tx) =>
       retireUser(tx, t.tenantId, ana.id, "user:admin", { onEnded: (e) => retired.push(e) }),
     );
-    expect(retired).toEqual([{ sessions: 0, oauthCodes: 0, oauthGrants: 2, apiKeys: 0 }]);
+    expect(retired).toEqual([
+      { sessions: 0, oauthCodes: 0, oauthGrants: 2, apiKeys: 0, invites: 0 },
+    ]);
   });
 
   it("take a configured trust over a pending client, never over a refused one", async () => {

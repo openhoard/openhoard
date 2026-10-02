@@ -17,6 +17,8 @@ import {
   sessions,
   oauthGrants,
   oauthCodes,
+  invites,
+  passkeys,
 } from "@openhoard/core-db";
 import type { AuthzPrincipal } from "@openhoard/core-policy";
 import { and, asc, count, eq, gt, inArray, isNotNull, isNull, ne, sql } from "drizzle-orm";
@@ -534,14 +536,16 @@ export async function updateUser(
 /**
  * What a stop (a lock, a provider disable, a retirement) or an unlinked identity ended at once,
  * for the caller's audit record (T-104): sessions revoked, OAuth codes used up, OAuth grants
- * revoked (with every access and refresh token they hold), and API keys revoked (retirement of
- * a service account only; a lock suspends its keys through the inactive principal instead).
+ * revoked (with every access and refresh token they hold), API keys revoked (retirement of
+ * a service account only; a lock suspends its keys through the inactive principal instead), and
+ * invites not yet used revoked (T-108: a built-in account's way to a first passkey).
  */
 export interface EndedAccess {
   sessions: number;
   oauthCodes: number;
   oauthGrants: number;
   apiKeys: number;
+  invites: number;
 }
 
 /** What the stops take besides who acted. */
@@ -580,10 +584,12 @@ export async function lockUser(
 }
 
 /**
- * Ends a user's live sessions and OAuth grants (a lock, a provider disable, retirement), or, with
- * `identity`, the sessions that identity signed in and every grant: they don't come back.
- * Returns what it ended.
+ * Ends a user's live sessions and OAuth grants and revokes their unused invites (a lock, a
+ * provider disable, retirement), or, with `identity`, the sessions that identity signed in and
+ * every grant: they don't come back. Returns what it ended. For this package's own modules
+ * (passkeys.ts removes a passkey with it), after they locked the person's row.
  */
+export const endAccess = endSessions;
 async function endSessions(
   tx: Tx,
   tenantId: string,
@@ -630,11 +636,28 @@ async function endSessions(
       ),
     )
     .returning({ id: oauthGrants.id });
+  // An invite not yet used would let them (or whoever holds its link) back in once the stop is
+  // lifted. Removing one sign-in identity leaves it: it makes a passkey, another way in.
+  const invited = identity
+    ? []
+    : await tx
+        .update(invites)
+        .set({ revokedAt: sql`greatest(now(), ${invites.createdAt})`, revokedBy: by })
+        .where(
+          and(
+            eq(invites.tenantId, tenantId),
+            eq(invites.userId, userId),
+            isNull(invites.usedAt),
+            isNull(invites.revokedAt),
+          ),
+        )
+        .returning({ id: invites.id });
   return {
     sessions: ended.length,
     oauthCodes: codes.length,
     oauthGrants: revoked.length,
     apiKeys: 0,
+    invites: invited.length,
   };
 }
 
@@ -735,6 +758,10 @@ export async function retireUser(
   await tx
     .delete(userIdentities)
     .where(and(eq(userIdentities.tenantId, tenantId), eq(userIdentities.userId, userId)));
+  // A built-in account's passkeys are its sign-in identities (T-108): they go too.
+  await tx
+    .delete(passkeys)
+    .where(and(eq(passkeys.tenantId, tenantId), eq(passkeys.userId, userId)));
   // Their sessions end now (they would fail anyway: the principal is inactive).
   const ended = await endSessions(tx, tenantId, userId, by);
   // A retired service account's keys stop at once (they would anyway: it is inactive).

@@ -841,6 +841,159 @@ export const signInLinks = pgTable(
 );
 
 /**
+ * Passkeys (T-108): the WebAuthn credentials a built-in account (a local person, on a server
+ * without an identity provider) signs in with. Only the public key is kept, as the authenticator
+ * gave it (a COSE key, base64url), with the credential's id, its signature counter and whether
+ * it may be synced (`backup_eligible`, fixed at registration) and is (`backed_up`). A passkey is
+ * removed by deleting its row; core/identity ends the sessions it signed in.
+ */
+export const passkeys = pgTable(
+  "passkeys",
+  {
+    tenantId: text("tenant_id").notNull(),
+    id: text("id").notNull(),
+    userId: text("user_id").notNull(),
+    /** The credential's id, base64url: what the authenticator names it by. */
+    credentialId: text("credential_id").notNull(),
+    /** The credential's public key, a COSE key, base64url. */
+    publicKey: text("public_key").notNull(),
+    /** Its COSE algorithm: -7 (ES256), -8 (EdDSA) or -257 (RS256). */
+    algorithm: integer("algorithm").notNull(),
+    /** The authenticator's signature counter at its last use (0 where it keeps none). */
+    signCount: bigint("sign_count", { mode: "number" }).notNull().default(0),
+    transports: text("transports").array().notNull(),
+    backupEligible: boolean("backup_eligible").notNull(),
+    backedUp: boolean("backed_up").notNull(),
+    /** The authenticator model's id, hex; all zeros when it doesn't say. */
+    aaguid: text("aaguid").notNull(),
+    /** What the person calls it: "Phone", "YubiKey". */
+    name: text("name").notNull(),
+    /** The invite it was made with, or null: added by its person, signed in. */
+    inviteId: text("invite_id"),
+    createdAt: createdAt(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    foreignKey({
+      name: "passkeys_user_fk",
+      columns: [t.tenantId, t.userId],
+      foreignColumns: [users.tenantId, users.id],
+    }),
+    // A credential belongs to one person: registering it again is refused.
+    unique("passkeys_credential_unique").on(t.tenantId, t.credentialId),
+    index("passkeys_user_idx").on(t.tenantId, t.userId),
+    idCheck("passkeys_id_format", "id", "passkey"),
+    // 16 to 1,023 bytes, base64url.
+    check(
+      "passkeys_credential_id_format",
+      sql`credential_id ~ '^[A-Za-z0-9_-]+$' and char_length(credential_id) between 22 and 1364`,
+    ),
+    check(
+      "passkeys_public_key_format",
+      sql`public_key ~ '^[A-Za-z0-9_-]+$' and char_length(public_key) between 40 and 4096`,
+    ),
+    check("passkeys_algorithm_valid", sql`algorithm in (-7, -8, -257)`),
+    check("passkeys_sign_count_range", sql`sign_count between 0 and 4294967295`),
+    check(
+      "passkeys_transports_valid",
+      sql`cardinality(transports) <= 8 and array_position(transports, null) is null
+        and array_to_string(transports, ',') ~ '^([a-z][a-z0-9-]{0,31}(,[a-z][a-z0-9-]{0,31})*)?$'`,
+    ),
+    // A credential that can't be backed up never is.
+    check("passkeys_backup_state", sql`backup_eligible or not backed_up`),
+    check("passkeys_aaguid_format", sql`aaguid ~ '^[0-9a-f]{32}$'`),
+    check("passkeys_name_length", sql`char_length(name) between 1 and 100`),
+    // (A check passes on null.)
+    idCheck("passkeys_invite_id_format", "invite_id", "invite"),
+    check("passkeys_last_used", sql`last_used_at is null or last_used_at >= created_at`),
+  ],
+);
+
+/**
+ * Invites (T-108): how a built-in account gets its first passkey. An admin issues one for a
+ * local person; whoever opens its link registers a passkey for that person and is signed in.
+ * The token is `ohi.<tenant id>.<invite id>.<secret>`; only a SHA-256 of the secret is kept. An
+ * invite lives at most 7 days and is used once (`used_at`, with the passkey it made); a stop on
+ * the person, or a newer invite, revokes it.
+ */
+export const invites = pgTable(
+  "invites",
+  {
+    tenantId: text("tenant_id").notNull(),
+    id: text("id").notNull(),
+    userId: text("user_id").notNull(),
+    /** SHA-256 of the secret, hex. The secret is 32 random bytes, so a fast hash is enough. */
+    secretHash: text("secret_hash").notNull(),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    /** The passkey it made. */
+    passkeyId: text("passkey_id"),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: text("revoked_by"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.id] }),
+    foreignKey({
+      name: "invites_user_fk",
+      columns: [t.tenantId, t.userId],
+      foreignColumns: [users.tenantId, users.id],
+    }),
+    index("invites_user_idx").on(t.tenantId, t.userId),
+    idCheck("invites_id_format", "id", "invite"),
+    check("invites_secret_hash_format", sql`secret_hash ~ '^[0-9a-f]{64}$'`),
+    check(
+      "invites_expiry",
+      // (Hours, not days: a day's length depends on the session's time zone.)
+      sql`expires_at > created_at and expires_at <= created_at + interval '168 hours'`,
+    ),
+    check("invites_created_by_principal", sql`created_by ~ '^(user|system):.+$'`),
+    idCheck("invites_passkey_id_format", "passkey_id", "passkey"),
+    check(
+      "invites_use_complete",
+      sql`(used_at is null) = (passkey_id is null) and (used_at is null or used_at >= created_at)`,
+    ),
+    check(
+      "invites_revocation_complete",
+      sql`(revoked_at is null) = (revoked_by is null) and (revoked_at is null or revoked_at >= created_at)`,
+    ),
+    check(
+      "invites_revoked_by_principal",
+      sql`revoked_by is null or revoked_by ~ '^(user|system|scim):.+$'`,
+    ),
+    // Used or revoked, never both.
+    check("invites_one_end", sql`used_at is null or revoked_at is null`),
+  ],
+);
+
+/**
+ * Passkey challenges already answered (T-108). A ceremony's challenge rides in a sealed cookie,
+ * which the server can't take back from a browser (or from whoever copied the request), so the
+ * first answer naming a real invite or passkey records the challenge's SHA-256 here, in the
+ * transaction that commits that answer's outcome, and a second answer with the same challenge is
+ * refused. Rows are only needed
+ * while the cookie could still be valid (minutes); core/identity removes older ones as it goes.
+ */
+export const passkeyChallenges = pgTable(
+  "passkey_challenges",
+  {
+    tenantId: text("tenant_id")
+      .notNull()
+      .references(() => tenants.id),
+    /** SHA-256 of the challenge, hex. */
+    challengeHash: text("challenge_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.challengeHash] }),
+    index("passkey_challenges_expiry_idx").on(t.tenantId, t.expiresAt),
+    check("passkey_challenges_hash_format", sql`challenge_hash ~ '^[0-9a-f]{64}$'`),
+  ],
+);
+
+/**
  * A counter per tenant, bumped by a trigger (migration 0021) on every change resolvePrincipal()
  * reads: grants, group memberships, and a user's kind or stops. core/identity's principal cache
  * keys entries by it, so a change anywhere in the tenant invalidates them, in every process.
@@ -1982,4 +2135,7 @@ export const tables = {
   oauthTokens,
   scimTokens,
   signInLinks,
+  passkeys,
+  invites,
+  passkeyChallenges,
 } as const;

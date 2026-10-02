@@ -31,6 +31,8 @@ export const ID_PREFIXES = {
   oauthToken: "oat",
   scimToken: "sct",
   signInLink: "sil",
+  passkey: "pky",
+  invite: "inv",
 } as const;
 export type IdKind = keyof typeof ID_PREFIXES;
 

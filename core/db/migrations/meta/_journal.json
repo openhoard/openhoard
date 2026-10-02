@@ -407,6 +407,20 @@
       "when": 1790472551166,
       "tag": "0057_source_owner",
       "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1790899586959,
+      "tag": "0058_passkeys_invites",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "7",
+      "when": 1790899588355,
+      "tag": "0059_passkeys_invites_rls",
+      "breakpoints": true
     }
   ]
 }

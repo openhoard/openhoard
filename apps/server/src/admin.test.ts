@@ -5,6 +5,7 @@ import { exportAudit } from "@openhoard/core-audit";
 import { newId, openDatabase, sourceSyncs, zones, type Database } from "@openhoard/core-db";
 import { openTestDatabase, TEST_POSTGRES_ENV } from "@openhoard/core-db/testing";
 import { addMember, createGroup, createUser } from "@openhoard/core-identity";
+import { SoftAuthenticator } from "@openhoard/core-identity/testing";
 import { startJobs } from "@openhoard/core-jobs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ADMIN_ACTOR, adminArgument, runAdmin } from "./admin.js";
@@ -616,6 +617,117 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
     ]);
     // The token is never in the audit log.
     expect(JSON.stringify(events)).not.toContain(link.out.trim().split("token=")[1]);
+  });
+
+  it("invites a local person to make a passkey, lists it and removes it", async () => {
+    const tenantId = (await admin("tenant", "create", "--name", "Solo")).out.trim();
+    const userId = (
+      await admin(
+        "user",
+        "create",
+        "--tenant",
+        tenantId,
+        "--email",
+        "bo@example.com",
+        "--name",
+        "Bo",
+      )
+    ).out.trim();
+    const invite = (...more: string[]) =>
+      admin("user", "invite", "--tenant", tenantId, "--user", "bo@example.com", ...more);
+    // Off unless the config turns passkeys on.
+    const off = await invite();
+    expect([off.code, off.out]).toEqual([1, ""]);
+    expect(off.err).toContain("passkeys are off");
+    const publicUrl = "https://files.example.com";
+    writeFileSync(
+      join(dir, "config.json"),
+      JSON.stringify({ auth: { publicUrl, passkeys: true } }),
+    );
+    expect((await invite("--hours", "169")).code).toBe(2);
+    expect((await invite("--hours", "x")).code).toBe(2);
+    const first = await invite("--hours", "2");
+    expect(first.code, first.err).toBe(0);
+    // The token is the link's fragment: a browser sends it to no server.
+    expect(first.out).toMatch(
+      new RegExp(`^https://files\\.example\\.com/auth/invite#ohi\\.${tenantId}\\.inv_\\S+\\n$`),
+    );
+    const second = await invite();
+    expect(second.err).toContain("Their earlier invite no longer works.");
+    const nobody = await admin("user", "invite", "--tenant", tenantId, "--user", "x@y.z");
+    expect(nobody.code).toBe(1);
+
+    // The person opens the link: the server makes their passkey (passkeys.test.ts has the rest).
+    const device = new SoftAuthenticator();
+    const use = (link: string) =>
+      inspect(async (db) => {
+        const config = ConfigSchema.parse({
+          dataDir: dir,
+          auth: { publicUrl, passkeys: true, cookieKey: "k".repeat(43) },
+        });
+        const app = createApp(config, undefined, { db });
+        const token = link.trim().split("#")[1];
+        const headers = { "content-type": "application/json", origin: publicUrl };
+        const options = await app.request("/auth/passkey/register/options", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ invite: token }),
+        });
+        if (options.status !== 200) return options.status;
+        const cookie = (options.headers.getSetCookie()[0] ?? "").split(";")[0] ?? "";
+        const done = await app.request("/auth/passkey/register", {
+          method: "POST",
+          headers: { ...headers, cookie },
+          body: JSON.stringify({
+            invite: token,
+            response: device.create((await options.json()) as Record<string, unknown>, publicUrl),
+          }),
+        });
+        return done.status;
+      });
+    expect(await use(first.out)).toBe(401);
+    expect(await use(second.out)).toBe(200);
+
+    const list = () => admin("user", "list-passkeys", "--tenant", tenantId, "--user", userId);
+    const listed = await list();
+    expect(listed.code, listed.err).toBe(0);
+    expect(listed.out).toMatch(/^pky_\S+\tPasskey\tcreated \S+\tnever used\tsynced\n$/);
+    const passkeyId = listed.out.split("\t")[0] as string;
+    const remove = (id: string) =>
+      admin("user", "remove-passkey", "--tenant", tenantId, "--user", userId, "--id", id);
+    expect((await remove("nonsense")).code).toBe(2);
+    expect((await remove("pky_00000000000000000000000000")).code).toBe(1);
+    const removed = await remove(passkeyId);
+    expect(removed.code, removed.err).toBe(0);
+    expect(removed.err).toContain("ended 1 session(s)");
+    expect((await list()).out).toBe("");
+
+    const events = await inspect(async (db) => {
+      const lines: string[] = [];
+      await exportAudit(db, tenantId, {}, "ndjson", (s: string) => void lines.push(s));
+      return lines
+        .join("")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { action: string; decision: string; detail?: object });
+    });
+    expect(
+      events
+        .filter((e) => /^(invite|passkey)\./.test(e.action) || e.action === "auth.sign-in")
+        .map((e) => [e.action, e.decision]),
+    ).toEqual([
+      ["invite.issue", "allow"],
+      ["invite.issue", "allow"],
+      ["invite.issue", "deny"],
+      // (The replaced invite was refused when its page asked for options: nothing began.)
+      ["passkey.register", "allow"],
+      ["auth.sign-in", "allow"],
+      ["passkey.remove", "allow"],
+    ]);
+    // No invite's secret is in the audit log.
+    for (const link of [first, second]) {
+      expect(JSON.stringify(events)).not.toContain(link.out.trim().split(".").at(-1));
+    }
   });
 
   it("plans a pack, applies exactly that plan, and refuses a stale hash, audited", async () => {

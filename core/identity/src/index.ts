@@ -6,3 +6,5 @@ export * from "./oauth.js";
 export * from "./scim-tokens.js";
 export * from "./admins.js";
 export * from "./sign-in-links.js";
+export * from "./passkeys.js";
+export * from "./webauthn.js";
