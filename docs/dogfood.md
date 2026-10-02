@@ -283,6 +283,11 @@ resume`; for a held deletion use `source confirm-reconcile` or `discard-reconcil
 - **Adding a folder**: a new entry in `config.json`'s `sources` (copy the first one, with a new
   `id`, `root` and `zone`), then restart. Moving a source to another zone is refused: give it a
   new `id` instead.
+- **Adding a file that isn't in a folder**: open `<the server's address>/app/` and pick or drop
+  it; OpenHoard keeps it (in `<data>/blobs`: back that up too). Installed from there (https
+  only, so through `oh tunnel` on a phone), OpenHoard is in the share menu of Android and
+  Windows. A setup made before this needs `"uploads": {}` added to config.json (apps/server
+  README, "Adding files").
 - **Stopping**: Ctrl+C. Running jobs get a few seconds, and resume on the next start.
 
 ## Not there yet

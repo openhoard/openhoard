@@ -73,13 +73,14 @@ const tenantKey = tenantKeyStore(config.dataDir, { hasContent: blobsIn(db) });
 // The configured folders (T-303): their zones, bindings and connectors. A source that can't be
 // set up stops the server, naming it.
 let sources: ServerSources;
+// What OpenHoard holds itself (managed zones: uploads, T-1206), in <dataDir>/blobs.
+const blobStore = BlobStore.open({ kind: "fs", root: join(config.dataDir, "blobs") });
+const blobs = blobContentSource(blobStore, { tenantKey });
 try {
   sources = await prepareSources(db, config, {
     tenantKey,
-    // What OpenHoard holds itself (managed zones, none yet in M1), before the connectors.
-    blobs: blobContentSource(BlobStore.open({ kind: "fs", root: join(config.dataDir, "blobs") }), {
-      tenantKey,
-    }),
+    // Before the connectors: a version OpenHoard holds is read from its own store.
+    blobs,
     log: log.child({ component: "sources" }),
   });
   // Every syncing tenant's key now, so a lost one is said at start, not in every job.
@@ -96,18 +97,19 @@ try {
 // maintenance schedule.
 let jobs: Jobs;
 let models: ReturnType<typeof createServerModels>;
+// What enrichment may read: the folders that opted in, and, with uploads, what OpenHoard holds.
+const content = sources.content ?? (config.uploads ? blobs : null);
 try {
   // Model providers (T-404) from `models`, keys from OPENHOARD_MODEL_<ID>_API_KEY; none, no model.
   models = createServerModels(config.models, process.env, log.child({ component: "models" }));
   // Content is read only from sources that opted in (`extract`): say so when models can't run.
-  const warning = modelsStartupWarning(models, sources.content !== null);
+  const warning = modelsStartupWarning(models, content !== null);
   if (warning !== null) log.warn(warning);
   jobs = await startJobs(db, {
     worker: config.jobs.worker,
     log: log.child({ component: "jobs" }),
-    ...(sources.content === null
-      ? {}
-      : { content: sources.content, extract: { indexedZones: true } }),
+    // Folders' content only where a folder opted in; what OpenHoard holds, always.
+    ...(content === null ? {} : { content, extract: { indexedZones: sources.content !== null } }),
     ...(sources.scheduled.length === 0 ? {} : { sync: { sources: sources.scheduled, tenantKey } }),
     ...(models === null
       ? {}
@@ -151,10 +153,28 @@ const watching = config.jobs.worker
 // The MCP `find` tool embeds queries with the same providers (local ones only, by default).
 const app = createApp(config, log, {
   db,
+  ...(config.uploads
+    ? {
+        uploads: {
+          store: blobStore,
+          tenantKey,
+          enqueue: (tenantId, result) => jobs.enqueueAfterIngest(tenantId, result),
+        },
+      }
+    : {}),
   ...(models === null ? {} : { embed: { router: models.router, budget: models.budget } }),
 });
-const server = serve({ fetch: app.fetch, hostname: config.host, port: config.port }, (info) =>
-  log.info({ address: info.address, port: info.port, dataDir: config.dataDir }, "listening"),
+const server = serve(
+  {
+    fetch: app.fetch,
+    hostname: config.host,
+    port: config.port,
+    // A large upload over a slow link takes longer than Node's five minutes for a request
+    // (its headers still have one minute).
+    ...(config.uploads ? { serverOptions: { requestTimeout: 60 * 60_000 } } : {}),
+  },
+  (info) =>
+    log.info({ address: info.address, port: info.port, dataDir: config.dataDir }, "listening"),
 );
 
 /**

@@ -159,6 +159,8 @@ describe("solo helpers", () => {
       ["fs-notes", "Notes"],
       ["fs-notes-2", "Notes (2)"],
     ]);
+    // Uploads are on (T-1206), with the defaults.
+    expect(file.uploads).toEqual({});
   });
 
   it("finds the starter pack from the source and the build", () => {
@@ -293,6 +295,7 @@ describe("init --solo", { timeout: process.platform === "win32" ? 600_000 : 180_
           extract: true,
         },
       ],
+      uploads: {},
       models: {
         providers: [{ id: "claude", kind: "commercial", adapter: "anthropic" }],
         dailyTokenBudget: 2_000_000,

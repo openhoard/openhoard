@@ -486,6 +486,10 @@ export async function runTunnel(argv: readonly string[], io: TunnelIo): Promise<
             `run, and anyone who has it reaches the sign-in page.\n`) +
         `  connector: ${new URL("/mcp", publicUrl).href}  (add it to Claude, or another MCP ` +
         `client, as a custom connector)\n` +
+        (config.uploads
+          ? `  add files: ${new URL("/app/", publicUrl).href}  (install that page on a phone or ` +
+            `a desktop, and OpenHoard is in its share menu)\n`
+          : ``) +
         (withdrawn > 0 && !link
           ? `  An invite of ${who.displayName}'s that was still unused was withdrawn (every start ` +
             `does that): issue another with "admin user invite" if a second device needs one.\n`

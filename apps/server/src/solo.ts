@@ -678,6 +678,8 @@ export function soloConfigFile(
   return {
     auth: { publicUrl, signInLinks: true },
     sources,
+    // Files added in the browser or shared from a phone (T-1206): kept in the data directory.
+    uploads: {},
     models: {
       providers: [{ id: "claude", kind: "commercial" as const, adapter: "anthropic" as const }],
       dailyTokenBudget: 2_000_000,
@@ -728,6 +730,7 @@ function summary(
     `  ${commandLine(io, s.dataDir, "")}`,
     `Or, to reach it from claude.ai or your phone, start it behind a tunnel instead (needs cloudflared):`,
     `  ${commandLine(io, s.dataDir, "tunnel")}`,
+    `Once it runs, add files in a browser at <its address>/app/ (and, installed from there, by sharing to OpenHoard).`,
     ``,
   ].join("\n");
 }

@@ -368,7 +368,7 @@ describe("tunnel", () => {
         signInLinks: false,
         passkeys: true,
       });
-      const app = createApp(config, undefined, { db });
+      const app = createApp({ ...config, uploads: undefined }, undefined, { db });
       expect((await app.request("/auth/link?token=x")).status).toBe(404);
       const token = link.split("#")[1];
       const headers = { "content-type": "application/json", origin: "https://files.example.com" };

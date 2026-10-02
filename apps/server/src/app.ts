@@ -11,6 +11,8 @@ import { mountMcp, type EmbedDeps, type McpTool } from "./mcp.js";
 import type { MetadataFetcher } from "./oauth/clients.js";
 import { mountOAuth } from "./oauth/routes.js";
 import { mountScim, type ScimOptions } from "./scim/routes.js";
+import { mountUploads, type UploadDeps } from "./uploads.js";
+import { mountShareFallback, mountWebApp } from "./web-app.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
   version: string;
@@ -25,6 +27,8 @@ export interface AppDeps {
   mcpTools?: readonly McpTool[];
   /** Query embeddings for the MCP `find` tool, when an embeddings model is configured. */
   embed?: EmbedDeps;
+  /** Where uploads go (T-1206); needed when `uploads` is configured. */
+  uploads?: Pick<UploadDeps, "store" | "tenantKey" | "enqueue">;
   /** SCIM limits (tests lower or raise them). */
   scim?: ScimOptions;
 }
@@ -84,9 +88,22 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
     if (!deps.db) throw new Error("sign-in (auth) needs the database");
     const key = loginKey(config.auth.cookieKey);
     const shared = { auth: config.auth, db: deps.db, key, ...(log ? { log } : {}) };
+    // Before sign-in's checks: a share the browser didn't take acts for nobody (web-app.ts).
+    if (config.uploads) mountShareFallback(app);
     mountAuth(app, shared);
     // Tenant administration (T-106), behind the session and its CSRF check.
     mountAdminApi(app, { auth: config.auth, db: deps.db, ...(log ? { log } : {}) });
+    // Uploads into a managed zone, and the installable page that shares into them (T-1206).
+    if (config.uploads) {
+      if (!deps.uploads) throw new Error("uploads need the blob store");
+      mountUploads(app, {
+        db: deps.db,
+        uploads: config.uploads,
+        ...deps.uploads,
+        ...(log ? { log } : {}),
+      });
+      mountWebApp(app, { maxBytes: config.uploads.maxBytes });
+    }
     // OpenHoard's OAuth authorization server for MCP clients (T-105), and the resource they reach.
     const { requireBearer } = mountOAuth(app, {
       ...shared,

@@ -968,7 +968,7 @@ start revokes that person's invites not yet used, so a link an earlier run print
 terminal's history, a log) is no way in afterwards.
 
 **Exposure.** Anyone who has the address reaches the server's public routes: the sign-in page,
-the OAuth and MCP endpoints, SCIM. Everything behind them needs a passkey, an approved client's
+the OAuth and MCP endpoints, SCIM, the upload page's script and icons. Everything behind them needs a passkey, an approved client's
 token, or a SCIM token. The server must listen on this machine only (`tunnel` refuses any other
 `host`); cloudflared connects out. A quick tunnel's address is unguessable but not secret: don't post it.
 
@@ -979,6 +979,64 @@ token, or a SCIM token. The server must listen on this machine only (`tunnel` re
 stops, cloudflared is. The server is told to stop through a channel (it closes its database
 first, on Windows too). If the `tunnel` command itself is killed outright, the server notices and
 stops, but cloudflared may be left running: stop it by hand.
+
+## Adding files: uploads and the share menu (T-1206)
+
+With `uploads` in the config (`init --solo` writes it; `"uploads": {}` is enough), signed-in
+members add files to OpenHoard itself, and OpenHoard keeps the bytes: the first content it
+holds, in a **managed zone**.
+
+```json
+{ "uploads": { "zone": "Uploads", "maxBytes": 104857600 } }
+```
+
+- **`/app/`** is a page to pick or drop files on, listing what you added. Install it (the
+  browser's menu: Install, or Add to Home screen) and OpenHoard appears in the share menu of
+  Android, Windows and ChromeOS: share a photo, a PDF, a link or some text to it from any app.
+  Installing needs https, so on a phone that means the tunnel's address (`openhoard tunnel`
+  prints the page's address) or your own domain. iOS Safari can't be a share target: there, open
+  the page and pick the files.
+- **`POST /api/uploads?name=<file name>`** takes one file as the request's body, with its type
+  as `Content-Type`, from a signed-in member's browser session (201, or 200 when the file was
+  there already, with `{object, version, title, size, created}`). `GET /api/uploads` lists the caller's own.
+
+What happens to an upload:
+
+- It streams to `<dataDir>/blobs` (core/storage), hashed as it arrives; a file over
+  `uploads.maxBytes` (100 MiB by default) is refused with 413 and nothing of it is kept.
+  Something in front may stop it sooner: Cloudflare's tunnels take about 100 MB a request.
+- It is recorded in the zone `uploads.zone` (made in the tenant on its first upload, audited as
+  `zone.create` by `system:uploads`), owned by the uploader. **Nobody else reads it** until it
+  is shared: an upload comes with no grants.
+- It is enriched like any other file (extracted, summarized, embedded, as far as its exposure
+  lets its content reach a model), and found with the MCP tools.
+- The same file (bytes and name) from the same person is one file: a share tapped twice, or
+  sent again after a lost answer, answers with the file there is (brought back if it had been
+  removed). The same bytes under another name are another file.
+- Every upload is audited as `object.upload`, and so is one refused for who sent it or where
+  it would go. (A request that names nobody, is too large or isn't a file is only answered.)
+
+**How a share arrives.** The system posts a form to `/app/share`. The page's service worker
+takes it in the browser, keeps the files in a cache of its own and opens the page, which lists
+what was shared with **Save** and **Discard**. Save uploads each as above and drops it from the
+cache once the server has it. So a share made while signed out waits through the sign-in
+instead of being lost, and the server never accepts a form. Shared text or a link with no file
+becomes a small `.txt`.
+
+Save is a tap on purpose: any website can post a form to `/app/share` in a browser that has
+the page, and the browser gives the worker no way to tell that from the system's share. Sent on
+arrival, another site's files would land in your hoard under your name, for models to read.
+Shown first, they are named and one tap from gone. What waits in the browser is that browser's,
+not an account's: on a shared device, someone who signs in next sees it there.
+
+**Back up `<dataDir>/blobs` with the database and the keys**: for uploads, it is the only copy.
+
+Limits for now: members only (no guests, no service accounts, no AI client: an MCP client
+can't upload); one file per request, within an hour; no quota per person or tenant, so a
+member can fill the disk; bytes whose recording failed, or that a crash left half-written, stay
+in the store unreferenced until maintenance learns to remove them; with uploads on, a folder
+(`sources`) can't be named `uploads` or sync into the uploads' zone; there is no way yet to
+download an upload again from the page (the MCP tools read it).
 
 ## Testing with a new Entra tenant (T-102 and T-103 together)
 

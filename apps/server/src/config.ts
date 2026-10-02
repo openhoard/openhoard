@@ -438,6 +438,26 @@ export const ConfigSchema = z
     models: ModelsSchema.prefault({}),
     auth: AuthSchema.optional(),
     /**
+     * Uploads (T-1206): signed-in members add files through `/api/uploads` and the installable
+     * page at `/app/` (a share target on phones and desktops), and OpenHoard keeps the bytes,
+     * in `<dataDir>/blobs`. Off unless this is here; `{}` turns it on with the defaults. Needs
+     * `auth`.
+     */
+    uploads: z
+      .object({
+        /** The managed zone uploads go to, by name: made in a tenant on its first upload. */
+        zone: z.string().min(1).max(200).default("Uploads"),
+        /** The largest file taken, in bytes. Default 100 MiB. */
+        maxBytes: z
+          .number()
+          .int()
+          .min(1)
+          .max(16 * 1024 ** 3)
+          .default(100 * 1024 ** 2),
+      })
+      .strict()
+      .optional(),
+    /**
      * The named Cloudflare tunnel `openhoard tunnel` runs when no flag names one (T-1205): the
      * tunnel's name on the operator's own Cloudflare account, and the host name routed to it.
      * Without it (and without flags) `openhoard tunnel` opens a quick tunnel, to try.
@@ -484,9 +504,31 @@ export const ConfigSchema = z
         });
       }
     }
+    if (c.uploads !== undefined && c.auth === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["uploads"],
+        message: "uploads need sign-in: configure auth",
+      });
+    }
     const ids = new Set<string>();
     c.sources.forEach((s, i) => {
       const key = `${s.tenantId}/${s.id}`;
+      // Uploaded items' own source (uploads.ts UPLOAD_SOURCE): a folder's would mix with them.
+      if (c.uploads !== undefined && s.id === "uploads") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["sources", i, "id"],
+          message: `"uploads" is what uploaded files are recorded under: give the source another id`,
+        });
+      }
+      if (c.uploads !== undefined && s.zone === c.uploads.zone) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["sources", i, "zone"],
+          message: `zone "${s.zone}" is the uploads' (uploads.zone): a folder syncs into another`,
+        });
+      }
       if (ids.has(key)) {
         ctx.addIssue({
           code: "custom",
@@ -508,6 +550,7 @@ export const ConfigSchema = z
   });
 
 export type Config = z.infer<typeof ConfigSchema>;
+export type UploadsConfig = NonNullable<Config["uploads"]>;
 
 /** The addresses `host` may name for a server that listens on this machine only. */
 /**
