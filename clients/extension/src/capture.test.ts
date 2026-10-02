@@ -244,7 +244,7 @@ describe("capturePage", () => {
             "tr",
             {},
             h("td", {}, h("p", {}, "x"), h("p", {}, "y|z")),
-            h("td", {}, "w"),
+            h("td", {}, "w\\|v"),
             // A column the page hides.
             h("td", { hidden: "" }, "unseen"),
             h("td", { style: "display:none" }, "unseen too"),
@@ -259,7 +259,7 @@ describe("capturePage", () => {
         "- Second\n  - Nested a\n  - Nested b\n3. Step three\n4. Step four",
         "a",
         "b",
-        "| x y\\|z | w |",
+        "| x y\\|z | w\\\\\\|v |",
       ].join("\n\n"),
     );
   });

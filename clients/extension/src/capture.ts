@@ -208,7 +208,13 @@ export function capturePage(mode: "page" | "selection", limit = 2_000_000): Capt
         const cells = [...el.children]
           .filter((c) => !SKIP.has(c.tagName.toUpperCase()) && !hidden(c))
           .map((c) =>
-            inline(c).replace(/\n/g, " ").replace(/\|/g, "\\|").replace(/ {2,}/g, " ").trim(),
+            inline(c)
+              .replace(/\n/g, " ")
+              // A cell's own bars, and the backslashes that would otherwise undo their escape.
+              .replace(/\\/g, "\\\\")
+              .replace(/\|/g, "\\|")
+              .replace(/ {2,}/g, " ")
+              .trim(),
           );
         if (cells.some((c) => c !== "")) push(`| ${cells.join(" | ")} |`, quote, "row");
       } else if (BLOCK.has(tag) || tag === "TBODY" || tag === "THEAD" || tag === "TFOOT") {
