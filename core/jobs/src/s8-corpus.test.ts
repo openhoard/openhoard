@@ -398,6 +398,12 @@ const view = async (objectId: string, trust: "first-party" | "local" | "commerci
   return v as CardView;
 };
 
+/**
+ * Starts the extractor's child process once per corpus file (70 of them): seconds alone, but past
+ * the default 30 s on a CI runner that is also running other packages' suites.
+ */
+const EXTRACT_ALL_TIMEOUT = process.platform === "win32" ? 600_000 : 180_000;
+
 describe("S8 corpus v0 (T-408)", () => {
   it("flags at least 90% of the attack files, and no benign file", () => {
     const flagged = attacks.filter((a) => a.flagged);
@@ -412,28 +418,32 @@ describe("S8 corpus v0 (T-408)", () => {
     expect(BENIGN.length).toBeGreaterThanOrEqual(20);
   });
 
-  it("scores the same with the detector alone (no database), from the real extractor", async () => {
-    let flagged = 0;
-    for (const c of corpus) {
-      async function* bytes() {
-        yield c.bytes;
+  it(
+    "scores the same with the detector alone (no database), from the real extractor",
+    async () => {
+      let flagged = 0;
+      for (const c of corpus) {
+        async function* bytes() {
+          yield c.bytes;
+        }
+        const r = await extract(bytes(), { mime: c.mime, name: c.name }, { size: c.bytes.length });
+        const v = detectInjection({
+          name: c.name,
+          ...(r.ok
+            ? {
+                text: r.extraction.text,
+                signals: r.extraction.signals,
+                metadata: r.extraction.metadata as Record<string, unknown>,
+              }
+            : {}),
+        });
+        if (v.flagged) flagged++;
+        expect(attacks.find((a) => a.id === c.id)?.flagged, c.id).toBe(v.flagged);
       }
-      const r = await extract(bytes(), { mime: c.mime, name: c.name }, { size: c.bytes.length });
-      const v = detectInjection({
-        name: c.name,
-        ...(r.ok
-          ? {
-              text: r.extraction.text,
-              signals: r.extraction.signals,
-              metadata: r.extraction.metadata as Record<string, unknown>,
-            }
-          : {}),
-      });
-      if (v.flagged) flagged++;
-      expect(attacks.find((a) => a.id === c.id)?.flagged, c.id).toBe(v.flagged);
-    }
-    expect(flagged).toBe(attacks.filter((a) => a.flagged).length);
-  });
+      expect(flagged).toBe(attacks.filter((a) => a.flagged).length);
+    },
+    EXTRACT_ALL_TIMEOUT,
+  );
 
   it("serves flagged files as metadata only to every AI client, and keeps them from the model", async () => {
     for (const a of attacks.filter((x) => x.flagged)) {
