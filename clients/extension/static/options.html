@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>OpenHoard extension</title>
+    <style>
+      body {
+        font:
+          16px/1.5 system-ui,
+          sans-serif;
+        max-width: 34rem;
+        margin: 3rem auto;
+        padding: 0 1rem;
+        color: #1d1d1f;
+        background: #fafaf7;
+      }
+      h1 {
+        font-size: 1.4rem;
+      }
+      label {
+        display: block;
+        margin: 0.4rem 0;
+      }
+      input[type="url"] {
+        font: inherit;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0.4rem;
+      }
+      button {
+        font: inherit;
+        padding: 0.5rem 1rem;
+        margin: 0.25rem 0.5rem 0.25rem 0;
+        border-radius: 6px;
+        border: 1px solid #888;
+        background: #fff;
+        color: inherit;
+        cursor: pointer;
+      }
+      button.primary {
+        background: #8a5a00;
+        border-color: #8a5a00;
+        color: #fff;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      #status {
+        min-height: 1.5em;
+        overflow-wrap: anywhere;
+      }
+      .muted {
+        color: #666;
+        font-size: 0.9rem;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #17171a;
+          color: #eee;
+        }
+        button {
+          background: #222;
+        }
+        .muted {
+          color: #aaa;
+        }
+      }
+    </style>
+    <script type="module" src="options.js"></script>
+  </head>
+  <body>
+    <h1>OpenHoard extension</h1>
+    <div id="setup" hidden>
+      <label for="server">Your OpenHoard server's address</label>
+      <input type="url" id="server" placeholder="https://files.example.com" autocomplete="url" />
+      <p><button type="button" class="primary" id="connect">Connect</button></p>
+      <p class="muted">
+        A window opens on your server: you sign in there and allow this extension to add files as
+        you. It can't read what is in OpenHoard. The first time, an admin of the server approves the
+        extension on that same page. Nothing is sent anywhere but to the server you name.
+      </p>
+    </div>
+    <div id="ready" hidden>
+      <p>Connected to <strong id="where"></strong>.</p>
+      <p><button type="button" id="disconnect">Disconnect</button></p>
+      <p class="muted">
+        Save the page you are on from the toolbar button, or from the page's menu (right-click): its
+        readable text, with its address. A PDF is saved as the file itself. A selection is saved
+        from the same menu.
+      </p>
+    </div>
+    <p id="status" role="status"></p>
+  </body>
+</html>

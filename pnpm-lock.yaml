@@ -298,6 +298,15 @@ importers:
         specifier: 8.20.0
         version: 8.20.0
 
+  clients/extension:
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      vitest:
+        specifier: ^5.0.1
+        version: 5.0.1(@types/node@24.13.6)(@vitest/coverage-v8@5.0.1)(vite@7.3.6(@types/node@24.13.6)(jiti@2.6.1)(tsx@4.23.15)(yaml@2.9.1))
+
   connectors/fs:
     dependencies:
       '@openhoard/sdk':

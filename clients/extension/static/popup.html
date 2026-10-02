@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>OpenHoard</title>
+    <style>
+      body {
+        font:
+          14px/1.4 system-ui,
+          sans-serif;
+        width: 20rem;
+        margin: 0;
+        padding: 0.75rem;
+        color: #1d1d1f;
+        background: #fafaf7;
+      }
+      h1 {
+        font-size: 1rem;
+        margin: 0 0 0.5rem;
+      }
+      label {
+        display: block;
+        margin: 0.25rem 0;
+      }
+      input[type="url"] {
+        font: inherit;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 0.35rem;
+      }
+      button {
+        font: inherit;
+        padding: 0.4rem 0.75rem;
+        margin: 0.25rem 0.25rem 0.25rem 0;
+        border-radius: 6px;
+        border: 1px solid #888;
+        background: #fff;
+        color: inherit;
+        cursor: pointer;
+      }
+      button.primary {
+        background: #8a5a00;
+        border-color: #8a5a00;
+        color: #fff;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      #status {
+        min-height: 1.4em;
+        overflow-wrap: anywhere;
+      }
+      .muted {
+        color: #666;
+        font-size: 0.85rem;
+        overflow-wrap: anywhere;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #17171a;
+          color: #eee;
+        }
+        button {
+          background: #222;
+        }
+        .muted {
+          color: #aaa;
+        }
+      }
+    </style>
+    <script type="module" src="popup.js"></script>
+  </head>
+  <body>
+    <h1>OpenHoard</h1>
+    <div id="setup" hidden>
+      <p>Not connected to an OpenHoard server yet.</p>
+      <p><button type="button" class="primary" id="set-up">Set up</button></p>
+    </div>
+    <div id="ready" hidden>
+      <p>
+        <button type="button" class="primary" id="save-page">Save this page</button>
+        <button type="button" id="save-selection">Save selection</button>
+      </p>
+      <p class="muted">
+        Connected to <span id="where"></span>. <a href="#" id="settings">Settings</a>
+      </p>
+    </div>
+    <p id="status" role="status"></p>
+  </body>
+</html>

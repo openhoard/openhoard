@@ -1,0 +1,19 @@
+{
+  "name": "@openhoard/extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenHoard browser extension (MV3; Chrome, Edge, Firefox): save a page, a PDF or a selection.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node scripts/assemble.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rimraf dist coverage"
+  },
+  "devDependencies": {
+    "@openhoard/config": "workspace:*",
+    "vitest": "^5.0.1"
+  },
+  "license": "Apache-2.0"
+}

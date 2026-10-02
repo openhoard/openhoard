@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "OpenHoard",
+  "version": "0.1.0",
+  "description": "Save the page you are on, a PDF or a selection to your own OpenHoard server.",
+  "icons": {
+    "16": "icon-16.png",
+    "32": "icon-32.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
+  "action": {
+    "default_title": "Save to OpenHoard",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon-16.png",
+      "32": "icon-32.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "permissions": ["activeTab", "scripting", "contextMenus", "storage", "identity"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "minimum_chrome_version": "121",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "extension@openhoard.invalid",
+      "strict_min_version": "128.0"
+    }
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  }
+}
