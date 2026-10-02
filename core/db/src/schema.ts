@@ -853,6 +853,12 @@ export const passkeys = pgTable(
     tenantId: text("tenant_id").notNull(),
     id: text("id").notNull(),
     userId: text("user_id").notNull(),
+    /**
+     * The host it belongs to (its WebAuthn relying party id: the server's public host when it
+     * was made). It signs in nowhere else, so a server that moved host can tell which passkeys
+     * it left behind. Null: made before this was recorded.
+     */
+    rpId: text("rp_id"),
     /** The credential's id, base64url: what the authenticator names it by. */
     credentialId: text("credential_id").notNull(),
     /** The credential's public key, a COSE key, base64url. */
@@ -907,6 +913,7 @@ export const passkeys = pgTable(
     // (A check passes on null.)
     idCheck("passkeys_invite_id_format", "invite_id", "invite"),
     check("passkeys_last_used", sql`last_used_at is null or last_used_at >= created_at`),
+    check("passkeys_rp_id_length", sql`rp_id is null or char_length(rp_id) between 1 and 253`),
   ],
 );
 

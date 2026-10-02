@@ -239,7 +239,7 @@ describe("an invite", () => {
     };
     expect(listed.passkeys).toHaveLength(1);
     expect(Object.keys(listed.passkeys[0] ?? {}).sort()).toEqual(
-      ["createdAt", "id", "lastUsedAt", "name", "synced"].sort(),
+      ["createdAt", "host", "id", "lastUsedAt", "name", "synced"].sort(),
     );
 
     const events = await audit();

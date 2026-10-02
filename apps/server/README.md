@@ -11,7 +11,8 @@ pnpm --filter @openhoard/server dev    # watches src/, data in ../../.openhoard
 
 Values are read from, in order: the environment (`OPENHOARD_*`), then
 `<dataDir>/config.json`, then the defaults (`src/config.ts`). The schema is strict, so an unknown
-key is an error.
+key is an error. `OPENHOARD_TUNNEL_URL` (set by `openhoard tunnel`, below) makes one run public
+at that address.
 
 ## Background jobs (T-401)
 
@@ -567,8 +568,8 @@ cloudflared tunnel --url http://127.0.0.1:7420
 
 Quick tunnels are for testing: the URL changes on every run, and there is no uptime guarantee.
 OpenHoard depends on no domain of ours. A self-hoster serves it at their own `publicUrl`, behind
-their own proxy or tunnel. A tunnel plugin running on the self-hoster's own Cloudflare account may
-come later.
+their own proxy or tunnel. For one person's server, `openhoard tunnel` (below, "Reaching it from
+outside") does the steps above in one command, with a quick tunnel or the operator's own.
 
 ## Provisioning over SCIM (T-103)
 
@@ -889,6 +890,75 @@ Desktop, press Allow on the consent page. Approving `http://127.0.0.1/oauth/call
 every program on the machine (MCP clients, above): any local program can register the same way
 and, once Allowed, read the person's files as them. Running it again changes nothing already
 right and issues a new link.
+
+## Reaching it from outside: `tunnel` (T-1205)
+
+claude.ai (web and mobile) and other hosted AI clients need an https address they can reach.
+`tunnel` gives a server on this machine one, with no port opened on the network: it runs
+Cloudflare's [`cloudflared`](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)
+beside the server and tells the server where it is reached. You install cloudflared (Windows:
+`winget install Cloudflare.cloudflared`; macOS: `brew install cloudflared`); OpenHoard downloads
+nothing and depends on no service of its own.
+
+```sh
+openhoard tunnel                                             # a quick tunnel, to try
+openhoard tunnel --name home --hostname files.example.com    # your own tunnel, to keep
+```
+
+It prints the address, the connector address to give the AI client (`<address>/mcp`), and, when
+the person who signs in has no passkey for that address, an invite link (alone on standard
+output) that makes one. Then it runs until Ctrl+C. Run it instead of starting the server: the
+embedded database belongs to one process.
+
+|                    | Quick tunnel                                          | Named tunnel                   |
+| ------------------ | ----------------------------------------------------- | ------------------------------ |
+| Cloudflare account | none                                                  | yours, with a domain on it     |
+| Address            | `https://<words>.trycloudflare.com`, new on every run | the host name you routed to it |
+| Sign-in            | a new invite and passkey on every run                 | one passkey, made once         |
+| AI clients         | connect again on every run (new address)              | stay connected                 |
+| For                | trying it                                             | using it                       |
+
+A named tunnel is set up once, on your own Cloudflare account:
+
+```sh
+cloudflared tunnel login
+cloudflared tunnel create home
+cloudflared tunnel route dns home files.example.com
+```
+
+and can be named in config.json, so `openhoard tunnel` alone runs it:
+
+```json
+{ "tunnel": { "name": "home", "hostname": "files.example.com" } }
+```
+
+**What changes while it runs.** The server is started with `OPENHOARD_TUNNEL_URL`, which for that
+run sets `auth.publicUrl` to the tunnel's address, turns one-time sign-in links off (they are for
+this machine only) and turns passkeys on ("Built-in accounts", above). config.json isn't
+changed: start the server without `tunnel` and it is local again. Two consequences:
+
+- Claude Desktop set up with `connect claude-desktop` uses this machine's address, so it doesn't
+  connect while the tunnel runs. Add the connector address to Claude instead.
+- Tokens belong to the address they were issued for: clients of the local server and clients of
+  the tunnel each consent again when you switch.
+
+**Sign-in.** `--user` (default: the one owner of the tenant's folders) is who the invite is for.
+A passkey belongs to the address it was made at, so a quick tunnel needs a new one every run
+(passkeys left at old quick-tunnel addresses are removed), and a named tunnel's passkey keeps
+working. The invite is good for 24 hours on a quick tunnel, 7 days on a named one, once.
+
+**Exposure.** Anyone who has the address reaches the server's public routes: the sign-in page,
+the OAuth and MCP endpoints, SCIM. Everything behind them needs a passkey, an approved client's
+token, or a SCIM token. The server keeps listening on this machine only; cloudflared connects
+out. A quick tunnel's address is unguessable but not secret: don't post it.
+
+**Audit.** `tunnel.start` (the address, quick or named) and `invite.issue`, as
+`system:admin-cli`.
+
+**Stopping.** Ctrl+C stops both. If cloudflared stops, the server is stopped; if the server
+stops, cloudflared is. The server is told to stop through a channel (it closes its database
+first, on Windows too). If the `tunnel` command itself is killed outright, the server notices and
+stops, but cloudflared may be left running: stop it by hand.
 
 ## Testing with a new Entra tenant (T-102 and T-103 together)
 

@@ -726,17 +726,19 @@ function summary(
     `Next, connect Claude Desktop, then start the server:`,
     `  ${commandLine(io, s.dataDir, "connect claude-desktop")}`,
     `  ${commandLine(io, s.dataDir, "")}`,
+    `Or, to reach it from claude.ai or your phone, start it behind a tunnel instead (needs cloudflared):`,
+    `  ${commandLine(io, s.dataDir, "tunnel")}`,
     ``,
   ].join("\n");
 }
 
 /**
  * Which solo command the server's arguments name, and where, when it is the first one that
- * isn't an option (`--data-dir x init --solo` too): `init` or `connect`.
+ * isn't an option (`--data-dir x init --solo` too): `init`, `connect` or `tunnel`.
  */
 export function soloArgument(
   args: readonly string[],
-): { command: "init" | "connect"; at: number } | undefined {
+): { command: "init" | "connect" | "tunnel"; at: number } | undefined {
   const { tokens } = parseArgs({
     args: [...args],
     options: { "data-dir": { type: "string" } },
@@ -746,7 +748,7 @@ export function soloArgument(
   });
   const first = tokens.find((t) => t.kind === "positional");
   if (first?.kind !== "positional") return undefined;
-  return first.value === "init" || first.value === "connect"
+  return first.value === "init" || first.value === "connect" || first.value === "tunnel"
     ? { command: first.value, at: first.index }
     : undefined;
 }

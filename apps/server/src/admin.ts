@@ -1452,6 +1452,8 @@ async function passkeyList(
         `created ${p.createdAt.toISOString()}`,
         p.lastUsedAt ? `last used ${p.lastUsedAt.toISOString()}` : "never used",
         p.backedUp ? "synced" : "this device only",
+        // Where it signs in: a passkey belongs to the address it was made at.
+        p.rpId ?? "-",
       ].join("\t") + "\n",
     );
   }

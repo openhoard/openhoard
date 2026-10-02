@@ -159,6 +159,8 @@ export function mountPasskeys(app: Hono<AuthEnv>, deps: PasskeyDeps): void {
     createdAt: p.createdAt.toISOString(),
     lastUsedAt: p.lastUsedAt?.toISOString() ?? null,
     synced: p.backedUp,
+    // The address it signs in at (null: not recorded).
+    host: p.rpId,
   });
 
   app.get("/auth/invite", (c) => {

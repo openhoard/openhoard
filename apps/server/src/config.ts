@@ -125,6 +125,11 @@ export const AdminGroupSchema = z
 
 export type AdminGroup = z.infer<typeof AdminGroupSchema>;
 
+/** A cloudflared tunnel's name (or its id), and a public host name: no address, no port. */
+export const TUNNEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+export const TUNNEL_HOST =
+  /^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
+
 /** Signing in (T-102): off unless configured. */
 export const AuthSchema = z
   .object({
@@ -433,6 +438,18 @@ export const ConfigSchema = z
     models: ModelsSchema.prefault({}),
     auth: AuthSchema.optional(),
     /**
+     * The named Cloudflare tunnel `openhoard tunnel` runs when no flag names one (T-1205): the
+     * tunnel's name on the operator's own Cloudflare account, and the host name routed to it.
+     * Without it (and without flags) `openhoard tunnel` opens a quick tunnel, to try.
+     */
+    tunnel: z
+      .object({
+        name: z.string().regex(TUNNEL_NAME, "a tunnel's name or id"),
+        hostname: z.string().regex(TUNNEL_HOST, "a host name, as files.example.com"),
+      })
+      .strict()
+      .optional(),
+    /**
      * The SCIM 2.0 endpoint (T-103) at /scim/v2, where each tenant's identity provider
      * provisions its users and groups with the tenant's SCIM token. On by default: without a
      * token nothing gets in.
@@ -507,6 +524,11 @@ export function relyingPartyId(publicUrl: string): string {
 }
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+
+/** Whether the server, listening on `host`, is reachable from this machine only. */
+export function isLoopbackHost(host: string): boolean {
+  return LOOPBACK_HOSTS.has(host);
+}
 
 /**
  * Whether two folders are one, or one is inside the other: as written, and as the file system
@@ -590,6 +612,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, cwd = process.c
   const cookieKey = env.OPENHOARD_AUTH_COOKIE_KEY;
   if (cookieKey && typeof merged.auth === "object" && merged.auth !== null) {
     merged.auth = { ...(merged.auth as object), cookieKey };
+  }
+  // Reached through a tunnel for this run (`openhoard tunnel` sets it for the server it starts):
+  // people come in at that address, so links issued on this machine are off, and built-in
+  // accounts sign in with passkeys. Nothing is written to the file.
+  const tunnelUrl = env.OPENHOARD_TUNNEL_URL;
+  if (tunnelUrl !== undefined && tunnelUrl !== "") {
+    if (typeof merged.auth !== "object" || merged.auth === null) {
+      throw new Error(
+        "invalid OpenHoard config:\n  OPENHOARD_TUNNEL_URL needs sign-in configured (auth)",
+      );
+    }
+    merged.auth = {
+      ...(merged.auth as object),
+      publicUrl: tunnelUrl,
+      signInLinks: false,
+      passkeys: true,
+    };
   }
   const parsed = ConfigSchema.safeParse(merged);
   if (!parsed.success) {

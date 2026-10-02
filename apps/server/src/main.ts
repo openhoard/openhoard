@@ -13,11 +13,13 @@ import { createServerModels, modelsStartupWarning } from "./models.js";
 import { runInit, soloArgument } from "./solo.js";
 import { prepareSources, type ServerSources } from "./sources.js";
 import { blobsIn, tenantKeyStore } from "./tenant-keys.js";
+import { runTunnel } from "./tunnel.js";
 import { watchSources } from "./watch.js";
 
 // `main.js [options] admin …` runs an admin command (admin.ts) instead of the server, then exits.
 // `admin` is the first argument that isn't an option (`--data-dir x admin …` is admin too).
-// `init --solo` (solo.ts) and `connect claude-desktop` (connect.ts) are dispatched the same way.
+// `init --solo` (solo.ts), `connect claude-desktop` (connect.ts) and `tunnel` (tunnel.ts, which
+// starts this entry point again as the server) are dispatched the same way.
 const adminAt = adminArgument(process.argv.slice(2));
 const solo = soloArgument(process.argv.slice(2));
 if (adminAt !== undefined || solo !== undefined) {
@@ -35,7 +37,9 @@ if (adminAt !== undefined || solo !== undefined) {
       ? await runAdmin(rest, io)
       : solo?.command === "connect"
         ? await runConnect(rest, io)
-        : await runInit(rest, io);
+        : solo?.command === "tunnel"
+          ? await runTunnel(rest, { ...io, self: process.argv[1] ?? "main.js" })
+          : await runInit(rest, io);
   // Let what was written (the one-time token) reach a pipe before exiting: on Windows pipes
   // are asynchronous, and exit() would cut it off.
   await Promise.all(
@@ -166,31 +170,37 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
 const JOBS_STOP_TIMEOUT_MS = 5_000;
 const JOBS_GRACE_MS = 2_000;
 let stopping = false;
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.on(signal, () => {
-    if (stopping) return;
-    stopping = true;
-    log.info({ signal }, "shutting down");
-    setTimeout(() => {
-      log.warn("shutdown timed out; forcing exit");
-      process.exit(1);
-    }, SHUTDOWN_TIMEOUT_MS).unref();
-    const closed = new Promise<void>((resolve) => server.close(() => resolve()));
-    if ("closeIdleConnections" in server) server.closeIdleConnections();
-    // The watchers first: no sync is requested of a queue that is stopping.
-    const stopped = (watching?.close() ?? Promise.resolve())
-      .then(() => jobs.stop({ timeoutMs: JOBS_STOP_TIMEOUT_MS, graceMs: JOBS_GRACE_MS }))
-      .catch((err: unknown) => log.error({ err }, "stopping the job queue failed"));
-    void Promise.all([closed, stopped])
-      // What the app still holds for the database (SCIM's audit summaries), then the database.
-      .then(() => closeApp(app))
-      .then(() => db.close())
-      .then(
-        () => process.exit(0),
-        (err: unknown) => {
-          log.error({ err }, "closing the database failed");
-          process.exit(1);
-        },
-      );
-  });
+const shutdown = (signal: string) => {
+  if (stopping) return;
+  stopping = true;
+  log.info({ signal }, "shutting down");
+  setTimeout(() => {
+    log.warn("shutdown timed out; forcing exit");
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS).unref();
+  const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+  if ("closeIdleConnections" in server) server.closeIdleConnections();
+  // The watchers first: no sync is requested of a queue that is stopping.
+  const stopped = (watching?.close() ?? Promise.resolve())
+    .then(() => jobs.stop({ timeoutMs: JOBS_STOP_TIMEOUT_MS, graceMs: JOBS_GRACE_MS }))
+    .catch((err: unknown) => log.error({ err }, "stopping the job queue failed"));
+  void Promise.all([closed, stopped])
+    // What the app still holds for the database (SCIM's audit summaries), then the database.
+    .then(() => closeApp(app))
+    .then(() => db.close())
+    .then(
+      () => process.exit(0),
+      (err: unknown) => {
+        log.error({ err }, "closing the database failed");
+        process.exit(1);
+      },
+    );
+};
+for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => shutdown(signal));
+// Started by `tunnel` (tunnel.ts), which holds a channel to this process: when it closes the
+// channel, or is gone, stop as on a signal. (Windows has no signal a parent can send that a
+// process may answer: this is how the server is stopped cleanly there.)
+// Only then: another parent's channel (a process manager's) closing means nothing here.
+if (process.send !== undefined && process.env.OPENHOARD_TUNNEL_URL) {
+  process.on("disconnect", () => shutdown("disconnect"));
 }

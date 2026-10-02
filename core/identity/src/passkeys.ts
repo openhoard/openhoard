@@ -5,10 +5,11 @@ import {
   newId,
   passkeyChallenges,
   passkeys,
+  sessions,
   users,
   type Tx,
 } from "@openhoard/core-db";
-import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, like, lt, ne, or, sql } from "drizzle-orm";
 import { endAccess, getUser, IdentityError, type EndedAccess, type User } from "./directory.js";
 import { startSession, type Session } from "./sessions.js";
 import {
@@ -312,7 +313,12 @@ export function registrationOptions(input: {
     rp: input.rp,
     user: {
       id: userHandle(input.tenantId, input.user.id),
-      name: input.user.email ?? input.user.displayName,
+      // What the authenticator lists the passkey under. An address under `.invalid` (a
+      // placeholder: RFC 2606) is nobody's, so their name instead.
+      name:
+        input.user.email === null || /\.invalid$/i.test(input.user.email)
+          ? input.user.displayName
+          : input.user.email,
       displayName: input.user.displayName,
     },
     challenge: input.challenge,
@@ -355,6 +361,8 @@ export interface Passkey {
   name: string;
   /** base64url. */
   credentialId: string;
+  /** The host it belongs to and signs in at; null when that wasn't recorded. */
+  rpId: string | null;
   transports: string[];
   /** Whether it can be synced between the person's devices, and is. */
   backupEligible: boolean;
@@ -368,6 +376,7 @@ const SHOWN = {
   userId: passkeys.userId,
   name: passkeys.name,
   credentialId: passkeys.credentialId,
+  rpId: passkeys.rpId,
   transports: passkeys.transports,
   backupEligible: passkeys.backupEligible,
   backedUp: passkeys.backedUp,
@@ -422,7 +431,14 @@ export async function registerPasskey(
   const [held] = await tx
     .select({ n: sql<number>`count(*)::int` })
     .from(passkeys)
-    .where(and(eq(passkeys.tenantId, tenantId), eq(passkeys.userId, user.id)));
+    .where(
+      and(
+        eq(passkeys.tenantId, tenantId),
+        eq(passkeys.userId, user.id),
+        // Those that sign in here: what a server left behind at another host doesn't count.
+        or(isNull(passkeys.rpId), eq(passkeys.rpId, input.expected.rpId)),
+      ),
+    );
   if ((held?.n ?? 0) >= PASSKEY_MAX_PER_USER) {
     throw new IdentityError("invalid", `a person holds at most ${PASSKEY_MAX_PER_USER} passkeys`);
   }
@@ -432,6 +448,7 @@ export async function registerPasskey(
       tenantId,
       id: newId("passkey"),
       userId: user.id,
+      rpId: input.expected.rpId,
       credentialId: made.credentialId,
       publicKey: made.publicKey,
       algorithm: made.algorithm,
@@ -691,4 +708,54 @@ export async function removePasskey(
     .returning({ id: passkeys.id });
   if (removed.length === 0) return null;
   return endAccess(tx, tenantId, userId, by, { issuer: PASSKEY_ISSUER, subject: passkeyId });
+}
+
+/**
+ * Removes a person's passkeys that belong to hosts this server will never be reached at again:
+ * those whose host ends with `suffix` (a dot and a domain: `.trycloudflare.com`, whose addresses
+ * are handed out once) and isn't `keep`, the host it is reached at now. They sign in nowhere, so
+ * nothing else ends but the sessions they started. Returns how many went.
+ */
+export async function removeStrandedPasskeys(
+  tx: Tx,
+  tenantId: string,
+  userId: string,
+  hosts: { suffix: string; keep: string },
+  by: string,
+): Promise<number> {
+  if (!ADMIN.test(by)) throw new IdentityError("invalid", "by is user:… or system:…");
+  if (!/^\.[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(hosts.suffix)) {
+    throw new IdentityError("invalid", "suffix is a dot and a domain");
+  }
+  if (!isId("user", userId)) return 0;
+  await lockPerson(tx, tenantId, userId);
+  const removed = await tx
+    .delete(passkeys)
+    .where(
+      and(
+        eq(passkeys.tenantId, tenantId),
+        eq(passkeys.userId, userId),
+        like(passkeys.rpId, `%${hosts.suffix}`),
+        ne(passkeys.rpId, hosts.keep),
+      ),
+    )
+    .returning({ id: passkeys.id });
+  if (removed.length > 0) {
+    await tx
+      .update(sessions)
+      .set({ revokedAt: sql`greatest(now(), ${sessions.createdAt})`, revokedBy: by })
+      .where(
+        and(
+          eq(sessions.tenantId, tenantId),
+          eq(sessions.userId, userId),
+          eq(sessions.issuer, PASSKEY_ISSUER),
+          inArray(
+            sessions.subject,
+            removed.map((r) => r.id),
+          ),
+          isNull(sessions.revokedAt),
+        ),
+      );
+  }
+  return removed.length;
 }

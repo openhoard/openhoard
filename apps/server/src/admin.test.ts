@@ -691,7 +691,9 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
     const list = () => admin("user", "list-passkeys", "--tenant", tenantId, "--user", userId);
     const listed = await list();
     expect(listed.code, listed.err).toBe(0);
-    expect(listed.out).toMatch(/^pky_\S+\tPasskey\tcreated \S+\tnever used\tsynced\n$/);
+    expect(listed.out).toMatch(
+      /^pky_\S+\tPasskey\tcreated \S+\tnever used\tsynced\tfiles\.example\.com\n$/,
+    );
     const passkeyId = listed.out.split("\t")[0] as string;
     const remove = (id: string) =>
       admin("user", "remove-passkey", "--tenant", tenantId, "--user", userId, "--id", id);

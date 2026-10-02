@@ -43,6 +43,7 @@ import {
   registerPasskey,
   registrationOptions,
   removePasskey,
+  removeStrandedPasskeys,
   signInWithPasskey,
   spendChallenge,
   userHandle,
@@ -288,6 +289,7 @@ describe("passkeys", () => {
         "id",
         "lastUsedAt",
         "name",
+        "rpId",
         "transports",
         "userId",
       ].sort(),
@@ -462,6 +464,104 @@ describe("passkeys", () => {
           .where(and(eq(passkeys.userId, bo.id))),
       ),
     ).toHaveLength(1);
+  });
+});
+
+describe("hosts", () => {
+  /** Adds a passkey made at `host` (the server reached at another address). */
+  async function addAt(host: string, device = new SoftAuthenticator()) {
+    const challenge = newChallenge();
+    const origin = `https://${host}`;
+    const response = device.create(
+      registrationOptions({
+        rp: { id: host, name: "OpenHoard" },
+        tenantId: t.tenantId,
+        user: bo,
+        challenge,
+        exclude: [],
+      }),
+      origin,
+    );
+    return write((tx) =>
+      registerPasskey(tx, t.tenantId, {
+        userId: bo.id,
+        response,
+        expected: { challenge, origin, rpId: host },
+      }),
+    );
+  }
+
+  it("are recorded, and a passkey left at another host doesn't count against this one", async () => {
+    const here = await enrolled();
+    expect(here.passkey.rpId).toBe(RP.id);
+    for (let n = 0; n < PASSKEY_MAX_PER_USER; n++) await addAt("old.example.net");
+    // Twenty at the old host, one here: here still has room.
+    const challenge = newChallenge();
+    const more = await write((tx) =>
+      registerPasskey(tx, t.tenantId, {
+        userId: bo.id,
+        response: new SoftAuthenticator().create(
+          registrationOptions({ rp: RP, tenantId: t.tenantId, user: bo, challenge, exclude: [] }),
+          ORIGIN,
+        ),
+        expected: expectedFor(challenge),
+      }),
+    );
+    expect(more.rpId).toBe(RP.id);
+    await expect(addAt("old.example.net")).rejects.toMatchObject({ code: "invalid" });
+  });
+
+  it("that are gone for good take their passkeys and those passkeys' sessions with them", async () => {
+    const here = await enrolled();
+    const gone = new SoftAuthenticator();
+    const stranded = await addAt("quiet-river.trycloudflare.com", gone);
+    await addAt("loud-lake.trycloudflare.com");
+    const current = await addAt("new-hill.trycloudflare.com");
+    const other = await addAt("files.example.org");
+    // A session the stranded passkey started (while its host lived).
+    const challenge = newChallenge();
+    const signed = await write((tx) =>
+      signInWithPasskey(tx, t.tenantId, {
+        response: gone.get(
+          authenticationOptions({ rpId: "quiet-river.trycloudflare.com", challenge }),
+          "https://quiet-river.trycloudflare.com",
+        ),
+        expected: {
+          challenge,
+          origin: "https://quiet-river.trycloudflare.com",
+          rpId: "quiet-river.trycloudflare.com",
+        },
+      }),
+    );
+    if (!signed.ok) throw new Error("refused");
+    const remove = (suffix = ".trycloudflare.com") =>
+      write((tx) =>
+        removeStrandedPasskeys(
+          tx,
+          t.tenantId,
+          bo.id,
+          { suffix, keep: "new-hill.trycloudflare.com" },
+          BY,
+        ),
+      );
+    expect(await remove()).toBe(2);
+    expect(await remove()).toBe(0);
+    const left = await write((tx) => listPasskeys(tx, t.tenantId, bo.id));
+    expect(left.map((p) => p.id).sort()).toEqual([here.passkey.id, current.id, other.id].sort());
+    expect(left.some((p) => p.id === stranded.id)).toBe(false);
+    const live = async (token: string) =>
+      (await write((tx) => checkSession(tx, t.tenantId, token))).ok;
+    expect(await live(signed.session.token)).toBe(false);
+    expect(await live(here.session.token)).toBe(true);
+    // A suffix is a dot and a domain: never a pattern, never everything.
+    for (const bad of ["trycloudflare.com", ".com", "%", "._.com", ""]) {
+      await expect(remove(bad)).rejects.toMatchObject({ code: "invalid" });
+    }
+    expect(
+      await write((tx) =>
+        removeStrandedPasskeys(tx, t.tenantId, "nobody", { suffix: ".a.b", keep: "x" }, BY),
+      ),
+    ).toBe(0);
   });
 });
 
