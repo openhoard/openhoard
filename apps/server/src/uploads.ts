@@ -1,6 +1,6 @@
 import { appendAudit } from "@openhoard/core-audit";
 import { ingest, INGEST_LIMITS, IngestError, type IngestResult } from "@openhoard/core-catalog";
-import { newId, objects, sourceRefs, zones, type Database, type Tx } from "@openhoard/core-db";
+import { newId, objects, sourceRefs, type Database, type Tx } from "@openhoard/core-db";
 import { getUser, grantIsLive, userPrincipal, type OAuthScope } from "@openhoard/core-identity";
 import {
   blobPath,
@@ -13,6 +13,7 @@ import type { Context, Hono, MiddlewareHandler } from "hono";
 import type { Logger } from "pino";
 import type { AuthEnv, BearerAuth, SignedIn } from "./auth.js";
 import type { UploadsConfig } from "./config.js";
+import { managedZone, ZoneKindError } from "./managed.js";
 import { retrying } from "./retry.js";
 
 /*
@@ -160,43 +161,15 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
   const { db, uploads, store, log } = deps;
 
   /** The tenant's uploads zone, made on its first upload. */
-  const zoneOf = async (tx: Tx, tenantId: string, create: boolean): Promise<string | null> => {
-    const find = () =>
-      tx
-        .select({ id: zones.id, kind: zones.kind })
-        .from(zones)
-        .where(and(eq(zones.tenantId, tenantId), eq(zones.name, uploads.zone)));
-    let [zone] = await find();
-    if (!zone && !create) return null;
-    if (!zone) {
-      const id = newId("zone");
-      // Two first uploads at once: one makes it, the other finds it. (Its audit comes before
-      // ingest's locks, once in a tenant's life; a deadlock from that order is retried.)
-      const made = await tx
-        .insert(zones)
-        .values({ tenantId, id, kind: "managed", name: uploads.zone })
-        .onConflictDoNothing()
-        .returning({ id: zones.id });
-      if (made.length > 0) {
-        await appendAudit(tx, tenantId, {
-          actor: ZONE_ACTOR,
-          action: "zone.create",
-          decision: "allow",
-          detail: { zone: id, kind: "managed", name: uploads.zone },
-        });
-        return id;
-      }
-      [zone] = await find();
-    }
-    if (!zone || zone.kind !== "managed") {
+  const zoneOf = (tx: Tx, tenantId: string, create: boolean): Promise<string | null> =>
+    managedZone(tx, tenantId, uploads.zone, { create, actor: ZONE_ACTOR }).catch((e: unknown) => {
+      if (!(e instanceof ZoneKindError)) throw e;
       throw new Refusal(
         409,
         "zone-kind",
         `zone "${uploads.zone}" is not a managed zone: name another in uploads.zone`,
       );
-    }
-    return zone.id;
-  };
+    });
 
   const deny = (who: Caller, reason: string) =>
     db.withTenant(who.tenantId, (tx) =>

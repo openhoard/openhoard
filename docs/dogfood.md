@@ -288,6 +288,9 @@ resume`; for a held deletion use `source confirm-reconcile` or `discard-reconcil
   only, so through `oh tunnel` on a phone), OpenHoard is in the share menu of Android and
   Windows. A setup made before this needs `"uploads": {}` added to config.json (apps/server
   README, "Adding files").
+- **Mailing something in**: with a mailbox configured (`mailIn`, apps/server README,
+  "Email-in"), forward a message to it and its text and attachments are files within a few
+  minutes.
 - **Stopping**: Ctrl+C. Running jobs get a few seconds, and resume on the next start.
 
 ## Not there yet

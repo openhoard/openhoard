@@ -9,6 +9,7 @@ import { closeApp, createApp } from "./app.js";
 import { runConnect } from "./connect.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
+import { checkMailboxes, startMailIn } from "./mail-in.js";
 import { createServerModels, modelsStartupWarning } from "./models.js";
 import { runInit, soloArgument } from "./solo.js";
 import { prepareSources, type ServerSources } from "./sources.js";
@@ -98,7 +99,7 @@ try {
 let jobs: Jobs;
 let models: ReturnType<typeof createServerModels>;
 // What enrichment may read: the folders that opted in, and, with uploads, what OpenHoard holds.
-const content = sources.content ?? (config.uploads ? blobs : null);
+const content = sources.content ?? (config.uploads || config.mailIn.length > 0 ? blobs : null);
 try {
   // Model providers (T-404) from `models`, keys from OPENHOARD_MODEL_<ID>_API_KEY; none, no model.
   models = createServerModels(config.models, process.env, log.child({ component: "models" }));
@@ -149,6 +150,32 @@ const watching = config.jobs.worker
       log: log.child({ component: "watch" }),
     })
   : null;
+
+// Mailboxes read over IMAP (T-1208): on a worker, as the folders' syncs are. One whose tenant
+// isn't there stops the server, naming it, as a folder's does; a lost key is said now too.
+try {
+  await checkMailboxes(db, config.mailIn);
+  for (const tenantId of new Set(config.mailIn.map((m) => m.tenantId))) await tenantKey(tenantId);
+} catch (err) {
+  log.fatal({ err }, "cannot set up the configured mailboxes");
+  await jobs.stop({ timeoutMs: 1000, graceMs: 500 }).catch(() => {});
+  await db.close().catch(() => {});
+  process.exit(1);
+}
+const mailIn =
+  config.jobs.worker && config.mailIn.length > 0
+    ? startMailIn(
+        {
+          db,
+          store: blobStore,
+          tenantKey,
+          enqueue: (tenantId, result) => jobs.enqueueAfterIngest(tenantId, result),
+          log: log.child({ component: "mail-in" }),
+        },
+        config.mailIn,
+        process.env,
+      )
+    : null;
 
 // The MCP `find` tool embeds queries with the same providers (local ones only, by default).
 const app = createApp(config, log, {
@@ -201,7 +228,7 @@ const shutdown = (signal: string) => {
   const closed = new Promise<void>((resolve) => server.close(() => resolve()));
   if ("closeIdleConnections" in server) server.closeIdleConnections();
   // The watchers first: no sync is requested of a queue that is stopping.
-  const stopped = (watching?.close() ?? Promise.resolve())
+  const stopped = Promise.all([watching?.close(), mailIn?.close()])
     .then(() => jobs.stop({ timeoutMs: JOBS_STOP_TIMEOUT_MS, graceMs: JOBS_GRACE_MS }))
     .catch((err: unknown) => log.error({ err }, "stopping the job queue failed"));
   void Promise.all([closed, stopped])

@@ -408,6 +408,64 @@ export const SourceSchema = z
 
 export type SourceConfig = z.infer<typeof SourceSchema>;
 
+const EMAIL = z
+  .string()
+  .max(320)
+  .regex(/^[^\s@<>]+@[^\s@<>]+$/, "an email address")
+  .transform((a) => a.toLowerCase());
+
+/**
+ * A mailbox read over IMAP (T-1208, mail-in.ts): what is sent to it becomes files in a managed
+ * zone. Its password is OPENHOARD_MAIL_<ID>_PASSWORD in the environment, never here.
+ */
+export const MailboxSchema = z
+  .object({
+    /** The mailbox's name here: in the audit, the logs and its password's variable. */
+    id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/, "a lower-case slug"),
+    tenantId: z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
+    host: z.string().min(1).max(253),
+    port: z.number().int().min(1).max(65535).default(993),
+    /** TLS from the first byte (port 993). Off only for a server on this machine. */
+    secure: z.boolean().default(true),
+    user: z.string().min(1).max(320),
+    folder: z.string().min(1).max(200).default("INBOX"),
+    /** The managed zone its files go to, by name: made in the tenant on its first message. */
+    zone: z.string().min(1).max(200).default("Mail"),
+    everyMinutes: z.number().int().min(1).max(1440).default(5),
+    /**
+     * The name the mailbox's provider signs its Authentication-Results header with (e.g.
+     * "mx.google.com"), or several (a provider with more than one receiving server): a message
+     * is taken only when that header says DMARC passed. Look at the headers of a message in
+     * the mailbox to find it.
+     */
+    authserv: z
+      .union([z.string().min(1).max(253), z.array(z.string().min(1).max(253)).min(1).max(20)])
+      .transform((a) => (typeof a === "string" ? [a] : a))
+      .optional(),
+    /** Believe the From line with no such check. Only for a mailbox nobody else can send to. */
+    allowUnauthenticated: z.boolean().default(false),
+    /** Senders taken besides the tenant's own members; their mail is `owner`'s. */
+    allowFrom: z.array(EMAIL).max(200).default([]),
+    /** Who owns mail from `allowFrom` senders: a member's email, or their id (`usr_…`). */
+    owner: z.string().min(3).max(320).optional(),
+    /** The largest message taken, and the largest attachment, in bytes. Default 25 MiB. */
+    maxBytes: z
+      .number()
+      .int()
+      .min(1024)
+      // (A message is held in memory whole, more than once, while it is read.)
+      .max(100 * 1024 ** 2)
+      .default(25 * 1024 ** 2),
+  })
+  .strict();
+
+/** The environment variable a mailbox's password is read from. */
+export function mailPasswordEnv(id: string): string {
+  return `OPENHOARD_MAIL_${id.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_PASSWORD`;
+}
+
+export type MailboxConfig = z.infer<typeof MailboxSchema>;
+
 export const ConfigSchema = z
   .object({
     host: z.string().default("127.0.0.1"),
@@ -436,6 +494,8 @@ export const ConfigSchema = z
     /** Folders synced on a schedule (T-303). */
     sources: z.array(SourceSchema).max(100).default([]),
     models: ModelsSchema.prefault({}),
+    /** Mailboxes read over IMAP (T-1208): what is sent to them becomes files. */
+    mailIn: z.array(MailboxSchema).max(20).default([]),
     auth: AuthSchema.optional(),
     /**
      * Uploads (T-1206): signed-in members add files through `/api/uploads` and the installable
@@ -511,10 +571,47 @@ export const ConfigSchema = z
         message: "uploads need sign-in: configure auth",
       });
     }
+    const mailboxes = new Set<string>();
+    c.mailIn.forEach((m, i) => {
+      const issue = (path: string, message: string) =>
+        ctx.addIssue({ code: "custom", path: ["mailIn", i, path], message });
+      // By the variable their passwords are read from: "a.b" and "a-b" would share one.
+      if (mailboxes.has(mailPasswordEnv(m.id))) issue("id", `duplicate mailbox ${m.id}`);
+      mailboxes.add(mailPasswordEnv(m.id));
+      if (m.authserv !== undefined && m.allowUnauthenticated) {
+        issue("allowUnauthenticated", "authserv checks the sender: this would switch that off");
+      }
+      if (m.authserv === undefined && !m.allowUnauthenticated) {
+        issue(
+          "authserv",
+          "name the mailbox provider's authserv-id, so a sender is who its server says (or set allowUnauthenticated, to believe the From line)",
+        );
+      }
+      if (m.allowFrom.length > 0 && m.owner === undefined) {
+        issue("owner", "mail from allowFrom senders needs an owner");
+      }
+      if (!m.secure && !LOOPBACK_HOSTS.has(m.host)) {
+        issue("secure", "a mailbox is read over TLS, unless its server is on this machine");
+      }
+      if (c.uploads !== undefined && m.zone === c.uploads.zone) {
+        issue("zone", `zone "${m.zone}" is the uploads' (uploads.zone): mail goes to another`);
+      }
+      if (c.sources.some((s) => s.tenantId === m.tenantId && s.zone === m.zone)) {
+        issue("zone", `zone "${m.zone}" is a folder's: mail goes to a zone of its own`);
+      }
+    });
     const ids = new Set<string>();
     c.sources.forEach((s, i) => {
       const key = `${s.tenantId}/${s.id}`;
       // Uploaded items' own source (uploads.ts UPLOAD_SOURCE): a folder's would mix with them.
+      // Mail's own source (mail-in.ts MAIL_SOURCE), likewise.
+      if (c.mailIn.length > 0 && s.id === "mail") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["sources", i, "id"],
+          message: `"mail" is what mail's files are recorded under: give the source another id`,
+        });
+      }
       if (c.uploads !== undefined && s.id === "uploads") {
         ctx.addIssue({
           code: "custom",

@@ -1057,6 +1057,79 @@ in the store unreferenced until maintenance learns to remove them; with uploads 
 (`sources`) can't be named `uploads` or sync into the uploads' zone; there is no way yet to
 download an upload again from the page (the MCP tools read it).
 
+## Email-in: a mailbox whose mail becomes files (T-1208)
+
+Forward a message to a dedicated mailbox and its text and attachments are files in OpenHoard.
+The server reads the mailbox over IMAP every few minutes (on a worker).
+
+```json
+{
+  "mailIn": [
+    {
+      "id": "inbox",
+      "tenantId": "ten_…",
+      "host": "imap.example.com",
+      "user": "hoard@example.com",
+      "authserv": "mx.example.com"
+    }
+  ]
+}
+```
+
+The password is `OPENHOARD_MAIL_<ID>_PASSWORD` in the environment (`OPENHOARD_MAIL_INBOX_PASSWORD`
+here), never in config.json. A mailbox with no password set is said in the log and not read.
+
+| Setting              | Default   | What                                                                           |
+| -------------------- | --------- | ------------------------------------------------------------------------------ |
+| `port`, `secure`     | 993, true | TLS from the first byte. `secure: false` only for a server on this machine     |
+| `folder`             | `INBOX`   | The folder read                                                                |
+| `zone`               | `Mail`    | The managed zone its files go to, made on the first message                    |
+| `everyMinutes`       | 5         | How often it is read                                                           |
+| `authserv`           | none      | How a sender is known (below). Required, unless `allowUnauthenticated`         |
+| `allowFrom`, `owner` | none      | Senders taken besides the tenant's members, and who owns their mail            |
+| `maxBytes`           | 25 MiB    | The largest message taken, and the largest single attachment (100 MiB at most) |
+
+**What a message becomes.** A Markdown file named after its subject (who, when, the text;
+an HTML-only message as plain text) and one file for each attachment, as sent. A message
+forwarded _as an attachment_ is opened too: its own text and attachments become files. The
+files are OpenHoard's to keep (`<dataDir>/blobs`), enriched and found like any upload.
+
+**Whose they are.** The sender's, when the sender's address is an active member's. For a sender
+in `allowFrom` (a scanner, a shared address), `owner`'s. Mail from anyone else is refused.
+Nobody but the owner reads the files until they share them.
+
+**How the sender is known.** A From line is anyone's to write, so it isn't believed by itself.
+Mail providers check a message when it arrives and write what they found in an
+`Authentication-Results` header, signed with their own name, at the top of the message (and
+are expected to remove any such header that arrives claiming that name). OpenHoard reads the
+topmost one with that name, and nothing below one it can't read. `authserv` is that name (open a message in the mailbox and look at
+its headers: for Gmail it is `mx.google.com`; a provider with several receiving servers may
+need several, as a list). A message is taken only when that header says `dmarc=pass` for the
+From address's domain, and the message has a single From line. So a sender whose domain
+publishes no DMARC policy (some scanners and devices) is refused, and so is everything when
+`authserv` is wrong: check the audit after the first message. A refused message is marked read
+and isn't looked at again; mark it unread in the mailbox to have it tried once more. Without a provider that does this, set
+`allowUnauthenticated: true`, and then anyone who can reach the mailbox can send as anyone: do
+that only for a mailbox nobody outside can send to.
+
+**Handled once.** A message taken or refused is marked read; a refused one is flagged too, so
+it stands out in the mailbox. One that couldn't be handled just now stays unread for the next
+run, and is given up on (refused as `failed`) after five. A message handled twice (the server stopped in between) is the same files, not twins.
+Nothing in a message is followed: no link is fetched, no remote image loaded.
+
+**Audit.** `mail.receive` for every message: allowed, with the files it became, or denied, with
+why (`sender`, `unauthenticated`, `too-large`, `no-owner`, `failed`, …). Sender addresses are recorded;
+subjects and text are not.
+
+A mailbox whose tenant doesn't exist stops the server at start, naming it.
+
+Limits for now: password sign-in only (an app password for Gmail; Microsoft 365, which needs
+OAuth for IMAP, isn't supported yet); the text of an HTML-only message is read up to 2 MB of
+HTML; messages are left in the mailbox, read, never moved or
+deleted; 50 messages a run and 50 attachments a message; one worker should read a mailbox
+(two would do the work twice, though not make twins); a reply isn't tied to the message it
+answers.
+
 ## Testing with a new Entra tenant (T-102 and T-103 together)
 
 Entra's provisioning service calls the Tenant URL from Microsoft's cloud, so it must be public
