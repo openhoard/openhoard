@@ -168,6 +168,40 @@ export class TenantStore {
     return item;
   }
 
+  /** Adds an empty folder under `parentId` (or the drive root). */
+  addFolder(driveId: string, parentId: string | undefined, name: string): StoredItem {
+    const file = this.addFile(driveId, parentId, name, 0, "inode/directory");
+    file.kind = "folder";
+    return file;
+  }
+
+  /**
+   * Moves an item to another folder of its drive (or its root), keeping its id. As in Graph,
+   * only the item itself shows up as changed in the next delta: what is inside a moved folder
+   * doesn't, though its path is another now.
+   */
+  move(id: string, parentId: string | undefined): StoredItem {
+    const item = this.require(id);
+    const parent = parentId ? this.require(parentId) : undefined;
+    if (parent && (parent.kind !== "folder" || parent.driveId !== item.driveId)) {
+      throw new TypeError("the new parent must be a folder of the same drive");
+    }
+    for (let up = parent; up; up = up.parentId ? this.items.get(up.parentId) : undefined) {
+      if (up.id === id) throw new TypeError("a folder can't be moved into itself");
+    }
+    if (
+      this.children(item.driveId, parentId).some(
+        (s) => s.id !== id && s.name.toLowerCase() === item.name.toLowerCase(),
+      )
+    ) {
+      throw new Error(`name conflict: ${item.name}`);
+    }
+    item.parentId = parentId;
+    this.repath(item);
+    this.touch(item, "updated");
+    return item;
+  }
+
   /** Deletes an item and, for folders, everything below it. */
   delete(id: string): void {
     const item = this.require(id);

@@ -1,8 +1,9 @@
 # @openhoard/connector-sharepoint
 
 SharePoint sites, indexed in place through Microsoft Graph. **It signs in (T-302) and crawls a
-site's document libraries with checkpoints (T-303).** It doesn't yet follow changes (T-304),
-import permissions (T-305) or pace itself under throttling (T-306). In the server it is a
+site's document libraries with checkpoints (T-303), and follows what changes in them through
+Graph's delta (T-304).** It isn't yet told of changes as they happen (change notifications),
+and doesn't import permissions (T-305) or pace itself under throttling (T-306). In the server it is a
 source with `"connector": "sharepoint"` (apps/server README, "SharePoint sites on a schedule").
 
 ## Crawling a site (T-303)
@@ -22,8 +23,8 @@ const connector = sharepointConnector({
 - **How.** Library by library, through Graph's delta enumeration from the start
   (`/drives/{id}/root/delta`), 200 items a page (`pageSize`). A checkpoint follows every page,
   holding the link to the next one: a crawl killed anywhere goes on from the last page
-  recorded, and keeps nothing on disk. The `done` cursor holds each library's delta link, which
-  is what following changes will start from.
+  recorded. The `done` cursor holds each library's delta link, which is what following changes
+  starts from.
 - **Paths without an order.** Delta gives an item its parent's id, no path, and promises no
   order. Folders seen are remembered for the library under way; a parent not seen yet (a child
   came first, or the crawl resumed mid-library) is asked for by id, with those above it, and
@@ -44,8 +45,9 @@ const connector = sharepointConnector({
   (misnamed, too deep, gone or refused when asked for) is `unplaced-item`; what is neither a
   file nor a folder is `unsupported-item`. Each names the item, and the runner takes an item a
   warning names as mentioned: it is not reconciled away. Only an entry that can't even be named
-  is `unreadable`: the runner then removes nothing after that crawl. A deletion in the feed is
-  not said as one: the crawl's reconcile removes what it didn't see, behind the runner's guard.
+  is `unreadable`: the runner then removes nothing after that crawl. Without a state directory
+  a deletion in the feed is not said as one: the crawl's reconcile removes what it didn't see,
+  behind the runner's guard.
 - **Where requests go.** To Graph's origin only. A link Graph hands back (a next page, a delta
   link, one in a token) is followed only when it is on that origin; a token holding any other
   is refused (`resync`), and so is a token's link Graph no longer takes.
@@ -58,15 +60,87 @@ const connector = sharepointConnector({
 - **Limits.** A token holds a delta link per finished library and may be 65,536 characters: a
   site with more libraries than fit (some hundred) fails as `permanent`. A folder renamed
   while a crawl is under way leaves items yielded before it at their old path, and a file
-  deleted after the crawl yielded it stays, until the next crawl (every sync is one until
-  T-304, which must say such deletions).
+  deleted after the crawl yielded it stays, until the next crawl; with a state directory the
+  deltas that follow say both.
 
 Tested (`src/connector.test.ts`, `src/graph.test.ts`, `src/e2e.test.ts`) against the fake
 Graph, whose delta feed is shaped as Graph documents it, and through the sync runner into the
 catalog: a 10,000-item tenant fully indexed, and a killed sync resumed (`test:slow`, in CI on
 PostgreSQL; 600 items in the ordinary run).
 
-**Not yet tried on a real tenant.** What to look at there first: whether `Sites.Selected` is
+## Following changes (T-304)
+
+```ts
+const connector = sharepointConnector({ auth, site, stateDir: "/var/lib/openhoard/sp-finance" });
+```
+
+With a `stateDir` (a directory of this source's own, used by one sync at a time) the connector
+has `delta()`: after a crawl, a sync asks each library's delta link what changed since, and
+yields that.
+
+- **A round at a time.** A library's changes are read whole before anything is yielded: Graph
+  may give an item more than once and the last word counts. Then folders (nearest the top
+  first), then files, then deletions; a checkpoint after each library that had any. A sync
+  with nothing changed asks for the site's libraries and one page per library, and yields
+  nothing but `done`.
+- **Renamed and moved folders.** Graph says the folder changed and nothing of what is in it,
+  whose paths changed too. The connector keeps each library's folders (id, parent, name: no
+  file's name, no content) in `stateDir`, sees the folder isn't where or what it kept, and
+  lists everything under it (`/items/{id}/children`, folder by folder) to yield each at its
+  new path. The bytes aren't read again as long as the listing gives the same content version
+  as the feed did. A folder it may not list (403) is warned of (`unlisted-folder`), what is in
+  it stays where the catalog has it, and the next round tries again.
+- **A round is bounded.** At most `roundRequests` requests (default 1000: pages of the feed,
+  folder listings, folders asked for by id) and 100,000 entries or events. One that would take
+  more (a folder with thousands of folders in it renamed) is `resync`: a crawl does the same
+  work a page at a time, with checkpoints. A round is all or nothing: throttled or cut short,
+  it starts again at the next sync (waiting in place is T-306).
+- **Deletions** are yielded as `deleted`; the runner counts them against its guard before
+  applying any. Graph is taken to say every item in a deleted folder. If it says a folder went
+  and not the folders kept under it, it can't have said the files either: `resync`.
+- **What a crawl leaves for the deltas after it.** A crawl says no deletion (the runner would
+  make it uncounted): ids the feed said were deleted are kept and said by the deltas that
+  follow, 200 a round, each only if Graph still has no such item (and one Graph won't answer
+  for waits). A folder the crawl met under two names or in two places (renamed while the crawl
+  was under way) is listed again by the first delta, and a crawl that was stopped places what
+  follows as it placed what came before, so a folder renamed meanwhile is seen to differ when
+  Graph reports it: either way what the crawl yielded under the old name is put right.
+- **What is kept** (`src/state.ts`): `folders.<generation>.json`, named by the cursor it goes
+  with, written whole before that cursor exists and never changed after, so whichever cursor
+  the runner saved, its folders are the ones written for it; and `crawl.<id>.jsonl`, what a
+  crawl under way has met, which a checkpoint names with its length so a resumed crawl cuts it
+  back to there (and places what follows as it placed what came before). Old generations go
+  as later deltas run. Files are the server user's alone (0600, and the directory 0700 where it can be made so), read and
+  written whole and synchronously: some tens of bytes a folder, at each sync that has changes.
+  Nothing removes the directory when its source is taken out of the configuration.
+- **When it crawls again** (`resync`): Graph no longer takes the link (410, or refuses it), a
+  library was added, removed or renamed, the generation the cursor names is missing or
+  unreadable, the cursor has none (one from before T-304, or from a crawl that lost its log),
+  a round is over its bounds, a folder went without the folders in it, or the crawl is older
+  than `recrawlAfterDays` (default 7, fractions allowed; 0 never) or stamped more than a day
+  ahead of the clock. The periodic crawl's reconcile mends whatever a delta missed.
+- **Several nodes need the same `stateDir`.** A crawl resumed where its log isn't (another
+  node's disk, or lost) goes on and ends, with a cursor changes can't be followed from: the
+  next sync crawls again. Per-node directories therefore mean every sync is a crawl, as before
+  T-304, never a wrong catalog.
+- **Not covered, until the next crawl.** A folder that couldn't be placed at the crawl (its
+  name, its depth, refused) and can be now: Graph says the folder, not what is in it, and the
+  connector never kept it. Files in a deleted folder if Graph doesn't say each (see below). A
+  file the crawl yielded and was then told is deleted, when it was told of more than 5,000
+  deletions in that library (a feed listing the recycle bin): none are kept. So
+  `recrawlAfterDays: 0` is for a site where none of these can happen.
+
+Tested in `src/delta.test.ts` by one measure: a catalog after a crawl and the deltas that
+followed equals a fresh crawl of the site as it is now (files and folders added, changed,
+renamed, moved, deleted; items given twice; two libraries, resumed between them; a delta run
+again from a kept cursor; a crawl killed and resumed, with a folder renamed meanwhile), in
+`src/state.test.ts` for what is kept, and through the sync runner in `src/e2e.test.ts`.
+
+**Not yet tried on a real tenant.** What to look at there first: whether Graph reports each
+item of a deleted folder, and of a folder moved to another library (the connector takes it
+that it does); whether a folder's children listing gives the same hashes as the feed (if
+not, everything under a renamed folder is downloaded again); whether a crawl's enumeration
+lists deleted items at all; whether `Sites.Selected` is
 enough for `delta` (Graph's page names `Files.Read.All`); whether a file's `size` always equals
 the bytes downloaded (SharePoint is known to differ for some Office files, and the runner would
 then skip the file as `changed`); which hosts download links point at, and whether they
