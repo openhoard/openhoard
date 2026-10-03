@@ -308,11 +308,16 @@ describe("a round of changes", () => {
     expect(events.at(-1)?.type).toBe("done");
     expect(events.filter((e) => e.type === "item").length).toBeGreaterThan(3);
     // A feed that never ends runs out of it too.
+    let pages = 0;
     const endless = feed((page, url) => {
-      (page as Record<string, unknown>)["@odata.nextLink"] = `${url}&again=${Math.random()}`;
+      const next = new URL(url);
+      next.searchParams.set("again", String(++pages));
+      (page as Record<string, unknown>)["@odata.nextLink"] = next.href;
       delete (page as Record<string, unknown>)["@odata.deltaLink"];
     });
-    expect(errorCode(await failure(delta(cursor, connector({ fetch: endless }))))).toBe("resync");
+    const bounded = connector({ fetch: endless, roundRequests: 25 });
+    expect(errorCode(await failure(delta(cursor, bounded)))).toBe("resync");
+    expect(pages).toBe(25);
   });
 
   it("goes on past a folder it may not list, saying so", async () => {
