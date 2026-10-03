@@ -16,6 +16,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "pnpm lint && pnpm format:check && pnpm typecheck && pnpm test:coverage",
+    "package:skills": "node scripts/package-skills.mjs",
     "changeset": "changeset",
     "clean": "turbo run clean && rimraf node_modules .turbo"
   },

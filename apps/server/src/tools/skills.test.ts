@@ -9,7 +9,8 @@ import { TOOLS } from "../mcp.js";
 
 const root = new URL("../../../../skills/", import.meta.url);
 const skills = readdirSync(root, { withFileTypes: true })
-  .filter((d) => d.isDirectory())
+  // (Not `.claude-plugin`, which packages them for Claude Code: T-1210.)
+  .filter((d) => d.isDirectory() && !d.name.startsWith("."))
   .map((d) => d.name)
   .sort();
 

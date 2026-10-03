@@ -1,0 +1,29 @@
+{
+  "name": "openhoard",
+  "displayName": "OpenHoard",
+  "version": "0.1.0",
+  "description": "Find, open and recap the files in your own OpenHoard server, and see who can read them.",
+  "author": {
+    "name": "OpenHoard",
+    "url": "https://github.com/openhoard/openhoard"
+  },
+  "homepage": "https://github.com/openhoard/openhoard/tree/main/skills",
+  "repository": "https://github.com/openhoard/openhoard",
+  "license": "Apache-2.0",
+  "keywords": ["files", "search", "mcp", "self-hosted"],
+  "skills": ["./"],
+  "userConfig": {
+    "mcp_url": {
+      "type": "string",
+      "title": "OpenHoard MCP address",
+      "description": "Your OpenHoard server's address with /mcp on the end, e.g. https://files.example.com/mcp or http://127.0.0.1:7420/mcp.",
+      "required": true
+    }
+  },
+  "mcpServers": {
+    "openhoard": {
+      "type": "http",
+      "url": "${user_config.mcp_url}"
+    }
+  }
+}

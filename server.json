@@ -1,0 +1,25 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.openhoard/openhoard",
+  "title": "OpenHoard",
+  "description": "Self-hosted AI filesystem: permission-aware find, open, recap and audit over your own files.",
+  "version": "0.1.0",
+  "websiteUrl": "https://github.com/openhoard/openhoard",
+  "repository": {
+    "url": "https://github.com/openhoard/openhoard",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://{server_host}/mcp",
+      "variables": {
+        "server_host": {
+          "description": "The host (and port, if not 443) your own OpenHoard server is reached at over https, e.g. files.example.com. OpenHoard is self-hosted: there is no shared endpoint.",
+          "isRequired": true,
+          "format": "string"
+        }
+      }
+    }
+  ]
+}

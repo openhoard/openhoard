@@ -41,9 +41,12 @@ text and summaries come back as untrusted data, and every call and every AI read
 3. **Approve the client** as a tenant admin (OpenHoard's admin API, `/api/admin`, or
    `auth.clients` in the config) with a trust label: `commercial` for Claude. Files whose
    exposure doesn't reach that label come back as metadata only (scenario 7).
-4. **Add the skills.** Zip each skill folder (the folder itself, with its SKILL.md at the top
-   level of the folder) and upload it in Claude: Settings → Capabilities → Skills → Upload
-   skill. Claude Code picks them up from `.claude/skills/<name>/SKILL.md` instead.
+4. **Add the skills.** `pnpm package:skills` writes each one as a zip in `dist/skills/` (the
+   skill's folder, with its SKILL.md at the top of the folder): upload them in Claude,
+   Settings → Capabilities → Skills → Upload skill. In Claude Code, install the plugin
+   instead, which brings the connector too:
+   `claude plugin marketplace add openhoard/openhoard`, then
+   `claude plugin install openhoard@openhoard --config mcp_url=<publicUrl>/mcp`. See [docs/listings.md](../docs/listings.md).
 5. **Try them:** "Find the Acme QBR deck and open it", "What CSVs was I looking at yesterday?
    I'm in America/Denver", "Who can see the salary sheet? Can Bo?"
 
