@@ -32,7 +32,8 @@ the 10 s after which it forces an exit.
 
 ## Local folders on a schedule (T-303)
 
-`sources` lists folders the server indexes in place (the fs connector, core/jobs `sync` queue).
+`sources` lists folders (and SharePoint sites, below) the server indexes in place (core/jobs
+`sync` queue).
 To try it on your own machine, follow [docs/dogfood.md](../../docs/dogfood.md).
 
 ```json
@@ -55,8 +56,8 @@ To try it on your own machine, follow [docs/dogfood.md](../../docs/dogfood.md).
 | Field            | What                                                                                                                                                                                                                                                                                                                                                                     |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `id`             | the connection's name, a lower-case slug: the `source` of its items, and what `admin source …` takes                                                                                                                                                                                                                                                                     |
-| `connector`      | `fs` (SharePoint comes with T-302)                                                                                                                                                                                                                                                                                                                                       |
-| `root`           | an absolute path on this machine: a local disk or a mapped drive. A network share or device path (`\\server\share`, `\\?\…`) is refused, and so is a root and data directory inside one another (links and junctions resolved)                                                                                                                                           |
+| `connector`      | `fs`, or `sharepoint` ([below](#sharepoint-sites-on-a-schedule-t-303))                                                                                                                                                                                                                                                                                                   |
+| `root`           | (`fs`) an absolute path on this machine: a local disk or a mapped drive. A network share or device path (`\\server\share`, `\\?\…`) is refused, and so is a root and data directory inside one another (links and junctions resolved)                                                                                                                                    |
 | `zone`           | the zone's name: an indexed zone, made at start (audited `zone.create`) if the tenant has none of that name; a zone of that name of another kind is refused                                                                                                                                                                                                              |
 | `owner`          | an email or a user id: the person who owns, and so reads, its files (the fs connector imports no permissions: owner-only). Until that person exists, runs wait (`unknown-owner`). The person it names on the first run is pinned: an email reused later by someone else never takes the source over, and a config naming someone else for the source is refused at start |
 | `schedule`       | standard cron, in UTC; default every 15 minutes. The fs connector's delta compares the whole folder with its last snapshot, so deletions are seen too: no separate full crawl is needed                                                                                                                                                                                  |
@@ -74,6 +75,63 @@ credentials, a held reconcile, another folder at the root) stops that source's r
 (`source.sync-stopped`), until an admin acts (`admin source resume`, or the reconcile and
 identity commands). `admin source status` and `GET /api/admin/sources` show how each source's
 last run ended.
+
+### SharePoint sites on a schedule (T-303)
+
+A source may be a SharePoint site instead of a folder: its document libraries are indexed in
+place through Microsoft Graph ([connectors/sharepoint](../../connectors/sharepoint/README.md)),
+each library a folder at the top.
+
+```json
+{
+  "sources": [
+    {
+      "id": "sp-finance",
+      "connector": "sharepoint",
+      "tenantId": "ten_…",
+      "site": "contoso.sharepoint.com:/sites/finance",
+      "directory": "contoso.onmicrosoft.com",
+      "clientId": "11111111-2222-4333-8444-555555555555",
+      "zone": "Finance",
+      "owner": "steve@example.com"
+    }
+  ]
+}
+```
+
+| Field                | What                                                                                                                                                                      |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `site`               | the site, by host and path (`contoso.sharepoint.com:/sites/finance`) or by its id as Graph gives it. One source is one site                                               |
+| `directory`          | the Entra directory (tenant) the app is registered in: its id, or a domain it has verified. Not OpenHoard's `tenantId`                                                    |
+| `clientId`           | the app registration's client id. Give the app the application permission `Sites.Selected`, and grant it this site (the connector's README says how, and how to check it) |
+| `certificate`        | `{ "certificateFile": …, "privateKeyFile": … }`: PEM files, absolute paths, readable by the server only. Preferred. Without it, the client secret below                   |
+| `authority`, `graph` | a national cloud's addresses (https origins). Default: the global cloud's                                                                                                 |
+| `downloadHosts`      | hosts a file's bytes may be fetched from besides Graph. Default `[".sharepoint.com"]`                                                                                     |
+
+`id`, `tenantId`, `zone`, `owner`, `extract` and `reconcileGuard` are as for a folder.
+`schedule` defaults to every six hours (`0 */6 * * *`), not fifteen minutes: until changes are
+followed (T-304), every sync crawls the whole site again and records each file anew (about two
+database transactions a file and a Graph request per 200 items; no downloads after the first
+sync). One worker runs one sync at a time, so a large site synced often would hold up the
+folders' syncs. There is no `watch`.
+
+The first sync downloads every file, whatever `extract` says, as a folder's does: a file's
+identity in the catalog is a hash of its bytes. `extract` decides whether text is taken from
+them afterwards.
+
+**The app's credential is never in config.json** (the schema refuses a secret there). A client
+secret is read from the environment, from `OPENHOARD_SOURCE_<ID>_CLIENT_SECRET` (the id in upper
+case, anything but letters and digits as `_`: `OPENHOARD_SOURCE_SP_FINANCE_CLIENT_SECRET`). A
+source with neither a certificate nor its secret set is left out with an error in the log, and
+the others start (what it indexed before stays, and goes stale); a certificate file that can't
+be read, or a key that isn't the certificate's, stops the server, naming the source and the
+file, never its contents. With both, the certificate signs in and the log says the secret is
+unused. Every node sharing the database needs the same secret or files.
+
+What it doesn't do yet: every sync is a crawl of the whole site (changes are followed with
+T-304), SharePoint's permissions aren't imported (T-305: only `owner` reads the files), and a
+throttled sync stops and comes back after the wait Graph asked for (T-306). It hasn't been run
+against a real tenant yet.
 
 Content is read through the source's connector, checked against the version's size and BLAKE3
 blob id with the tenant's blob key. **Tenant blob keys** live in `<dataDir>/keys/<tenant>.blob-key`

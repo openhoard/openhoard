@@ -2,8 +2,8 @@
 
 SharePoint sites, indexed in place through Microsoft Graph. **It signs in (T-302) and crawls a
 site's document libraries with checkpoints (T-303).** It doesn't yet follow changes (T-304),
-import permissions (T-305) or pace itself under throttling (T-306), and the server's
-configuration doesn't name it yet: it is driven by core/jobs' sync runner in its tests.
+import permissions (T-305) or pace itself under throttling (T-306). In the server it is a
+source with `"connector": "sharepoint"` (apps/server README, "SharePoint sites on a schedule").
 
 ## Crawling a site (T-303)
 
