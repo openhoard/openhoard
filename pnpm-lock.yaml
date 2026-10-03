@@ -245,6 +245,9 @@ importers:
       '@openhoard/connector-fs':
         specifier: workspace:^
         version: link:../../connectors/fs
+      '@openhoard/connector-sharepoint':
+        specifier: workspace:^
+        version: link:../../connectors/sharepoint
       '@openhoard/core-audit':
         specifier: workspace:^
         version: link:../../core/audit

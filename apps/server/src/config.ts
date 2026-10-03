@@ -349,17 +349,46 @@ export const ModelsSchema = z
 /** Standard cron (five fields): minutes, hours, day of month, month, day of week. */
 const CRON = /^(\S+\s+){4}\S+$/;
 
+/** What every source has, whatever its connector. */
+const schedule = (byDefault: string) =>
+  z.string().max(100).regex(CRON, "a cron expression with five fields").default(byDefault);
+
+const sourceBase = {
+  /** The connection's name: the `source` of its items, and how admin commands name it. */
+  id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/, "a lower-case slug"),
+  tenantId: z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
+  /**
+   * The zone its items go to, by name: an indexed zone, made at start if the tenant has none
+   * of that name. A source stays in the zone it was first synced into.
+   */
+  zone: z.string().min(1).max(200),
+  /** Who owns (and so reads) its files: a person's email, or their id (`usr_…`). */
+  owner: z.string().min(3).max(320),
+  /**
+   * Read its files' content on this server for text extraction, summaries and embeddings (as
+   * far as each file's exposure lets content reach a model). Default false: names and
+   * metadata only.
+   */
+  extract: z.boolean().default(false),
+  /** When a reconcile is held for an admin (core/jobs runSync()); the defaults suit most. */
+  reconcileGuard: z
+    .object({
+      maxFraction: z.number().min(0).max(1).optional(),
+      minItems: z.number().int().min(0).max(1_000_000).optional(),
+    })
+    .strict()
+    .optional(),
+};
+
 /**
  * A local folder synced on a schedule (T-303, the fs connector): indexed in place, its files
  * owned (and so read) by `owner`. Each source's content is read by the server only when it opts
  * in (`extract`), for text extraction, summaries and embeddings.
  */
-export const SourceSchema = z
+export const FsSourceSchema = z
   .object({
-    /** The connection's name: the `source` of its items, and how admin commands name it. */
-    id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/, "a lower-case slug"),
+    ...sourceBase,
     connector: z.literal("fs"),
-    tenantId: z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
     /** The folder, an absolute path on this machine (a local disk, or a mapped drive). */
     root: z
       .string()
@@ -370,41 +399,115 @@ export const SourceSchema = z
         (r) => !/^[\\/]{2}/.test(r) && isAbsolute(r) && pathToFileURL(r).host === "",
         "a network share or a device path isn't supported: map the share to a drive letter",
       ),
-    /**
-     * The zone its items go to, by name: an indexed zone, made at start if the tenant has none
-     * of that name. A source stays in the zone it was first synced into.
-     */
-    zone: z.string().min(1).max(200),
-    /** Who owns (and so reads) its files: a person's email, or their id (`usr_…`). */
-    owner: z.string().min(3).max(320),
     /** When it syncs, in UTC (standard cron). Default every 15 minutes. */
-    schedule: z
-      .string()
-      .max(100)
-      .regex(CRON, "a cron expression with five fields")
-      .default("*/15 * * * *"),
+    schedule: schedule("*/15 * * * *"),
     /**
      * Also sync soon (seconds) after something in the folder changes, not only on `schedule`
      * (watch.ts, on a worker only). Default true. The schedule stays the safety net: changes on
      * network drives, or while nothing watched, are seen at its next run.
      */
     watch: z.boolean().default(true),
-    /**
-     * Read its files' content on this server for text extraction, summaries and embeddings (as
-     * far as each file's exposure lets content reach a model). Default false: names and
-     * metadata only.
-     */
-    extract: z.boolean().default(false),
-    /** When a reconcile is held for an admin (core/jobs runSync()); the defaults suit most. */
-    reconcileGuard: z
-      .object({
-        maxFraction: z.number().min(0).max(1).optional(),
-        minItems: z.number().int().min(0).max(1_000_000).optional(),
-      })
+  })
+  .strict();
+
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DOMAIN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
+/** An origin: https, a host, perhaps a port; no path, credentials or query. */
+const ORIGIN = z
+  .string()
+  .max(255)
+  .refine((value) => {
+    try {
+      const url = new URL(value);
+      return (
+        url.protocol === "https:" &&
+        DOMAIN.test(url.hostname) &&
+        url.username === "" &&
+        url.password === "" &&
+        (url.pathname === "/" || url.pathname === "") &&
+        url.search === "" &&
+        url.hash === "" &&
+        !value.includes("?") &&
+        !value.includes("#")
+      );
+    } catch {
+      return false;
+    }
+  }, "an https origin, as https://graph.microsoft.com");
+/** A file the admin names, absolute so it doesn't depend on where the server was started. */
+const KEY_FILE = z
+  .string()
+  .min(1)
+  .max(1024)
+  .refine((f) => isAbsolute(f), "an absolute path on this machine");
+
+/**
+ * A SharePoint site synced on a schedule (T-303, connectors/sharepoint): its document libraries
+ * indexed in place through Microsoft Graph, as the Entra app `clientId` of the directory
+ * `directory`, which an admin has granted the site (`Sites.Selected`).
+ *
+ * The app's credential is never here: a client secret is in the environment
+ * ({@link sourceSecretEnv}); a certificate is two files this names.
+ */
+export const SharePointSourceSchema = z
+  .object({
+    ...sourceBase,
+    connector: z.literal("sharepoint"),
+    /** The site: `contoso.sharepoint.com:/sites/finance`, or its id as Graph gives it. */
+    site: z.string().min(1).max(1024),
+    /** The Entra directory (tenant): its id, or a domain it has verified. Not OpenHoard's tenant. */
+    directory: z
+      .string()
+      .max(253)
+      .refine((d) => GUID.test(d) || DOMAIN.test(d), "an Entra tenant id (a GUID) or domain"),
+    /** The app registration's application (client) id. */
+    clientId: z.string().regex(GUID, "the app's client id (a GUID)"),
+    /** A certificate registered for the app, and its private key: PEM files. Else a secret. */
+    certificate: z
+      .object({ certificateFile: KEY_FILE, privateKeyFile: KEY_FILE })
       .strict()
+      .refine(
+        (c) => c.certificateFile !== c.privateKeyFile,
+        "two files: the certificate, and its key",
+      )
+      .optional(),
+    /**
+     * When it syncs, in UTC (standard cron). Default every six hours: until changes are
+     * followed (T-304), every sync crawls the whole site again.
+     */
+    schedule: schedule("0 */6 * * *"),
+    /** A national cloud's addresses. Default: the global cloud's. */
+    authority: ORIGIN.optional(),
+    graph: ORIGIN.optional(),
+    /** Hosts a file's bytes may be fetched from besides Graph (default `.sharepoint.com`). */
+    downloadHosts: z
+      .array(
+        z
+          .string()
+          .max(253)
+          .regex(
+            /^\.?([a-z0-9-]+\.)+[a-z0-9-]+$/i,
+            "a host name, or a suffix starting with a dot (.sharepoint.com)",
+          ),
+      )
+      .min(1)
+      .max(20)
       .optional(),
   })
   .strict();
+
+export const SourceSchema = z.discriminatedUnion("connector", [
+  FsSourceSchema,
+  SharePointSourceSchema,
+]);
+
+export type FsSourceConfig = z.infer<typeof FsSourceSchema>;
+export type SharePointSourceConfig = z.infer<typeof SharePointSourceSchema>;
+
+/** The environment variable a source's client secret is read from. */
+export function sourceSecretEnv(id: string): string {
+  return `OPENHOARD_SOURCE_${id.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_CLIENT_SECRET`;
+}
 
 export type SourceConfig = z.infer<typeof SourceSchema>;
 
@@ -601,6 +704,7 @@ export const ConfigSchema = z
       }
     });
     const ids = new Set<string>();
+    const secrets = new Set<string>();
     c.sources.forEach((s, i) => {
       const key = `${s.tenantId}/${s.id}`;
       // Uploaded items' own source (uploads.ts UPLOAD_SOURCE): a folder's would mix with them.
@@ -634,8 +738,20 @@ export const ConfigSchema = z
         });
       }
       ids.add(key);
+      // Two sources' secrets are told apart by their ids as the environment spells them.
+      if (s.connector === "sharepoint") {
+        const name = sourceSecretEnv(s.id);
+        if (secrets.has(name)) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["sources", i, "id"],
+            message: `its secret's variable (${name}) is another source's too: give it another id`,
+          });
+        }
+        secrets.add(name);
+      }
       // The connector keeps its state under the data directory, which must be outside the root.
-      if (isAbsolute(s.root) && overlap(s.root, c.dataDir)) {
+      if (s.connector === "fs" && isAbsolute(s.root) && overlap(s.root, c.dataDir)) {
         ctx.addIssue({
           code: "custom",
           path: ["sources", i, "root"],

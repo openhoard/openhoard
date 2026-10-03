@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SourceSchema } from "./config.js";
+import { FsSourceSchema } from "./config.js";
 import {
   createDebouncer,
   createFolderTreeWatch,
@@ -589,8 +589,8 @@ describe("config", () => {
       zone: "Docs",
       owner: "steve@example.com",
     };
-    expect(SourceSchema.parse(base).watch).toBe(true);
-    expect(SourceSchema.parse({ ...base, watch: false }).watch).toBe(false);
-    expect(SourceSchema.safeParse({ ...base, watch: "yes" }).success).toBe(false);
+    expect(FsSourceSchema.parse(base).watch).toBe(true);
+    expect(FsSourceSchema.parse({ ...base, watch: false }).watch).toBe(false);
+    expect(FsSourceSchema.safeParse({ ...base, watch: "yes" }).success).toBe(false);
   });
 });

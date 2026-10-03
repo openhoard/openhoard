@@ -1,3 +1,4 @@
+import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendAudit } from "@openhoard/core-audit";
 import type { ContentSource } from "@openhoard/core-catalog";
@@ -11,15 +12,22 @@ import {
   type ScheduledSource,
 } from "@openhoard/core-jobs";
 import { fsConnector } from "@openhoard/connector-fs";
+import { graphAuth, sharepointConnector, sitePath } from "@openhoard/connector-sharepoint";
 import type { Connector } from "@openhoard/sdk";
 import { and, eq } from "drizzle-orm";
 import type { Logger } from "pino";
-import type { Config, SourceConfig } from "./config.js";
+import {
+  sourceSecretEnv,
+  type Config,
+  type FsSourceConfig,
+  type SharePointSourceConfig,
+  type SourceConfig,
+} from "./config.js";
 import { retrying } from "./retry.js";
 
 /*
- * The configured sources (T-303): local folders synced on a schedule. At start the server, for
- * each one:
+ * The configured sources (T-303): local folders and SharePoint sites synced on a schedule. At
+ * start the server, for each one:
  *
  * - checks its tenant exists, and finds its zone by name, making it (an indexed zone, audited
  *   as `zone.create` by `system:config`) when the tenant has none of that name; a zone of that
@@ -27,9 +35,12 @@ import { retrying } from "./retry.js";
  * - binds the source to that zone and to its connector (core/jobs ensureSourceSync()): a
  *   configuration that later points it at another zone is refused, never applied to the items
  *   it already has;
- * - builds its connector (the fs connector over `root`, its state in
- *   `<dataDir>/connectors/<tenant>/<source>`, owner-only permissions: nothing but the owner's
- *   OpenHoard access reaches its files);
+ * - builds its connector: the fs connector over `root` (its state in
+ *   `<dataDir>/connectors/<tenant>/<source>`), or the SharePoint connector over `site`, signed
+ *   in as the configured Entra app (its secret from the environment, or a certificate from the
+ *   files named). Either way with owner-only permissions: nothing but the owner's OpenHoard
+ *   access reaches its files. A SharePoint source whose secret isn't set is left out with a
+ *   warning (as a model without its key is), and the rest start;
  * - resolves its owner (an email or a user id) to an active member on its first run, and pins
  *   that person (ownerOf()): until they exist (`admin user create`, SCIM) runs wait, and a later
  *   configuration naming someone else is refused.
@@ -60,8 +71,12 @@ export async function prepareSources(
     tenantKey: (tenantId: string) => Promise<Uint8Array>;
     blobs?: ContentSource;
     log?: Logger;
-    /** Builds a source's connector; the fs connector by default (tests pass their own). */
+    /** Builds a source's connector; by its `connector` by default (tests pass their own). */
     connectorOf?: (source: SourceConfig, stateDir: string) => Connector;
+    /** Where a source's secret is read from. Default `process.env`. */
+    env?: NodeJS.ProcessEnv;
+    /** What the SharePoint connector reaches Entra and Graph with. Default the global `fetch`. */
+    fetch?: typeof fetch;
   },
 ): Promise<ServerSources> {
   const scheduled: ScheduledSource[] = [];
@@ -72,8 +87,31 @@ export async function prepareSources(
     };
     const stateDir = join(config.dataDir, "connectors", s.tenantId, s.id);
     let connector: Connector;
+    /** How a SharePoint source signs in, for the log: never the credential. */
+    let credential: "certificate" | "secret" | undefined;
     try {
-      connector = (options.connectorOf ?? fsSource)(s, stateDir);
+      if (options.connectorOf) connector = options.connectorOf(s, stateDir);
+      else if (s.connector === "fs") connector = fsSource(s, stateDir);
+      else {
+        const env = options.env ?? process.env;
+        const built = sharepointSource(s, env, options.fetch);
+        if (built === null) {
+          // As a mailbox without its password: said loudly, and the rest start. What it
+          // indexed before stays as it is, and goes stale until the secret is back.
+          options.log?.error(
+            { source: s.id, tenantId: s.tenantId, variable: sourceSecretEnv(s.id) },
+            `source ${s.id} has no client secret (${sourceSecretEnv(s.id)} isn't set) and no certificate: it isn't synced until one is given and the server restarted`,
+          );
+          continue;
+        }
+        ({ connector, credential } = built);
+        if (built.secretIgnored) {
+          options.log?.warn(
+            { source: s.id, tenantId: s.tenantId, variable: sourceSecretEnv(s.id) },
+            `source ${s.id} signs in with its certificate: ${sourceSecretEnv(s.id)} is set and not used`,
+          );
+        }
+      }
     } catch (e) {
       return fail((e as Error).message);
     }
@@ -88,7 +126,7 @@ export async function prepareSources(
         let id = zone?.id;
         if (zone && zone.kind !== "indexed") {
           return fail(
-            `zone "${s.zone}" is a ${zone.kind} zone: a folder syncs into an indexed one`,
+            `zone "${s.zone}" is a ${zone.kind} zone: a source syncs into an indexed one`,
           );
         }
         if (!zone) {
@@ -146,7 +184,14 @@ export async function prepareSources(
     });
     if (s.extract) reading.set(`${s.tenantId}/${s.id}`, connector);
     options.log?.info(
-      { source: s.id, tenantId: s.tenantId, zoneId, schedule: s.schedule, extract: s.extract },
+      {
+        source: s.id,
+        tenantId: s.tenantId,
+        zoneId,
+        schedule: s.schedule,
+        extract: s.extract,
+        ...(credential === undefined ? {} : { credential }),
+      },
       "source ready",
     );
   }
@@ -175,8 +220,75 @@ export async function prepareSources(
 }
 
 /** The fs connector over a configured folder: owner-only permissions. */
-function fsSource(s: SourceConfig, stateDir: string): Connector {
+function fsSource(s: FsSourceConfig, stateDir: string): Connector {
   return fsConnector({ root: s.root, stateDir });
+}
+
+/** A PEM file is a few kilobytes: one far larger isn't one, and isn't read. */
+const MAX_PEM_BYTES = 256 * 1024;
+
+/**
+ * The SharePoint connector over a configured site, signed in as the configured Entra app: with
+ * its certificate when one is named, else with the client secret in the environment. Null
+ * when there is neither (after checking what can be checked without one, so a mistake in the
+ * site isn't found only once the secret is set). The credential goes to the connector and
+ * nowhere else: it is not logged, and what is thrown here names files and variables, never
+ * their contents.
+ */
+export function sharepointSource(
+  s: SharePointSourceConfig,
+  env: NodeJS.ProcessEnv,
+  send?: typeof fetch,
+): { connector: Connector; credential: "certificate" | "secret"; secretIgnored: boolean } | null {
+  const pem = (what: string, file: string): string => {
+    let reason: string;
+    let fd: number | undefined;
+    try {
+      // Opened once, and checked and read through that: what is read is what was checked.
+      fd = openSync(file, "r");
+      const found = fstatSync(fd);
+      if (!found.isFile()) reason = "not a file";
+      else if (found.size > MAX_PEM_BYTES) reason = "too large to be one";
+      else return readFileSync(fd, "utf8");
+    } catch (e) {
+      // The reason by its code: not the error's own text, and nothing of the file.
+      const code = (e as NodeJS.ErrnoException).code ?? "unreadable";
+      reason = code === "EISDIR" ? "not a file" : code;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    throw new Error(`its ${what} file can't be read (${reason}): ${file}`);
+  };
+  const secret = env[sourceSecretEnv(s.id)] ?? "";
+  if (s.certificate === undefined && secret === "") {
+    sitePath(s.site);
+    return null;
+  }
+  const credential = s.certificate
+    ? ({
+        kind: "certificate",
+        certificate: pem("certificate", s.certificate.certificateFile),
+        privateKey: pem("private key", s.certificate.privateKeyFile),
+      } as const)
+    : ({ kind: "secret", secret } as const);
+  const connector = sharepointConnector({
+    auth: graphAuth({
+      tenant: s.directory,
+      clientId: s.clientId,
+      credential,
+      ...(s.authority === undefined ? {} : { authority: s.authority }),
+      ...(s.graph === undefined ? {} : { graph: s.graph }),
+      ...(send === undefined ? {} : { fetch: send }),
+    }),
+    site: s.site,
+    ...(s.downloadHosts === undefined ? {} : { downloadHosts: s.downloadHosts }),
+    ...(send === undefined ? {} : { fetch: send }),
+  });
+  return {
+    connector,
+    credential: credential.kind,
+    secretIgnored: s.certificate !== undefined && secret !== "",
+  };
 }
 
 /**
