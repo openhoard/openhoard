@@ -81,6 +81,7 @@ import type { JobsLogger } from "./jobs.js";
  *   deletes among them, with those it made before, are counted against the same guard. Past
  *   it, nothing since the last checkpoint is applied and the run fails (`delete-guard`), held
  *   the same way (`delta_deletes` keeps the count across runs until the delta is done).
+ * - An item a `warning` names is taken as mentioned by the crawl: a reconcile doesn't remove it.
  * - A crawl that met a place it couldn't read (a `warning` `unreadable`) removes nothing: its
  *   reconcile is deferred (`reconcile_deferred`, said in every report) to the next crawl from the
  *   beginning, which the runner can't narrow to the readable part (it keeps no tree).
@@ -541,6 +542,9 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
           }
           case "warning":
             warn(event.code, event.externalId);
+            // An item a warning names is there (the connector couldn't serve it this time):
+            // mentioned, so a reconcile doesn't take it for gone.
+            if (event.externalId !== undefined) await seen(event.externalId);
             if (event.code === "unreadable" && reconciling) {
               // Unknown is not gone: this crawl removes nothing, and the next crawl from the
               // beginning reconciles instead (the runner keeps no tree, so it can't reconcile

@@ -138,11 +138,12 @@ describe("sites, drives and items", () => {
     expect(file?.parentReference.driveId).toBe(DRIVE);
   });
 
-  it("redirects the root item id to the root", async () => {
+  it("answers for the root item's id with the root", async () => {
     const res = await graph.fetch(`/v1.0/drives/${DRIVE}/items/${rootId(DRIVE)}`, {
       headers: AUTH,
     });
-    expect(res.status).toBe(307);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { root?: unknown; id: string }).root).toEqual({});
     expect(
       (
         await graph.fetch(`/v1.0/drives/${DRIVE}/items/${rootId(DRIVE)}/children`, {

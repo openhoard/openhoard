@@ -1,0 +1,261 @@
+import { objects, sourceRefs, sourceSyncs, type Database } from "@openhoard/core-db";
+import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
+import { runSync, type SyncReport } from "@openhoard/core-jobs";
+import { and, count, eq, isNull } from "drizzle-orm";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { graphAuth } from "./auth.js";
+import { sharepointConnector } from "./connector.js";
+import { AUTHORITY, CLIENT_ID, fakes, GRAPH, SECRET, type Fakes } from "./testing/fakes.js";
+
+/*
+ * T-303's done-when, through the real sync runner into the catalog (PGlite, or PostgreSQL with
+ * OPENHOARD_TEST_POSTGRES_URL): a fake tenant's sites are fully indexed, and a sync that is
+ * killed goes on from its last checkpoint.
+ *
+ * The 10,000-item tenant takes minutes, so it runs as a slow test:
+ * `pnpm --filter @openhoard/connector-sharepoint test:slow` (or OPENHOARD_TEST_SLOW=1). The
+ * same test runs on 600 items every time.
+ */
+
+const KEY = new Uint8Array(32).fill(7);
+const slow =
+  process.env.OPENHOARD_TEST_SLOW === "1" || process.env.npm_lifecycle_event === "test:slow";
+
+let db: Database;
+let t: SeededTenant;
+let f: Fakes;
+
+function setUp(items: number, more: { contentHashes?: boolean } = {}) {
+  f = fakes({ items, maxFileBytes: 512, ...more });
+  f.entra.registerApp({ clientId: CLIENT_ID, secret: SECRET, appRoles: ["Sites.Selected"] });
+  for (const site of f.tenant.sites) f.entra.grantSite(CLIENT_ID, site.id);
+}
+
+beforeEach(async () => {
+  db = await openTestDatabase();
+  t = await seedTenant(db, 1);
+});
+afterEach(async () => {
+  await db?.close();
+});
+
+const sourceOf = (siteId: string) => `sp-${siteId.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+
+/** One run of the runner over one site, with a connector that remembers nothing. */
+function sync(
+  siteId: string,
+  more: { signal?: AbortSignal; maxItems?: number; fetch?: typeof fetch } = {},
+): Promise<SyncReport> {
+  const send = more.fetch ?? f.fetch;
+  return runSync(db, {
+    tenantId: t.tenantId,
+    source: sourceOf(siteId),
+    zoneId: t.zoneId,
+    connector: sharepointConnector({
+      auth: graphAuth({
+        tenant: f.tenant.domain,
+        clientId: CLIENT_ID,
+        credential: { kind: "secret", secret: SECRET },
+        authority: AUTHORITY,
+        graph: GRAPH,
+        fetch: send,
+        now: () => f.clock.now,
+      }),
+      site: siteId,
+      fetch: send,
+      now: () => f.clock.now,
+      pageSize: 50,
+    }),
+    ownerId: `user:${t.userId}`,
+    tenantKey: () => KEY,
+    enqueue: async () => {},
+    sleep: async () => {},
+    ...(more.signal === undefined ? {} : { signal: more.signal }),
+    ...(more.maxItems === undefined ? {} : { maxItems: more.maxItems }),
+  });
+}
+
+/** How many live objects the catalog holds for a site's source. */
+async function recorded(siteId: string): Promise<number> {
+  const [row] = await db.withTenant(t.tenantId, (tx) =>
+    tx
+      .select({ n: count() })
+      .from(sourceRefs)
+      .innerJoin(
+        objects,
+        and(eq(objects.tenantId, sourceRefs.tenantId), eq(objects.id, sourceRefs.objectId)),
+      )
+      .where(and(eq(sourceRefs.source, sourceOf(siteId)), isNull(objects.deletedAt))),
+  );
+  return Number(row?.n ?? 0);
+}
+
+const filesOf = (siteId: string) =>
+  f.tenant.items.filter((i) => i.siteId === siteId && i.kind === "file").length;
+
+async function indexEverySite(): Promise<void> {
+  let total = 0;
+  for (const site of f.tenant.sites) {
+    const report = await sync(site.id);
+    expect(report, site.id).toMatchObject({ status: "done", phase: "crawl", skipped: [] });
+    expect(report.warnings).toEqual([]);
+    expect(report.counts.files).toBe(filesOf(site.id));
+    expect(report.counts.ingested).toBe(filesOf(site.id));
+    expect(await recorded(site.id)).toBe(filesOf(site.id));
+    total += report.counts.files + report.counts.folders - 1; // the library's top is a folder too
+  }
+  expect(total).toBe(f.tenant.items.length);
+}
+
+describe("a fake tenant through the sync runner", () => {
+  it("is fully indexed, site by site", async () => {
+    setUp(600);
+    await indexEverySite();
+    // Again: nothing is read a second time, and nothing is taken for gone.
+    const site = f.tenant.sites[0] as { id: string };
+    const downloads = () => f.sent.filter((s) => s.url.includes("/_download/")).length;
+    const before = downloads();
+    const again = await sync(site.id);
+    expect(again.status).toBe("done");
+    expect(again.counts).toMatchObject({ files: filesOf(site.id), deleted: 0, reconciled: 0 });
+    expect(downloads()).toBe(before);
+    expect(await recorded(site.id)).toBe(filesOf(site.id));
+  }, 240_000);
+
+  it.runIf(slow)(
+    "of 10,000 items is fully indexed",
+    async () => {
+      setUp(10_000);
+      await indexEverySite();
+    },
+    1_800_000,
+  );
+
+  it("killed midway goes on from its last checkpoint, and ends complete", async () => {
+    setUp(2500);
+    const site = f.tenant.sites[0] as { id: string };
+    const files = filesOf(site.id);
+    expect(files).toBeGreaterThan(150);
+
+    // Killed: the signal aborts once a third of the files have been asked for.
+    const kill = new AbortController();
+    let reads = 0;
+    const counting: typeof fetch = (input, init) => {
+      if (String(input).endsWith("/content") && ++reads === Math.floor(files / 3)) {
+        kill.abort(new Error("killed"));
+      }
+      return f.fetch(input, init);
+    };
+    const first = await sync(site.id, { signal: kill.signal, fetch: counting });
+    expect(first.status).toBe("cancelled");
+    const partly = await recorded(site.id);
+    expect(partly).toBeGreaterThan(0);
+    expect(partly).toBeLessThan(files);
+    const [state] = await db.withTenant(t.tenantId, (tx) =>
+      tx
+        .select()
+        .from(sourceSyncs)
+        .where(eq(sourceSyncs.source, sourceOf(site.id))),
+    );
+    expect(state?.token, "a checkpoint was saved before the kill").toEqual(expect.any(String));
+
+    // Stopped at checkpoints to fit a budget, as a job does: each run goes on from the last.
+    let report = await sync(site.id, { maxItems: 60 });
+    expect(report.status).toBe("partial");
+    let runs = 1;
+    while (report.status === "partial") {
+      report = await sync(site.id, { maxItems: 60 });
+      expect(++runs).toBeLessThan(50);
+    }
+    expect(report).toMatchObject({ status: "done", skipped: [] });
+    expect(runs).toBeGreaterThan(2);
+    expect(await recorded(site.id)).toBe(files);
+
+    // What the killed run recorded wasn't read again: fewer downloads than two whole crawls.
+    const downloads = f.sent.filter((s) => s.url.includes("/_download/")).length;
+    expect(downloads).toBeLessThan(files + 60);
+  }, 240_000);
+
+  it("indexes a tenant whose files have no content hash", async () => {
+    setUp(300, { contentHashes: false });
+    const site = f.tenant.sites[0] as { id: string };
+    expect(await sync(site.id)).toMatchObject({ status: "done", skipped: [] });
+    expect(await recorded(site.id)).toBe(filesOf(site.id));
+  }, 120_000);
+
+  it("keeps a file Graph says nonsense of, and still removes what is gone", async () => {
+    setUp(300);
+    const site = f.tenant.sites[0] as { id: string };
+    expect((await sync(site.id)).status).toBe("done");
+    const files = filesOf(site.id);
+    const mine = f.tenant.items.filter((i) => i.siteId === site.id && i.kind === "file");
+    const victim = mine[0] as { id: string };
+    const gone = mine[1] as { id: string };
+    // The next crawl's feed is wrong about one file, and another file has been deleted.
+    f.graph.store.delete(gone.id);
+    const wrong: typeof fetch = async (input, init) => {
+      const response = await f.fetch(input, init);
+      if (!String(input).includes("/root/delta") || !response.ok) return response;
+      const page = (await response.json()) as { value: Record<string, unknown>[] };
+      for (const raw of page.value) if (raw.id === victim.id) raw.size = "many";
+      return new Response(JSON.stringify(page));
+    };
+    const second = await sync(site.id, { fetch: wrong });
+    // The one it couldn't serve is warned of and kept; the deleted one is removed.
+    expect(second).toMatchObject({ status: "done", counts: { deleted: 0, reconciled: 1 } });
+    expect(second.warnings).toEqual([
+      { code: "invalid-item", externalId: expect.stringContaining(victim.id) as string },
+    ]);
+    expect(await recorded(site.id)).toBe(files - 1);
+
+    // An entry that can't even be named: unknown, not gone. Nothing is removed that time.
+    const third = f.tenant.items.filter((i) => i.siteId === site.id && i.kind === "file")[2] as {
+      id: string;
+    };
+    f.graph.store.delete(third.id);
+    const nameless: typeof fetch = async (input, init) => {
+      const response = await f.fetch(input, init);
+      if (!String(input).includes("/root/delta") || !response.ok) return response;
+      const page = (await response.json()) as { value: unknown[] };
+      page.value.push({ name: "no id" });
+      return new Response(JSON.stringify(page));
+    };
+    const unsure = await sync(site.id, { fetch: nameless });
+    expect(unsure.counts.reconciled).toBe(0);
+    expect(unsure.warnings.map((w) => w.code)).toEqual(["unreadable", "reconcile-deferred"]);
+    expect(await recorded(site.id)).toBe(files - 1);
+    // The next clean crawl removes it.
+    expect((await sync(site.id)).counts.reconciled).toBe(1);
+    expect(await recorded(site.id)).toBe(files - 2);
+  }, 120_000);
+
+  it("stops for an admin when the site isn't granted, and goes on once it is", async () => {
+    setUp(300);
+    const site = f.tenant.sites[1] as { id: string };
+    f.entra.revokeSite(CLIENT_ID, site.id);
+    expect(await sync(site.id)).toMatchObject({ status: "failed", error: "auth" });
+    expect(await recorded(site.id)).toBe(0);
+    f.entra.grantSite(CLIENT_ID, site.id);
+    expect((await sync(site.id)).status).toBe("done");
+    expect(await recorded(site.id)).toBe(filesOf(site.id));
+  }, 120_000);
+
+  it("waits when Graph asks it to, and loses nothing", async () => {
+    setUp(300);
+    const site = f.tenant.sites[2] as { id: string };
+    let pages = 0;
+    const throttling: typeof fetch = (input, init) => {
+      if (String(input).includes("/root/delta") && ++pages === 1) {
+        return Promise.resolve(
+          new Response("{}", { status: 429, headers: { "retry-after": "120" } }),
+        );
+      }
+      return f.fetch(input, init);
+    };
+    const first = await sync(site.id, { fetch: throttling });
+    expect(first).toMatchObject({ status: "retry", error: "throttled", retryAfterMs: 120_000 });
+    expect(await recorded(site.id)).toBe(0);
+    expect((await sync(site.id)).status).toBe("done");
+    expect(await recorded(site.id)).toBe(filesOf(site.id));
+  }, 120_000);
+});

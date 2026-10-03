@@ -22,16 +22,35 @@ export interface Fakes {
 /** A tenant id as Entra's are, which the fake Entra answers to as well as to its domain. */
 export const TENANT_GUID = "0f0e0d0c-0b0a-4908-8706-050403020100";
 
-export function fakes(options: { lifetimeSeconds?: number } = {}): Fakes {
-  const tenant = generateTenant({ items: 200 });
+export function fakes(
+  options: {
+    lifetimeSeconds?: number;
+    items?: number;
+    maxFileBytes?: number;
+    pageSize?: number;
+    /** False: no file has a content hash (FakeGraphOptions.contentHashes). */
+    contentHashes?: boolean;
+  } = {},
+): Fakes {
+  const { items = 200, maxFileBytes, pageSize, contentHashes, ...entraOptions } = options;
+  const tenant = generateTenant({ items });
+  // Small files, for tests that read every one: the generator's run to gigabytes.
+  if (maxFileBytes !== undefined) {
+    for (const item of tenant.items) item.size = Math.min(item.size, maxFileBytes);
+  }
   const clock = { now: Date.parse("2026-10-02T12:00:00Z") };
   const entra = new FakeEntra(tenant, {
     graph: GRAPH,
     now: () => clock.now,
     aliases: [TENANT_GUID],
-    ...options,
+    ...entraOptions,
   });
-  const graph = new FakeGraph(tenant, { entra, now: () => clock.now });
+  const graph = new FakeGraph(tenant, {
+    entra,
+    now: () => clock.now,
+    ...(pageSize === undefined ? {} : { pageSize }),
+    ...(contentHashes === undefined ? {} : { contentHashes }),
+  });
   const sent: Fakes["sent"] = [];
   const send: typeof fetch = (input, init) => {
     const url = String(input);

@@ -3,12 +3,15 @@
   "name": "connector-sharepoint",
   "version": "0.1.0",
   "type": "connector",
-  "description": "SharePoint sites and OneDrive, indexed in place through Microsoft Graph. So far it signs in (app-only with Sites.Selected, and on behalf of a user); crawling comes next.",
+  "description": "SharePoint sites, indexed in place through Microsoft Graph: one site's document libraries, crawled with checkpoints. Following changes and importing permissions come next.",
   "publisher": "openhoard",
   "license": "Apache-2.0",
-  "capabilities": ["read:metadata", "read:content", "source:crawl"],
+  "capabilities": ["read:metadata", "read:content", "source:crawl", "source:redirect"],
   "network": ["login.microsoftonline.com", "graph.microsoft.com", "*.sharepoint.com"],
   "max_exposure": "full",
   "runtime": "process",
-  "limits": { "memory_mb": 512, "timeout_s": 3600 }
+  "limits": {
+    "memory_mb": 512,
+    "timeout_s": 3600
+  }
 }

@@ -6,6 +6,7 @@ import { contentStream } from "../tenant/content.js";
 import type { FakeSite, FakeTenant, FakeUser } from "../tenant/types.js";
 import {
   deletedItem,
+  deltaItem,
   driveItem,
   driveResource,
   permissionResource,
@@ -30,6 +31,11 @@ export interface FakeGraphOptions {
   pageSize?: number;
   /** Rate limit: at most `limit` requests per `windowMs`, then 429 with Retry-After. */
   throttle?: { limit: number; windowMs: number };
+  /**
+   * Whether files carry `file.hashes` (default true). Graph doesn't promise a hash for every
+   * file: false gives a tenant where none has one, and a client must tell versions another way.
+   */
+  contentHashes?: boolean;
   /** Clock for rate limits and subscription expiry. Default `Date.now`. */
   now?: () => number;
   /** Delivers subscription validation requests and notifications. Default global `fetch`. */
@@ -286,7 +292,10 @@ export class FakeGraph {
     app.get("/v1.0/drives/:drive/items/:item", (c) => {
       const found = this.item(c);
       if (!found) return notFound(c);
-      if (found === "root") return c.redirect(`/v1.0/drives/${c.req.param("drive")}/root`, 307);
+      if (found === "root") {
+        const site = this.sites.get(c.req.param("drive") ?? "") as FakeSite;
+        return c.json(rootItem(site, this.store.children(site.driveId, undefined).length));
+      }
       return c.json(this.toDriveItem(found));
     });
     app.get("/v1.0/drives/:drive/items/:item/children", (c) =>
@@ -439,7 +448,7 @@ export class FakeGraph {
       .sort((a, b) => (a.id < b.id ? -1 : 1))
       .filter((i) => cursor.after === undefined || i.id > cursor.after);
     const pageItems = visible.slice(0, top);
-    const value: unknown[] = pageItems.map((i) => this.toDriveItem(i));
+    const value: unknown[] = pageItems.map((i) => deltaItem(this.toDriveItem(i)));
     if (cursor.after === undefined) {
       if (cursor.since < 0) {
         value.unshift(rootItem(site, this.store.children(drive, undefined).length));
@@ -620,7 +629,7 @@ export class FakeGraph {
     const site = this.sites.get(item.driveId) as FakeSite;
     const childCount =
       item.kind === "folder" ? this.store.children(item.driveId, item.id).length : 0;
-    return driveItem(item, site, this.users, childCount);
+    return driveItem(item, site, this.users, childCount, this.options.contentHashes ?? true);
   }
 
   private sign(value: string): string {

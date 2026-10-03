@@ -965,6 +965,37 @@ describe("runSync's safeguards", () => {
     expect(await admin((tx) => discardReconcile(tx, t.tenantId, "mem"))).toBe(false);
   });
 
+  it("keeps an item a crawl only warned of, and still removes what it didn't mention", async () => {
+    const mem = memorySource();
+    for (let i = 0; i < 4; i++) await mem.write([`f${i}.txt`], enc.encode(`${i}`));
+    const ids = new Map<string, string>();
+    for await (const e of mem.connector.crawl(null, new AbortController().signal)) {
+      if (e.type === "item") ids.set(e.item.path.join("/"), e.item.externalId);
+    }
+    await sync(mem.connector, { source: "mem" });
+    await mem.remove(["f0.txt"]);
+    // The next crawl can't serve f1 (and says so by its id); f0 is truly gone.
+    const { delta: _delta, ...crawling } = mem.connector;
+    const warning: Connector = {
+      ...crawling,
+      crawl: async function* (checkpoint, signal) {
+        for await (const e of mem.connector.crawl(checkpoint, signal)) {
+          if (e.type === "item" && e.item.externalId === ids.get("f1.txt")) {
+            yield { type: "warning", code: "invalid-item", externalId: e.item.externalId };
+          } else yield e;
+        }
+      },
+      describe: () => ({
+        ...mem.connector.describe(),
+        capabilities: { ...mem.connector.describe().capabilities, delta: false },
+      }),
+    };
+    const report = await sync(warning, { source: "mem" });
+    expect(report).toMatchObject({ status: "done", counts: { reconciled: 1 } });
+    expect(report.warnings).toEqual([{ code: "invalid-item", externalId: ids.get("f1.txt") }]);
+    expect((await live("mem")).map((o) => o.title).sort()).toEqual(["f1.txt", "f2.txt", "f3.txt"]);
+  });
+
   it("discards a held reconcile without removing anything, and guards the fresh crawl again", async () => {
     const mem = memorySource();
     for (let i = 0; i < 6; i++) await mem.write([`f${i}.txt`], enc.encode(`${i}`));

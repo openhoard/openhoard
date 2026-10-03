@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { FakeAclEntry, FakeSite, FakeTenant, FakeUser } from "../tenant/types.js";
 import type { StoredItem, Tombstone } from "./store.js";
 
@@ -49,6 +50,7 @@ export function driveItem(
   site: FakeSite,
   users: Map<string, FakeUser>,
   childCount: number,
+  hashes = true,
 ) {
   const parentPath = item.path.slice(0, item.path.lastIndexOf("/"));
   return {
@@ -69,8 +71,39 @@ export function driveItem(
       path: `/drive/root:${parentPath}`,
       siteId: item.siteId,
     },
-    ...(item.kind === "file" ? { file: { mimeType: item.mime } } : { folder: { childCount } }),
+    ...(item.kind === "file"
+      ? {
+          file: {
+            mimeType: item.mime,
+            ...(hashes ? { hashes: { quickXorHash: contentHash(item) } } : {}),
+          },
+        }
+      : { folder: { childCount } }),
   };
+}
+
+/**
+ * Stands in for SharePoint's quickXorHash: text that is the same for the same bytes and changes
+ * when they do. It is not computed from the bytes (a fake file may be gigabytes), so a client
+ * can compare it, and can't check content against it.
+ */
+export function contentHash(item: StoredItem): string {
+  return createHash("sha1")
+    .update(`${item.contentKey}\n${item.size}\n${item.contentVersion}`)
+    .digest("base64");
+}
+
+/**
+ * An item as the delta feed gives it. As Graph documents for SharePoint and OneDrive for
+ * Business: the parent's `path` is left out (a renamed folder's descendants aren't returned,
+ * so items are tracked by id), and so is `cTag`.
+ */
+export function deltaItem<T extends { cTag?: unknown; parentReference: { path?: unknown } }>(
+  item: T,
+): Omit<T, "cTag"> {
+  const { cTag: _cTag, parentReference, ...rest } = item;
+  const { path: _path, ...parent } = parentReference;
+  return { ...rest, parentReference: parent } as unknown as Omit<T, "cTag">;
 }
 
 export function deletedItem(t: Tombstone) {

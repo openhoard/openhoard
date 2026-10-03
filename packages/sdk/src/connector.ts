@@ -130,7 +130,9 @@ export interface SourceItem {
  * - `warning`: something the runner should know and report, by code (a slug), with the item it
  *   concerns when there is one. `unreadable`: part of the source (the item, or everything under
  *   it) couldn't be listed or read; its contents are unknown, not gone, so nothing under it may
- *   be taken as deleted (a crawl that met one doesn't reconcile). Other codes are reported only.
+ *   be taken as deleted (a crawl that met one doesn't reconcile). Other codes are reported, and
+ *   the item one names counts as mentioned: a crawl that warned of an item it couldn't serve
+ *   (a name the catalog can't hold) doesn't have it taken for gone.
  */
 export type SyncEvent =
   | { type: "item"; item: SourceItem }

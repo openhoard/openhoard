@@ -94,7 +94,7 @@ const graph = new FakeGraph(tenant, { entra }); // accepts the tokens entra issu
   only and can't list sites; `Sites.Read.All` (and the like) reaches all; a delegated token
   reaches, of those, the sites whose groups its user is in; `/v1.0/me` answers for it.
 
-Response shapes follow the Graph v1.0 documentation for the fields connectors read. The source tenant is never modified: `graph.store` holds a mutable copy.
+The delta feed is shaped as Graph documents it for SharePoint: an item's `parentReference` has no `path` and there is no `cTag`; files carry a `quickXorHash` that stands in for the real one (stable for the same bytes, not computed from them). Response shapes follow the Graph v1.0 documentation for the fields connectors read. The source tenant is never modified: `graph.store` holds a mutable copy.
 
 ## Dev OIDC provider and SCIM seed (T-016)
 

@@ -1,7 +1,77 @@
 # @openhoard/connector-sharepoint
 
-SharePoint sites and OneDrive, indexed in place through Microsoft Graph. **So far it signs in
-(T-302); it doesn't crawl yet** (T-303 and following), and the server doesn't load it.
+SharePoint sites, indexed in place through Microsoft Graph. **It signs in (T-302) and crawls a
+site's document libraries with checkpoints (T-303).** It doesn't yet follow changes (T-304),
+import permissions (T-305) or pace itself under throttling (T-306), and the server's
+configuration doesn't name it yet: it is driven by core/jobs' sync runner in its tests.
+
+## Crawling a site (T-303)
+
+```ts
+import { graphAuth, sharepointConnector } from "@openhoard/connector-sharepoint";
+
+const connector = sharepointConnector({
+  auth: graphAuth({ tenant, clientId, credential }),
+  site: "contoso.sharepoint.com:/sites/finance", // or the site's id
+});
+```
+
+- **One source is one site.** Each of its document libraries is a folder at the top, named
+  after the library (two of one name are told apart by their ids); files and folders are below.
+  An item's externalId is `<drive id>:<item id>`: it survives renames and moves in a library.
+- **How.** Library by library, through Graph's delta enumeration from the start
+  (`/drives/{id}/root/delta`), 200 items a page (`pageSize`). A checkpoint follows every page,
+  holding the link to the next one: a crawl killed anywhere goes on from the last page
+  recorded, and keeps nothing on disk. The `done` cursor holds each library's delta link, which
+  is what following changes will start from.
+- **Paths without an order.** Delta gives an item its parent's id, no path, and promises no
+  order. Folders seen are remembered for the library under way; a parent not seen yet (a child
+  came first, or the crawl resumed mid-library) is asked for by id, with those above it, and
+  yielded first. Parents always come before their children.
+- **Versions.** A file's `contentVersion` is its content hash when Graph gives one
+  (`quickXorHash`, or `sha256Hash`), else its eTag, which also changes on a rename (the bytes are then read
+  again, never missed). Never its cTag: SharePoint's delta feed leaves it out and an item asked
+  for by id has it. `read()` compares like with like: the version of the kind the crawl
+  recorded. The item's `etag` is made of Graph's eTag and the path, since Graph's own doesn't
+  change for what is inside a renamed folder.
+- **Reading.** `read()` checks the file is still the version (and size) crawled, follows Graph's
+  download link **without the token**, counts the bytes, and asks once more at the end: a file
+  replaced meanwhile is `changed`, never passed off as the version crawled. The link must be on
+  Graph's origin or an https host in `downloadHosts` (default `.sharepoint.com`), and nothing
+  it redirects to is followed.
+- **What can't be served is there, not gone.** An item Graph says nonsense of, or whose name
+  the catalog can't hold, is a warning `invalid-item`; one whose folder can't be placed
+  (misnamed, too deep, gone or refused when asked for) is `unplaced-item`; what is neither a
+  file nor a folder is `unsupported-item`. Each names the item, and the runner takes an item a
+  warning names as mentioned: it is not reconciled away. Only an entry that can't even be named
+  is `unreadable`: the runner then removes nothing after that crawl. A deletion in the feed is
+  not said as one: the crawl's reconcile removes what it didn't see, behind the runner's guard.
+- **Where requests go.** To Graph's origin only. A link Graph hands back (a next page, a delta
+  link, one in a token) is followed only when it is on that origin; a token holding any other
+  is refused (`resync`), and so is a token's link Graph no longer takes.
+- **Failures** are the contract's: 403 on the site, its libraries or a page is `auth` (the site
+  isn't granted); 404 `not-found`; 410 `resync`; 429 (and 503 or 504 with Retry-After)
+  `throttled`; other 5xx `retryable`; a site that isn't there `permanent`; the app's token
+  refused twice `auth`. One file whose content or download is refused is `permanent`: it is
+  passed over and the sync goes on (a site whose policy blocks every download ends `done` with
+  every file skipped: look at the skipped count).
+- **Limits.** A token holds a delta link per finished library and may be 65,536 characters: a
+  site with more libraries than fit (some hundred) fails as `permanent`. A folder renamed
+  while a crawl is under way leaves items yielded before it at their old path, and a file
+  deleted after the crawl yielded it stays, until the next crawl (every sync is one until
+  T-304, which must say such deletions).
+
+Tested (`src/connector.test.ts`, `src/graph.test.ts`, `src/e2e.test.ts`) against the fake
+Graph, whose delta feed is shaped as Graph documents it, and through the sync runner into the
+catalog: a 10,000-item tenant fully indexed, and a killed sync resumed (`test:slow`, in CI on
+PostgreSQL; 600 items in the ordinary run).
+
+**Not yet tried on a real tenant.** What to look at there first: whether `Sites.Selected` is
+enough for `delta` (Graph's page names `Files.Read.All`); whether a file's `size` always equals
+the bytes downloaded (SharePoint is known to differ for some Office files, and the runner would
+then skip the file as `changed`); which hosts download links point at, and whether they
+redirect (`downloadHosts`); what Graph answers for a next-page link that has lapsed; how many
+items a page really holds, and how often Graph throttles.
 
 ## Signing in to Graph (T-302)
 

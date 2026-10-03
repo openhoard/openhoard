@@ -94,7 +94,8 @@ jobs:
       - run: >-
           pnpm --filter "@openhoard/core-audit^..." --filter "@openhoard/core-catalog^..."
           --filter "@openhoard/core-identity^..." --filter "@openhoard/core-jobs^..."
-          --filter "@openhoard/server^..." --filter "@openhoard/enricher-extract^..." run build
+          --filter "@openhoard/server^..." --filter "@openhoard/enricher-extract^..."
+          --filter "@openhoard/connector-sharepoint^..." run build
       - run: pnpm --filter @openhoard/core-db run test:coverage
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
@@ -116,6 +117,11 @@ jobs:
       # T-402's done-when: a 1 GiB CSV streams through the extractor's child process with flat
       # memory and an exact row count (about a minute; the node jobs run it at 32 MiB).
       - run: pnpm --filter @openhoard/enricher-extract run test:slow
+      # T-303's done-when: a 10,000-item fake tenant is fully indexed through the sync runner,
+      # and a killed sync resumes (about a minute here; the node jobs run it on 600 items).
+      - run: pnpm --filter @openhoard/connector-sharepoint run test:slow
+        env:
+          OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
 
   python-cli:
     runs-on: ubuntu-latest
