@@ -24,11 +24,11 @@
     "bench": "tsx scripts/bench.ts"
   },
   "dependencies": {
-    "@hono/node-server": "^2.1.1",
+    "@hono/node-server": "^2.1.3",
     "@openhoard/core-audit": "workspace:^",
     "@openhoard/core-catalog": "workspace:^",
     "@openhoard/core-summarize": "workspace:^",
-    "hono": "^4.8.0",
+    "hono": "^4.13.11",
     "jose": "^6.2.12",
     "oidc-provider": "^9.12.2"
   },

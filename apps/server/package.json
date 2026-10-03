@@ -20,8 +20,8 @@
     "clean": "rimraf dist coverage"
   },
   "dependencies": {
-    "@hono/node-server": "^2.1.1",
-    "@modelcontextprotocol/sdk": "^1.30.1",
+    "@hono/node-server": "^2.1.3",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@openhoard/connector-fs": "workspace:^",
     "@openhoard/core-audit": "workspace:^",
     "@openhoard/core-catalog": "workspace:^",
@@ -33,7 +33,7 @@
     "@openhoard/core-storage": "workspace:^",
     "@openhoard/sdk": "workspace:^",
     "drizzle-orm": "^0.45.3",
-    "hono": "^4.8.0",
+    "hono": "^4.13.11",
     "imapflow": "^2.2.1",
     "openid-client": "^6.8.8",
     "pino": "^10.3.1",
