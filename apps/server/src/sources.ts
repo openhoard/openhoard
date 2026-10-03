@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendAudit } from "@openhoard/core-audit";
 import type { ContentSource } from "@openhoard/core-catalog";
@@ -242,14 +242,20 @@ export function sharepointSource(
 ): { connector: Connector; credential: "certificate" | "secret"; secretIgnored: boolean } | null {
   const pem = (what: string, file: string): string => {
     let reason: string;
+    let fd: number | undefined;
     try {
-      const found = statSync(file);
+      // Opened once, and checked and read through that: what is read is what was checked.
+      fd = openSync(file, "r");
+      const found = fstatSync(fd);
       if (!found.isFile()) reason = "not a file";
       else if (found.size > MAX_PEM_BYTES) reason = "too large to be one";
-      else return readFileSync(file, "utf8");
+      else return readFileSync(fd, "utf8");
     } catch (e) {
       // The reason by its code: not the error's own text, and nothing of the file.
-      reason = (e as NodeJS.ErrnoException).code ?? "unreadable";
+      const code = (e as NodeJS.ErrnoException).code ?? "unreadable";
+      reason = code === "EISDIR" ? "not a file" : code;
+    } finally {
+      if (fd !== undefined) closeSync(fd);
     }
     throw new Error(`its ${what} file can't be read (${reason}): ${file}`);
   };
