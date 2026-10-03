@@ -389,7 +389,9 @@ describe("init --solo", { timeout: process.platform === "win32" ? 600_000 : 180_
     );
     expect(res.code, res.err).toBe(0);
     const config = loadConfig({ OPENHOARD_DATA_DIR: dir });
-    expect(config.sources.map((s) => [s.id, s.root, s.zone, s.owner, s.extract])).toEqual([
+    expect(
+      config.sources.map((s) => [s.id, s.connector === "fs" && s.root, s.zone, s.owner, s.extract]),
+    ).toEqual([
       ["fs-notes", a, "Notes", "Steve@Example.com", false],
       ["fs-notes-2", b, "Notes (2)", "Steve@Example.com", false],
     ]);

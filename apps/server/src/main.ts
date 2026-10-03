@@ -71,7 +71,7 @@ log.info({ database: db.kind }, "database ready");
 // Made only for a tenant with no content yet; a lost one stops the server (tenant-keys.ts).
 const tenantKey = tenantKeyStore(config.dataDir, { hasContent: blobsIn(db) });
 
-// The configured folders (T-303): their zones, bindings and connectors. A source that can't be
+// The configured sources (T-303): their zones, bindings and connectors. A source that can't be
 // set up stops the server, naming it.
 let sources: ServerSources;
 // What OpenHoard holds itself (managed zones: uploads, T-1206), in <dataDir>/blobs.
@@ -145,10 +145,13 @@ sources.onStale((tenantId, source) => {
 // Only on a worker, which runs the syncs: any node could request one, but one set of watchers
 // per cluster is enough, and a serving-only node needn't hold the folders open.
 const watching = config.jobs.worker
-  ? watchSources(config.sources, {
-      request: (tenantId, source) => jobs.requestSync(tenantId, source),
-      log: log.child({ component: "watch" }),
-    })
+  ? watchSources(
+      config.sources.filter((s) => s.connector === "fs"),
+      {
+        request: (tenantId, source) => jobs.requestSync(tenantId, source),
+        log: log.child({ component: "watch" }),
+      },
+    )
   : null;
 
 // Mailboxes read over IMAP (T-1208): on a worker, as the folders' syncs are. One whose tenant

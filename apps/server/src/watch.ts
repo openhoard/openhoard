@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { lstat, readdir, stat } from "node:fs/promises";
 import { basename, join, relative, sep } from "node:path";
-import type { SourceConfig } from "./config.js";
+import type { FsSourceConfig } from "./config.js";
 
 /*
  * Folder watching (T-1203): a file saved into an fs source's folder syncs that source within
@@ -41,7 +41,10 @@ import type { SourceConfig } from "./config.js";
  */
 
 /** What a source's watcher needs from its configuration. */
-export type WatchedSource = Pick<SourceConfig, "id" | "tenantId" | "root" | "connector" | "watch">;
+export type WatchedSource = Pick<
+  FsSourceConfig,
+  "id" | "tenantId" | "root" | "connector" | "watch"
+>;
 
 export interface WatchLogger {
   debug(fields: object, message: string): void;
