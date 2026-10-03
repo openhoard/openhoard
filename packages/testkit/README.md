@@ -67,6 +67,33 @@ It covers what a SharePoint/OneDrive connector uses:
 - Rate limiting (429 + Retry-After) and injected faults. Both also apply to downloads, so retry and resume can be tested.
 - `graph.store` mutations: `update` (rename or new content), `addFile`, recursive `delete`, and `setAcl`. `setAcl` breaks inheritance and re-derives what inheriting descendants get, so permission sync can be tested through delta.
 
+### Fake Entra ID token endpoint (T-302)
+
+```ts
+import { FakeEntra, FakeGraph, selfSignedCertificate } from "@openhoard/testkit";
+
+const entra = new FakeEntra(tenant, { graph: "https://graph.test" });
+const cert = selfSignedCertificate(); // made at run time: no key in the repository
+entra.registerApp({
+  clientId,
+  secret,
+  certificate: cert.certificate,
+  appRoles: ["Sites.Selected"],
+});
+entra.grantSite(clientId, tenant.sites[0].id); // Sites.Selected is granted site by site
+const graph = new FakeGraph(tenant, { entra }); // accepts the tokens entra issues
+```
+
+- `POST /{tenant}/oauth2/v2.0/token`: the client credentials grant and the on-behalf-of grant,
+  with a client secret or a certificate assertion (PS256, `x5t#S256`, audience, lifetime and a
+  `jti` used once are checked). Refusals have Entra's shape and AADSTS codes.
+- `entra.userToken(userId, clientId)` makes the token a person's client would send the app (the
+  on-behalf-of `assertion`); `requireInteraction(userId)` makes their exchange answer
+  `interaction_required` with a claims challenge; `failNext(429, 1, 7)` injects faults.
+- A `FakeGraph` given `entra` applies what a token says: `Sites.Selected` reaches granted sites
+  only and can't list sites; `Sites.Read.All` (and the like) reaches all; a delegated token
+  reaches, of those, the sites whose groups its user is in; `/v1.0/me` answers for it.
+
 Response shapes follow the Graph v1.0 documentation for the fields connectors read. The source tenant is never modified: `graph.store` holds a mutable copy.
 
 ## Dev OIDC provider and SCIM seed (T-016)

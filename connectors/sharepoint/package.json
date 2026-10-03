@@ -1,0 +1,34 @@
+{
+  "name": "@openhoard/connector-sharepoint",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SharePoint and OneDrive connector, through Microsoft Graph. So far: signing in to Graph (app-only and on behalf of a user).",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "openhoard.plugin.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rimraf dist coverage",
+    "check": "node dist/check.js"
+  },
+  "dependencies": {
+    "@openhoard/sdk": "workspace:^"
+  },
+  "devDependencies": {
+    "@openhoard/config": "workspace:*",
+    "@openhoard/testkit": "workspace:^",
+    "vitest": "^5.0.1"
+  },
+  "license": "Apache-2.0"
+}

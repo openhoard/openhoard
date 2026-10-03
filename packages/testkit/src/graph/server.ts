@@ -13,11 +13,19 @@ import {
   rootItem,
   siteResource,
 } from "./resources.js";
+import { ALL_SITES_PERMISSIONS, type FakeEntra, type GraphCaller } from "./entra.js";
 import { TenantStore, type StoredItem } from "./store.js";
 
 export interface FakeGraphOptions {
-  /** Bearer token clients must send. Default `fake-graph-token`. */
+  /** Bearer token clients must send. Default `fake-graph-token`. Unused with `entra`. */
   token?: string;
+  /**
+   * Accept the tokens this fake Entra issues instead of the fixed `token`, and apply their
+   * permissions: an app token with `Sites.Selected` reaches only the sites it was granted
+   * (FakeEntra.grantSite), one with `Sites.Read.All` every site; a delegated token reaches, of
+   * those, the sites whose reader or writer groups the user is in.
+   */
+  entra?: FakeEntra;
   /** Default page size for collections; clients may lower it with `$top`. Default 200. */
   pageSize?: number;
   /** Rate limit: at most `limit` requests per `windowMs`, then 429 with Retry-After. */
@@ -58,9 +66,11 @@ const MAX_PAGE_SIZE = 999;
  */
 export class FakeGraph {
   readonly store: TenantStore;
-  readonly app = new Hono();
+  readonly app = new Hono<{ Variables: { caller?: GraphCaller } }>();
   readonly requests: LoggedRequest[] = [];
   readonly subscriptions = new Map<string, Subscription>();
+  /** With a fake Entra: the app each subscription belongs to. */
+  private readonly subscriptionOwner = new Map<string, string>();
 
   private readonly token: string;
   private readonly pageSize: number;
@@ -175,7 +185,10 @@ export class FakeGraph {
 
     app.use("/v1.0/*", async (c, next) => {
       const auth = c.req.header("authorization") ?? "";
-      if (!safeEqual(auth, `Bearer ${this.token}`)) {
+      const entra = this.options.entra;
+      const caller =
+        entra && auth.startsWith("Bearer ") ? await entra.verify(auth.slice(7)) : undefined;
+      if (entra ? !caller : !safeEqual(auth, `Bearer ${this.token}`)) {
         return graphError(
           c,
           401,
@@ -183,15 +196,69 @@ export class FakeGraph {
           "Access token is empty or invalid.",
         );
       }
+      if (caller) c.set("caller", caller);
       return next();
     });
 
-    app.get("/v1.0/sites", (c) =>
-      this.page(
+    // With a fake Entra, a token reaches a site only as its permissions say.
+    const guardSite = (site: FakeSite | undefined, c: Context) =>
+      site && !this.mayReach(c.get("caller") as GraphCaller | undefined, site)
+        ? graphError(c, 403, "accessDenied", "Access denied")
+        : undefined;
+    // A site named by its host and path: GET /v1.0/sites/{host}:/{path}.
+    app.get("/v1.0/sites/*", async (c, next) => {
+      const named = /^\/v1\.0\/sites\/([^/:]+):(\/.*)$/.exec(new URL(c.req.url).pathname);
+      if (!named) return next();
+      let path: string;
+      try {
+        path = decodeURIComponent(named[2] as string).replace(/\/+$/, "");
+      } catch {
+        return graphError(c, 400, "invalidRequest", "Malformed URL");
+      }
+      const site = this.tenant.sites.find((s) => s.webUrl === `https://${named[1]}${path}`);
+      if (!site) return notFound(c);
+      return guardSite(site, c) ?? c.json(siteResource(site, this.tenant));
+    });
+    for (const path of ["/v1.0/sites/:site", "/v1.0/sites/:site/*"]) {
+      app.use(path, async (c, next) => {
+        const site = this.tenant.sites.find((s) => s.id === c.req.param("site"));
+        return guardSite(site, c) ?? next();
+      });
+    }
+    for (const path of ["/v1.0/drives/:drive", "/v1.0/drives/:drive/*"]) {
+      app.use(
+        path,
+        async (c, next) => guardSite(this.sites.get(c.req.param("drive") ?? ""), c) ?? next(),
+      );
+    }
+
+    app.get("/v1.0/me", (c) => {
+      const caller = c.get("caller");
+      const user = caller?.userId === undefined ? undefined : this.users.get(caller.userId);
+      if (!user) {
+        return graphError(
+          c,
+          400,
+          "BadRequest",
+          "/me request is only valid with delegated authentication flow.",
+        );
+      }
+      return c.json({ id: user.id, displayName: user.displayName, userPrincipalName: user.upn });
+    });
+
+    app.get("/v1.0/sites", (c) => {
+      const caller = c.get("caller");
+      // Sites.Selected names sites one by one: it can't list them.
+      if (caller && !reachesAllSites(caller)) {
+        return graphError(c, 403, "accessDenied", "Access denied");
+      }
+      return this.page(
         c,
-        this.tenant.sites.map((s) => siteResource(s, this.tenant)),
-      ),
-    );
+        this.tenant.sites
+          .filter((s) => this.mayReach(caller, s))
+          .map((s) => siteResource(s, this.tenant)),
+      );
+    });
     app.get("/v1.0/sites/:site", (c) => {
       const site = this.tenant.sites.find((s) => s.id === c.req.param("site"));
       return site ? c.json(siteResource(site, this.tenant)) : notFound(c);
@@ -245,13 +312,24 @@ export class FakeGraph {
     });
 
     app.post("/v1.0/subscriptions", (c) => this.createSubscription(c));
-    app.get("/v1.0/subscriptions", (c) => this.page(c, [...this.subscriptions.values()]));
+    // With a fake Entra, an app sees and changes its own subscriptions only.
+    const owned = (c: Context, id: string) => {
+      const caller = c.get("caller") as GraphCaller | undefined;
+      const s = this.subscriptions.get(id);
+      return s && (!caller || this.subscriptionOwner.get(id) === caller.appId) ? s : undefined;
+    };
+    app.get("/v1.0/subscriptions", (c) =>
+      this.page(
+        c,
+        [...this.subscriptions.values()].filter((s) => owned(c, s.id)),
+      ),
+    );
     app.get("/v1.0/subscriptions/:id", (c) => {
-      const s = this.subscriptions.get(c.req.param("id"));
+      const s = owned(c, c.req.param("id"));
       return s ? c.json(s) : notFound(c);
     });
     app.patch("/v1.0/subscriptions/:id", async (c) => {
-      const s = this.subscriptions.get(c.req.param("id"));
+      const s = owned(c, c.req.param("id"));
       if (!s) return notFound(c);
       const body = (await c.req.json().catch(() => ({}))) as { expirationDateTime?: string };
       const problem = this.checkExpiry(body.expirationDateTime);
@@ -259,9 +337,13 @@ export class FakeGraph {
       s.expirationDateTime = new Date(Date.parse(body.expirationDateTime as string)).toISOString();
       return c.json(s);
     });
-    app.delete("/v1.0/subscriptions/:id", (c) =>
-      this.subscriptions.delete(c.req.param("id")) ? c.body(null, 204) : notFound(c),
-    );
+    app.delete("/v1.0/subscriptions/:id", (c) => {
+      const s = owned(c, c.req.param("id"));
+      if (!s) return notFound(c);
+      this.subscriptions.delete(s.id);
+      this.subscriptionOwner.delete(s.id);
+      return c.body(null, 204);
+    });
 
     app.notFound((c) =>
       graphError(
@@ -274,6 +356,24 @@ export class FakeGraph {
   }
 
   // ── Handlers ─────────────────────────────────────────────────────────────────────────
+
+  /** Whether a token's permissions reach a site. Without a fake Entra every token does. */
+  private mayReach(caller: GraphCaller | undefined, site: FakeSite): boolean {
+    if (!caller) return true;
+    const entra = this.options.entra as FakeEntra;
+    const granted =
+      reachesAllSites(caller) ||
+      ([...caller.roles, ...caller.scopes].includes("Sites.Selected") &&
+        entra.siteRole(caller.appId, site.id) !== undefined);
+    if (!granted || caller.userId === undefined) return granted;
+    // Delegated: never more than the user reaches.
+    const user = this.users.get(caller.userId);
+    const groups = new Set([...site.readerGroups, ...site.writerGroups]);
+    return (
+      user?.active === true &&
+      this.tenant.groups.some((g) => groups.has(g.id) && g.members.includes(user.id))
+    );
+  }
 
   private item(c: Context): StoredItem | "root" | undefined {
     const drive = c.req.param("drive");
@@ -405,6 +505,9 @@ export class FakeGraph {
     const drive = /^\/?(?:me\/)?drives\/([^/]+)\/root$/.exec(body.resource)?.[1];
     if (!drive || !this.sites.has(drive))
       return graphError(c, 400, "InvalidRequest", `Unsupported resource: ${body.resource}`);
+    const caller = c.get("caller") as GraphCaller | undefined;
+    if (!this.mayReach(caller, this.sites.get(drive) as FakeSite))
+      return graphError(c, 403, "accessDenied", "Access denied");
     const problem = this.checkExpiry(body.expirationDateTime);
     if (problem) return graphError(c, 400, "InvalidRequest", problem);
 
@@ -435,6 +538,7 @@ export class FakeGraph {
       expirationDateTime: new Date(Date.parse(body.expirationDateTime as string)).toISOString(),
     };
     this.subscriptions.set(subscription.id, subscription);
+    if (caller) this.subscriptionOwner.set(subscription.id, caller.appId);
     return c.json(subscription, 201);
   }
 
@@ -591,6 +695,11 @@ function graphError(c: Context, status: number, code: string, message: string): 
     },
     status as 400,
   );
+}
+
+function reachesAllSites(caller: GraphCaller): boolean {
+  const held = caller.userId === undefined ? caller.roles : caller.scopes;
+  return held.some((p) => (ALL_SITES_PERMISSIONS as readonly string[]).includes(p));
 }
 
 function notFound(c: Context): Response {

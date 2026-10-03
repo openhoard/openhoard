@@ -326,6 +326,22 @@ importers:
         specifier: ^5.0.1
         version: 5.0.1(@types/node@24.13.6)(@vitest/coverage-v8@5.0.1)(vite@7.3.6(@types/node@24.13.6)(jiti@2.6.1)(tsx@4.23.15)(yaml@2.9.1))
 
+  connectors/sharepoint:
+    dependencies:
+      '@openhoard/sdk':
+        specifier: workspace:^
+        version: link:../../packages/sdk
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@openhoard/testkit':
+        specifier: workspace:^
+        version: link:../../packages/testkit
+      vitest:
+        specifier: ^5.0.1
+        version: 5.0.1(@types/node@24.13.6)(@vitest/coverage-v8@5.0.1)(vite@7.3.6(@types/node@24.13.6)(jiti@2.6.1)(tsx@4.23.15)(yaml@2.9.1))
+
   core/audit:
     dependencies:
       '@openhoard/core-db':
