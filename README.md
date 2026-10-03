@@ -106,11 +106,31 @@ The core makes every trust decision. Plugins extend what OpenHoard can **reach**
 
 ## Try it
 
-Run the server locally. Node 24 and pnpm are all you need; no Docker, no database to install:
+On your own machine, over your own folder, in a few commands. Node 24, pnpm and git are all
+the server needs; no Docker, no database to install:
 
 ```bash
-pnpm install && pnpm dev   # http://127.0.0.1:7420/healthz
+git clone https://github.com/openhoard/openhoard
+cd openhoard
+pnpm install
+pnpm build
+node apps/server/dist/main.js init --solo
 ```
+
+`init --solo` sets up one person, a folder (`OpenHoard` in your home folder, made if missing;
+or `--folder <an existing folder>`, the path written out) and a starter policy pack. It then
+prints the two commands that are left: one connects Claude Desktop (`connect claude-desktop`),
+one starts the server. Follow what they print (a sign-in link to open, Claude Desktop to
+restart, Allow to press), put a file in the folder, and ask Claude for it.
+
+- Search works with no AI key. For summaries, set `OPENHOARD_MODEL_CLAUDE_API_KEY` in the
+  environment (never in a config file).
+- No Claude Desktop (Linux has none), or you want claude.ai or your phone: start it with
+  `tunnel` instead (needs `cloudflared`) and follow what it prints. Add files in a browser at
+  `<its address>/app/`.
+
+The details are in [apps/server/README.md](apps/server/README.md) ("One person on one
+machine"). This is pre-alpha: it never writes to the folder you name, but expect rough edges.
 
 The CLI validates plugin manifests against the published schema, the first contract every plugin must meet.
 
