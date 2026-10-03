@@ -13,7 +13,7 @@
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*",
-    "vitest": "^5.0.1"
+    "vitest": "^5.0.3"
   },
   "license": "Apache-2.0"
 }
