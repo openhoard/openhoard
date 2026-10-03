@@ -38,7 +38,8 @@ import { retrying } from "./retry.js";
  * - builds its connector: the fs connector over `root` (its state in
  *   `<dataDir>/connectors/<tenant>/<source>`), or the SharePoint connector over `site`, signed
  *   in as the configured Entra app (its secret from the environment, or a certificate from the
- *   files named). Either way with owner-only permissions: nothing but the owner's OpenHoard
+ *   files named), keeping the folders it follows changes by in the same state directory.
+ *   Either way with owner-only permissions: nothing but the owner's OpenHoard
  *   access reaches its files. A SharePoint source whose secret isn't set is left out with a
  *   warning (as a model without its key is), and the rest start;
  * - resolves its owner (an email or a user id) to an active member on its first run, and pins
@@ -94,7 +95,7 @@ export async function prepareSources(
       else if (s.connector === "fs") connector = fsSource(s, stateDir);
       else {
         const env = options.env ?? process.env;
-        const built = sharepointSource(s, env, options.fetch);
+        const built = sharepointSource(s, env, options.fetch, stateDir);
         if (built === null) {
           // As a mailbox without its password: said loudly, and the rest start. What it
           // indexed before stays as it is, and goes stale until the secret is back.
@@ -239,6 +240,7 @@ export function sharepointSource(
   s: SharePointSourceConfig,
   env: NodeJS.ProcessEnv,
   send?: typeof fetch,
+  stateDir?: string,
 ): { connector: Connector; credential: "certificate" | "secret"; secretIgnored: boolean } | null {
   const pem = (what: string, file: string): string => {
     let reason: string;
@@ -282,6 +284,9 @@ export function sharepointSource(
     }),
     site: s.site,
     ...(s.downloadHosts === undefined ? {} : { downloadHosts: s.downloadHosts }),
+    ...(s.recrawlAfterDays === undefined ? {} : { recrawlAfterDays: s.recrawlAfterDays }),
+    // With it the connector follows changes; without (a caller's own use), every sync crawls.
+    ...(stateDir === undefined ? {} : { stateDir }),
     ...(send === undefined ? {} : { fetch: send }),
   });
   return {

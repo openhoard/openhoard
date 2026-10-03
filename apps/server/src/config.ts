@@ -472,10 +472,16 @@ export const SharePointSourceSchema = z
       )
       .optional(),
     /**
-     * When it syncs, in UTC (standard cron). Default every six hours: until changes are
-     * followed (T-304), every sync crawls the whole site again.
+     * When it syncs, in UTC (standard cron). Default every fifteen minutes: a sync asks Graph
+     * what changed since the last one (T-304), and crawls the site only the first time and
+     * every `recrawlAfterDays`.
      */
-    schedule: schedule("0 */6 * * *"),
+    schedule: schedule("*/15 * * * *"),
+    /**
+     * How old a crawl may be before the site is crawled again instead of followed, in days:
+     * the crawl mends whatever following changes missed. Default 7; 0 never.
+     */
+    recrawlAfterDays: z.number().min(0).max(3650).optional(),
     /** A national cloud's addresses. Default: the global cloud's. */
     authority: ORIGIN.optional(),
     graph: ORIGIN.optional(),
