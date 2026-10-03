@@ -1,16 +1,21 @@
 import { objects, sourceRefs, sourceSyncs, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runSync, type SyncReport } from "@openhoard/core-jobs";
+import type { SyncEvent } from "@openhoard/sdk";
 import { and, count, eq, isNull } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { graphAuth } from "./auth.js";
-import { sharepointConnector } from "./connector.js";
+import { sharepointConnector, type SharePointConnectorOptions } from "./connector.js";
 import { AUTHORITY, CLIENT_ID, fakes, GRAPH, SECRET, type Fakes } from "./testing/fakes.js";
 
 /*
  * T-303's done-when, through the real sync runner into the catalog (PGlite, or PostgreSQL with
  * OPENHOARD_TEST_POSTGRES_URL): a fake tenant's sites are fully indexed, and a sync that is
- * killed goes on from its last checkpoint.
+ * killed goes on from its last checkpoint. And T-304's: after a crawl, syncs follow the site's
+ * changes, and the catalog holds what a fresh crawl of the site as it is now would give it.
  *
  * The 10,000-item tenant takes minutes, so it runs as a slow test:
  * `pnpm --filter @openhoard/connector-sharepoint test:slow` (or OPENHOARD_TEST_SLOW=1). The
@@ -41,30 +46,39 @@ afterEach(async () => {
 
 const sourceOf = (siteId: string) => `sp-${siteId.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
 
-/** One run of the runner over one site, with a connector that remembers nothing. */
+/** A connector that remembers nothing itself: what it keeps between runs is in `stateDir`. */
+function connectorOf(siteId: string, more: Partial<SharePointConnectorOptions> = {}) {
+  const send = more.fetch ?? f.fetch;
+  return sharepointConnector({
+    auth: graphAuth({
+      tenant: f.tenant.domain,
+      clientId: CLIENT_ID,
+      credential: { kind: "secret", secret: SECRET },
+      authority: AUTHORITY,
+      graph: GRAPH,
+      fetch: send,
+      now: () => f.clock.now,
+    }),
+    site: siteId,
+    fetch: send,
+    now: () => f.clock.now,
+    pageSize: 50,
+    ...more,
+  });
+}
+
+/** One run of the runner over one site, with a new connector each time. */
 function sync(
   siteId: string,
-  more: { signal?: AbortSignal; maxItems?: number; fetch?: typeof fetch } = {},
+  more: { signal?: AbortSignal; maxItems?: number; fetch?: typeof fetch; stateDir?: string } = {},
 ): Promise<SyncReport> {
-  const send = more.fetch ?? f.fetch;
   return runSync(db, {
     tenantId: t.tenantId,
     source: sourceOf(siteId),
     zoneId: t.zoneId,
-    connector: sharepointConnector({
-      auth: graphAuth({
-        tenant: f.tenant.domain,
-        clientId: CLIENT_ID,
-        credential: { kind: "secret", secret: SECRET },
-        authority: AUTHORITY,
-        graph: GRAPH,
-        fetch: send,
-        now: () => f.clock.now,
-      }),
-      site: siteId,
-      fetch: send,
-      now: () => f.clock.now,
-      pageSize: 50,
+    connector: connectorOf(siteId, {
+      ...(more.fetch === undefined ? {} : { fetch: more.fetch }),
+      ...(more.stateDir === undefined ? {} : { stateDir: more.stateDir }),
     }),
     ownerId: `user:${t.userId}`,
     tenantKey: () => KEY,
@@ -258,4 +272,182 @@ describe("a fake tenant through the sync runner", () => {
     expect((await sync(site.id)).status).toBe("done");
     expect(await recorded(site.id)).toBe(filesOf(site.id));
   }, 120_000);
+});
+
+/** The catalog's live files for a site's source: each one's id and etag (which holds its path). */
+async function cataloged(siteId: string): Promise<string[]> {
+  const rows = await db.withTenant(t.tenantId, (tx) =>
+    tx
+      .select({ externalId: sourceRefs.externalId, etag: sourceRefs.etag })
+      .from(sourceRefs)
+      .innerJoin(
+        objects,
+        and(eq(objects.tenantId, sourceRefs.tenantId), eq(objects.id, sourceRefs.objectId)),
+      )
+      .where(and(eq(sourceRefs.source, sourceOf(siteId)), isNull(objects.deletedAt))),
+  );
+  return rows.map((r) => `${r.externalId} ${r.etag}`).sort();
+}
+
+/** The same of the site as it is now, from a crawl that knows nothing of what came before. */
+async function crawled(siteId: string): Promise<string[]> {
+  const out: string[] = [];
+  const events: AsyncIterable<SyncEvent> = connectorOf(siteId).crawl(
+    null,
+    new AbortController().signal,
+  );
+  for await (const e of events) {
+    if (e.type === "item" && e.item.kind === "file") {
+      out.push(`${e.item.externalId} ${e.item.etag}`);
+    }
+  }
+  return out.sort();
+}
+
+describe("a site's changes through the sync runner (T-304)", () => {
+  let stateDir: string;
+  beforeEach(() => {
+    stateDir = mkdtempSync(join(tmpdir(), "oh-sp-e2e-"));
+  });
+  afterEach(() => {
+    rmSync(stateDir, { recursive: true, force: true, maxRetries: 5 });
+  });
+  const downloads = () => f.sent.filter((s) => s.url.includes("/_download/")).length;
+  const deltas = () => f.sent.filter((s) => s.url.includes("/root/delta")).length;
+
+  it("are followed: the catalog is what a fresh crawl of the site as it is now would give", async () => {
+    setUp(600);
+    const site = f.tenant.sites[0] as { id: string; driveId: string };
+    const store = f.graph.store;
+    const mine = () => store.inDrive(site.driveId);
+    // Three folders of its own, each with files and a folder of files in it.
+    const made = ["Plans", "Drafts", "Old"].map((name) => {
+      const folder = store.addFolder(site.driveId, undefined, name);
+      const inner = store.addFolder(site.driveId, folder.id, "Inner");
+      for (const n of [1, 2, 3]) {
+        store.addFile(site.driveId, folder.id, `${name} ${n}.txt`, 40 + n);
+        store.addFile(site.driveId, inner.id, `${name} inner ${n}.txt`, 60 + n);
+      }
+      return folder;
+    });
+    const renamedFolder = made[0] as { id: string };
+    const movedFolder = made[1] as { id: string };
+    const doomedFolder = made[2] as { id: string };
+    expect(await sync(site.id, { stateDir })).toMatchObject({ status: "done", phase: "crawl" });
+    expect(await cataloged(site.id)).toEqual(await crawled(site.id));
+
+    // Nothing changed: one request to the library, nothing recorded, nothing read.
+    let asked = deltas();
+    let read = downloads();
+    const idle = await sync(site.id, { stateDir });
+    expect(idle).toMatchObject({ status: "done", phase: "delta", skipped: [], warnings: [] });
+    expect(idle.counts).toMatchObject({ files: 0, deleted: 0, reconciled: 0 });
+    expect(deltas() - asked).toBe(1);
+    expect(downloads()).toBe(read);
+
+    // A day's work on the site.
+    const files = mine().filter((i) => i.kind === "file");
+    const below = (id: string): string[] =>
+      mine()
+        .filter((i) => i.parentId === id)
+        .flatMap((i) => [i.id, ...below(i.id)]);
+    const touched = new Set(
+      [renamedFolder, movedFolder, doomedFolder].flatMap((d) => [d.id, ...below(d.id)]),
+    );
+    const free = files.filter((i) => !touched.has(i.id));
+    const [edited, renamed, deleted] = free as [
+      (typeof files)[0],
+      (typeof files)[0],
+      (typeof files)[0],
+    ];
+    store.addFile(site.driveId, undefined, "new at the top.txt", 120);
+    store.addFile(site.driveId, renamedFolder.id, "new in a folder.txt", 80);
+    store.update(edited.id, { size: edited.size + 11 });
+    store.update(renamed.id, { name: "renamed in place.txt" });
+    store.delete(deleted.id);
+    store.update(renamedFolder.id, { name: "Renamed folder" });
+    const gone = below(doomedFolder.id).filter((id) => store.get(id)?.kind === "file").length;
+    store.delete(doomedFolder.id);
+    store.move(movedFolder.id, renamedFolder.id);
+
+    asked = deltas();
+    read = downloads();
+    const followed = await sync(site.id, { stateDir });
+    const [askedNow, readNow] = [deltas() - asked, downloads() - read];
+    expect(followed).toMatchObject({ status: "done", phase: "delta", skipped: [], warnings: [] });
+    expect(followed.counts.deleted).toBe(1 + gone);
+    expect(await cataloged(site.id)).toEqual(await crawled(site.id));
+    // Asked what changed, not crawled; and only the bytes that are new were read: the two new
+    // files and the edited one, not what was renamed or is under a renamed or moved folder.
+    expect(askedNow).toBe(1);
+    expect(readNow).toBe(3);
+
+    // And from there again.
+    store.update(renamed.id, { name: "renamed again.txt" });
+    expect(await sync(site.id, { stateDir })).toMatchObject({ status: "done", phase: "delta" });
+    expect(await cataloged(site.id)).toEqual(await crawled(site.id));
+  }, 240_000);
+
+  it("are held when they would delete most of the source, as a reconcile is", async () => {
+    setUp(300);
+    const site = f.tenant.sites[0] as { id: string; driveId: string };
+    expect((await sync(site.id, { stateDir })).status).toBe("done");
+    const before = await recorded(site.id);
+    for (const top of f.graph.store.inDrive(site.driveId).filter((i) => i.parentId === undefined)) {
+      f.graph.store.delete(top.id);
+    }
+    expect(await sync(site.id, { stateDir })).toMatchObject({
+      status: "failed",
+      phase: "delta",
+      error: "delete-guard",
+    });
+    expect(await recorded(site.id)).toBe(before);
+  }, 120_000);
+
+  it("are found by a crawl when what the connector kept is lost, or Graph can't say", async () => {
+    setUp(300);
+    const site = f.tenant.sites[0] as { id: string; driveId: string };
+    const store = f.graph.store;
+    expect((await sync(site.id, { stateDir })).status).toBe("done");
+    const file = store.inDrive(site.driveId).find((i) => i.kind === "file") as { id: string };
+
+    // The state directory lost (a restore without it): crawled again, in the same run.
+    rmSync(stateDir, { recursive: true, force: true });
+    store.update(file.id, { name: "while the state was lost.txt" });
+    expect(await sync(site.id, { stateDir })).toMatchObject({ status: "done", phase: "crawl" });
+    expect(await cataloged(site.id)).toEqual(await crawled(site.id));
+    expect((await sync(site.id, { stateDir })).phase).toBe("delta");
+
+    // Graph no longer takes the link (410).
+    store.update(file.id, { name: "while the link lapsed.txt" });
+    f.graph.requireResync();
+    expect(await sync(site.id, { stateDir })).toMatchObject({ status: "done", phase: "crawl" });
+    expect(await cataloged(site.id)).toEqual(await crawled(site.id));
+
+    // A week on, the site is crawled again whatever changed.
+    expect((await sync(site.id, { stateDir })).phase).toBe("delta");
+    f.clock.now += 8 * 86_400_000;
+    expect(await sync(site.id, { stateDir })).toMatchObject({ status: "done", phase: "crawl" });
+  }, 240_000);
+
+  it("are followed from a crawl that was killed and resumed", async () => {
+    setUp(600);
+    const site = f.tenant.sites[0] as { id: string; driveId: string };
+    const store = f.graph.store;
+    let report = await sync(site.id, { stateDir, maxItems: 40 });
+    expect(report.status).toBe("partial");
+    for (let runs = 1; report.status === "partial"; runs++) {
+      report = await sync(site.id, { stateDir, maxItems: 40 });
+      expect(runs).toBeLessThan(60);
+    }
+    expect(report).toMatchObject({ status: "done", phase: "crawl" });
+    const folder = store
+      .inDrive(site.driveId)
+      .find(
+        (i) => i.kind === "folder" && store.inDrive(site.driveId).some((c) => c.parentId === i.id),
+      ) as { id: string };
+    store.update(folder.id, { name: "Renamed after the crawl" });
+    expect(await sync(site.id, { stateDir })).toMatchObject({ status: "done", phase: "delta" });
+    expect(await cataloged(site.id)).toEqual(await crawled(site.id));
+  }, 240_000);
 });

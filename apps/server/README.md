@@ -107,13 +107,25 @@ each library a folder at the top.
 | `certificate`        | `{ "certificateFile": …, "privateKeyFile": … }`: PEM files, absolute paths, readable by the server only. Preferred. Without it, the client secret below                   |
 | `authority`, `graph` | a national cloud's addresses (https origins). Default: the global cloud's                                                                                                 |
 | `downloadHosts`      | hosts a file's bytes may be fetched from besides Graph. Default `[".sharepoint.com"]`                                                                                     |
+| `recrawlAfterDays`   | how old a crawl may be before the site is crawled again instead of followed. Default 7; 0 never                                                                           |
 
 `id`, `tenantId`, `zone`, `owner`, `extract` and `reconcileGuard` are as for a folder.
-`schedule` defaults to every six hours (`0 */6 * * *`), not fifteen minutes: until changes are
-followed (T-304), every sync crawls the whole site again and records each file anew (about two
-database transactions a file and a Graph request per 200 items; no downloads after the first
-sync). One worker runs one sync at a time, so a large site synced often would hold up the
-folders' syncs. There is no `watch`.
+`schedule` defaults to every fifteen minutes. The first sync crawls the site; those after ask
+Graph what changed since (T-304: its list of libraries and one request per library when
+nothing did) and record only that.
+The site is crawled again when Graph can no longer say what changed, when a library is added or
+removed, when one round of changes is more than a sync should take at once (a folder with
+thousands of folders in it renamed), and every `recrawlAfterDays` (default 7; 0 never): a crawl records each file anew
+(about two database transactions a file, no downloads) and removes what is no longer there,
+which mends anything following changes missed. One worker runs one sync at a time, so a large
+site's crawl holds up the other sources' syncs while it runs. There is no `watch`: changes are
+found at the next sync, not as they happen.
+
+To follow changes the connector keeps each library's folders (ids and names, no file's) in
+`<dataDir>/connectors/<tenant>/<source>`; it stays there when the source is taken out of the
+configuration. Lost, the site is crawled again. **With several nodes sharing the database,
+that directory must be shared too** (or one node run the sources): with a directory per node
+changes aren't followed and every sync is a crawl of the whole site, as it was before.
 
 The first sync downloads every file, whatever `extract` says, as a folder's does: a file's
 identity in the catalog is a hash of its bytes. `extract` decides whether text is taken from
@@ -128,8 +140,8 @@ be read, or a key that isn't the certificate's, stops the server, naming the sou
 file, never its contents. With both, the certificate signs in and the log says the secret is
 unused. Every node sharing the database needs the same secret or files.
 
-What it doesn't do yet: every sync is a crawl of the whole site (changes are followed with
-T-304), SharePoint's permissions aren't imported (T-305: only `owner` reads the files), and a
+What it doesn't do yet: be told of changes as they happen (Graph's change notifications, the
+rest of T-304), SharePoint's permissions aren't imported (T-305: only `owner` reads the files), and a
 throttled sync stops and comes back after the wait Graph asked for (T-306). It hasn't been run
 against a real tenant yet.
 

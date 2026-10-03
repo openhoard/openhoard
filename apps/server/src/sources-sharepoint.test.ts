@@ -107,11 +107,13 @@ describe("a SharePoint site in the configuration", { timeout: 120_000 }, () => {
     expect(ok()).toBe(true);
     expect(SourceSchema.parse(source())).toMatchObject({
       connector: "sharepoint",
-      // Every six hours: until changes are followed, a sync crawls the whole site.
-      schedule: "0 */6 * * *",
+      // A sync asks what changed: as often as a folder's.
+      schedule: "*/15 * * * *",
       extract: false,
     });
     expect(ok({ directory: "0f0e0d0c-0b0a-4908-8706-050403020100" })).toBe(true);
+    expect(ok({ recrawlAfterDays: 0 })).toBe(true);
+    expect(ok({ recrawlAfterDays: -1 })).toBe(false);
     expect(ok({ authority: undefined, graph: undefined, downloadHosts: undefined })).toBe(true);
     expect(
       ok({
@@ -248,6 +250,21 @@ describe("a SharePoint site in the configuration", { timeout: 120_000 }, () => {
         .where(and(eq(sourceRefs.source, "sp-finance"), isNull(objects.deletedAt))),
     );
     expect(Number(row?.n)).toBe(files);
+
+    // The next sync asks what changed since (the connector keeps its folders under dataDir),
+    // and doesn't crawl the site again.
+    expect(scheduled.connector.describe().capabilities.delta).toBe(true);
+    const next = await runSync(db, {
+      tenantId: t.tenantId,
+      source: scheduled.source,
+      zoneId: scheduled.zoneId,
+      connector: scheduled.connector,
+      ownerId: (await scheduled.owner()) as string,
+      tenantKey: keys(),
+      enqueue: async () => {},
+      sleep: async () => {},
+    });
+    expect(next).toMatchObject({ status: "done", phase: "delta", counts: { files: 0 } });
     expect(entra.requests.length).toBeGreaterThan(0);
     expect(entra.requests.every((r) => r.auth === "secret" && r.status === 200)).toBe(true);
   });

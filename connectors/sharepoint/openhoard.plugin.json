@@ -3,10 +3,16 @@
   "name": "connector-sharepoint",
   "version": "0.1.0",
   "type": "connector",
-  "description": "SharePoint sites, indexed in place through Microsoft Graph: one site's document libraries, crawled with checkpoints. Following changes and importing permissions come next.",
+  "description": "SharePoint sites, indexed in place through Microsoft Graph: one site's document libraries, crawled with checkpoints, then followed by their changes. Importing permissions comes next.",
   "publisher": "openhoard",
   "license": "Apache-2.0",
-  "capabilities": ["read:metadata", "read:content", "source:crawl", "source:redirect"],
+  "capabilities": [
+    "read:metadata",
+    "read:content",
+    "source:crawl",
+    "source:delta",
+    "source:redirect"
+  ],
   "network": ["login.microsoftonline.com", "graph.microsoft.com", "*.sharepoint.com"],
   "max_exposure": "full",
   "runtime": "process",

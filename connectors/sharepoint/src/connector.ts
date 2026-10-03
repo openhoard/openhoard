@@ -22,6 +22,14 @@ import type { GraphAuth } from "./auth.js";
 import { graphClient, isForbidden, type GraphClient } from "./graph.js";
 import { retryAfterMs } from "./http.js";
 import { sitePath } from "./probe.js";
+import {
+  folderState,
+  newStateId,
+  type Folders,
+  type FolderState,
+  type Kept,
+  type LogLine,
+} from "./state.js";
 
 /*
  * The SharePoint connector (T-303): one site's document libraries, crawled in place through
@@ -41,13 +49,24 @@ import { sitePath } from "./probe.js";
  *
  * Paths: delta gives each item its parent's id, not its path, and promises no order. The
  * connector keeps the folders it has seen (id → path) while it crawls a library. A parent it
- * hasn't seen (the feed gave a child first, or the crawl resumed mid-library with nothing
- * remembered) is asked for by id, with its ancestors, and yielded before the child: parents
- * always come before their children, and nothing needs to be kept between runs.
+ * hasn't seen (the feed gave a child first, or the crawl resumed mid-library) is asked for by
+ * id, with its ancestors, and yielded before the child: parents always come before their
+ * children.
  *
- * What it doesn't do yet: follow changes (delta(), T-304), import permissions (aclImport(),
- * T-305: until then only the object's owner in OpenHoard sees a file), pace itself under
- * throttling beyond reporting it (T-306).
+ * Following changes (T-304, with a `stateDir`): delta() asks each library's delta link for
+ * what changed since, a whole round at a time, and yields it: items created, changed, renamed
+ * or moved, and deletions. Graph says a folder was renamed or moved and nothing of what is in
+ * it, whose paths changed too: the connector keeps each library's folders (state.ts), sees the
+ * folder's name or place differ from what it kept, and asks Graph for everything under it, to
+ * yield each with its new path. A round is bounded (`roundRequests`): one that would take more
+ * is a crawl's work, which is done a page at a time with checkpoints. A library added or
+ * removed, a link Graph no longer takes, kept folders that are missing, or a cursor older than
+ * `recrawlAfterDays` means a crawl from the beginning too (`resync`), whose reconcile also
+ * mends anything a delta missed.
+ *
+ * What it doesn't do yet: be told of changes as they happen (Graph's change notifications),
+ * import permissions (aclImport(), T-305: until then only the object's owner in OpenHoard sees
+ * a file), pace itself under throttling beyond reporting it (T-306).
  */
 
 export const SHAREPOINT_CONNECTOR_VERSION = "0.1.0";
@@ -68,6 +87,23 @@ export interface SharePointConnectorOptions {
    * answers a download with a link; one to any other host is not followed.
    */
   downloadHosts?: readonly string[];
+  /**
+   * A directory of this source's own, where the connector keeps each library's folders
+   * between runs (state.ts). With it the connector follows changes (delta()); without it every
+   * sync is a crawl.
+   */
+  stateDir?: string;
+  /**
+   * How old a crawl may be before changes are no longer followed from it and the site is
+   * crawled again, in days: the crawl's reconcile mends whatever following changes missed.
+   * Default 7; 0 never.
+   */
+  recrawlAfterDays?: number;
+  /**
+   * Requests one library's round of changes may take (pages of the feed, and the listing of
+   * renamed and moved folders) before the site is crawled instead. Default 1000.
+   */
+  roundRequests?: number;
   /** Default: the global `fetch`. */
   fetch?: typeof fetch;
   /** Milliseconds. Default `Date.now`. */
@@ -99,7 +135,7 @@ interface Drive {
   webUrl: string | undefined;
 }
 
-/** The crawl's position: what a checkpoint token holds. */
+/** The crawl's position: what a checkpoint token holds. A cursor is one between libraries. */
 interface Position {
   v: 1;
   /** The site's id: a token made for another site is not used. */
@@ -109,7 +145,22 @@ interface Position {
   link: string | null;
   /** The libraries finished, with the delta link each ended with. */
   done: Record<string, string>;
+  /** A crawl with a state directory: its log of folders, and how long the log was here. */
+  log?: { id: string; at: number };
+  /** A cursor: the generation of kept folders it goes with, and when its crawl ended (ms). */
+  gen?: string;
+  crawled?: number;
 }
+
+/** Changes, or events, taken in one round for one library, at most: more means "crawl again". */
+const MAX_ROUND = 100_000;
+/** Ids a crawl was told are deleted, asked after in one round: the rest wait for the next. */
+const MAX_CHECKED = 200;
+/** A folder kept under a name the catalog can't hold: it places nothing, and differs from any. */
+const NO_NAME = "";
+/** A crawl stamped this far ahead of the clock was stamped by a clock that was wrong. */
+const CLOCK_SKEW_MS = 86_400_000;
+const STATE_ID = /^[a-z0-9]{8,40}$/;
 
 type Raw = Record<string, unknown>;
 const isObject = (v: unknown): v is Raw => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -187,8 +238,14 @@ function etagOf(raw: Raw, path: readonly string[], contentVersion: string | unde
     .digest("base64url");
 }
 
-/** The folders of one library seen so far: id → path, or null for one that can't be served. */
-type Tree = Map<string, readonly string[] | null>;
+/**
+ * The folders of one library seen so far: id → path, or null for one that can't be served. And
+ * the folders placed since they were last collected, for what is kept between runs.
+ */
+interface Tree {
+  paths: Map<string, readonly string[] | null>;
+  met: LogLine[];
+}
 
 export function sharepointConnector(options: SharePointConnectorOptions): Connector {
   const pageSize = options.pageSize ?? 200;
@@ -210,6 +267,20 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     now,
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   });
+  const state: FolderState | undefined =
+    options.stateDir === undefined ? undefined : folderState(options.stateDir);
+  const recrawlAfterDays = options.recrawlAfterDays ?? 7;
+  if (!(Number.isFinite(recrawlAfterDays) && recrawlAfterDays >= 0)) {
+    throw new RangeError("recrawlAfterDays must be 0 or more");
+  }
+  const roundRequests = options.roundRequests ?? 1000;
+  if (!Number.isSafeInteger(roundRequests) || roundRequests < 1) {
+    throw new RangeError("roundRequests must be 1 or more");
+  }
+  const description: ConnectorDescription = {
+    ...DESCRIPTION,
+    capabilities: { ...DESCRIPTION.capabilities, delta: state !== undefined },
+  };
 
   let siteAsked: Promise<string> | undefined;
   /** The site's id as Graph gives it. Asked once; a failure is asked again. */
@@ -324,7 +395,34 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       done[id] = delta;
     }
     if (midway && (!GRAPH_ID.test(drive) || !client.owns(link))) throw resyncError();
-    return { v: 1, site, drive: midway ? drive : null, link: midway ? link : null, done };
+    const { log, gen, crawled } = parsed;
+    const position: Position = {
+      v: 1,
+      site,
+      drive: midway ? drive : null,
+      link: midway ? link : null,
+      done,
+    };
+    if (log !== undefined) {
+      if (
+        !isObject(log) ||
+        typeof log.id !== "string" ||
+        !STATE_ID.test(log.id) ||
+        !(Number.isSafeInteger(log.at) && (log.at as number) >= 0)
+      ) {
+        throw resyncError();
+      }
+      position.log = { id: log.id, at: log.at as number };
+    }
+    if (gen !== undefined) {
+      if (typeof gen !== "string" || !STATE_ID.test(gen)) throw resyncError();
+      position.gen = gen;
+    }
+    if (crawled !== undefined) {
+      if (typeof crawled !== "number" || !Number.isFinite(crawled)) throw resyncError();
+      position.crawled = crawled;
+    }
+    return position;
   }
 
   /** A folder event for a library's top, or an item's, from what Graph says of it. */
@@ -374,12 +472,12 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       ...(url !== undefined && checkUrl(url) === null ? { url } : {}),
     };
     // Who changed it last is worth less than the item: left out when it can't be kept.
-    if (checkItem(item, DESCRIPTION) !== null && item.modifiedBy !== undefined) {
+    if (checkItem(item, description) !== null && item.modifiedBy !== undefined) {
       delete (item as { modifiedBy?: unknown }).modifiedBy;
     }
     // Nothing is yielded that the runner would refuse. An item it can't serve is warned of by
     // its id, which the runner takes as mentioned: it is there, and not taken for gone.
-    return checkItem(item, DESCRIPTION) === null
+    return checkItem(item, description) === null
       ? { type: "item", item }
       : { type: "warning", code: "invalid-item", externalId };
   }
@@ -396,8 +494,9 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     folderId: string,
     out: SyncEvent[],
     signal: AbortSignal,
+    budget?: Budget,
   ): Promise<readonly string[] | null> {
-    const known = tree.get(folderId);
+    const known = tree.paths.get(folderId);
     if (known !== undefined) return known;
     // Up from the folder to one that is known (or the top), then back down.
     const chain: { id: string; raw: Raw; parentId: string | null }[] = [];
@@ -412,6 +511,7 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
         break;
       }
       let raw: Raw;
+      if (budget) spend(budget);
       try {
         raw = await client.json(`${itemUrl(drive.id, id)}?$select=${ITEM_FIELDS}`, signal);
       } catch (e) {
@@ -432,7 +532,7 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
         break;
       }
       chain.push({ id, raw, parentId });
-      const above = tree.get(parentId);
+      const above = tree.paths.get(parentId);
       if (above !== undefined) {
         base = above;
         break;
@@ -446,19 +546,26 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
         path === null || name === undefined || !nameIsOne(name) || path.length >= LIMITS.pathDepth
           ? null
           : [...path, name];
-      tree.set(link.id, path);
-      if (path !== null) out.push(eventOf(drive, link.raw, link.id, "folder", link.parentId, path));
+      tree.paths.set(link.id, path);
+      if (path !== null) {
+        tree.met.push([drive.id, link.id, link.parentId, name as string]);
+        out.push(eventOf(drive, link.raw, link.id, "folder", link.parentId, path));
+      }
     }
-    if (!tree.has(folderId)) tree.set(folderId, null);
-    return tree.get(folderId) ?? null;
+    if (!tree.paths.has(folderId)) tree.paths.set(folderId, null);
+    return tree.paths.get(folderId) ?? null;
   }
 
-  /** The events one entry of a delta page becomes. */
+  /**
+   * The events one live entry becomes, in a crawl or when following changes. A deleted one
+   * becomes none here: it is noted (`tree.met`) for the caller to say at the right time.
+   */
   async function eventsOf(
     drive: Drive,
     tree: Tree,
     raw: unknown,
     signal: AbortSignal,
+    budget?: Budget,
   ): Promise<SyncEvent[]> {
     const id = isObject(raw) ? str(raw.id) : undefined;
     if (!isObject(raw) || id === undefined || !GRAPH_ID.test(id)) {
@@ -468,17 +575,18 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     }
     const externalId = externalIdOf(drive.id, id);
     if (isObject(raw.deleted)) {
-      // Not said as a deletion: a crawl's reconcile removes what it didn't see, behind the
-      // runner's guard against removing too much, which a `deleted` event would go around.
-      // (For T-304: an item yielded earlier in this crawl and deleted here stays until the
-      // next crawl. Once delta() starts from this crawl's links, that deletion is behind them:
-      // it must then be said here.)
-      tree.delete(id);
+      tree.paths.delete(id);
+      // A crawl never says a deletion: the runner would make it at once, uncounted, and its
+      // reconcile removes what the crawl didn't see anyway. But the item may have been yielded
+      // on an earlier page, and this deletion is behind the link the next delta starts from,
+      // never to be reported again: it is noted, for the first delta to say (state.ts).
+      tree.met.push([drive.id, id]);
       return [];
     }
     if (isObject(raw.root)) {
       const path = [drive.name];
-      tree.set(id, path);
+      tree.paths.set(id, path);
+      tree.met.push([drive.id, id, null, drive.name]);
       return [eventOf(drive, raw, id, "folder", null, path)];
     }
     const kind = isObject(raw.file)
@@ -494,7 +602,8 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     const parentId = isObject(raw.parentReference) ? str(raw.parentReference.id) : undefined;
     const name = str(raw.name);
     const out: SyncEvent[] = [];
-    const above = parentId === undefined ? null : await pathOf(drive, tree, parentId, out, signal);
+    const above =
+      parentId === undefined ? null : await pathOf(drive, tree, parentId, out, signal, budget);
     if (
       above === null ||
       name === undefined ||
@@ -504,7 +613,7 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       // It is there, and can't be served: its name isn't one, or its folder can't be placed
       // (misnamed, too deep, gone or refused when asked for). Graph lists everything under
       // such a folder too, each by its id, so each is warned of in turn, none taken for gone.
-      if (kind === "folder") tree.set(id, null);
+      if (kind === "folder") tree.paths.set(id, null);
       out.push({
         type: "warning",
         code: above === null ? "unplaced-item" : "invalid-item",
@@ -513,7 +622,10 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       return out;
     }
     const path = [...above, name];
-    if (kind === "folder") tree.set(id, path);
+    if (kind === "folder") {
+      tree.paths.set(id, path);
+      tree.met.push([drive.id, id, parentId as string, name]);
+    }
     out.push(eventOf(drive, raw, id, kind, parentId as string, path));
     return out;
   }
@@ -525,11 +637,34 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       checkpoint === null
         ? { v: 1, site, drive: null, link: null, done: {} }
         : positionOf(checkpoint, site);
+    // With a state directory, the folders met are logged as the crawl goes, so the cursor it
+    // ends with has every library's folders, however often the crawl was resumed.
+    /** What a resumed crawl logged before its checkpoint: how it placed what it yielded. */
+    let logged: Kept | undefined;
+    if (state && checkpoint === null) position.log = { id: newStateId(), at: 0 };
+    else if (state && position.log && state.truncateLog(position.log.id, position.log.at)) {
+      logged = state.readLog(position.log.id);
+    }
+    // A token from a crawl that kept no log, or whose log isn't here (another node's, or
+    // lost) or can't be read: the folders of the pages before it are unknown. The crawl goes
+    // on, keeping nothing, and its cursor is one changes can't be followed from: the sync
+    // after it crawls again, with a log from its start.
+    if (!state || (checkpoint !== null && !logged)) delete position.log;
+    state?.keepOnlyLog(position.log?.id ?? null);
     const drives = await drivesOf(site, signal);
     // The library the token was in the middle of is gone: its place means nothing now.
     if (position.drive !== null && !drives.some((d) => d.id === position.drive)) {
       throw resyncError();
     }
+    const met: LogLine[] = [];
+    /** A checkpoint at this position, with the folders met since the last one on disk first. */
+    const checkpointAt = (next: Position): SyncEvent => {
+      if (state && position.log) {
+        next.log = { id: position.log.id, at: state.appendLog(position.log.id, met.splice(0)) };
+      }
+      position = next;
+      return { type: "checkpoint", token: tokenOf(position) };
+    };
     // The library the token was in the middle of goes first, so a library added meanwhile
     // doesn't take its place in the token; then the rest, in the order of their ids.
     const order = [
@@ -542,7 +677,10 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
         position.drive === drive.id && position.link !== null
           ? position.link
           : `/v1.0/drives/${encodeURIComponent(drive.id)}/root/delta?$select=${ITEM_FIELDS}&$top=${pageSize}`;
-      const tree: Tree = new Map();
+      // Resumed, folders are where the crawl placed them before, not where Graph has them now:
+      // one renamed since is then seen to differ when the feed (or the first delta) gives it.
+      const before = logged?.folders.get(drive.id);
+      const tree: Tree = before ? treeOf(drive, before, met) : { paths: new Map(), met };
       // A link out of a token may have lapsed since: refused, it means "from the start".
       let fromToken = position.drive === drive.id && position.link !== null;
       for (;;) {
@@ -560,6 +698,7 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
           for (const event of await eventsOf(drive, tree, raw, signal)) yield event;
           signal.throwIfAborted();
         }
+        if (!position.log) met.length = 0;
         const next = str(page["@odata.nextLink"]);
         const delta = str(page["@odata.deltaLink"]);
         if (next !== undefined) {
@@ -572,29 +711,348 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
               "Graph gave a link that isn't Graph's: not followed",
             );
           }
-          position = { ...position, drive: drive.id, link: next };
-          yield { type: "checkpoint", token: tokenOf(position) };
+          yield checkpointAt({ ...position, drive: drive.id, link: next });
           link = next;
           continue;
         }
         if (delta === undefined || !client.owns(delta)) {
           throw new ConnectorError("retryable", "Graph's last page had no link to go on from");
         }
-        position = {
+        yield checkpointAt({
           v: 1,
           site,
           drive: null,
           link: null,
           done: { ...position.done, [drive.id]: delta },
-        };
-        yield { type: "checkpoint", token: tokenOf(position) };
+        });
         break;
       }
     }
-    // What following changes starts from: each library's delta link, of the libraries there are.
+    // What following changes starts from: each library's delta link, of the libraries there
+    // are, and (with a state directory) the folders the crawl met, as a generation of their own.
     const done: Record<string, string> = {};
     for (const drive of drives) done[drive.id] = position.done[drive.id] as string;
-    yield { type: "done", cursor: tokenOf({ v: 1, site, drive: null, link: null, done }) };
+    const cursor: Position = { v: 1, site, drive: null, link: null, done };
+    if (state && position.log) {
+      state.appendLog(position.log.id, met.splice(0));
+      const kept = state.readLog(position.log.id);
+      if (kept) {
+        cursor.gen = newStateId();
+        cursor.crawled = now();
+        state.writeGeneration(cursor.gen, kept);
+      }
+    }
+    yield { type: "done", cursor: tokenOf(cursor) };
+  }
+
+  /** What a round may still ask of Graph. Spent, the round is a crawl's work. */
+  interface Budget {
+    left: number;
+  }
+  function spend(budget: Budget): void {
+    if (budget.left-- <= 0) throw resyncError();
+  }
+
+  /**
+   * Every page of a list Graph pages (a library's changes, a folder's children), within the
+   * round's budget: a list that doesn't end, or loops, runs out of it. `kept`: the first link
+   * is one a cursor held, and Graph not taking it any more means "crawl again".
+   */
+  async function* pagesOf(
+    first: string,
+    budget: Budget,
+    signal: AbortSignal,
+    kept = false,
+  ): AsyncGenerator<{ value: unknown[]; delta: string | undefined }> {
+    for (let link = first; ;) {
+      spend(budget);
+      const page = await client.json(link, signal).catch((e: unknown) => {
+        if (kept && link === first && isConnectorError(e)) {
+          if (e.code === "permanent" || e.code === "not-found") throw resyncError();
+        }
+        throw e;
+      });
+      if (!Array.isArray(page.value)) {
+        throw new ConnectorError("retryable", "Graph's answer wasn't a page of items");
+      }
+      const next = str(page["@odata.nextLink"]);
+      const delta = str(page["@odata.deltaLink"]);
+      yield { value: page.value as unknown[], delta: next === undefined ? delta : undefined };
+      if (next === undefined) return;
+      if (next === link) {
+        throw new ConnectorError("retryable", "Graph's next page is the page it gave");
+      }
+      if (!client.owns(next)) {
+        throw new ConnectorError("permanent", "Graph gave a link that isn't Graph's: not followed");
+      }
+      link = next;
+    }
+  }
+
+  /** A library's folders as paths: what is kept, read as the crawl's tree is. */
+  function treeOf(drive: Drive, folders: Folders, met: LogLine[]): Tree {
+    const paths = new Map<string, readonly string[] | null>();
+    const pathOfKept = (id: string, depth: number): readonly string[] | null | undefined => {
+      const known = paths.get(id);
+      if (known !== undefined) return known;
+      const folder = folders.get(id);
+      // Not kept: left unknown, so it is asked for when something needs it.
+      if (!folder) return undefined;
+      let path: readonly string[] | null | undefined;
+      if (folder.parent === null) path = [drive.name];
+      else if (depth >= LIMITS.pathDepth)
+        path = null; // a loop, or too deep: can't be placed
+      else {
+        const above = pathOfKept(folder.parent, depth + 1);
+        path =
+          above === undefined
+            ? undefined
+            : above === null || !nameIsOne(folder.name) || above.length >= LIMITS.pathDepth
+              ? null
+              : [...above, folder.name];
+      }
+      if (path !== undefined) paths.set(id, path);
+      return path;
+    };
+    for (const id of folders.keys()) pathOfKept(id, 0);
+    return { paths, met };
+  }
+
+  /** What is left to do for a library: folders to list again, ids to say deleted if they are. */
+  interface Todo {
+    relist: Set<string>;
+    deleted: Set<string>;
+  }
+
+  /**
+   * One library's changes since its delta link: every event they become, and the link to go
+   * on from. `folders` (what is kept of the library) is brought up to date in place; `changed`
+   * says whether what is kept differs from before. `todo` is what was left to do (by the crawl,
+   * or by a round that couldn't): `left` is what this one leaves in turn.
+   */
+  async function roundOf(
+    drive: Drive,
+    link: string,
+    folders: Folders,
+    todo: Todo,
+    signal: AbortSignal,
+  ): Promise<{ events: SyncEvent[]; link: string; changed: boolean; left: Todo }> {
+    const budget: Budget = { left: roundRequests };
+    // The whole round first: the same item may come more than once, and the last word counts.
+    const last = new Map<string, Raw>();
+    let unnamed = 0;
+    let entries = 0;
+    let next: string | undefined;
+    for await (const page of pagesOf(link, budget, signal, true)) {
+      for (const raw of page.value) {
+        const id = isObject(raw) ? str(raw.id) : undefined;
+        if (!isObject(raw) || id === undefined || !GRAPH_ID.test(id)) unnamed++;
+        else {
+          last.delete(id);
+          last.set(id, raw);
+        }
+        // Too much to take as changes: a crawl does it a page at a time, with checkpoints.
+        if (++entries > MAX_ROUND) throw resyncError();
+      }
+      next = page.delta;
+    }
+    if (next === undefined || !client.owns(next)) {
+      throw new ConnectorError("retryable", "Graph's last page had no link to go on from");
+    }
+    const events: SyncEvent[] = [];
+    const left: Todo = { relist: new Set(), deleted: new Set() };
+    const owed = todo.relist.size + todo.deleted.size > 0;
+    // Nothing changed, and nothing left to do: nothing of what is kept is even looked at.
+    if (entries === 0 && !owed) return { events, link: next, changed: false, left };
+
+    // What is kept, brought up to date: which folders are where now, and which of them were
+    // renamed or moved (Graph says nothing of what is in those).
+    let changed = owed;
+    const moved = new Set<string>(todo.relist);
+    const gone = new Set<string>();
+    const keep = (id: string, parent: string | null, name: string) => {
+      const before = folders.get(id);
+      if (before?.parent === parent && before.name === name) return;
+      if (before) moved.add(id);
+      folders.set(id, { parent, name });
+      changed = true;
+    };
+    for (const [id, raw] of last) {
+      if (isObject(raw.deleted)) {
+        if (folders.delete(id)) gone.add(id);
+      } else if (isObject(raw.root)) keep(id, null, drive.name);
+      else if (isObject(raw.folder) || isObject(raw.package)) {
+        const parent = isObject(raw.parentReference) ? str(raw.parentReference.id) : undefined;
+        const name = str(raw.name);
+        // A name the catalog can't hold is kept as none: it places nothing (treeOf), and the
+        // folder is seen to differ when it is given one that can.
+        if (parent !== undefined)
+          keep(id, parent, name !== undefined && nameIsOne(name) ? name : NO_NAME);
+        else if (folders.delete(id)) changed = true;
+      }
+    }
+    // A folder still kept inside one that was deleted: Graph said the folder went and nothing
+    // of what was in it. Then it said nothing of the files there either, and which those were
+    // isn't kept: only a crawl's reconcile can take them out.
+    for (const folder of folders.values()) {
+      if (folder.parent !== null && gone.has(folder.parent)) throw resyncError();
+    }
+    changed ||= gone.size > 0;
+
+    const met: LogLine[] = [];
+    const tree = treeOf(drive, folders, met);
+    const add = (more: SyncEvent[]) => {
+      events.push(...more);
+      // More than a round should hold in memory: a crawl yields as it goes.
+      if (events.length > MAX_ROUND) throw resyncError();
+    };
+    // An entry that can't be named: nothing can be said of it. The next crawl will.
+    for (let i = 0; i < unnamed; i++) events.push({ type: "warning", code: "unreadable" });
+    // Folders before files, the ones nearer the top first: parents before their children.
+    const depth = (id: string) => tree.paths.get(id)?.length ?? Number.MAX_SAFE_INTEGER;
+    const live = [...last].filter(([, raw]) => !isObject(raw.deleted));
+    const isFolder = (raw: Raw) =>
+      isObject(raw.root) || isObject(raw.folder) || isObject(raw.package);
+    const ordered = [
+      ...live.filter(([, raw]) => isFolder(raw)).sort((a, b) => depth(a[0]) - depth(b[0])),
+      ...live.filter(([, raw]) => !isFolder(raw)),
+    ];
+    for (const [, raw] of ordered) {
+      add(await eventsOf(drive, tree, raw, signal, budget));
+      signal.throwIfAborted();
+    }
+
+    // Renamed or moved (or left by the crawl to look at again): everything under such a folder
+    // is somewhere else now, and is said so. The ones nearer the top first, and a folder inside
+    // one already listed isn't listed twice.
+    const listed = new Set<string>();
+    for (const top of [...moved].sort((a, b) => depth(a) - depth(b))) {
+      if (listed.has(top) || !tree.paths.get(top)) continue;
+      for (const pending = [top]; pending.length > 0;) {
+        const folder = pending.shift() as string;
+        listed.add(folder);
+        const children = `${itemUrl(drive.id, folder)}/children?$select=${ITEM_FIELDS}&$top=${pageSize}`;
+        try {
+          for await (const page of pagesOf(children, budget, signal)) {
+            for (const child of page.value) {
+              add(await eventsOf(drive, tree, child, signal, budget));
+              const childId = isObject(child) ? str(child.id) : undefined;
+              if (childId !== undefined && !listed.has(childId) && tree.paths.get(childId)) {
+                pending.push(childId);
+              }
+            }
+            signal.throwIfAborted();
+          }
+        } catch (e) {
+          // Gone since the feed was read: the next round says so. Refused, this one folder:
+          // what is in it stays where the catalog has it, that is said, and the next round
+          // tries again.
+          if (isForbidden(e)) {
+            left.relist.add(folder);
+            add([
+              {
+                type: "warning",
+                code: "unlisted-folder",
+                externalId: externalIdOf(drive.id, folder),
+              },
+            ]);
+          } else if (!(isConnectorError(e) && e.code === "not-found")) throw e;
+        }
+      }
+    }
+
+    for (const [id, raw] of last) {
+      if (isObject(raw.deleted)) add([{ type: "deleted", externalId: externalIdOf(drive.id, id) }]);
+    }
+    // What the crawl was told is deleted, and didn't say. Said now, if Graph still has no such
+    // item: one deleted and brought back since is there. Some each round, within its budget:
+    // the rest, and any Graph wouldn't answer for, wait for the next.
+    let checked = 0;
+    for (const id of todo.deleted) {
+      if (last.has(id) || !GRAPH_ID.test(id)) continue;
+      if (checked >= MAX_CHECKED || budget.left <= 0) {
+        left.deleted.add(id);
+        continue;
+      }
+      checked++;
+      spend(budget);
+      const there = await client
+        .json(`${itemUrl(drive.id, id)}?$select=id,deleted`, signal)
+        .then((raw) => !isObject(raw.deleted))
+        .catch((e: unknown) => {
+          if (isConnectorError(e) && e.code === "not-found") return false;
+          if (!isForbidden(e)) throw e;
+          // Refused: unknown, and so not said to be gone.
+          left.deleted.add(id);
+          return true;
+        });
+      if (!there) add([{ type: "deleted", externalId: externalIdOf(drive.id, id) }]);
+    }
+    // Folders asked for by id on the way (ones the kept state didn't have) are kept from now.
+    for (const line of met) if (line.length === 4) keep(line[1], line[2], line[3]);
+    return { events, link: next, changed, left };
+  }
+
+  async function* delta(cursor: string, signal: AbortSignal): AsyncGenerator<SyncEvent> {
+    signal.throwIfAborted();
+    if (!state) throw resyncError();
+    const site = await siteId(signal);
+    let position = positionOf(cursor, site);
+    // Not a cursor, or one without its folders, or too old to go on from: crawl again.
+    if (position.drive !== null || position.gen === undefined) throw resyncError();
+    const age = position.crawled === undefined ? Infinity : now() - position.crawled;
+    // (A crawl from the future was stamped by a wrong clock: its age is unknown.)
+    if (recrawlAfterDays > 0 && (age > recrawlAfterDays * 86_400_000 || age < -CLOCK_SKEW_MS)) {
+      throw resyncError();
+    }
+    const kept = state.readGeneration(position.gen);
+    if (!kept) throw resyncError();
+    // The runner saved this token: what was written for any other is nobody's now.
+    state.keepOnly(position.gen);
+    /** The generation this run wrote last, named by a checkpoint the runner has since saved. */
+    let mine: string | undefined;
+    const drives = await drivesOf(site, signal);
+    // A library added or removed: its files are all new, or all gone. A crawl's business.
+    const known = Object.keys(position.done);
+    if (known.length !== drives.length || drives.some((d) => position.done[d.id] === undefined)) {
+      throw resyncError();
+    }
+    for (const drive of drives) {
+      const folders: Folders = new Map(kept.folders.get(drive.id) ?? []);
+      // The library was renamed: everything in it is somewhere else. A crawl's business.
+      for (const top of folders.values()) {
+        if (top.parent !== null) continue;
+        if (top.name !== drive.name) throw resyncError();
+        break;
+      }
+      const before = position.done[drive.id] as string;
+      const todo = {
+        relist: kept.relist.get(drive.id) ?? new Set<string>(),
+        deleted: kept.deleted.get(drive.id) ?? new Set<string>(),
+      };
+      const round = await roundOf(drive, before, folders, todo, signal);
+      for (const event of round.events) yield event;
+      const next: Position = { ...position, done: { ...position.done, [drive.id]: round.link } };
+      // Nothing changed: nothing but `done` is said, which carries the link to go on from.
+      if (round.events.length === 0 && !round.changed) {
+        position = next;
+        continue;
+      }
+      if (round.changed) {
+        kept.folders.set(drive.id, folders);
+        kept.relist.set(drive.id, round.left.relist);
+        kept.deleted.set(drive.id, round.left.deleted);
+        // The runner came back for more, so it saved the checkpoint naming this run's last
+        // generation: the ones before it are nobody's (one a library otherwise, until the end).
+        if (mine !== undefined) state.keepOnly(mine);
+        // Written whole, under a new name, before the token that names it exists.
+        mine = next.gen = newStateId();
+        state.writeGeneration(mine, kept);
+      }
+      position = next;
+      yield { type: "checkpoint", token: tokenOf(position) };
+    }
+    yield { type: "done", cursor: tokenOf(position) };
   }
 
   /** What Graph says of one item now, for read() and redirect(). */
@@ -723,8 +1181,9 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
   }
 
   return defineConnector({
-    describe: () => DESCRIPTION,
+    describe: () => description,
     crawl,
+    ...(state ? { delta } : {}),
     read,
     async redirect(ref, signal) {
       signal.throwIfAborted();
