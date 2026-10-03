@@ -292,7 +292,8 @@ describe("a SharePoint site in the configuration", { timeout: 120_000 }, () => {
     });
     expect(missing).toMatch(/sources sp-other: its private key file can't be read \(ENOENT\)/);
     expect(await failing({ certificate: { certificateFile, privateKeyFile: base } })).toMatch(
-      /its private key file can't be read \(not a file\)/,
+      // (Windows refuses to open a directory at all.)
+      /its private key file can't be read \((not a file|EPERM|EACCES)\)/,
     );
     writeFileSync(join(base, "huge.key"), "x".repeat(300_000));
     expect(
