@@ -275,9 +275,12 @@ const principalKey = (p: AclPrincipal): string => {
 
 /**
  * One entry per principal, sorted, in a form that compares equal whenever two sources say the
- * same thing: the strongest role wins; `inherited` only when every entry for the principal is;
- * an expiry only when every entry has one (the latest). A user's email and a guest's are
- * lower-cased in the ASCII range. Throws TypeError for an entry that isn't one.
+ * same thing. Two entries for a principal become the one that gives no more than both did:
+ * the stronger role when it lasts at least as long as the weaker (no expiry lasts longest),
+ * else the weaker role, for its longer life: a read that stays is never made a write that
+ * stays because a write was lent for a week. `inherited` only when every entry for the
+ * principal is. A user's email and a guest's are lower-cased in the ASCII range. Throws
+ * TypeError for an entry that isn't one.
  */
 export function normalizeAcl(entries: readonly unknown[]): AclEntry[] {
   if (!Array.isArray(entries)) throw new TypeError("ACL entries must be an array");
@@ -315,12 +318,12 @@ export function normalizeAcl(entries: readonly unknown[]): AclEntry[] {
 
 function merge(a: AclEntry, b: AclEntry): AclEntry {
   const rank = (r: AclEntry["role"]) => ACL_ROLES.indexOf(r);
-  const expiresAt =
-    a.expiresAt === undefined || b.expiresAt === undefined
-      ? undefined
-      : a.expiresAt > b.expiresAt
-        ? a.expiresAt
-        : b.expiresAt;
+  // (Expiries are ISO strings in UTC: they compare as text. None outlasts any.)
+  const outlasts = (x: AclEntry, y: AclEntry) =>
+    x.expiresAt === undefined || (y.expiresAt !== undefined && x.expiresAt >= y.expiresAt);
+  const [strong, weak] = rank(b.role) > rank(a.role) ? [b, a] : [a, b];
+  // The same role: whichever lasts longer. Else the stronger only if it lasts as long.
+  const { role, expiresAt } = outlasts(strong, weak) ? strong : weak;
   // The principal as the fuller entry names it (a user with an email over one without); between
   // two as full, the one that sorts first, so the order entries come in doesn't matter.
   const [pa, pb] = [JSON.stringify(a.principal), JSON.stringify(b.principal)];
@@ -328,7 +331,7 @@ function merge(a: AclEntry, b: AclEntry): AclEntry {
     pb.length > pa.length || (pb.length === pa.length && pb < pa) ? b.principal : a.principal;
   return {
     principal,
-    role: rank(b.role) > rank(a.role) ? b.role : a.role,
+    role,
     inherited: a.inherited && b.inherited,
     ...(expiresAt === undefined ? {} : { expiresAt }),
   };

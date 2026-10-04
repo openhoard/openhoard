@@ -35,6 +35,10 @@ export {
   type GrantRole,
   type GrantSet,
   type LiveGrant,
+  addObjectGrants,
+  liveObjectGrantsBy,
+  revokeGrants,
+  revokeGrantsBy,
 } from "./grants.js";
 export { lockPrincipals } from "./principals.js";
 export {

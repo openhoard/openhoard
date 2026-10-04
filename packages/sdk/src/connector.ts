@@ -174,7 +174,7 @@ export type AclRole = (typeof ACL_ROLES)[number];
 
 /**
  * Who a permission is for, by the source's own ids. The core maps these to its users and groups
- * (T-305); until it can, a permission grants nothing.
+ * (core/jobs acl.ts); one it can't match grants nothing.
  */
 export type AclPrincipal =
   | { kind: "user"; id: string; email?: string }

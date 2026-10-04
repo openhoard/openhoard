@@ -1,14 +1,22 @@
-import { objects, sourceRefs, sourceSyncs, type Database } from "@openhoard/core-db";
+import { grants, objects, sourceRefs, sourceSyncs, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  addMember,
+  createGroup,
+  createUser,
+  lockUser,
+  resolvePrincipal,
+} from "@openhoard/core-identity";
 import { runSync, type SyncReport } from "@openhoard/core-jobs";
 import type { SyncEvent } from "@openhoard/sdk";
 import { and, count, eq, isNull } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { graphAuth } from "./auth.js";
 import { sharepointConnector, type SharePointConnectorOptions } from "./connector.js";
+import { AccessModel } from "@openhoard/testkit";
 import { AUTHORITY, CLIENT_ID, fakes, GRAPH, SECRET, type Fakes } from "./testing/fakes.js";
 
 /*
@@ -16,6 +24,7 @@ import { AUTHORITY, CLIENT_ID, fakes, GRAPH, SECRET, type Fakes } from "./testin
  * OPENHOARD_TEST_POSTGRES_URL): a fake tenant's sites are fully indexed, and a sync that is
  * killed goes on from its last checkpoint. And T-304's: after a crawl, syncs follow the site's
  * changes, and the catalog holds what a fresh crawl of the site as it is now would give it.
+ * And T-305's: who can read each file here is exactly who SharePoint lets read it.
  *
  * The 10,000-item tenant takes minutes, so it runs as a slow test:
  * `pnpm --filter @openhoard/connector-sharepoint test:slow` (or OPENHOARD_TEST_SLOW=1). The
@@ -449,5 +458,167 @@ describe("a site's changes through the sync runner (T-304)", () => {
     store.update(folder.id, { name: "Renamed after the crawl" });
     expect(await sync(site.id, { stateDir })).toMatchObject({ status: "done", phase: "delta" });
     expect(await cataloged(site.id)).toEqual(await crawled(site.id));
+  }, 240_000);
+});
+
+describe("a site's permissions through the sync runner (T-305)", () => {
+  let stateDir: string;
+  /** The tenant's people here, by their id there. */
+  let people: Map<string, string>;
+  beforeEach(() => {
+    stateDir = mkdtempSync(join(tmpdir(), "oh-sp-acl-"));
+  });
+  afterEach(() => {
+    rmSync(stateDir, { recursive: true, force: true, maxRetries: 5 });
+  });
+
+  /**
+   * The fake tenant's directory as an identity provider would provision it: members and groups
+   * by their Entra ids (SCIM), guests as guest accounts, and those who left locked.
+   */
+  async function provision(): Promise<void> {
+    people = new Map();
+    await db.withTenant(t.tenantId, async (tx) => {
+      for (const u of f.tenant.users) {
+        const created = await createUser(tx, t.tenantId, {
+          email: u.upn,
+          displayName: u.displayName,
+          source: "scim",
+          externalId: u.id,
+          ...(u.guest ? { kind: "guest" as const } : {}),
+        });
+        people.set(u.id, created.id);
+        if (!u.active) await lockUser(tx, t.tenantId, created.id, "system:test");
+      }
+      for (const g of f.tenant.groups) {
+        const group = await createGroup(tx, t.tenantId, {
+          name: g.displayName,
+          source: "scim",
+          externalId: g.id,
+        });
+        for (const member of g.members) {
+          await addMember(tx, t.tenantId, group.id, people.get(member) as string, "scim");
+        }
+      }
+    });
+  }
+
+  /** For every person, the site's files they can read here: by the grants the policy engine is given. */
+  async function readableHere(siteId: string): Promise<Map<string, string[]>> {
+    const rows = await db.withTenant(t.tenantId, (tx) =>
+      tx
+        .select({ externalId: sourceRefs.externalId, objectId: sourceRefs.objectId })
+        .from(sourceRefs)
+        .innerJoin(
+          objects,
+          and(eq(objects.tenantId, sourceRefs.tenantId), eq(objects.id, sourceRefs.objectId)),
+        )
+        .where(and(eq(sourceRefs.source, sourceOf(siteId)), isNull(objects.deletedAt))),
+    );
+    const itemOf = new Map(rows.map((r) => [r.objectId, r.externalId.split(":")[1] as string]));
+    const out = new Map<string, string[]>();
+    for (const [there, here] of people) {
+      const principal = await db.withTenant(t.tenantId, (tx) =>
+        resolvePrincipal(tx, t.tenantId, here),
+      );
+      const held =
+        principal?.active === true
+          ? [...principal.objectGrants, ...principal.objectWriteGrants]
+          : [];
+      out.set(there, [...new Set(held.flatMap((id) => itemOf.get(id) ?? []))].sort());
+    }
+    return out;
+  }
+
+  /** The same, as SharePoint has it. */
+  function readableThere(driveId: string): Map<string, string[]> {
+    const access = new AccessModel(f.tenant);
+    const files = f.graph.store.inDrive(driveId).filter((i) => i.kind === "file");
+    return new Map(
+      f.tenant.users.map((u) => [
+        u.id,
+        files
+          .filter((i) => access.canRead(u.id, i))
+          .map((i) => i.id)
+          .sort(),
+      ]),
+    );
+  }
+
+  it("are who can read each file here: the matrix matches SharePoint's exactly, and follows it", async () => {
+    setUp(600);
+    await provision();
+    // A site with unique permissions, sharing links and guests among its files.
+    const site = f.tenant.sites.find((s) =>
+      f.tenant.items.some(
+        (i) => i.siteId === s.id && i.acl.some((a) => a.principal.startsWith("guest:")),
+      ),
+    ) as { id: string; driveId: string };
+    const store = f.graph.store;
+    const files = () => store.inDrive(site.driveId).filter((i) => i.kind === "file");
+    const kinds = new Set(files().flatMap((i) => i.acl.map((a) => a.principal.split(":")[0])));
+    expect([...kinds].sort()).toEqual(
+      expect.arrayContaining(["anyone-with-link", "group", "guest", "user"]),
+    );
+
+    const crawl = await sync(site.id, { stateDir });
+    expect(crawl).toMatchObject({ status: "done", phase: "crawl", skipped: [] });
+    expect(crawl.counts.grantsAdded).toBeGreaterThan(files().length);
+    expect(crawl.counts).toMatchObject({ unmappedUsers: 0, unmappedGroups: 0 });
+    const there = readableThere(site.driveId);
+    expect(await readableHere(site.id)).toEqual(there);
+    // Not vacuously: some people read some files, some read none, nobody reads through a link.
+    const counts = [...there.values()].map((list) => list.length);
+    expect(Math.max(...counts)).toBeGreaterThan(0);
+    expect(Math.min(...counts)).toBe(0);
+
+    // Again, nothing changed: no grant is touched.
+    const idle = await sync(site.id, { stateDir });
+    expect(idle).toMatchObject({ status: "done", phase: "delta" });
+    expect(idle.counts).toMatchObject({ grantsAdded: 0, grantsRevoked: 0 });
+
+    // Permissions change at SharePoint: a file shared with one person only, a folder's
+    // permissions replaced (and with them what everything inheriting from it allows), a file
+    // whose sharing is taken away.
+    const outsider = f.tenant.users.find(
+      (u) => u.active && !u.guest && (there.get(u.id) as string[]).length === 0,
+    ) as { id: string };
+    const first = files()[0] as { id: string };
+    const second = files()[1] as { id: string };
+    store.setAcl(first.id, [{ principal: `user:${outsider.id}`, role: "write" }]);
+    store.setAcl(second.id, []);
+    const folder = store
+      .inDrive(site.driveId)
+      .find(
+        (i) =>
+          i.kind === "folder" &&
+          store.inDrive(site.driveId).some((c) => c.parentId === i.id && c.kind === "file"),
+      ) as { id: string };
+    store.setAcl(folder.id, [{ principal: `user:${outsider.id}`, role: "read" }]);
+
+    const read = f.sent.filter((r) => r.url.includes("/_download/")).length;
+    const followed = await sync(site.id, { stateDir });
+    expect(followed).toMatchObject({ status: "done", phase: "delta", skipped: [] });
+    expect(followed.counts.grantsRevoked).toBeGreaterThan(0);
+    expect(followed.counts.grantsAdded).toBeGreaterThan(0);
+    // No file's bytes were read for a change of permissions.
+    expect(f.sent.filter((r) => r.url.includes("/_download/")).length).toBe(read);
+    const now = readableThere(site.driveId);
+    expect(now).not.toEqual(there);
+    expect((now.get(outsider.id) as string[]).length).toBeGreaterThan(0);
+    expect(await readableHere(site.id)).toEqual(now);
+  }, 600_000);
+
+  it("grant nothing to people and groups nobody provisioned, and say how many", async () => {
+    setUp(300);
+    people = new Map();
+    const site = f.tenant.sites[0] as { id: string; driveId: string };
+    const report = await sync(site.id, { stateDir });
+    expect(report).toMatchObject({ status: "done", skipped: [] });
+    expect(report.counts.grantsAdded).toBe(0);
+    expect(report.counts.unmappedGroups).toBeGreaterThan(0);
+    const [row] = await db.withTenant(t.tenantId, (tx) => tx.select({ n: count() }).from(grants));
+    // (The seeded tenant's own fixture grant aside.)
+    expect(Number(row?.n)).toBeLessThanOrEqual(1);
   }, 240_000);
 });

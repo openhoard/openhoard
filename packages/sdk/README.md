@@ -57,9 +57,12 @@ in them.
 
 **ACLs** (`ItemAcl`): entries for users and groups by the source's ids, guests by email, sharing
 links (by id and scope) and the whole organization, each with a role (read, write, owner),
-`inherited` and an optional expiry, normalized by `normalizeAcl()`; `basis` says whether they
+`inherited` and an optional expiry, normalized by `normalizeAcl()` (one entry a principal,
+never giving more than the entries it merges: a stronger role only when it lasts as long); `basis` says whether they
 are the source's own, a configured default (sources without portable permissions), or none
-(`owner-only`). T-305 maps them to grants; until then a permission grants nothing.
+(`owner-only`). The sync runner asks for an item's each time the source mentions it and makes
+them grants (core/jobs `acl.ts`): to the users and groups the tenant has provisioned under those
+ids, and to nobody otherwise. A link and "the whole organization" grant nothing.
 
 **Versioning.** `CONNECTOR_API_VERSION` changes when the interface changes in a way an existing
 connector or runner would get wrong. Additions that can be ignored (an optional method or field)

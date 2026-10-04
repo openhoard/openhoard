@@ -12,6 +12,7 @@ import {
   insideWithTenant,
   isId,
   isRetryable,
+  lockPrincipals,
   NestedWorkError,
   objects,
   sourceRefs,
@@ -21,6 +22,7 @@ import {
   type Tx,
 } from "@openhoard/core-db";
 import {
+  acceptAcl,
   canonicalUrl,
   changedError,
   checkDescription,
@@ -35,11 +37,13 @@ import {
   type Connector,
   type ConnectorDescription,
   type ConnectorErrorCode,
+  type ItemAcl,
   type SourceItem,
   type SourceUser,
   type SyncEvent,
 } from "@openhoard/sdk";
 import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { aclResolver, applySourceAcl, withdrawSourceGrants, type AclOutcome } from "./acl.js";
 import type { JobsLogger } from "./jobs.js";
 
 /*
@@ -59,6 +63,15 @@ import type { JobsLogger } from "./jobs.js";
  *   a move) is recorded with the content it already has, without reading it. Only new content
  *   is read, counted against the size the connector reported, hashed with the tenant's blob key
  *   (core/catalog blobIdOf()) and ingested.
+ * - A connector that imports permissions (aclImport()) is asked for an item's each time the
+ *   source mentions it, changed or not, and the grants the source made on the object are made
+ *   equal to them (acl.ts), in the transaction that records the item. A file is never recorded
+ *   with permissions that couldn't be read. An item that can't be recorded this time still has
+ *   its permissions applied to what it already is here; when they couldn't be read either, the
+ *   source's grants on it are withdrawn (unknown is not allowed) until the item is next
+ *   mentioned: by a delta when it changes, by the next crawl at the latest. A connector that
+ *   imports none leaves only the owner: grants an earlier import made are taken back when the
+ *   run starts.
  * - Deletes are soft (removeFromSource()); a later ingest of the item restores it.
  * - Enrichment is enqueued after each ingest commits (Jobs.enqueueAfterIngest), never inside.
  * - A checkpoint or cursor is saved (source_syncs) only after everything before it committed.
@@ -197,6 +210,14 @@ export interface SyncReport {
     deleted: number;
     /** Items removed because a crawl from the beginning didn't find them. */
     reconciled: number;
+    /** Grants made because the source lets someone see an item (acl.ts). */
+    grantsAdded: number;
+    /** Grants revoked because the source no longer does. */
+    grantsRevoked: number;
+    /** Distinct users and guests the source names that match nobody here: they see nothing. */
+    unmappedUsers: number;
+    /** Distinct groups the source names that match no group here: their members see nothing. */
+    unmappedGroups: number;
   };
   /** Items left out, and why (the first {@link MAX_REPORTED_SKIPS}). */
   skipped: { externalId?: string; reason: string }[];
@@ -212,6 +233,15 @@ export interface SyncReport {
 export const MAX_REPORTED_SKIPS = 100;
 /** Items looked up per transaction when reconciling. */
 const RECONCILE_BATCH = 500;
+
+/** No permissions of the source's: nobody but the object's owner. */
+const NO_ACL: ItemAcl = Object.freeze({ basis: "owner-only", entries: [] });
+
+/** The connector's answer to aclImport() wasn't an ACL. */
+class InvalidAcl extends Error {}
+
+/** Distinct unmapped principals a run counts: beyond that, "at least this many". */
+const MAX_UNMAPPED = 10_000;
 
 /** Why a run ends early. */
 class Stop {
@@ -251,6 +281,10 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
       skipped: 0,
       deleted: 0,
       reconciled: 0,
+      grantsAdded: 0,
+      grantsRevoked: 0,
+      unmappedUsers: 0,
+      unmappedGroups: 0,
     },
     skipped: [],
     warnings: [],
@@ -274,6 +308,11 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
   /** How many of the source's items the delta now running has removed (source_syncs). */
   let deltaDeletes = 0;
   let description: ConnectorDescription | undefined;
+  /** The source's permissions become grants (acl.ts) when its connector imports them. */
+  let importing = false;
+  const resolver = aclResolver(tenantId);
+  /** Who the source names that matches nobody here, as far as it is worth remembering. */
+  const unmapped = { users: new Set<string>(), groups: new Set<string>() };
   let key: Promise<Uint8Array> | undefined;
   const tenantKey = () => (key ??= Promise.resolve(options.tenantKey(tenantId)));
 
@@ -289,6 +328,20 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     }
   };
   const end = (stop: Stop | null): SyncReport => {
+    report.counts.unmappedUsers = unmapped.users.size;
+    report.counts.unmappedGroups = unmapped.groups.size;
+    if (unmapped.groups.size + unmapped.users.size > 0) {
+      // Groups by the source's ids, for an admin to provision; people only counted.
+      log.warn?.(
+        {
+          tenantId,
+          source,
+          unmappedUsers: unmapped.users.size,
+          unmappedGroups: [...unmapped.groups].slice(0, 20),
+        },
+        "sync: the source grants access to people or groups unknown here, who get none",
+      );
+    }
     report.status = stop?.status ?? "done";
     if (stop?.error !== undefined) report.error = stop.error;
     if (stop?.retryAfterMs !== undefined) report.retryAfterMs = stop.retryAfterMs;
@@ -353,6 +406,7 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
       return end(new Stop("failed", "invalid-connector"));
     }
     const described: ConnectorDescription = description;
+    importing = described.capabilities.aclImport && connector.aclImport !== undefined;
     const zone = await transaction(async (tx) => {
       const [row] = await tx
         .select({ kind: zones.kind })
@@ -405,6 +459,13 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
       } else if (state.sourceIdentity !== identity) {
         return end(new Stop("failed", "source-identity"));
       }
+    }
+    // A source whose permissions aren't imported (any more) leaves its files to their owner:
+    // what an earlier import granted is taken back now, not as each file comes round.
+    if (!importing) {
+      report.counts.grantsRevoked += await transaction((tx) =>
+        withdrawSourceGrants(tx, tenantId, source),
+      );
     }
     let phase: Phase = state.phase;
     let token = state.token;
@@ -532,6 +593,8 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
             const held = await flush();
             if (held) return held;
             await save(phase, event.token);
+            // Who is who is asked afresh from here: the directory may have changed.
+            resolver.clear();
             if (
               (options.budgetMs !== undefined && Date.now() - started >= options.budgetMs) ||
               applied >= maxItems
@@ -655,7 +718,20 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     report.counts.files++;
     /** The ingest that committed: a retry after its enqueue failed only enqueues it again. */
     let committed: IngestResult | undefined;
+    /** What the catalog has of the item, as last looked up. */
+    let known: Awaited<ReturnType<typeof sourceItemState>> | undefined;
+    /** Who the source lets see it: asked once, however many attempts recording it takes. */
+    let acl: ItemAcl | undefined;
+    /**
+     * The item can't be recorded this time. What it already is here doesn't keep grants the
+     * source no longer makes: its permissions as just read are applied all the same, and when
+     * they couldn't be read, the source's grants on it are withdrawn until they can.
+     */
     const skipSeen = async (reason: string) => {
+      if (known && !known.deleted && (importing || acl !== undefined)) {
+        const objectId = known.objectId;
+        tally(await transaction((tx) => grant(tx, objectId, acl ?? NO_ACL)));
+      }
       skip(reason, item.externalId);
       await seen(item.externalId);
     };
@@ -666,35 +742,55 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
           await enqueue(committed);
           return;
         }
-        const known = await transaction((tx) =>
+        const state = await transaction((tx) =>
           sourceItemState(tx, tenantId, source, item.externalId),
         );
-        if (known && !known.deleted && known.etag === item.etag && !reconciling) {
+        known = state;
+        // Who the source lets see it, asked every time the item is mentioned: its permissions
+        // can change without its eTag changing.
+        const permissions = (acl ??= await permissionsOf(item));
+        if (state && !state.deleted && state.etag === item.etag && !reconciling) {
+          // (A source with none of its own is looked at when the item is next recorded.)
+          if (permissions.basis !== "owner-only") {
+            tally(await transaction((tx) => grant(tx, state.objectId, permissions)));
+          }
           report.counts.unchanged++;
           return;
         }
+        /** The item recorded and its grants made equal to the source's, in one transaction. */
+        const record = async (content: { blobId: string; size: number }) => {
+          const recorded = await transaction(async (tx) => {
+            // The lock order (core/catalog locks.ts): principals before the item, whenever
+            // grants may change: the source names someone, or the item may hold its grants.
+            if (permissions.entries.length > 0 || (state && permissions.basis !== "owner-only")) {
+              await lockPrincipals(tx, tenantId);
+            }
+            const ingested = await ingest(tx, tenantId, input(item, content));
+            return { ingested, granted: await grant(tx, ingested.objectId, permissions) };
+          });
+          tally(recorded.granted);
+          return recorded.ingested;
+        };
         let result: IngestResult | undefined;
-        const current = known?.current;
+        const current = state?.current;
         if (current && current.sourceVersion === item.contentVersion) {
           // Only its name, place or eTag changed: the content is the one already recorded.
-          const content = { blobId: current.blobId, size: item.size as number };
           try {
-            result = await transaction((tx) => ingest(tx, tenantId, input(item, content)));
+            result = await record({ blobId: current.blobId, size: item.size as number });
           } catch (e) {
             // Recorded with another size after all: read it.
             if (!(e instanceof IngestError && e.code === "blob-mismatch")) throw e;
           }
         }
-        if (!result) {
-          const content = await readContent(item);
-          result = await transaction((tx) => ingest(tx, tenantId, input(item, content)));
-        }
+        result ??= await record(await readContent(item));
         report.counts.ingested++;
         committed = result;
         await enqueue(result);
         return;
       } catch (e) {
         if (e instanceof IngestError) return skipSeen(`ingest-${e.code}`);
+        // Permissions that aren't any: nothing of the item is recorded on their word.
+        if (e instanceof InvalidAcl) return skipSeen("invalid-acl");
         if (signal.aborted || e instanceof Stop) throw e;
         if (e instanceof EnqueueFailed) {
           // Committed, not enqueued: try the enqueue again; the sweep is the last resort.
@@ -730,6 +826,42 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
         }
         await sleep(wait, signal);
       }
+    }
+  }
+
+  /**
+   * Who the source lets see the item, checked. A connector that imports no permissions has
+   * none to give: only the owner, and any grant an earlier import made is withdrawn when the
+   * item is next recorded.
+   */
+  async function permissionsOf(item: SourceItem): Promise<ItemAcl> {
+    if (!importing || !connector.aclImport) return NO_ACL;
+    let said: unknown;
+    try {
+      said = await connector.aclImport(refOf(item), signal);
+    } catch (e) {
+      throw fromConnector(e);
+    }
+    try {
+      return acceptAcl(said);
+    } catch {
+      throw new InvalidAcl();
+    }
+  }
+
+  function grant(tx: Tx, objectId: string, acl: ItemAcl): Promise<AclOutcome> {
+    return applySourceAcl(tx, tenantId, { source, objectId, acl, resolver });
+  }
+
+  /** Counts what a committed transaction did to the grants. */
+  function tally(outcome: AclOutcome): void {
+    report.counts.grantsAdded += outcome.added;
+    report.counts.grantsRevoked += outcome.revoked;
+    for (const [seen, ids] of [
+      [unmapped.users, outcome.unmappedUsers],
+      [unmapped.groups, outcome.unmappedGroups],
+    ] as const) {
+      for (const id of ids) if (seen.size < MAX_UNMAPPED) seen.add(id);
     }
   }
 

@@ -203,6 +203,40 @@ describe("normalizeAcl", () => {
     ]);
   });
 
+  it("never makes a role that stays out of one that was lent", () => {
+    const ann = { kind: "user", id: "u1" } as const;
+    const merged = (a: object, b: object) => {
+      const entries = [
+        { principal: ann, inherited: false, ...a },
+        { principal: ann, inherited: false, ...b },
+      ];
+      const out = normalizeAcl(entries);
+      expect(normalizeAcl([...entries].reverse())).toEqual(out);
+      return [out[0]?.role, out[0]?.expiresAt ?? "never"];
+    };
+    const [june, july] = ["2031-06-01T00:00:00.000Z", "2031-07-01T00:00:00.000Z"];
+    // A read that stays and a write until June: the read that stays.
+    expect(merged({ role: "read" }, { role: "write", expiresAt: june })).toEqual(["read", "never"]);
+    expect(merged({ role: "read", expiresAt: july }, { role: "owner", expiresAt: june })).toEqual([
+      "read",
+      july,
+    ]);
+    // The stronger role when it lasts as long.
+    expect(merged({ role: "read", expiresAt: june }, { role: "write" })).toEqual([
+      "write",
+      "never",
+    ]);
+    expect(merged({ role: "read", expiresAt: june }, { role: "write", expiresAt: july })).toEqual([
+      "write",
+      july,
+    ]);
+    expect(merged({ role: "read", expiresAt: june }, { role: "write", expiresAt: june })).toEqual([
+      "write",
+      june,
+    ]);
+    expect(merged({ role: "read" }, { role: "write" })).toEqual(["write", "never"]);
+  });
+
   it("gives the same answer whatever order the entries come in", () => {
     const entries = [
       {

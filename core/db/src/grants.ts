@@ -169,6 +169,103 @@ export async function revokeGrant(
   return rows.length === 1;
 }
 
+/**
+ * Adds several grants on one object in one statement (one bump of the principal epoch, where
+ * addGrant() would make one each): what an import does for every file. Each principal is checked
+ * and locked as addGrant() does; one that is no current user or existing group is left out and
+ * returned in `unknown`. Created at the database's now(); `expiresAt` null is never.
+ */
+export async function addObjectGrants(
+  tx: Tx,
+  tenantId: string,
+  input: {
+    objectId: string;
+    grantedBy: string;
+    grants: readonly { principal: string; role: GrantRole; expiresAt: Date | null }[];
+  },
+): Promise<{ added: number; unknown: string[] }> {
+  if (input.grants.length === 0) return { added: 0, unknown: [] };
+  await lockPrincipals(tx, tenantId);
+  const unknown: string[] = [];
+  const rows = [];
+  for (const g of input.grants) {
+    try {
+      await lockPrincipal(tx, tenantId, g.principal);
+    } catch (e) {
+      if (!(e instanceof GrantError && e.code === "unknown-principal")) throw e;
+      unknown.push(g.principal);
+      continue;
+    }
+    rows.push({
+      tenantId,
+      id: newId("grant"),
+      principal: g.principal,
+      role: g.role,
+      objectId: input.objectId,
+      grantedBy: input.grantedBy,
+      createdAt: sql`now()`,
+      expiresAt: g.expiresAt,
+    });
+  }
+  if (rows.length > 0) await tx.insert(grants).values(rows);
+  return { added: rows.length, unknown };
+}
+
+/**
+ * Revokes several live grants in one statement, at the database's now() (never before a
+ * grant's creation). Returns how many were live.
+ */
+export async function revokeGrants(
+  tx: Tx,
+  tenantId: string,
+  grantIds: readonly string[],
+  revokedBy: string,
+): Promise<number> {
+  if (grantIds.length === 0) return 0;
+  await lockPrincipals(tx, tenantId);
+  const rows = await tx
+    .update(grants)
+    .set({ revokedAt: sql`greatest(now(), ${grants.createdAt})`, revokedBy })
+    .where(
+      and(
+        eq(grants.tenantId, tenantId),
+        inArray(grants.id, [...grantIds]),
+        isNull(grants.revokedAt),
+      ),
+    )
+    .returning({ id: grants.id });
+  return rows.length;
+}
+
+/**
+ * Revokes every live grant `grantedBy` made, in one statement: a source that no longer imports
+ * permissions takes back what it gave. Returns how many there were (0 touches nothing).
+ */
+export async function revokeGrantsBy(
+  tx: Tx,
+  tenantId: string,
+  grantedBy: string,
+  revokedBy: string,
+): Promise<number> {
+  const [held] = await tx
+    .select({ id: grants.id })
+    .from(grants)
+    .where(
+      and(eq(grants.tenantId, tenantId), eq(grants.grantedBy, grantedBy), isNull(grants.revokedAt)),
+    )
+    .limit(1);
+  if (!held) return 0;
+  await lockPrincipals(tx, tenantId);
+  const rows = await tx
+    .update(grants)
+    .set({ revokedAt: sql`greatest(now(), ${grants.createdAt})`, revokedBy })
+    .where(
+      and(eq(grants.tenantId, tenantId), eq(grants.grantedBy, grantedBy), isNull(grants.revokedAt)),
+    )
+    .returning({ id: grants.id });
+  return rows.length;
+}
+
 /** What a caller holds, in the shape core/policy's AuthzPrincipal takes. */
 export interface GrantSet {
   /** Tags readable through a read grant (write grants are listed separately). */
@@ -234,6 +331,37 @@ export async function liveGrants(
     ...r,
     tag: facet !== null && value !== null ? `${facet}:${value}` : null,
   }));
+}
+
+/**
+ * The grants on one object that `grantedBy` made and that are still on record as live: not
+ * revoked, and not expired at the database's now(). What an import compares with what its source
+ * says now (core/jobs acl.ts): only its own grants, never one a person made.
+ */
+export async function liveObjectGrantsBy(
+  tx: Tx,
+  tenantId: string,
+  objectId: string,
+  grantedBy: string,
+): Promise<{ id: string; principal: string; role: GrantRole; expiresAt: Date | null }[]> {
+  return tx
+    .select({
+      id: grants.id,
+      principal: grants.principal,
+      role: grants.role,
+      expiresAt: grants.expiresAt,
+    })
+    .from(grants)
+    .where(
+      and(
+        eq(grants.tenantId, tenantId),
+        eq(grants.objectId, objectId),
+        eq(grants.grantedBy, grantedBy),
+        isNull(grants.revokedAt),
+        or(isNull(grants.expiresAt), gt(grants.expiresAt, sql`now()`)),
+      ),
+    )
+    .orderBy(grants.id);
 }
 
 /**

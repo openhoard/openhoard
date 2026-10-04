@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
+  checkAcl,
   checkEvent,
   errorCode,
   manifestCapabilities,
@@ -89,7 +90,7 @@ describe("what it is", () => {
       apiVersion: 1,
       id: "connector-sharepoint",
       zoneKinds: ["indexed"],
-      capabilities: { delta: false, aclImport: false, redirect: true },
+      capabilities: { delta: false, aclImport: true, redirect: true },
       stableIds: true,
     });
     const manifest = JSON.parse(
@@ -806,5 +807,113 @@ describe("opening an item", () => {
     expect(errorCode(await failure(c.redirect?.(refOf(item), never) as Promise<string>))).toBe(
       "not-found",
     );
+  });
+});
+
+describe("an item's permissions", () => {
+  it("are what SharePoint says of it: who, how much, from where, until when", async () => {
+    const c = connector();
+    expect(c.describe().capabilities.aclImport).toBe(true);
+    const files = itemsOf(await collect(c)).filter((i) => i.kind === "file");
+    const stored = (item: SourceItem) => {
+      const found = f.graph.store.get(item.externalId.split(":")[1] as string);
+      if (!found) throw new Error("no such item");
+      return found;
+    };
+    // Every kind of entry the tenant has, over the site's files.
+    const seen = new Set<string>();
+    for (const item of files) {
+      const acl = await (c.aclImport as NonNullable<Connector["aclImport"]>)(refOf(item), never);
+      expect(checkAcl(acl), item.externalId).toBeNull();
+      expect(acl.basis).toBe("source");
+      const source = stored(item).acl;
+      const expected = new Set(
+        source.map((a) =>
+          a.principal === "anyone-with-link"
+            ? "link"
+            : a.principal.startsWith("guest:")
+              ? `guest:${a.principal.slice("guest:".length)}`
+              : a.principal,
+        ),
+      );
+      const said = new Set(
+        acl.entries.map((e) =>
+          e.principal.kind === "link"
+            ? "link"
+            : e.principal.kind === "guest"
+              ? `guest:${e.principal.email}`
+              : e.principal.kind === "organization"
+                ? "organization"
+                : `${e.principal.kind}:${e.principal.id}`,
+        ),
+      );
+      expect(said, item.externalId).toEqual(expected);
+      for (const e of acl.entries) {
+        seen.add(e.principal.kind);
+        if (e.principal.kind === "link") expect(e.principal.scope).toBe("anyone");
+      }
+      // An entry is inherited when every permission for its principal is.
+      for (const e of acl.entries.filter((x) => x.principal.kind === "group")) {
+        const id = (e.principal as { id: string }).id;
+        const theirs = source.filter((a) => a.principal === `group:${id}`);
+        expect(e.inherited).toBe(theirs.every((a) => a.inherited));
+      }
+    }
+    expect([...seen].sort()).toEqual(expect.arrayContaining(["group", "user"]));
+  });
+
+  it("follow every page, and say an item that is gone is gone", async () => {
+    const c = connector({ pageSize: 3 });
+    const item = itemsOf(await collect(c)).find((i) => i.kind === "file") as SourceItem;
+    const id = item.externalId.split(":")[1] as string;
+    f.graph.store.setAcl(
+      id,
+      f.tenant.users.slice(0, 7).map((u) => ({ principal: `user:${u.id}`, role: "read" as const })),
+    );
+    // Two permissions a page.
+    const paged: typeof fetch = (input, init) =>
+      f.fetch(String(input).replace(/\/permissions$/, "/permissions?$top=2"), init);
+    const aclImport = connector({ fetch: paged }).aclImport as NonNullable<Connector["aclImport"]>;
+    const before = f.sent.length;
+    expect((await aclImport(refOf(item), never)).entries).toHaveLength(7);
+    expect(f.sent.slice(before).filter((s) => s.url.includes("/permissions")).length).toBe(4);
+    // A next page that isn't Graph's is not followed.
+    const elsewhere: typeof fetch = async (input, init) => {
+      const response = await paged(input, init);
+      if (!String(input).includes("/permissions")) return response;
+      const page = (await response.json()) as Record<string, unknown>;
+      page["@odata.nextLink"] = "https://elsewhere.test/v1.0/next";
+      return new Response(JSON.stringify(page));
+    };
+    expect(
+      errorCode(
+        await failure(
+          (connector({ fetch: elsewhere }).aclImport as typeof aclImport)(refOf(item), never),
+        ),
+      ),
+    ).toBe("permanent");
+    // One item's permissions refused: that item is passed over, the site goes on.
+    const refused: typeof fetch = (input, init) =>
+      String(input).includes("/permissions")
+        ? Promise.resolve(new Response("{}", { status: 403 }))
+        : f.fetch(input, init);
+    expect(
+      errorCode(
+        await failure(
+          (connector({ fetch: refused }).aclImport as typeof aclImport)(refOf(item), never),
+        ),
+      ),
+    ).toBe("permanent");
+    f.graph.store.delete(id);
+    expect(errorCode(await failure(aclImport(refOf(item), never)))).toBe("not-found");
+    expect(
+      errorCode(await failure(aclImport({ externalId: "not one of ours" } as never, never))),
+    ).toBe("not-found");
+  });
+
+  it("are not read when the source is told not to", () => {
+    const c = connector({ permissions: false });
+    expect(c.describe().capabilities.aclImport).toBe(false);
+    expect(c.aclImport).toBeUndefined();
   });
 });

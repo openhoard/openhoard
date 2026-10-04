@@ -110,9 +110,19 @@ describe("a SharePoint site in the configuration", { timeout: 120_000 }, () => {
       // A sync asks what changed: as often as a folder's.
       schedule: "*/15 * * * *",
       extract: false,
+      importPermissions: true,
     });
     expect(ok({ directory: "0f0e0d0c-0b0a-4908-8706-050403020100" })).toBe(true);
-    expect(ok({ recrawlAfterDays: 0 })).toBe(true);
+    expect(ok({ recrawlAfterDays: 0.5 })).toBe(true);
+    // Never crawling again is only for a source whose permissions aren't imported: the crawl
+    // bounds how long a permission removed at SharePoint can last here.
+    const whole = (more: Record<string, unknown>) =>
+      ConfigSchema.safeParse({ dataDir, sources: [source(more)] }).success;
+    expect(whole({ recrawlAfterDays: 0 })).toBe(false);
+    expect(whole({ recrawlAfterDays: 0, importPermissions: false })).toBe(true);
+    expect(whole({ recrawlAfterDays: 7 })).toBe(true);
+    expect(ok({ importPermissions: false })).toBe(true);
+    expect(ok({ importPermissions: "yes" })).toBe(false);
     expect(ok({ recrawlAfterDays: -1 })).toBe(false);
     expect(ok({ authority: undefined, graph: undefined, downloadHosts: undefined })).toBe(true);
     expect(
@@ -238,6 +248,11 @@ describe("a SharePoint site in the configuration", { timeout: 120_000 }, () => {
       sleep: async () => {},
     });
     expect(report).toMatchObject({ status: "done", skipped: [] });
+    // The site's permissions were read: nobody the tenant has is named by them, so nothing
+    // is granted, and the run says who it couldn't match.
+    expect(scheduled.connector.describe().capabilities.aclImport).toBe(true);
+    expect(report.counts.grantsAdded).toBe(0);
+    expect(report.counts.unmappedGroups).toBeGreaterThan(0);
     const files = tenant.items.filter((i) => i.siteId === site().id && i.kind === "file").length;
     const [row] = await db.withTenant(t.tenantId, (tx) =>
       tx

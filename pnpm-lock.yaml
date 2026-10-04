@@ -341,6 +341,9 @@ importers:
       '@openhoard/core-db':
         specifier: workspace:^
         version: link:../../core/db
+      '@openhoard/core-identity':
+        specifier: workspace:^
+        version: link:../../core/identity
       '@openhoard/core-jobs':
         specifier: workspace:^
         version: link:../../core/jobs

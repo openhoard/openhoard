@@ -1,10 +1,11 @@
 # @openhoard/connector-sharepoint
 
-SharePoint sites, indexed in place through Microsoft Graph. **It signs in (T-302) and crawls a
-site's document libraries with checkpoints (T-303), and follows what changes in them through
-Graph's delta (T-304).** It isn't yet told of changes as they happen (change notifications),
-and doesn't import permissions (T-305) or pace itself under throttling (T-306). In the server it is a
-source with `"connector": "sharepoint"` (apps/server README, "SharePoint sites on a schedule").
+SharePoint sites, indexed in place through Microsoft Graph. **It signs in (T-302), crawls a
+site's document libraries with checkpoints (T-303), follows what changes in them through
+Graph's delta (T-304), and reads each item's permissions for the core to turn into grants
+(T-305).** It isn't yet told of changes as they happen (change notifications), and doesn't pace
+itself under throttling (T-306). In the server it is a source with `"connector": "sharepoint"`
+(apps/server README, "SharePoint sites on a schedule").
 
 ## Crawling a site (T-303)
 
@@ -136,16 +137,76 @@ renamed, moved, deleted; items given twice; two libraries, resumed between them;
 again from a kept cursor; a crawl killed and resumed, with a folder renamed meanwhile), in
 `src/state.test.ts` for what is kept, and through the sync runner in `src/e2e.test.ts`.
 
-**Not yet tried on a real tenant.** What to look at there first: whether Graph reports each
-item of a deleted folder, and of a folder moved to another library (the connector takes it
-that it does); whether a folder's children listing gives the same hashes as the feed (if
-not, everything under a renamed folder is downloaded again); whether a crawl's enumeration
-lists deleted items at all; whether `Sites.Selected` is
-enough for `delta` (Graph's page names `Files.Read.All`); whether a file's `size` always equals
-the bytes downloaded (SharePoint is known to differ for some Office files, and the runner would
-then skip the file as `changed`); which hosts download links point at, and whether they
-redirect (`downloadHosts`); what Graph answers for a next-page link that has lapsed; how many
-items a page really holds, and how often Graph throttles.
+## Permissions (T-305)
+
+`aclImport()` asks Graph for an item's permissions (`/items/{id}/permissions`, every page) and
+gives them in the contract's terms (`src/permissions.ts`); `permissions: false` turns it off.
+
+| Graph says                                         | entry                                |
+| -------------------------------------------------- | ------------------------------------ |
+| an Entra user                                      | user, by object id, with the email   |
+| the same with an invitation (taken up)             | guest, by object id, with an email   |
+| an Entra group                                     | group, by object id                  |
+| a SharePoint group (a site's Members, Visitors)    | group, id `sitegroup:<site id>:<id>` |
+| "Everyone", "Everyone except external users"       | organization                         |
+| a site user that is a person, with an email        | user, id `siteuser:<login>`          |
+| a link to view or edit, for anyone or the org      | link                                 |
+| a link to view or edit, for named people or groups | link, and each of them               |
+| anything else                                      | nothing                              |
+
+"Anything else" is the rule, since what an entry gives here is the file's content: an
+application, an invitation nobody has taken up, what only the older `grantedTo` fields say, an
+expiry that can't be read, a claim that isn't a person's (a Microsoft 365 group's owners, a security group
+seen as a site user), a link that isn't to view or edit or that prevents download, a role that
+gives less than the file (view only, limited access) or that this doesn't know. `owner` and
+full control are owner, `write` write, `read` read; a link's role is its type. Graph's "never"
+(year 1) is no expiry.
+
+What an entry is worth is the core's decision (core/jobs `acl.ts`): users and groups the tenant
+has provisioned under those ids get grants, a link and the organization grant nothing, and a
+SharePoint group matches no group there, so its members get nothing until something can say
+who they are.
+
+- **One request an item**, each time the source mentions it, asked once however often
+  recording it is retried. A crawl of a site asks once per file (the spike, S4, measured this
+  as most of a crawl's time): `$batch` and asking only for items with unique permissions are
+  the next step, with pacing (T-306).
+- **Changes.** The crawl and every delta ask Graph to mark items whose sharing changed
+  (`Prefer: deltashowsharingchanges`); a folder, or the library itself, so marked has
+  everything under it listed again (as a renamed folder has), so the runner asks for each
+  item's permissions again. While permissions are imported a round may mention 2,000 items at
+  most, whatever the reason (each is a request more, all before the round's checkpoint): more
+  is `resync`, and a crawl asks them a page at a time, with checkpoints. What a delta doesn't report
+  waits for the next crawl (`recrawlAfterDays`).
+- **Refused** (403 or another refusal of one item's permissions, or a list that doesn't end)
+  is `permanent`: the item is passed over, the
+  runner withdraws what the source had granted on it, and the site goes on. A site where every
+  file is skipped that way is an app that can't read permissions.
+
+Tested in `src/permissions.test.ts` (Graph's documented shapes), `src/connector.test.ts`
+(against the fake), and `src/e2e.test.ts`: with the fake tenant's directory provisioned, **who
+can read each file through OpenHoard's grants is exactly who the fake SharePoint lets read
+it**, before and after permissions change there. The fake has users, groups, guests and
+anyone-links; SharePoint groups, organization links and links for named people are covered by
+the mapping's own tests only.
+
+**Not yet tried on a real tenant.** What to look at there first:
+
+- Permissions: whether listing an item's permissions works under `Sites.Selected` with the
+  read role; what a team site's item permissions really hold (SharePoint groups, the Microsoft
+  365 group's claim and its owners') and how to say who is in them; whether the delta honours
+  `deltashowsharingchanges` with this app's permissions (Microsoft's scan guidance asks for
+  more), and whether it then also lists what inherits from a changed folder.
+- Following changes: whether Graph reports each item of a deleted folder, and of a folder
+  moved to another library (the connector takes it that it does); whether a folder's children
+  listing gives the same hashes as the feed (if not, everything under a renamed folder is
+  downloaded again); whether a crawl's enumeration lists deleted items at all.
+- Crawling: whether `Sites.Selected` is enough for `delta` (Graph's page names
+  `Files.Read.All`); whether a file's `size` always equals the bytes downloaded (SharePoint is
+  known to differ for some Office files, and the runner would then skip the file as
+  `changed`); which hosts download links point at, and whether they redirect
+  (`downloadHosts`); what Graph answers for a next-page link that has lapsed; how many items a
+  page really holds, and how often Graph throttles.
 
 ## Signing in to Graph (T-302)
 

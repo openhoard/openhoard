@@ -108,6 +108,7 @@ each library a folder at the top.
 | `authority`, `graph` | a national cloud's addresses (https origins). Default: the global cloud's                                                                                                 |
 | `downloadHosts`      | hosts a file's bytes may be fetched from besides Graph. Default `[".sharepoint.com"]`                                                                                     |
 | `recrawlAfterDays`   | how old a crawl may be before the site is crawled again instead of followed. Default 7; 0 never                                                                           |
+| `importPermissions`  | whether SharePoint's permissions become grants here (below). Default true                                                                                                 |
 
 `id`, `tenantId`, `zone`, `owner`, `extract` and `reconcileGuard` are as for a folder.
 `schedule` defaults to every fifteen minutes. The first sync crawls the site; those after ask
@@ -140,10 +141,59 @@ be read, or a key that isn't the certificate's, stops the server, naming the sou
 file, never its contents. With both, the certificate signs in and the log says the secret is
 unused. Every node sharing the database needs the same secret or files.
 
+**Who can read a site's files (T-305).** Each time a sync records or revisits a file it asks
+SharePoint who may see it, and makes that the file's grants here, by the source (`granted_by`
+is `source:<id>`; `explain` shows them): added when SharePoint adds someone, revoked when it
+takes them away, audited as `grant.import`. A grant a person made here is never touched. Read
+at SharePoint is read here; edit and full control are a write grant (which here lets someone
+tag the file; nothing is written back to SharePoint). Who a permission is for is matched to
+someone the tenant already has, and to nobody otherwise:
+
+- a **user** or **guest**: the SCIM user whose `externalId` is their Entra object id; failing
+  that, a local user (`admin user create`) with the same email. A SCIM user is never matched by
+  email;
+- an **Entra group**: the SCIM group whose `externalId` is its object id, with the members SCIM
+  gives it;
+- **nobody**: a sharing link for anyone or for the organization, "Everyone", a **SharePoint
+  group** (a site's Owners, Members, Visitors), and any permission that gives less than the
+  file (view only, limited access, a link that blocks download or only takes uploads), and an
+  invitation nobody has taken up. The people and groups a view or edit link was made for are
+  named and matched like any other.
+
+What this means for a pilot:
+
+- **Provision first.** With SCIM from Entra, map `objectId` to `externalId` for groups **and
+  for users** (Entra's default for users is another attribute). Without SCIM, only people
+  named one by one at SharePoint can be matched, by email, to local users.
+- **A team site grants mostly through its SharePoint groups**, which match nobody yet: expect
+  few people besides `owner` to get access from such a site until that is resolved on a real
+  tenant. Nobody gets more than SharePoint gives; many may get less.
+- **What matched nobody** is in the run's counts (`unmappedUsers`, `unmappedGroups` in `admin
+source status`, as of the last run: a crawl's run counts the whole site, a later one only
+  what it revisited) and the groups' ids are in the log.
+- **Provisioning later** takes effect when a file is next visited: at the latest the next
+  crawl (`recrawlAfterDays`).
+- **A permission removed at SharePoint may still read here until the file is next visited.**
+  A sync visits what Graph's delta reports (a folder or library whose sharing changed has
+  everything under it looked at again) and a crawl visits everything. Whether the delta
+  reports sharing changes with this app's permissions is not yet verified on a real tenant:
+  until it is, take `recrawlAfterDays` as the bound (the configuration refuses 0 while
+  permissions are imported). A source that is
+  stopped (`admin source status`) visits nothing: its grants stay as they were.
+- **Cost.** One Graph request per file each time it is visited: a crawl of 20,000 files is
+  20,000 requests more (an hour or so, over several runs). Every file is a grant per person or
+  group named, and a person's grants are loaded when they search: this is sized for sites of
+  some tens of thousands of files, not hundreds of thousands.
+- `"importPermissions": false` leaves a site's files to `owner` alone: what an earlier import
+  granted is taken back when the next sync starts.
+- A file whose permissions SharePoint won't show (refused, or an answer that makes no sense) is
+  not recorded (skipped as `permanent` or `invalid-acl`), and what it had been granted is
+  withdrawn until the file is next visited. A site where every file is skipped that way is an
+  app that can't read permissions: grant it, or turn the import off.
+
 What it doesn't do yet: be told of changes as they happen (Graph's change notifications, the
-rest of T-304), SharePoint's permissions aren't imported (T-305: only `owner` reads the files), and a
-throttled sync stops and comes back after the wait Graph asked for (T-306). It hasn't been run
-against a real tenant yet.
+rest of T-304); resolve SharePoint groups; and a throttled sync stops and comes back after the
+wait Graph asked for (T-306). It hasn't been run against a real tenant yet.
 
 Content is read through the source's connector, checked against the version's size and BLAKE3
 blob id with the tenant's blob key. **Tenant blob keys** live in `<dataDir>/keys/<tenant>.blob-key`

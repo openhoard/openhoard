@@ -39,8 +39,9 @@ import { retrying } from "./retry.js";
  *   `<dataDir>/connectors/<tenant>/<source>`), or the SharePoint connector over `site`, signed
  *   in as the configured Entra app (its secret from the environment, or a certificate from the
  *   files named), keeping the folders it follows changes by in the same state directory.
- *   Either way with owner-only permissions: nothing but the owner's OpenHoard
- *   access reaches its files. A SharePoint source whose secret isn't set is left out with a
+ *   A folder has owner-only permissions: nothing but the owner's OpenHoard access reaches its
+ *   files. A site's permissions become grants (core/jobs acl.ts) unless `importPermissions` is
+ *   off. A SharePoint source whose secret isn't set is left out with a
  *   warning (as a model without its key is), and the rest start;
  * - resolves its owner (an email or a user id) to an active member on its first run, and pins
  *   that person (ownerOf()): until they exist (`admin user create`, SCIM) runs wait, and a later
@@ -285,6 +286,7 @@ export function sharepointSource(
     site: s.site,
     ...(s.downloadHosts === undefined ? {} : { downloadHosts: s.downloadHosts }),
     ...(s.recrawlAfterDays === undefined ? {} : { recrawlAfterDays: s.recrawlAfterDays }),
+    permissions: s.importPermissions,
     // With it the connector follows changes; without (a caller's own use), every sync crawls.
     ...(stateDir === undefined ? {} : { stateDir }),
     ...(send === undefined ? {} : { fetch: send }),

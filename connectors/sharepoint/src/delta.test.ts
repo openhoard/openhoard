@@ -347,6 +347,63 @@ describe("a round of changes", () => {
     expect(sorted(model)).toEqual(sorted(await fresh()));
   });
 
+  it("mentions everything in a folder whose sharing changed, when permissions are imported", async () => {
+    const start = f.sent.length;
+    const cursor = cursorOf(await crawl());
+    // The crawl asked for sharing changes to be marked too: its link is one they follow from.
+    const crawled = f.sent.slice(start).filter((r) => r.url.includes("/root/delta"));
+    expect(crawled.length).toBeGreaterThan(1);
+    expect(
+      crawled.every(
+        (r) => new Headers(r.init?.headers).get("prefer") === "deltashowsharingchanges",
+      ),
+    ).toBe(true);
+    const folder = folderWith((c) => c.length > 1);
+    const below = (id: string): string[] =>
+      items()
+        .filter((i) => i.parentId === id)
+        .flatMap((i) => [i.id, ...below(i.id)]);
+    const under = below(folder.id);
+    store().setAcl(folder.id, [{ principal: `user:${f.tenant.users[0]?.id}`, role: "read" }]);
+    // As Graph gives it when asked for sharing changes: the folder, marked, and nothing of
+    // what inherits from it.
+    const marked = feed((page) => {
+      page.value = page.value.filter((v) => v.id === folder.id);
+      for (const v of page.value) v["@microsoft.graph.sharedChanged"] = "True";
+    });
+    const before = f.sent.length;
+    const events = await delta(cursor, connector({ fetch: marked }));
+    const said = new Set(events.flatMap((e) => (e.type === "item" ? [e.item.externalId] : [])));
+    expect(said).toEqual(new Set([folder.id, ...under].map((id) => `${site.driveId}:${id}`)));
+    // It asked for them to be marked.
+    const asked = f.sent.slice(before).find((r) => r.url.includes("/root/delta"));
+    expect(new Headers(asked?.init?.headers).get("prefer")).toBe("deltashowsharingchanges");
+
+    // The library's own sharing changed: everything in it.
+    const top = feed((page) => {
+      page.value = [
+        { id: `${site.driveId}-root`, root: {}, "@microsoft.graph.sharedChanged": "True" },
+      ];
+    });
+    const all = await delta(cursor, connector({ fetch: top, roundRequests: 5000 }));
+    expect(new Set(all.flatMap((e) => (e.type === "item" ? [e.item.externalId] : []))).size).toBe(
+      items().length + 1,
+    );
+    // More than one run can ask the permissions of is a crawl's work (a page at a time).
+    for (let n = 0; n < 2100; n++) store().addFile(site.driveId, folder.id, `bulk ${n}.txt`, 1);
+    const why = await failure(delta(cursor, connector({ fetch: top, roundRequests: 5000 })));
+    expect(why && errorCode(why)).toBe("resync");
+    for (const added of items().filter((i) => i.name.startsWith("bulk "))) store().delete(added.id);
+
+    // A source that imports no permissions doesn't ask, and has nothing to look at again.
+    const plain = connector({ fetch: marked, permissions: false });
+    const at = f.sent.length;
+    const fewer = await delta(cursor, plain);
+    expect(fewer.filter((e) => e.type === "item")).toHaveLength(1);
+    const unasked = f.sent.slice(at).find((r) => r.url.includes("/root/delta"));
+    expect(new Headers(unasked?.init?.headers).get("prefer")).toBeNull();
+  });
+
   it("sees a folder given a name it can hold after one it couldn't", async () => {
     const model = apply(new Map(), await crawl());
     const cursor = cursorOf(await crawl());

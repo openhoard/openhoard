@@ -482,6 +482,12 @@ export const SharePointSourceSchema = z
      * the crawl mends whatever following changes missed. Default 7; 0 never.
      */
     recrawlAfterDays: z.number().min(0).max(3650).optional(),
+    /**
+     * Whether SharePoint's permissions become grants here (T-305): to the users and groups
+     * provisioned under their Entra ids, and to nobody otherwise. False: only `owner` reads the
+     * files (grants an earlier import made are withdrawn as each file is next recorded).
+     */
+    importPermissions: z.boolean().default(true),
     /** A national cloud's addresses. Default: the global cloud's. */
     authority: ORIGIN.optional(),
     graph: ORIGIN.optional(),
@@ -680,6 +686,22 @@ export const ConfigSchema = z
         message: "uploads need sign-in: configure auth",
       });
     }
+    c.sources.forEach((source, i) => {
+      // The crawl is what bounds how long a permission removed at SharePoint can still read
+      // here: without one, a change the delta doesn't report would never be seen.
+      if (
+        source.connector === "sharepoint" &&
+        source.importPermissions &&
+        source.recrawlAfterDays === 0
+      ) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["sources", i, "recrawlAfterDays"],
+          message:
+            "can't be 0 while permissions are imported: the periodic crawl bounds how long a removed permission lasts here",
+        });
+      }
+    });
     const mailboxes = new Set<string>();
     c.mailIn.forEach((m, i) => {
       const issue = (path: string, message: string) =>

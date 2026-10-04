@@ -4,14 +4,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fromDriver, queryRows, type Database, type Driver, type Tx } from "./database.js";
 import {
   addGrant,
+  addObjectGrants,
   DEFAULT_GRANT_DAYS,
   liveGrants,
+  liveObjectGrantsBy,
   loadGrants,
   revokeGrant,
+  revokeGrants,
+  revokeGrantsBy,
   type GrantInput,
 } from "./grants.js";
 import { newId } from "./ids.js";
-import { facetValues, grants, groups, objects, users } from "./schema.js";
+import { facetValues, grants, groups, objects, principalEpochs, users } from "./schema.js";
 import { openTestDriver, seedTenant, type SeededTenant } from "./testing.js";
 
 /* Grants as data (T-602): default expiry, revocation, and what a caller holds. */
@@ -318,6 +322,119 @@ describe("revokeGrant", () => {
       tx.update(grants).set({ revokedAt: new Date() }).where(eq(grants.id, id)),
     );
     expect(await sqlState(half)).toBe(CHECK_VIOLATION);
+  });
+});
+
+describe("an import's grants on an object", () => {
+  const BY = "source:sp-finance";
+  const epoch = () =>
+    inTenant(async (tx) => (await tx.select().from(principalEpochs))[0]?.epoch as unknown);
+  const held = (by = BY) => inTenant((tx) => liveObjectGrantsBy(tx, t.tenantId, t.objectId, by));
+
+  it("are added in one statement, leaving out who is nobody, and are the import's alone", async () => {
+    const soon = new Date(Date.now() + DAY);
+    const before = await epoch();
+    const made = await inTenant((tx) =>
+      addObjectGrants(tx, t.tenantId, {
+        objectId: t.objectId,
+        grantedBy: BY,
+        grants: [
+          { principal: ana, role: "read", expiresAt: null },
+          { principal: sales, role: "write", expiresAt: soon },
+          { principal: "user:usr_00000000000000000000000000", role: "read", expiresAt: null },
+          { principal: "group:nobody", role: "read", expiresAt: null },
+        ],
+      }),
+    );
+    expect(made).toEqual({
+      added: 2,
+      unknown: ["user:usr_00000000000000000000000000", "group:nobody"],
+    });
+    // One statement: the tenant's principals are recomputed once, not once a grant.
+    expect(Number(await epoch()) - Number(before)).toBe(1);
+    // A person's own grant on the same object is not one of them.
+    await grant({ principal: bo, target: { objectId: t.objectId }, grantedBy: "user:admin" });
+    expect(
+      (await held()).map((g) => [g.principal, g.role, g.expiresAt?.getTime() ?? null]),
+    ).toEqual(
+      expect.arrayContaining([
+        [ana, "read", null],
+        [sales, "write", soon.getTime()],
+      ]),
+    );
+    expect(await held()).toHaveLength(2);
+    expect(await held("source:another")).toEqual([]);
+    expect((await load([ana, sales])).objectWriteGrants).toEqual([t.objectId]);
+    // Nothing to add touches nothing.
+    const quiet = await epoch();
+    expect(
+      await inTenant((tx) =>
+        addObjectGrants(tx, t.tenantId, { objectId: t.objectId, grantedBy: BY, grants: [] }),
+      ),
+    ).toEqual({ added: 0, unknown: [] });
+    expect(await epoch()).toEqual(quiet);
+    // A principal that isn't one is the caller's mistake, not "nobody".
+    await expect(
+      inTenant((tx) =>
+        addObjectGrants(tx, t.tenantId, {
+          objectId: t.objectId,
+          grantedBy: BY,
+          grants: [{ principal: "everyone", role: "read", expiresAt: null }],
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "invalid" });
+  });
+
+  it("are revoked together, once, and no longer listed; lapsed ones aren't listed either", async () => {
+    await inTenant((tx) =>
+      addObjectGrants(tx, t.tenantId, {
+        objectId: t.objectId,
+        grantedBy: BY,
+        grants: [
+          { principal: ana, role: "read", expiresAt: null },
+          { principal: bo, role: "read", expiresAt: null },
+          { principal: sales, role: "read", expiresAt: null },
+        ],
+      }),
+    );
+    const ids = (await held()).map((g) => g.id);
+    const before = await epoch();
+    expect(await inTenant((tx) => revokeGrants(tx, t.tenantId, ids.slice(0, 2), BY))).toBe(2);
+    expect(Number(await epoch()) - Number(before)).toBe(1);
+    // Again: nothing is live to revoke.
+    expect(await inTenant((tx) => revokeGrants(tx, t.tenantId, ids.slice(0, 2), BY))).toBe(0);
+    expect(await inTenant((tx) => revokeGrants(tx, t.tenantId, [], BY))).toBe(0);
+    expect((await held()).map((g) => g.principal)).toEqual([sales]);
+    expect(await row(ids[0] as string)).toMatchObject({ revokedBy: BY });
+
+    // One that has lapsed by the database's clock is no longer held.
+    await inTenant((tx) =>
+      tx.execute(
+        sql`update grants set created_at = now() - interval '2 days', expires_at = now() - interval '1 day' where id = ${ids[2]}`,
+      ),
+    );
+    expect(await held()).toEqual([]);
+  });
+
+  it("are all taken back when their granter stops granting, and nobody else's are", async () => {
+    await inTenant((tx) =>
+      addObjectGrants(tx, t.tenantId, {
+        objectId: t.objectId,
+        grantedBy: BY,
+        grants: [
+          { principal: ana, role: "read", expiresAt: null },
+          { principal: bo, role: "write", expiresAt: null },
+        ],
+      }),
+    );
+    const own = await grant({ principal: bo, target: { objectId: t.objectId } });
+    expect(await inTenant((tx) => revokeGrantsBy(tx, t.tenantId, BY, BY))).toBe(2);
+    expect(await held()).toEqual([]);
+    expect(await row(own)).toMatchObject({ revokedAt: null });
+    // Nothing held: nothing touched.
+    const quiet = await epoch();
+    expect(await inTenant((tx) => revokeGrantsBy(tx, t.tenantId, BY, BY))).toBe(0);
+    expect(await epoch()).toEqual(quiet);
   });
 });
 

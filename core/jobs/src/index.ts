@@ -86,3 +86,11 @@ export {
   type SyncPayload,
   type SyncQueueOptions,
 } from "./sync-schedule.js";
+export {
+  aclResolver,
+  applySourceAcl,
+  sourceGranter,
+  withdrawSourceGrants,
+  type AclOutcome,
+  type AclResolver,
+} from "./acl.js";

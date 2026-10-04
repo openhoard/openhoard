@@ -13,6 +13,7 @@ import {
   resyncError,
   type Connector,
   type ConnectorDescription,
+  type ItemAcl,
   type ItemRef,
   type ReadResult,
   type SourceItem,
@@ -21,6 +22,7 @@ import {
 import type { GraphAuth } from "./auth.js";
 import { graphClient, isForbidden, type GraphClient } from "./graph.js";
 import { retryAfterMs } from "./http.js";
+import { aclEntriesOf } from "./permissions.js";
 import { sitePath } from "./probe.js";
 import {
   folderState,
@@ -64,9 +66,13 @@ import {
  * `recrawlAfterDays` means a crawl from the beginning too (`resync`), whose reconcile also
  * mends anything a delta missed.
  *
+ * Permissions (T-305): aclImport() gives an item's as Graph lists them (permissions.ts), for
+ * the core to turn into grants. A delta is asked to mark the items whose sharing changed; a
+ * folder so marked has everything under it mentioned again, as a moved one has, so each item's
+ * permissions are asked for again.
+ *
  * What it doesn't do yet: be told of changes as they happen (Graph's change notifications),
- * import permissions (aclImport(), T-305: until then only the object's owner in OpenHoard sees
- * a file), pace itself under throttling beyond reporting it (T-306).
+ * pace itself under throttling beyond reporting it (T-306).
  */
 
 export const SHAREPOINT_CONNECTOR_VERSION = "0.1.0";
@@ -104,6 +110,11 @@ export interface SharePointConnectorOptions {
    * renamed and moved folders) before the site is crawled instead. Default 1000.
    */
   roundRequests?: number;
+  /**
+   * False: the site's permissions are not read (aclImport()), and only the object's owner in
+   * OpenHoard sees its files. Default true.
+   */
+  permissions?: boolean;
   /** Default: the global `fetch`. */
   fetch?: typeof fetch;
   /** Milliseconds. Default `Date.now`. */
@@ -115,7 +126,7 @@ const DESCRIPTION: ConnectorDescription = {
   id: "connector-sharepoint",
   version: SHAREPOINT_CONNECTOR_VERSION,
   zoneKinds: ["indexed"],
-  capabilities: { delta: false, aclImport: false, redirect: true },
+  capabilities: { delta: false, aclImport: true, redirect: true },
   stableIds: true,
 };
 
@@ -158,6 +169,10 @@ const MAX_ROUND = 100_000;
 const MAX_CHECKED = 200;
 /** A folder kept under a name the catalog can't hold: it places nothing, and differs from any. */
 const NO_NAME = "";
+/** Items one round may mention when each has its permissions asked for (a request each). */
+const MAX_ROUND_PERMISSIONS = 2000;
+/** Asks a delta to mark the items whose sharing changed (`@microsoft.graph.sharedChanged`). */
+const SHARING_CHANGES = { prefer: "deltashowsharingchanges" };
 /** A crawl stamped this far ahead of the clock was stamped by a clock that was wrong. */
 const CLOCK_SKEW_MS = 86_400_000;
 const STATE_ID = /^[a-z0-9]{8,40}$/;
@@ -279,7 +294,11 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
   }
   const description: ConnectorDescription = {
     ...DESCRIPTION,
-    capabilities: { ...DESCRIPTION.capabilities, delta: state !== undefined },
+    capabilities: {
+      ...DESCRIPTION.capabilities,
+      delta: state !== undefined,
+      aclImport: options.permissions !== false,
+    },
   };
 
   let siteAsked: Promise<string> | undefined;
@@ -684,7 +703,10 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       // A link out of a token may have lapsed since: refused, it means "from the start".
       let fromToken = position.drive === drive.id && position.link !== null;
       for (;;) {
-        const page = await client.json(link, signal).catch((e: unknown) => {
+        // (Asked for sharing changes from the start, so the link the crawl ends with is one
+        // Graph follows them from.)
+        const marked = description.capabilities.aclImport ? { headers: SHARING_CHANGES } : {};
+        const page = await client.json(link, signal, marked).catch((e: unknown) => {
           if (fromToken && isConnectorError(e) && ["permanent", "not-found"].includes(e.code)) {
             throw resyncError();
           }
@@ -763,15 +785,18 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     budget: Budget,
     signal: AbortSignal,
     kept = false,
+    headers?: Record<string, string>,
   ): AsyncGenerator<{ value: unknown[]; delta: string | undefined }> {
     for (let link = first; ;) {
       spend(budget);
-      const page = await client.json(link, signal).catch((e: unknown) => {
-        if (kept && link === first && isConnectorError(e)) {
-          if (e.code === "permanent" || e.code === "not-found") throw resyncError();
-        }
-        throw e;
-      });
+      const page = await client
+        .json(link, signal, headers ? { headers } : {})
+        .catch((e: unknown) => {
+          if (kept && link === first && isConnectorError(e)) {
+            if (e.code === "permanent" || e.code === "not-found") throw resyncError();
+          }
+          throw e;
+        });
       if (!Array.isArray(page.value)) {
         throw new ConnectorError("retryable", "Graph's answer wasn't a page of items");
       }
@@ -843,7 +868,10 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     let unnamed = 0;
     let entries = 0;
     let next: string | undefined;
-    for await (const page of pagesOf(link, budget, signal, true)) {
+    // With permissions imported, Graph is asked to say whose sharing changed: a folder's
+    // sharing changing changes what everything inheriting from it lets people see.
+    const asked = description.capabilities.aclImport ? SHARING_CHANGES : undefined;
+    for await (const page of pagesOf(link, budget, signal, true, asked)) {
       for (const raw of page.value) {
         const id = isObject(raw) ? str(raw.id) : undefined;
         if (!isObject(raw) || id === undefined || !GRAPH_ID.test(id)) unnamed++;
@@ -878,6 +906,13 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       changed = true;
     };
     for (const [id, raw] of last) {
+      // Its sharing changed (the library's own, or a folder's): what is in it is mentioned
+      // again, as for a moved folder, so the runner asks for each item's permissions again.
+      const shared = String(raw["@microsoft.graph.sharedChanged"]).toLowerCase() === "true";
+      const container = isObject(raw.root) || isObject(raw.folder) || isObject(raw.package);
+      if (shared && container && !isObject(raw.deleted) && description.capabilities.aclImport) {
+        moved.add(id);
+      }
       if (isObject(raw.deleted)) {
         if (folders.delete(id)) gone.add(id);
       } else if (isObject(raw.root)) keep(id, null, drive.name);
@@ -904,7 +939,13 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     const add = (more: SyncEvent[]) => {
       events.push(...more);
       // More than a round should hold in memory: a crawl yields as it goes.
-      if (events.length > MAX_ROUND) throw resyncError();
+      // And with permissions imported each item is a request more, all of them before the
+      // round's checkpoint: more than fit one run are a crawl's work too.
+      if (
+        events.length > (description.capabilities.aclImport ? MAX_ROUND_PERMISSIONS : MAX_ROUND)
+      ) {
+        throw resyncError();
+      }
     };
     // An entry that can't be named: nothing can be said of it. The next crawl will.
     for (let i = 0; i < unnamed; i++) events.push({ type: "warning", code: "unreadable" });
@@ -1180,10 +1221,49 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     throw new ConnectorError("permanent", `the download was refused (${status})`);
   }
 
+  /** Pages of permissions followed for one item: far more than any item has. */
+  const MAX_PERMISSION_PAGES = 50;
+
+  /** Who SharePoint lets see an item (permissions.ts), for the core to match to its own. */
+  async function aclImport(ref: ItemRef, signal: AbortSignal): Promise<ItemAcl> {
+    signal.throwIfAborted();
+    const at = parseExternalId(ref.externalId);
+    if (!at) throw notFoundError("not an item of this source");
+    const site = await siteId(signal);
+    const permissions: unknown[] = [];
+    let link: string | undefined = `${itemUrl(at.drive, at.item)}/permissions`;
+    for (let pages = 0; link !== undefined; pages++) {
+      if (pages >= MAX_PERMISSION_PAGES) {
+        // Asking again gives the same: this item is passed over, with what it had withdrawn.
+        throw new ConnectorError("permanent", "Graph's list of permissions doesn't end");
+      }
+      const page: Raw = await client.json(link, signal).catch((e: unknown) => {
+        // The site's items were just listed: this one item's permissions are refused, not
+        // the app. Passed over (and what the source had granted on it withdrawn): the rest of
+        // the site goes on. A site where every item is refused shows as every file skipped.
+        if (isForbidden(e)) {
+          throw new ConnectorError("permanent", "Graph refused this item's permissions");
+        }
+        throw e;
+      });
+      if (!Array.isArray(page.value)) {
+        throw new ConnectorError("retryable", "Graph's answer wasn't a list of permissions");
+      }
+      permissions.push(...(page.value as unknown[]));
+      const next = str(page["@odata.nextLink"]);
+      if (next !== undefined && (next === link || !client.owns(next))) {
+        throw new ConnectorError("permanent", "Graph's next page of permissions isn't one");
+      }
+      link = next;
+    }
+    return { basis: "source", entries: aclEntriesOf(permissions, site) };
+  }
+
   return defineConnector({
     describe: () => description,
     crawl,
     ...(state ? { delta } : {}),
+    ...(description.capabilities.aclImport ? { aclImport } : {}),
     read,
     async redirect(ref, signal) {
       signal.throwIfAborted();
