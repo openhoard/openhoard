@@ -82,6 +82,8 @@ const source = (more: Record<string, unknown> = {}) => ({
   downloadHosts: ["graph.test"],
   zone: "Finance",
   owner: "steve@example.com",
+  // (No pacing in these tests: the default budget would take real minutes.)
+  graphUnitsPerMinute: 1_000_000,
   ...more,
 });
 const keys = () => tenantKeyStore(dataDir, { hasContent: async () => false });
@@ -122,6 +124,32 @@ describe("a SharePoint site in the configuration", { timeout: 120_000 }, () => {
     expect(whole({ recrawlAfterDays: 0, importPermissions: false })).toBe(true);
     expect(whole({ recrawlAfterDays: 7 })).toBe(true);
     expect(ok({ importPermissions: false })).toBe(true);
+    expect(ok({ graphUnitsPerMinute: 100 })).toBe(false);
+    expect(ok({ graphUnitsPerMinute: 2500 })).toBe(true);
+    // Sources of one app in one directory share a budget: they can't each name their own.
+    const two = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+      ConfigSchema.safeParse({
+        dataDir,
+        sources: [source(a), source({ id: "sp-other", zone: "Other", ...b })],
+      }).success;
+    expect(two({}, {})).toBe(true);
+    expect(two({ graphUnitsPerMinute: 2000 }, { graphUnitsPerMinute: 4000 })).toBe(false);
+    expect(two({ graphUnitsPerMinute: 2000 }, { graphUnitsPerMinute: undefined })).toBe(false);
+    // Saying the default is saying nothing; and Graph named is Graph, however it is written.
+    expect(two({ graphUnitsPerMinute: 800 }, { graphUnitsPerMinute: undefined })).toBe(true);
+    const globally = { graph: undefined, authority: undefined };
+    expect(
+      two(
+        { ...globally, graphUnitsPerMinute: 2000 },
+        { ...globally, graph: "https://graph.microsoft.com", graphUnitsPerMinute: 4000 },
+      ),
+    ).toBe(false);
+    expect(
+      two(
+        { graphUnitsPerMinute: 2000 },
+        { graphUnitsPerMinute: 4000, clientId: "99999999-2222-4333-8444-555555555555" },
+      ),
+    ).toBe(true);
     expect(ok({ importPermissions: "yes" })).toBe(false);
     expect(ok({ recrawlAfterDays: -1 })).toBe(false);
     expect(ok({ authority: undefined, graph: undefined, downloadHosts: undefined })).toBe(true);

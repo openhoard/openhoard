@@ -11,7 +11,16 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { graphAuth } from "./auth.js";
 import { sharepointConnector, type SharePointConnectorOptions } from "./connector.js";
-import { AUTHORITY, CLIENT_ID, fakes, GRAPH, SECRET, type Fakes } from "./testing/fakes.js";
+import { pacer } from "./pace.js";
+import {
+  AUTHORITY,
+  CLIENT_ID,
+  fakes,
+  GRAPH,
+  SECRET,
+  UNPACED,
+  type Fakes,
+} from "./testing/fakes.js";
 
 /*
  * T-304: following a site's changes. The measure throughout: what a catalog holds after a crawl
@@ -50,6 +59,8 @@ function connector(over: Partial<SharePointConnectorOptions> = {}): Connector {
     site: site.id,
     fetch: send,
     now: () => f.clock.now,
+    sleep: f.sleep,
+    unitsPerMinute: UNPACED,
     pageSize: 10,
     stateDir,
     ...over,
@@ -390,7 +401,7 @@ describe("a round of changes", () => {
       items().length + 1,
     );
     // More than one run can ask the permissions of is a crawl's work (a page at a time).
-    for (let n = 0; n < 2100; n++) store().addFile(site.driveId, folder.id, `bulk ${n}.txt`, 1);
+    for (let n = 0; n < 600; n++) store().addFile(site.driveId, folder.id, `bulk ${n}.txt`, 1);
     const why = await failure(delta(cursor, connector({ fetch: top, roundRequests: 5000 })));
     expect(why && errorCode(why)).toBe("resync");
     for (const added of items().filter((i) => i.name.startsWith("bulk "))) store().delete(added.id);
@@ -402,6 +413,58 @@ describe("a round of changes", () => {
     expect(fewer.filter((e) => e.type === "item")).toHaveLength(1);
     const unasked = f.sent.slice(at).find((r) => r.url.includes("/root/delta"));
     expect(new Headers(unasked?.init?.headers).get("prefer")).toBeNull();
+  });
+
+  it("is sized to what the budget lets one run ask: slowed, it waits; too much at any rate is a crawl's", async () => {
+    const budget = pacer({ now: () => f.clock.now, sleep: f.sleep, unitsPerMinute: 800 });
+    const paced = () => connector({ pacer: budget });
+    const cursor = cursorOf(await crawl(paced()));
+    const folder = folderWith((c) => c.length > 1);
+    for (let n = 0; n < 250; n++) store().addFile(site.driveId, folder.id, `new ${n}.txt`, 1);
+    // 250 files fit a run at 800 units a minute (400 do)...
+    const whole = await delta(cursor, paced());
+    expect(whole.filter((e) => e.type === "item").length).toBeGreaterThanOrEqual(250);
+    // ...but not at half that, after a throttle: the round waits for the rate to come back,
+    // rather than crawl the site at the moment Graph asked for less.
+    budget.throttled(1000);
+    f.clock.now += 1000;
+    const slowed = await failure(delta(cursor, paced()));
+    expect([errorCode(slowed), (slowed as { retryAfterMs?: number }).retryAfterMs]).toEqual([
+      "throttled",
+      300_000,
+    ]);
+    f.clock.now += 10 * 60_000;
+    expect((await delta(cursor, paced())).at(-1)?.type).toBe("done");
+    // More than a run could ask at the full budget is a crawl's work.
+    for (let n = 0; n < 200; n++) store().addFile(site.driveId, folder.id, `more ${n}.txt`, 1);
+    expect(errorCode(await failure(delta(cursor, paced())))).toBe("resync");
+  });
+
+  it("asks for pages a run can record at a tenth of its budget, unless told a size", async () => {
+    const first = async (unitsPerMinute: number) => {
+      const at = f.sent.length;
+      const events = sharepointConnector({
+        auth: graphAuth({
+          tenant: f.tenant.domain,
+          clientId: CLIENT_ID,
+          credential: { kind: "secret", secret: SECRET },
+          authority: AUTHORITY,
+          graph: GRAPH,
+          fetch: f.fetch,
+          now: () => f.clock.now,
+        }),
+        site: site.id,
+        fetch: f.fetch,
+        pacer: pacer({ now: () => f.clock.now, sleep: f.sleep, unitsPerMinute }),
+      }).crawl(null, never);
+      for await (const e of events) if (e.type === "checkpoint") break;
+      const asked = f.sent.slice(at).find((r) => r.url.includes("/root/delta"));
+      return new URL(asked?.url ?? "").searchParams.get("$top");
+    };
+    expect(await first(800)).toBe("40");
+    expect(await first(250)).toBe("12");
+    expect(await first(100_000)).toBe("50");
+    expect(() => connector({ unitsPerMinute: 50 })).toThrow(RangeError);
   });
 
   it("sees a folder given a name it can hold after one it couldn't", async () => {

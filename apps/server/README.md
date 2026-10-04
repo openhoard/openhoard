@@ -99,16 +99,17 @@ each library a folder at the top.
 }
 ```
 
-| Field                | What                                                                                                                                                                      |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `site`               | the site, by host and path (`contoso.sharepoint.com:/sites/finance`) or by its id as Graph gives it. One source is one site                                               |
-| `directory`          | the Entra directory (tenant) the app is registered in: its id, or a domain it has verified. Not OpenHoard's `tenantId`                                                    |
-| `clientId`           | the app registration's client id. Give the app the application permission `Sites.Selected`, and grant it this site (the connector's README says how, and how to check it) |
-| `certificate`        | `{ "certificateFile": …, "privateKeyFile": … }`: PEM files, absolute paths, readable by the server only. Preferred. Without it, the client secret below                   |
-| `authority`, `graph` | a national cloud's addresses (https origins). Default: the global cloud's                                                                                                 |
-| `downloadHosts`      | hosts a file's bytes may be fetched from besides Graph. Default `[".sharepoint.com"]`                                                                                     |
-| `recrawlAfterDays`   | how old a crawl may be before the site is crawled again instead of followed. Default 7; 0 never                                                                           |
-| `importPermissions`  | whether SharePoint's permissions become grants here (below). Default true                                                                                                 |
+| Field                 | What                                                                                                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `site`                | the site, by host and path (`contoso.sharepoint.com:/sites/finance`) or by its id as Graph gives it. One source is one site                                               |
+| `directory`           | the Entra directory (tenant) the app is registered in: its id, or a domain it has verified. Not OpenHoard's `tenantId`                                                    |
+| `clientId`            | the app registration's client id. Give the app the application permission `Sites.Selected`, and grant it this site (the connector's README says how, and how to check it) |
+| `certificate`         | `{ "certificateFile": …, "privateKeyFile": … }`: PEM files, absolute paths, readable by the server only. Preferred. Without it, the client secret below                   |
+| `authority`, `graph`  | a national cloud's addresses (https origins). Default: the global cloud's                                                                                                 |
+| `downloadHosts`       | hosts a file's bytes may be fetched from besides Graph. Default `[".sharepoint.com"]`                                                                                     |
+| `recrawlAfterDays`    | how old a crawl may be before the site is crawled again instead of followed. Default 7; 0 never                                                                           |
+| `importPermissions`   | whether SharePoint's permissions become grants here (below). Default true                                                                                                 |
+| `graphUnitsPerMinute` | Graph's resource units a minute the app may spend (below). Default 800, 250 at least                                                                                      |
 
 `id`, `tenantId`, `zone`, `owner`, `extract` and `reconcileGuard` are as for a folder.
 `schedule` defaults to every fifteen minutes. The first sync crawls the site; those after ask
@@ -180,8 +181,9 @@ source status`, as of the last run: a crawl's run counts the whole site, a later
   until it is, take `recrawlAfterDays` as the bound (the configuration refuses 0 while
   permissions are imported). A source that is
   stopped (`admin source status`) visits nothing: its grants stay as they were.
-- **Cost.** One Graph request per file each time it is visited: a crawl of 20,000 files is
-  20,000 requests more (an hour or so, over several runs). Every file is a grant per person or
+- **Cost.** One Graph request per file each time it is visited, five of Graph's units each: a
+  crawl of 20,000 files is two hours of the default budget for permissions alone ("Pacing"
+  below), over many runs. Every file is a grant per person or
   group named, and a person's grants are loaded when they search: this is sized for sites of
   some tens of thousands of files, not hundreds of thousands.
 - `"importPermissions": false` leaves a site's files to `owner` alone: what an earlier import
@@ -191,9 +193,17 @@ source status`, as of the last run: a crawl's run counts the whole site, a later
   withdrawn until the file is next visited. A site where every file is skipped that way is an
   app that can't read permissions: grant it, or turn the import off.
 
+**Pacing (T-306).** Requests to Graph keep to `graphUnitsPerMinute` (default 800 of Graph's
+resource units, under its smallest tenant's limits as Microsoft documents them), one budget for
+every source signed in as the same app in the same directory (the configuration refuses two
+that give different figures). Each node has its own: with several, divide it. When Graph says to slow down, the sync
+waits in place, up to about a minute a request, and goes on; asked for more, it stops and comes back
+after the wait, from its last checkpoint. Nothing is lost either way. A first crawl costs some
+eight units a file, so 20,000 files take over three hours at the default: a tenant with more
+licences has a higher limit, and raising the budget shortens crawls in proportion.
+
 What it doesn't do yet: be told of changes as they happen (Graph's change notifications, the
-rest of T-304); resolve SharePoint groups; and a throttled sync stops and comes back after the
-wait Graph asked for (T-306). It hasn't been run against a real tenant yet.
+rest of T-304), and resolve SharePoint groups. It hasn't been run against a real tenant yet.
 
 Content is read through the source's connector, checked against the version's size and BLAKE3
 blob id with the tenant's blob key. **Tenant blob keys** live in `<dataDir>/keys/<tenant>.blob-key`

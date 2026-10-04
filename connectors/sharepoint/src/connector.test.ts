@@ -14,7 +14,15 @@ import { contentBytes } from "@openhoard/testkit";
 import { beforeEach, describe, expect, it } from "vitest";
 import { graphAuth } from "./auth.js";
 import { sharepointConnector, type SharePointConnectorOptions } from "./connector.js";
-import { AUTHORITY, CLIENT_ID, fakes, GRAPH, SECRET, type Fakes } from "./testing/fakes.js";
+import {
+  AUTHORITY,
+  CLIENT_ID,
+  fakes,
+  GRAPH,
+  SECRET,
+  UNPACED,
+  type Fakes,
+} from "./testing/fakes.js";
 
 /*
  * T-303: the connector crawls one site's libraries through the fake Graph (whose delta feed is
@@ -47,6 +55,8 @@ function connector(over: Partial<SharePointConnectorOptions> = {}): Connector {
     site: site.id,
     fetch: send,
     now: () => f.clock.now,
+    sleep: f.sleep,
+    unitsPerMinute: UNPACED,
     pageSize: 10,
     ...over,
   });
@@ -441,7 +451,8 @@ describe("a crawl that can't go on", () => {
   });
 
   it("reports a busy Graph as the runner expects, and resumes after it", async () => {
-    const c = connector();
+    // (Told to wait for nothing in place: every throttle is the runner's to wait out.)
+    const c = connector({ maxWaitMs: 0 });
     const events: SyncEvent[] = [];
     let token: string | null = null;
     const run = async () => {
@@ -457,10 +468,17 @@ describe("a crawl that can't go on", () => {
     };
     const throttled = await failure(run());
     expect([errorCode(throttled), throttled?.retryAfterMs]).toEqual(["throttled", 5000]);
-    f.graph.failNext(503);
+    // Come back too soon, it doesn't even ask: the wait Graph named isn't over.
+    f.clock.now += 3000;
+    const early = await failure(run());
+    expect([errorCode(early), early?.retryAfterMs]).toEqual(["throttled", 2000]);
+    f.clock.now += 2001;
+    // A failure of the moment is asked again twice before it is the runner's.
+    f.graph.failNext(503, 3);
     expect(errorCode(await failure(run()))).toBe("retryable");
     f.graph.failNext(503, 1, 2);
     expect((await failure(run()))?.retryAfterMs).toBe(2000);
+    f.clock.now += 2001;
     await run();
     expect(new Set(itemsOf(events).map((i) => i.externalId)).size).toBe(inSite().length + 1);
   });

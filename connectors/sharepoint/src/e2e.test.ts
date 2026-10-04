@@ -17,7 +17,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { graphAuth } from "./auth.js";
 import { sharepointConnector, type SharePointConnectorOptions } from "./connector.js";
 import { AccessModel } from "@openhoard/testkit";
-import { AUTHORITY, CLIENT_ID, fakes, GRAPH, SECRET, type Fakes } from "./testing/fakes.js";
+import {
+  AUTHORITY,
+  CLIENT_ID,
+  fakes,
+  GRAPH,
+  SECRET,
+  UNPACED,
+  type Fakes,
+} from "./testing/fakes.js";
 
 /*
  * T-303's done-when, through the real sync runner into the catalog (PGlite, or PostgreSQL with
@@ -39,7 +47,10 @@ let db: Database;
 let t: SeededTenant;
 let f: Fakes;
 
-function setUp(items: number, more: { contentHashes?: boolean } = {}) {
+function setUp(
+  items: number,
+  more: { contentHashes?: boolean; throttle?: { limit: number; windowMs: number } } = {},
+) {
   f = fakes({ items, maxFileBytes: 512, ...more });
   f.entra.registerApp({ clientId: CLIENT_ID, secret: SECRET, appRoles: ["Sites.Selected"] });
   for (const site of f.tenant.sites) f.entra.grantSite(CLIENT_ID, site.id);
@@ -71,6 +82,8 @@ function connectorOf(siteId: string, more: Partial<SharePointConnectorOptions> =
     site: siteId,
     fetch: send,
     now: () => f.clock.now,
+    sleep: f.sleep,
+    unitsPerMinute: UNPACED,
     pageSize: 50,
     ...more,
   });
@@ -79,7 +92,13 @@ function connectorOf(siteId: string, more: Partial<SharePointConnectorOptions> =
 /** One run of the runner over one site, with a new connector each time. */
 function sync(
   siteId: string,
-  more: { signal?: AbortSignal; maxItems?: number; fetch?: typeof fetch; stateDir?: string } = {},
+  more: {
+    signal?: AbortSignal;
+    maxItems?: number;
+    fetch?: typeof fetch;
+    stateDir?: string;
+    unitsPerMinute?: number;
+  } = {},
 ): Promise<SyncReport> {
   return runSync(db, {
     tenantId: t.tenantId,
@@ -88,6 +107,7 @@ function sync(
     connector: connectorOf(siteId, {
       ...(more.fetch === undefined ? {} : { fetch: more.fetch }),
       ...(more.stateDir === undefined ? {} : { stateDir: more.stateDir }),
+      ...(more.unitsPerMinute === undefined ? {} : { unitsPerMinute: more.unitsPerMinute }),
     }),
     ownerId: `user:${t.userId}`,
     tenantKey: () => KEY,
@@ -620,5 +640,70 @@ describe("a site's permissions through the sync runner (T-305)", () => {
     const [row] = await db.withTenant(t.tenantId, (tx) => tx.select({ n: count() }).from(grants));
     // (The seeded tenant's own fixture grant aside.)
     expect(Number(row?.n)).toBeLessThanOrEqual(1);
+  }, 240_000);
+});
+
+describe("a throttling Graph through the sync runner (T-306)", () => {
+  /** A `fetch` that counts how often Graph said to slow down. */
+  function counting() {
+    const seen = { throttled: 0, graph: 0 };
+    const send: typeof fetch = async (input, init) => {
+      const response = await f.fetch(input, init);
+      if (String(input).startsWith(GRAPH)) {
+        seen.graph++;
+        if (response.status === 429) seen.throttled++;
+      }
+      return response;
+    };
+    return { seen, send };
+  }
+
+  it("is waited out in place: the site is indexed whole, in one run, with nothing lost", async () => {
+    // Graph allows 10 requests a minute; the connector isn't told, and asks as fast as it can.
+    setUp(300, { throttle: { limit: 10, windowMs: 60_000 } });
+    const site = f.tenant.sites[0] as { id: string };
+    const { seen, send } = counting();
+    const started = f.clock.now;
+    const report = await sync(site.id, { fetch: send });
+    expect(report).toMatchObject({ status: "done", skipped: [], warnings: [] });
+    expect(report.counts.files).toBe(filesOf(site.id));
+    expect(await recorded(site.id)).toBe(filesOf(site.id));
+    // It was throttled, often, and each time waited as long as it was told before asking again.
+    expect(seen.throttled).toBeGreaterThan(3);
+    expect(f.clock.now - started).toBeGreaterThan(3 * 60_000);
+    // What it reads is what the site has: a fresh look agrees.
+    expect(await cataloged(site.id)).toEqual(await crawled(site.id));
+  }, 240_000);
+
+  it("is never met by a connector that keeps to a budget under Graph's limit", async () => {
+    // Graph allows 300 requests a minute; the connector spends 250 units a minute, and a
+    // request costs a unit at least.
+    setUp(300, { throttle: { limit: 300, windowMs: 60_000 } });
+    const site = f.tenant.sites[0] as { id: string };
+    const { seen, send } = counting();
+    const started = f.clock.now;
+    const report = await sync(site.id, { fetch: send, unitsPerMinute: 250 });
+    expect(report).toMatchObject({ status: "done", skipped: [] });
+    expect(await recorded(site.id)).toBe(filesOf(site.id));
+    expect(seen.throttled).toBe(0);
+    // Paced: the requests took at least as long as their units allow (a permissions list is
+    // five, and there is one a file).
+    const minutes = (f.clock.now - started) / 60_000;
+    expect(minutes).toBeGreaterThan((filesOf(site.id) * 5) / 250 - 1);
+  }, 240_000);
+
+  it("that asks for more waiting than a run should do in place is the runner's to come back to", async () => {
+    setUp(300);
+    const site = f.tenant.sites[0] as { id: string };
+    let n = 0;
+    const once: typeof fetch = (input, init) =>
+      String(input).includes("/permissions") && ++n === 5
+        ? Promise.resolve(new Response("{}", { status: 429, headers: { "retry-after": "600" } }))
+        : f.fetch(input, init);
+    const first = await sync(site.id, { fetch: once });
+    expect(first).toMatchObject({ status: "retry", error: "throttled", retryAfterMs: 600_000 });
+    // Nothing is lost: the next run goes on, and ends with every file.
+    expect(await sync(site.id)).toMatchObject({ status: "done", skipped: [] });
+    expect(await recorded(site.id)).toBe(filesOf(site.id));
   }, 240_000);
 });

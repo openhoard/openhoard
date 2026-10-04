@@ -15,3 +15,4 @@ export {
   type SharePointConnectorOptions,
 } from "./connector.js";
 export { graphClient, type GraphClient, type GraphClientOptions } from "./graph.js";
+export { DEFAULT_UNITS_PER_MINUTE, pacer, sharedPacer, type Pacer } from "./pace.js";

@@ -17,7 +17,12 @@ export interface Fakes {
   fetch: typeof fetch;
   /** Every request `fetch` sent, in order. */
   sent: { url: string; init: RequestInit | undefined }[];
+  /** A wait that moves the clock instead of taking the time. */
+  sleep: (ms: number) => Promise<void>;
 }
+
+/** A budget no test reaches: pacing is out of the way unless a test is about it. */
+export const UNPACED = 1e12;
 
 /** A tenant id as Entra's are, which the fake Entra answers to as well as to its domain. */
 export const TENANT_GUID = "0f0e0d0c-0b0a-4908-8706-050403020100";
@@ -30,9 +35,11 @@ export function fakes(
     pageSize?: number;
     /** False: no file has a content hash (FakeGraphOptions.contentHashes). */
     contentHashes?: boolean;
+    /** Graph answers 429 past this many requests a window (FakeGraphOptions.throttle). */
+    throttle?: { limit: number; windowMs: number };
   } = {},
 ): Fakes {
-  const { items = 200, maxFileBytes, pageSize, contentHashes, ...entraOptions } = options;
+  const { items = 200, maxFileBytes, pageSize, contentHashes, throttle, ...entraOptions } = options;
   const tenant = generateTenant({ items });
   // Small files, for tests that read every one: the generator's run to gigabytes.
   if (maxFileBytes !== undefined) {
@@ -50,6 +57,7 @@ export function fakes(
     now: () => clock.now,
     ...(pageSize === undefined ? {} : { pageSize }),
     ...(contentHashes === undefined ? {} : { contentHashes }),
+    ...(throttle === undefined ? {} : { throttle }),
   });
   const sent: Fakes["sent"] = [];
   const send: typeof fetch = (input, init) => {
@@ -59,5 +67,9 @@ export function fakes(
     if (url.startsWith(`${GRAPH}/`)) return graph.fetch(url, init);
     return Promise.reject(new TypeError(`fetch failed: nothing at ${url}`));
   };
-  return { tenant, entra, graph, clock, fetch: send, sent };
+  const sleep = (ms: number) => {
+    clock.now += ms;
+    return Promise.resolve();
+  };
+  return { tenant, entra, graph, clock, fetch: send, sent, sleep };
 }

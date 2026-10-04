@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { DEFAULT_UNITS_PER_MINUTE } from "@openhoard/connector-sharepoint";
 import { z } from "zod";
 
 /**
@@ -488,6 +489,12 @@ export const SharePointSourceSchema = z
      * files (grants an earlier import made are withdrawn as each file is next recorded).
      */
     importPermissions: z.boolean().default(true),
+    /**
+     * Graph's resource units a minute the app may spend in its directory (T-306), shared by
+     * every source signed in as the same app there, which must all say the same. Default 800,
+     * under Graph's smallest limits; a larger tenant allows more. Each node spends it.
+     */
+    graphUnitsPerMinute: z.number().int().min(250).max(1_000_000).optional(),
     /** A national cloud's addresses. Default: the global cloud's. */
     authority: ORIGIN.optional(),
     graph: ORIGIN.optional(),
@@ -686,7 +693,25 @@ export const ConfigSchema = z
         message: "uploads need sign-in: configure auth",
       });
     }
+    /** Where Graph is when a source doesn't say (the connector's default). */
+    const DEFAULT_GRAPH = "https://graph.microsoft.com";
+    const budgets = new Map<string, number>();
     c.sources.forEach((source, i) => {
+      if (source.connector === "sharepoint") {
+        // One budget an app and directory: two sources of it can't each set their own.
+        const graph = (source.graph ?? DEFAULT_GRAPH).replace(/\/+$/, "").toLowerCase();
+        const app = `${graph}|${source.directory.toLowerCase()}|${source.clientId.toLowerCase()}`;
+        const units = source.graphUnitsPerMinute ?? DEFAULT_UNITS_PER_MINUTE;
+        if (budgets.has(app) && budgets.get(app) !== units) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["sources", i, "graphUnitsPerMinute"],
+            message:
+              "sources signed in as the same app in the same directory share one budget: give them the same graphUnitsPerMinute",
+          });
+        }
+        budgets.set(app, units);
+      }
       // The crawl is what bounds how long a permission removed at SharePoint can still read
       // here: without one, a change the delta doesn't report would never be seen.
       if (

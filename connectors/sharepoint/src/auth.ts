@@ -64,6 +64,11 @@ export interface GraphAuthOptions {
 export interface GraphAuth {
   /** Where Graph is, without a slash at the end. */
   readonly graph: string;
+  /**
+   * The app in its tenant, as Graph limits it: every connector signed in as the same account
+   * shares one budget of requests (pace.ts). Nothing secret: the tenant and the client id.
+   */
+  readonly account?: string;
   /** An app-only token for Graph. */
   appToken(signal: AbortSignal): Promise<string>;
   /**
@@ -405,6 +410,7 @@ export function graphAuth(options: GraphAuthOptions): GraphAuth {
 
   return {
     graph,
+    account: `${graph}|${options.tenant.toLowerCase()}|${options.clientId.toLowerCase()}`,
 
     async appToken(signal) {
       signal.throwIfAborted();

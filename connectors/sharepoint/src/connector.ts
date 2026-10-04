@@ -22,6 +22,7 @@ import {
 import type { GraphAuth } from "./auth.js";
 import { graphClient, isForbidden, type GraphClient } from "./graph.js";
 import { retryAfterMs } from "./http.js";
+import { pacer, sharedPacer, type Pacer } from "./pace.js";
 import { aclEntriesOf } from "./permissions.js";
 import { sitePath } from "./probe.js";
 import {
@@ -71,8 +72,10 @@ import {
  * folder so marked has everything under it mentioned again, as a moved one has, so each item's
  * permissions are asked for again.
  *
- * What it doesn't do yet: be told of changes as they happen (Graph's change notifications),
- * pace itself under throttling beyond reporting it (T-306).
+ * Requests keep to a budget shared by every source of the same app and tenant, and a throttle
+ * is waited out in place when the wait is short (T-306: pace.ts, graph.ts).
+ *
+ * What it doesn't do yet: be told of changes as they happen (Graph's change notifications).
  */
 
 export const SHAREPOINT_CONNECTOR_VERSION = "0.1.0";
@@ -85,7 +88,12 @@ export interface SharePointConnectorOptions {
    * (`contoso.sharepoint.com:/sites/finance`).
    */
   site: string;
-  /** Items asked for per page (1 to 999). Default 200. A checkpoint follows each page. */
+  /**
+   * Items asked for per page (1 to 999). A checkpoint follows each page, and a page's files are
+   * recorded before it (a permissions list and a read each). Default: what the budget lets a
+   * run ask in a few minutes when the pacer has slowed to a tenth: 40 at 800 units a minute,
+   * 50 at most, 10 at least.
+   */
   pageSize?: number;
   /**
    * Where a file's bytes may be fetched from besides Graph itself: host names, or suffixes
@@ -115,6 +123,21 @@ export interface SharePointConnectorOptions {
    * OpenHoard sees its files. Default true.
    */
   permissions?: boolean;
+  /**
+   * Graph's resource units a minute this app may spend in its tenant (pace.ts): the budget is
+   * shared by every source signed in as the same app, and the first to start sets it. Default
+   * 800, under Graph's smallest limits; 100 at least.
+   */
+  unitsPerMinute?: number;
+  /**
+   * How long one request may wait in place for Graph's throttling before the sync stops to
+   * come back later, in ms. Default 60 s.
+   */
+  maxWaitMs?: number;
+  /** How it waits (tests move their clock). Default: a timer. With `now`, it paces alone. */
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** What paces its requests, instead of the app's shared pacer (pace.ts). */
+  pacer?: Pacer;
   /** Default: the global `fetch`. */
   fetch?: typeof fetch;
   /** Milliseconds. Default `Date.now`. */
@@ -169,8 +192,18 @@ const MAX_ROUND = 100_000;
 const MAX_CHECKED = 200;
 /** A folder kept under a name the catalog can't hold: it places nothing, and differs from any. */
 const NO_NAME = "";
-/** Items one round may mention when each has its permissions asked for (a request each). */
-const MAX_ROUND_PERMISSIONS = 2000;
+/**
+ * Items one round may mention, at most, when each has its permissions asked for: all of them
+ * are asked before the round's checkpoint, so a round is sized to what the budget lets one run
+ * ask (see `fits` in roundOf()).
+ */
+const MAX_ROUND_PERMISSIONS = 500;
+/** Graph's units a file costs when it is recorded: its permissions (5) and its read (3). */
+const UNITS_A_FILE = 8;
+/** How long the work between two checkpoints is sized to take, in minutes: well inside a run. */
+const RUN_MINUTES = 4;
+/** The least budget a connector takes: under it a single page can't fit a run. */
+const MIN_UNITS_PER_MINUTE = 100;
 /** Asks a delta to mark the items whose sharing changed (`@microsoft.graph.sharedChanged`). */
 const SHARING_CHANGES = { prefer: "deltashowsharingchanges" };
 /** A crawl stamped this far ahead of the clock was stamped by a clock that was wrong. */
@@ -263,9 +296,14 @@ interface Tree {
 }
 
 export function sharepointConnector(options: SharePointConnectorOptions): Connector {
-  const pageSize = options.pageSize ?? 200;
-  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > 999) {
+  if (
+    options.pageSize !== undefined &&
+    !(Number.isSafeInteger(options.pageSize) && options.pageSize >= 1 && options.pageSize <= 999)
+  ) {
     throw new RangeError("pageSize must be 1 to 999");
+  }
+  if (options.unitsPerMinute !== undefined && !(options.unitsPerMinute >= MIN_UNITS_PER_MINUTE)) {
+    throw new RangeError(`unitsPerMinute must be ${MIN_UNITS_PER_MINUTE} or more`);
   }
   const sitePathname = sitePath(options.site); // refused now, not at the first sync
   const now = options.now ?? Date.now;
@@ -277,11 +315,36 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       "downloadHosts must be host names, or suffixes starting with a dot (.sharepoint.com)",
     );
   }
+  const pacing = {
+    ...(options.unitsPerMinute === undefined ? {} : { unitsPerMinute: options.unitsPerMinute }),
+    ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+  };
   const client: GraphClient = graphClient({
     auth: options.auth,
     now,
+    // One budget an app and tenant, whichever of its sources is asking. A connector given a
+    // clock of its own (tests) paces by that clock, alone.
+    pacer:
+      options.pacer ??
+      (options.now === undefined && options.sleep === undefined
+        ? sharedPacer(options.auth.account ?? options.auth.graph, pacing)
+        : pacer({ ...pacing, now })),
+    ...(options.maxWaitMs === undefined ? {} : { maxWaitMs: options.maxWaitMs }),
     ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
   });
+  /**
+   * Files a page of a crawl holds: each is recorded before the page's checkpoint, some
+   * {@link UNITS_A_FILE} units each, so a page is sized to take about {@link RUN_MINUTES} even
+   * when the pacer has slowed to a tenth of its budget.
+   */
+  const pageSize =
+    options.pageSize ??
+    Math.min(
+      50,
+      Math.max(10, Math.floor((client.pacer.budget * 0.1 * RUN_MINUTES) / UNITS_A_FILE)),
+    );
+  /** Items a list of children is asked for at a time: a list costs the same whatever its size. */
+  const listSize = options.pageSize ?? 200;
   const state: FolderState | undefined =
     options.stateDir === undefined ? undefined : folderState(options.stateDir);
   const recrawlAfterDays = options.recrawlAfterDays ?? 7;
@@ -940,11 +1003,25 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       events.push(...more);
       // More than a round should hold in memory: a crawl yields as it goes.
       // And with permissions imported each item is a request more, all of them before the
-      // round's checkpoint: more than fit one run are a crawl's work too.
-      if (
-        events.length > (description.capabilities.aclImport ? MAX_ROUND_PERMISSIONS : MAX_ROUND)
-      ) {
-        throw resyncError();
+      // round's checkpoint: more than fit one run, at the rate the pacer allows itself now, are
+      // a crawl's work too (it asks them a page at a time).
+      if (!description.capabilities.aclImport) {
+        if (events.length > MAX_ROUND) throw resyncError();
+        return;
+      }
+      const fits = (unitsPerMinute: number) =>
+        Math.min(
+          MAX_ROUND_PERMISSIONS,
+          Math.max(10, Math.floor((unitsPerMinute * RUN_MINUTES) / UNITS_A_FILE)),
+        );
+      // More than a run could ask at the full budget is a crawl's work (a page at a time).
+      if (events.length > fits(client.pacer.budget)) throw resyncError();
+      // More than it could ask at the rate the pacer allows itself now, after a throttle,
+      // waits for the rate to come back: a crawl would ask Graph for far more.
+      if (events.length > fits(client.pacer.allowance)) {
+        throw new ConnectorError("throttled", "slowed after a throttle: the round waits", {
+          retryAfterMs: 5 * 60_000,
+        });
       }
     };
     // An entry that can't be named: nothing can be said of it. The next crawl will.
@@ -972,7 +1049,7 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       for (const pending = [top]; pending.length > 0;) {
         const folder = pending.shift() as string;
         listed.add(folder);
-        const children = `${itemUrl(drive.id, folder)}/children?$select=${ITEM_FIELDS}&$top=${pageSize}`;
+        const children = `${itemUrl(drive.id, folder)}/children?$select=${ITEM_FIELDS}&$top=${listSize}`;
         try {
           for await (const page of pagesOf(children, budget, signal)) {
             for (const child of page.value) {
@@ -1210,6 +1287,8 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     if (status === 404) throw changedError();
     const wait = retryAfterMs(response.headers.get("retry-after"), now());
     if (status === 429 || (status === 503 && wait !== undefined)) {
+      // SharePoint said so, not Graph, but it is the same app being told: its requests wait.
+      client.pacer.throttled(wait ?? 30_000);
       throw new ConnectorError("throttled", `the download was asked to slow down (${status})`, {
         retryAfterMs: wait ?? 30_000,
       });

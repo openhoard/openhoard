@@ -287,6 +287,7 @@ export function sharepointSource(
     ...(s.downloadHosts === undefined ? {} : { downloadHosts: s.downloadHosts }),
     ...(s.recrawlAfterDays === undefined ? {} : { recrawlAfterDays: s.recrawlAfterDays }),
     permissions: s.importPermissions,
+    ...(s.graphUnitsPerMinute === undefined ? {} : { unitsPerMinute: s.graphUnitsPerMinute }),
     // With it the connector follows changes; without (a caller's own use), every sync crawls.
     ...(stateDir === undefined ? {} : { stateDir }),
     ...(send === undefined ? {} : { fetch: send }),

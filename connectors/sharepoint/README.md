@@ -3,8 +3,8 @@
 SharePoint sites, indexed in place through Microsoft Graph. **It signs in (T-302), crawls a
 site's document libraries with checkpoints (T-303), follows what changes in them through
 Graph's delta (T-304), and reads each item's permissions for the core to turn into grants
-(T-305).** It isn't yet told of changes as they happen (change notifications), and doesn't pace
-itself under throttling (T-306). In the server it is a source with `"connector": "sharepoint"`
+(T-305), keeping to a budget of requests and waiting when Graph says to (T-306).** It isn't yet
+told of changes as they happen (change notifications). In the server it is a source with `"connector": "sharepoint"`
 (apps/server README, "SharePoint sites on a schedule").
 
 ## Crawling a site (T-303)
@@ -22,7 +22,7 @@ const connector = sharepointConnector({
   after the library (two of one name are told apart by their ids); files and folders are below.
   An item's externalId is `<drive id>:<item id>`: it survives renames and moves in a library.
 - **How.** Library by library, through Graph's delta enumeration from the start
-  (`/drives/{id}/root/delta`), 200 items a page (`pageSize`). A checkpoint follows every page,
+  (`/drives/{id}/root/delta`), 40 items a page at the default budget (`pageSize`). A checkpoint follows every page,
   holding the link to the next one: a crawl killed anywhere goes on from the last page
   recorded. The `done` cursor holds each library's delta link, which is what following changes
   starts from.
@@ -54,7 +54,8 @@ const connector = sharepointConnector({
   is refused (`resync`), and so is a token's link Graph no longer takes.
 - **Failures** are the contract's: 403 on the site, its libraries or a page is `auth` (the site
   isn't granted); 404 `not-found`; 410 `resync`; 429 (and 503 or 504 with Retry-After)
-  `throttled`; other 5xx `retryable`; a site that isn't there `permanent`; the app's token
+  `throttled`, once waiting in place is over (see "Pacing"); other 5xx `retryable`, after two
+  more tries; a site that isn't there `permanent`; the app's token
   refused twice `auth`. One file whose content or download is refused is `permanent`: it is
   passed over and the sync goes on (a site whose policy blocks every download ends `done` with
   every file skipped: look at the skipped count).
@@ -94,8 +95,9 @@ yields that.
 - **A round is bounded.** At most `roundRequests` requests (default 1000: pages of the feed,
   folder listings, folders asked for by id) and 100,000 entries or events. One that would take
   more (a folder with thousands of folders in it renamed) is `resync`: a crawl does the same
-  work a page at a time, with checkpoints. A round is all or nothing: throttled or cut short,
-  it starts again at the next sync (waiting in place is T-306).
+  work a page at a time, with checkpoints. A round is all or nothing: cut short, it starts
+  again at the next sync. A throttle doesn't cut it short unless Graph asks for more waiting
+  than a request may do in place (below).
 - **Deletions** are yielded as `deleted`; the runner counts them against its guard before
   applying any. Graph is taken to say every item in a deleted folder. If it says a folder went
   and not the folders kept under it, it can't have said the files either: `resync`.
@@ -169,14 +171,16 @@ who they are.
 
 - **One request an item**, each time the source mentions it, asked once however often
   recording it is retried. A crawl of a site asks once per file (the spike, S4, measured this
-  as most of a crawl's time): `$batch` and asking only for items with unique permissions are
-  the next step, with pacing (T-306).
+  as most of a crawl's time), and each costs five of Graph's resource units, which is what
+  the budget below is counted in: asking only for items with unique permissions is the next
+  saving (`$batch` saves round trips, not units).
 - **Changes.** The crawl and every delta ask Graph to mark items whose sharing changed
   (`Prefer: deltashowsharingchanges`); a folder, or the library itself, so marked has
   everything under it listed again (as a renamed folder has), so the runner asks for each
-  item's permissions again. While permissions are imported a round may mention 2,000 items at
-  most, whatever the reason (each is a request more, all before the round's checkpoint): more
-  is `resync`, and a crawl asks them a page at a time, with checkpoints. What a delta doesn't report
+  item's permissions again. While permissions are imported a round may mention only what the
+  budget lets one run ask (400 items at the default, see "Pacing"), whatever the reason: each is a request
+  more, all before the round's checkpoint. More is `resync`, and a crawl asks them a page at
+  a time, with checkpoints. What a delta doesn't report
   waits for the next crawl (`recrawlAfterDays`).
 - **Refused** (403 or another refusal of one item's permissions, or a list that doesn't end)
   is `permanent`: the item is passed over, the
@@ -207,6 +211,60 @@ the mapping's own tests only.
   `changed`); which hosts download links point at, and whether they redirect
   (`downloadHosts`); what Graph answers for a next-page link that has lapsed; how many items a
   page really holds, and how often Graph throttles.
+
+## Pacing (T-306)
+
+Graph limits an app in a tenant by resource units a minute and a day (a permissions list costs
+five, a list of children or a delta from its beginning two, an item or a delta with its token
+one), answers 429 past the limit, and throttles longer an app that keeps asking. The costs, the
+limits and the `RateLimit` headers below are Microsoft's as documented when this was written,
+not measured: its page on avoiding throttling in SharePoint Online has the current ones. So the
+connector (`src/pace.ts`, `src/graph.ts`):
+
+- **Keeps a budget.** `unitsPerMinute` (default 800, under the smallest tenant's limits a
+  minute and a day) is spent before a request is sent: a request waits its turn rather than
+  being sent to be refused. A sixth of a minute's budget may go at once. The budget is **one
+  for an app in a tenant, in a process**: every source signed in as the same app shares it
+  (they are throttled together), and the first to start sets it. Several nodes each have their
+  own: divide the budget by their number, or run the sources on one. Spell the tenant the same
+  way in each source (its id, or its domain): the two are not known to be one.
+- **Waits when told.** A throttled answer stops the sending of that app's requests from this
+  process for as long as Graph said (30 s when it didn't; an hour at most, whatever it said),
+  and the request is asked again in place. A request waits no more than about `maxWaitMs` in
+  all (default 60 s) for its turn, its own throttles and those others met meanwhile, and is
+  asked again at most eight times: past that it is `throttled`, with how long is left, and the
+  runner comes back after that from the last checkpoint. (Waits of up to a second for the
+  budget to fill are always taken.) A throttled download tells the pacer too.
+- **Adapts.** Each pause halves the rate it allows itself, down to a tenth of the budget; every
+  fifty answers without one, and every minute without one, give a tenth back. Graph's own
+  warning that most of the limit is used (`RateLimit-Remaining` under a fifth) halves what is
+  left again until the reset it names (five minutes at most; a minute when it names none).
+- **Tries again** twice, one and two seconds later, when Graph gives no answer or a 5xx without
+  a wait, before reporting `retryable`.
+- **Sizes its work to one run.** Everything between two checkpoints is asked in one run, so it
+  is sized to take about four minutes of budget at some eight units a file. A crawl's page
+  (`pageSize`) is sized for a pacer slowed to a tenth: 40 files at the default budget, 12 at the
+  least the server takes (250), 50 at most. A delta round with permissions imported may mention
+  what the full budget allows (400 items at the default, 500 at most): more is a crawl's work
+  (`resync`). A round that fits the budget but not the rate the pacer allows itself just now
+  waits (`throttled`, five minutes) for the rate to come back, rather than crawl the site at
+  the moment Graph asked for less. Lists of a folder's children are asked 200 at a time: a
+  list costs the same whatever its size.
+
+What this is not: the budget, not concurrency, bounds a sync (a sync asks one request at a
+time, and a file read for someone meanwhile takes its turn in the same budget; the task's
+"adaptive concurrency" is an adaptive rate). File downloads go to SharePoint's
+own hosts and are not counted in the budget. A first crawl costs some eight units a file (its
+permissions, and three requests to read it): 20,000 files at 800 a minute are over three hours
+of budget, and a later crawl (permissions only) about two. A larger tenant's limit is worth
+setting.
+
+Tested in `src/pace.test.ts` (the budget, on a clock the test moves), `src/graph.test.ts`
+(waiting in place and its limits, two sources on one pacer, Graph's warning), and
+`src/e2e.test.ts` against a fake Graph that throttles: **a site is indexed whole in one run,
+with nothing lost, through a fake Graph that allows ten requests a minute; and a connector kept
+to a budget under the fake's limit is never throttled by it.** (The fake counts requests in a
+fixed window: it has no daily or tenant-wide limit.)
 
 ## Signing in to Graph (T-302)
 
