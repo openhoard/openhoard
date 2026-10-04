@@ -397,7 +397,10 @@ describe("an import's grants on an object", () => {
         ],
       }),
     );
-    const ids = (await held()).map((g) => g.id);
+    // (Ids made in one statement come in no particular order: picked by whose they are.)
+    const all = await held();
+    const idOf = (principal: string) => all.find((g) => g.principal === principal)?.id as string;
+    const ids = [idOf(ana), idOf(bo), idOf(sales)];
     const before = await epoch();
     expect(await inTenant((tx) => revokeGrants(tx, t.tenantId, ids.slice(0, 2), BY))).toBe(2);
     expect(Number(await epoch()) - Number(before)).toBe(1);
