@@ -68,5 +68,8 @@ If a task you are handed is in this list, stop and say so instead of building it
   reviewer pass before it goes up.
 - Claim a task in the Task List (set In progress) before working on it; `git fetch` and check open
   PRs first; keep parallel sessions on separate epics.
+- Code graph: `graphify update .` (local AST, no tokens; `uv tool install 'graphifyy[sql]'` once) writes
+  `graphify-out/` (gitignored). `graphify explain "<symbol>"` and `graphify path "A" "B"` answer who-calls-what
+  before a structural change; `.graphifyignore` keeps `dist/` and `coverage/` out.
 - Architecture: `docs/architecture.md`. Threat model: `docs/threat-model.md`. Decisions:
   `docs/adr/`. Spike results: `docs/spikes/`.

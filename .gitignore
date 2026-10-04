@@ -13,3 +13,6 @@ __pycache__/
 coverage/
 .openhoard/
 apps/cli/schemas/
+
+# graphify code graph (rebuild locally: graphify update .)
+graphify-out/
