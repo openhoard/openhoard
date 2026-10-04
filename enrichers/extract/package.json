@@ -22,7 +22,7 @@
     "test:slow": "vitest run src/csv-scale.test.ts"
   },
   "dependencies": {
-    "csv-parse": "7.0.2",
+    "csv-parse": "7.0.3",
     "pdfjs-dist": "6.3.289",
     "saxes": "6.0.0",
     "yauzl": "3.4.0"

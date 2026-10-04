@@ -35,7 +35,7 @@
     "@electric-sql/pglite-pgvector": "0.0.9",
     "@openhoard/core-policy": "workspace:^",
     "drizzle-orm": "^0.45.3",
-    "pg": "^8.23.0"
+    "pg": "^8.23.1"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*",
