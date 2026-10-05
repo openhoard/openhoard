@@ -5,6 +5,7 @@ import {
   liveObjectGrantsBy,
   objects,
   sourceRefs,
+  sourceShares,
   type Database,
 } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
@@ -516,5 +517,130 @@ describe("a source's permissions", () => {
     );
     expect((await sync()).counts).toMatchObject({ grantsAdded: 1, grantsRevoked: 2 });
     expect(await granted("plan.txt")).toEqual([`read user:${bo}`]);
+  });
+
+  /** What is kept of the source's sharing of a file beyond grants, as text, sorted. */
+  async function shared(name: string): Promise<string[]> {
+    const objectId = await objectOf(name);
+    const rows = await db.withTenant(t.tenantId, (tx) =>
+      tx.select().from(sourceShares).where(eq(sourceShares.objectId, objectId)),
+    );
+    return rows
+      .map(
+        (r) =>
+          `${r.kind} ${r.key} ${r.role}${r.inherited ? " inherited" : ""}${r.matched ? " matched" : ""}${r.expiresAt ? ` until ${r.expiresAt.toISOString().slice(0, 10)}` : ""}`,
+      )
+      .sort();
+  }
+
+  it("keep what the source shares beyond grants: links, the organization, guests, the unmatched (T-1001)", async () => {
+    await put("deck.txt", [
+      entry(user("aad-ana")),
+      entry(group("aad-finance"), { role: "write" }),
+      entry({ kind: "link", id: "L1", scope: "anyone" }, { expiresAt: "2999-01-01T00:00:00Z" }),
+      entry({ kind: "link", id: "L2", scope: "organization" }, { role: "write", inherited: true }),
+      // A link that has lapsed shares nothing.
+      entry({ kind: "link", id: "L3", scope: "anyone" }, { expiresAt: "2001-01-01T00:00:00Z" }),
+      entry({ kind: "organization" }),
+      entry({ kind: "guest", email: "pat@client.test" }),
+      entry({ kind: "guest", email: "stranger@else.test" }),
+      entry(user("aad-nobody")),
+      entry(group("aad-unknown")),
+    ]);
+    await put("plain.txt", [entry(user("aad-ana"))]);
+    await sync();
+    // Those matched are grants, and only grants; the rest is kept as said, giving nobody anything.
+    expect(await granted("deck.txt")).toEqual(
+      [`read user:${ana}`, `read user:${guest}`, `write group:${finance}`].sort(),
+    );
+    expect(await shared("deck.txt")).toEqual([
+      "group aad-unknown read",
+      "guest pat@client.test read matched",
+      "guest stranger@else.test read",
+      "link-anyone L1 read until 2999-01-01",
+      "link-organization L2 write inherited",
+      "organization  read",
+      "user aad-nobody read",
+    ]);
+    expect(await shared("plain.txt")).toEqual([]);
+
+    // Followed like grants, with no grant changing: nothing is audited for it.
+    const audited = (await imports()).length;
+    mem.setAcl(
+      ["deck.txt"],
+      [
+        entry(user("aad-ana")),
+        entry(group("aad-finance"), { role: "write" }),
+        entry({ kind: "guest", email: "pat@client.test" }),
+        entry({ kind: "link", id: "L4", scope: "specific" }),
+      ],
+    );
+    // (A delta that mentions every item again, as a source reporting a sharing change does.)
+    const mentioning: Connector = {
+      ...mem.connector,
+      delta: (cursor, signal) =>
+        (async function* () {
+          for await (const e of mem.connector.crawl(null, signal)) if (e.type === "item") yield e;
+          yield* (mem.connector.delta as NonNullable<Connector["delta"]>)(cursor, signal);
+        })(),
+    };
+    const again = await sync(mentioning);
+    expect(again.counts).toMatchObject({ grantsAdded: 0, grantsRevoked: 0 });
+    expect(await shared("deck.txt")).toEqual([
+      "guest pat@client.test read matched",
+      "link-specific L4 read",
+    ]);
+    expect((await imports()).length).toBe(audited);
+
+    // Gone with the object's permissions being no longer imported, and with the object.
+    await sync({ ...mem.connector, aclImport: undefined } as unknown as Connector);
+    expect(await shared("deck.txt")).toEqual([]);
+  });
+
+  it("keep who made and last changed a file, and when, for items already recorded too (T-1001)", async () => {
+    await put("plan.txt", []);
+    await sync();
+    const facts = async () => {
+      const [row] = await db.withTenant(t.tenantId, (tx) =>
+        tx
+          .select({
+            at: sourceRefs.sourceModifiedAt,
+            by: sourceRefs.sourceModifiedBy,
+            made: sourceRefs.sourceCreatedBy,
+          })
+          .from(sourceRefs)
+          .where(eq(sourceRefs.source, SOURCE)),
+      );
+      return row;
+    };
+    const recorded = await facts();
+    expect(recorded).toMatchObject({ by: null, made: null });
+    // The source says more of the same, unchanged item: kept without recording it again.
+    const saying: Connector = {
+      ...mem.connector,
+      delta: (cursor, signal) =>
+        (async function* () {
+          for await (const e of mem.connector.crawl(null, signal)) {
+            if (e.type === "item") {
+              yield {
+                ...e,
+                item: {
+                  ...e.item,
+                  modifiedAt: e.item.modifiedAt ?? "2020-02-02T02:02:02Z",
+                  modifiedBy: { id: "aad-ana" },
+                  createdBy: { id: "aad-gone", name: "Gone" },
+                },
+              };
+            }
+          }
+          yield* (mem.connector.delta as NonNullable<Connector["delta"]>)(cursor, signal);
+        })(),
+    };
+    const before = mem.calls.read;
+    const report = await sync(saying);
+    expect(report.counts).toMatchObject({ unchanged: 1, ingested: 0 });
+    expect(mem.calls.read).toBe(before);
+    expect(await facts()).toMatchObject({ by: "aad-ana", made: "aad-gone" });
+    expect((await facts())?.at).toBeInstanceOf(Date);
   });
 });

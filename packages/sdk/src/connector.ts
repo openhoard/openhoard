@@ -96,6 +96,8 @@ export interface SourceItem {
   modifiedAt?: string;
   /** Who last changed it, as the source says. */
   modifiedBy?: SourceUser;
+  /** Who made it, as the source says. */
+  createdBy?: SourceUser;
   /**
    * Changes whenever anything reported here changes: content, name, parent, path (so moving or
    * renaming a folder changes the eTag of everything in it), media type. The sync runner skips

@@ -265,6 +265,15 @@ export const sourceRefs = pgTable(
     /** The source's change marker for the item (e.g. an eTag), for delta sync. */
     etag: text("etag"),
     syncedAt: timestamp("synced_at", { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * What the source says of the item, kept as it says it, for the File Health Report (T-1001):
+     * when it was last changed, and the source's own ids of who changed it last and who made
+     * it (an Entra object id; matched to users by their `external_id` when read, never stored
+     * as a principal). Null: not said, or recorded before this was kept.
+     */
+    sourceModifiedAt: timestamp("source_modified_at", { withTimezone: true }),
+    sourceModifiedBy: text("source_modified_by"),
+    sourceCreatedBy: text("source_created_by"),
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.source, t.externalId] }),
@@ -276,6 +285,63 @@ export const sourceRefs = pgTable(
     index("source_refs_object_idx").on(t.tenantId, t.objectId),
     check("source_refs_source_format", sql`source ~ '^[a-z0-9][a-z0-9._-]{0,63}$'`),
     check("source_refs_external_id_length", sql`char_length(external_id) between 1 and 2048`),
+    check(
+      "source_refs_source_users_length",
+      sql`char_length(source_modified_by) between 1 and 1024 and char_length(source_created_by) between 1 and 1024`,
+    ),
+  ],
+);
+
+export const SHARE_KINDS = [
+  "link-anyone",
+  "link-organization",
+  "link-specific",
+  "organization",
+  "guest",
+  "user",
+  "group",
+] as const;
+
+/**
+ * What a source shares an item with beyond the grants made here (T-1001): the entries of its
+ * permissions (core/jobs applySourceAcl()) that are a sharing link, everyone in the
+ * organization, a guest, or a person or group that matched nobody here. A user or group that
+ * did match is a grant (`granted_by` the source), not a row here. These rows give nobody
+ * anything: they are what the File Health Report reads, kept equal to the source's each time
+ * its permissions are applied, and gone with the object.
+ */
+export const sourceShares = pgTable(
+  "source_shares",
+  {
+    tenantId: text("tenant_id").notNull(),
+    source: text("source").notNull(),
+    objectId: text("object_id").notNull(),
+    kind: text("kind", { enum: SHARE_KINDS }).notNull(),
+    /**
+     * Which one, as the source names it: a link's id, a guest's email, a user's or group's id
+     * there; empty for the organization.
+     */
+    key: text("key").notNull(),
+    role: text("role", { enum: ["read", "write", "owner"] }).notNull(),
+    /** It comes from a folder or site above the item. */
+    inherited: boolean("inherited").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    /** Whether it matched someone here (a guest who has an account): they hold a grant too. */
+    matched: boolean("matched").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.source, t.objectId, t.kind, t.key] }),
+    foreignKey({
+      name: "source_shares_object_fk",
+      columns: [t.tenantId, t.objectId],
+      foreignColumns: [objects.tenantId, objects.id],
+    }).onDelete("cascade"),
+    index("source_shares_kind_idx").on(t.tenantId, t.kind),
+    index("source_shares_object_idx").on(t.tenantId, t.objectId),
+    check("source_shares_source_format", sql`source ~ '^[a-z0-9][a-z0-9._-]{0,63}$'`),
+    check("source_shares_kind_valid", sql.raw(`kind in (${quoted(SHARE_KINDS)})`)),
+    check("source_shares_role_valid", sql`role in ('read', 'write', 'owner')`),
+    check("source_shares_key_length", sql`char_length(key) <= 1024`),
   ],
 );
 
@@ -2115,6 +2181,7 @@ export const tables = {
   objects,
   versions,
   sourceRefs,
+  sourceShares,
   facets,
   facetValues,
   objectTags,

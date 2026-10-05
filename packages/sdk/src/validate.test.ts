@@ -96,6 +96,7 @@ describe("checkItem and checkEvent", () => {
     ["a loose time", { ...file, modifiedAt: "yesterday" }],
     ["an impossible time", { ...file, modifiedAt: "2026-13-45T99:99:99Z" }],
     ["a bad author", { ...file, modifiedBy: { id: "" } }],
+    ["a bad creator", { ...file, createdBy: { id: "u1", name: "" } }],
     ["a fractional size", { ...file, size: 1.5 }],
     ["a file without a version", { ...file, contentVersion: undefined }],
     ["a bad media type", { ...file, mediaType: 5 }],

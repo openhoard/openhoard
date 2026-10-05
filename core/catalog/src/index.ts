@@ -61,10 +61,12 @@ export {
   IngestError,
   normalizeMime,
   markSourceItemSeen,
+  noteSourceFacts,
   removeFromSource,
   sourceItemState,
   type IngestInput,
   type IngestResult,
+  type SourceFacts,
   type SourceItemState,
 } from "./ingest.js";
 export {
@@ -132,6 +134,16 @@ export {
   type SourceItem,
   type VersionView,
 } from "./read.js";
+export {
+  HEALTH_SECTIONS,
+  HealthError,
+  healthReport,
+  type HealthFinding,
+  type HealthItem,
+  type HealthOptions,
+  type HealthReport,
+  type HealthSection,
+} from "./health.js";
 export { recentObjects, type RecentItem, type RecentQuery, type RecentResult } from "./recent.js";
 export {
   ACTIVITY_PAGE,

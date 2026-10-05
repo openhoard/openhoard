@@ -57,6 +57,8 @@ const SURFACE = {
     "lockCurrentVersion",
     "markProcessed",
     "markSourceItemSeen",
+    // What a source says of an item it hasn't changed (T-1001), for the sync runner.
+    "noteSourceFacts",
     "markSuperseded",
     "mergeReview",
     "proposeDisplayTitle",
@@ -88,6 +90,9 @@ const SURFACE = {
     // For enrichment (core/jobs): the exposure its tags give a file, before it is processed.
     "enrichmentExposure",
     "explainAccess",
+    // The File Health Report (T-1001): every live file by its real title, for tenant admins
+    // only; it checks the asker is one itself.
+    "healthReport",
     // "Who can see this?" (T-806): grants on a file, for its owner and admins only, like
     // explainAccess.
     "whoCanAccess",
@@ -151,6 +156,8 @@ const SURFACE = {
     "EXACT_SEARCH_ROWS",
     "ExplainError",
     "GENERIC_TITLE",
+    "HEALTH_SECTIONS",
+    "HealthError",
     "HNSW_EF_SEARCH",
     "HNSW_ITERATIVE_SCAN",
     "HNSW_MAX_SCAN_TUPLES",

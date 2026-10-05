@@ -87,6 +87,14 @@ export interface IngestInput {
   /** The source's change marker for the item (e.g. an eTag), for delta sync. */
   etag?: string;
   url?: string;
+  /**
+   * The source's own ids of who changed the item last and who made it, kept with the source
+   * reference as said (with `modifiedAt`), for the File Health Report. One that can't be kept
+   * (empty, over 1024 characters, holding NUL) is left out, not refused: it is worth less
+   * than the item.
+   */
+  sourceModifiedBy?: string;
+  sourceCreatedBy?: string;
 }
 
 export interface IngestResult {
@@ -159,7 +167,12 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
         eq(sourceRefs.externalId, externalId),
       ),
     );
-  const refFields = { url: input.url ?? null, etag: input.etag ?? null, syncedAt: sql`now()` };
+  const refFields = {
+    url: input.url ?? null,
+    etag: input.etag ?? null,
+    syncedAt: sql`now()`,
+    ...sourceFactsOf(input),
+  };
 
   if (!ref) {
     // A new object needs an owner who can own it. An existing one keeps its owner, even one
@@ -408,11 +421,62 @@ export async function markSourceItemSeen(
   return touched.length > 0;
 }
 
+/** What the source says of an item besides its content (source_refs, T-1001). */
+export interface SourceFacts {
+  modifiedAt?: Date | undefined;
+  sourceModifiedBy?: string | undefined;
+  sourceCreatedBy?: string | undefined;
+}
+
+const sourceUser = (id: string | undefined) =>
+  id !== undefined && id !== "" && [...id].length <= 1024 && !id.includes("\0") ? id : null;
+
+/** The facts as columns: what isn't said, or can't be kept, is null. */
+function sourceFactsOf(facts: SourceFacts) {
+  return {
+    sourceModifiedAt: facts.modifiedAt ?? null,
+    sourceModifiedBy: sourceUser(facts.sourceModifiedBy),
+    sourceCreatedBy: sourceUser(facts.sourceCreatedBy),
+  };
+}
+
+/**
+ * Records what the source says of an item it has not changed (its eTag is the one recorded):
+ * for items recorded before these facts were kept, and a source that says more than it did.
+ * Returns whether the item is known.
+ */
+export async function noteSourceFacts(
+  tx: Tx,
+  tenantId: string,
+  source: string,
+  externalId: string,
+  facts: SourceFacts,
+): Promise<boolean> {
+  const touched = await tx
+    .update(sourceRefs)
+    .set(sourceFactsOf(facts))
+    .where(
+      and(
+        eq(sourceRefs.tenantId, tenantId),
+        eq(sourceRefs.source, source),
+        eq(sourceRefs.externalId, externalId),
+      ),
+    )
+    .returning({ objectId: sourceRefs.objectId });
+  return touched.length > 0;
+}
+
 /** What a connector needs to skip an unchanged item before downloading it. */
 export interface SourceItemState {
   objectId: string;
   etag: string | null;
   deleted: boolean;
+  /** What is recorded of what the source says of it (noteSourceFacts()). */
+  facts: {
+    modifiedAt: Date | null;
+    sourceModifiedBy: string | null;
+    sourceCreatedBy: string | null;
+  };
   /** The current version's source marker and blob; null for an object with no versions. */
   current: { seq: number; sourceVersion: string | null; blobId: string } | null;
 }
@@ -428,6 +492,9 @@ export async function sourceItemState(
       objectId: sourceRefs.objectId,
       etag: sourceRefs.etag,
       deletedAt: objects.deletedAt,
+      modifiedAt: sourceRefs.sourceModifiedAt,
+      sourceModifiedBy: sourceRefs.sourceModifiedBy,
+      sourceCreatedBy: sourceRefs.sourceCreatedBy,
     })
     .from(sourceRefs)
     .innerJoin(
@@ -452,6 +519,11 @@ export async function sourceItemState(
     objectId: row.objectId,
     etag: row.etag,
     deleted: row.deletedAt !== null,
+    facts: {
+      modifiedAt: row.modifiedAt,
+      sourceModifiedBy: row.sourceModifiedBy,
+      sourceCreatedBy: row.sourceCreatedBy,
+    },
     current: current ?? null,
   };
 }

@@ -28,6 +28,7 @@
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*",
+    "@openhoard/core-catalog": "workspace:^",
     "@openhoard/core-db": "workspace:^",
     "@openhoard/core-identity": "workspace:^",
     "@openhoard/core-jobs": "workspace:^",

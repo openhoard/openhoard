@@ -143,6 +143,10 @@ again from a kept cursor; a crawl killed and resumed, with a folder renamed mean
 
 `aclImport()` asks Graph for an item's permissions (`/items/{id}/permissions`, every page) and
 gives them in the contract's terms (`src/permissions.ts`); `permissions: false` turns it off.
+What gives nobody a grant here (sharing links, "everyone", guests and people who matched
+nobody) is kept by the core all the same, with who made and last changed each file
+(`createdBy`, `lastModifiedBy`) and when: the File Health Report (T-1001, core/catalog
+`healthReport()`) reads them.
 
 | Graph says                                         | entry                                |
 | -------------------------------------------------- | ------------------------------------ |

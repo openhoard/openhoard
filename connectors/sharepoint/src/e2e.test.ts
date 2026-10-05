@@ -1,4 +1,18 @@
-import { grants, objects, sourceRefs, sourceSyncs, type Database } from "@openhoard/core-db";
+import {
+  healthReport,
+  proposeTag,
+  VIEW_TRANSACTION,
+  type HealthSection,
+} from "@openhoard/core-catalog";
+import {
+  facets,
+  facetValues,
+  grants,
+  objects,
+  sourceRefs,
+  sourceSyncs,
+  type Database,
+} from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,6 +21,7 @@ import {
   addMember,
   createGroup,
   createUser,
+  grantAdmin,
   lockUser,
   resolvePrincipal,
 } from "@openhoard/core-identity";
@@ -32,7 +47,8 @@ import {
  * OPENHOARD_TEST_POSTGRES_URL): a fake tenant's sites are fully indexed, and a sync that is
  * killed goes on from its last checkpoint. And T-304's: after a crawl, syncs follow the site's
  * changes, and the catalog holds what a fresh crawl of the site as it is now would give it.
- * And T-305's: who can read each file here is exactly who SharePoint lets read it.
+ * And T-305's: who can read each file here is exactly who SharePoint lets read it. And
+ * T-1001's: the File Health Report finds every problem the fake tenant was seeded with.
  *
  * The 10,000-item tenant takes minutes, so it runs as a slow test:
  * `pnpm --filter @openhoard/connector-sharepoint test:slow` (or OPENHOARD_TEST_SLOW=1). The
@@ -707,5 +723,231 @@ describe("a throttling Graph through the sync runner (T-306)", () => {
     // Nothing is lost: the next run goes on, and ends with every file.
     expect(await sync(site.id)).toMatchObject({ status: "done", skipped: [] });
     expect(await recorded(site.id)).toBe(filesOf(site.id));
+  }, 240_000);
+});
+
+describe("the File Health Report over a synced tenant (T-1001)", () => {
+  it("finds every seeded problem its sections cover, and nothing else", async () => {
+    setUp(600);
+    const tenant = f.tenant;
+    // The directory as an identity provider would provision it; those who left are locked.
+    const admin = await db.withTenant(t.tenantId, async (tx) => {
+      const here = new Map<string, string>();
+      for (const u of tenant.users) {
+        const created = await createUser(tx, t.tenantId, {
+          email: u.upn,
+          displayName: u.displayName,
+          source: "scim",
+          externalId: u.id,
+          ...(u.guest ? { kind: "guest" as const } : {}),
+        });
+        here.set(u.id, created.id);
+        if (!u.active) await lockUser(tx, t.tenantId, created.id, "system:test");
+      }
+      for (const g of tenant.groups) {
+        const group = await createGroup(tx, t.tenantId, {
+          name: g.displayName,
+          source: "scim",
+          externalId: g.id,
+        });
+        for (const member of g.members) {
+          await addMember(tx, t.tenantId, group.id, here.get(member) as string, "scim");
+        }
+      }
+      const boss = await createUser(tx, t.tenantId, {
+        email: "boss@example.com",
+        displayName: "Boss",
+        source: "local",
+      });
+      await grantAdmin(tx, t.tenantId, boss.id, "system:test");
+      // The vocabulary a pack would bring: two sensitivity values that set a level.
+      await tx
+        .insert(facets)
+        .values({ tenantId: t.tenantId, key: "sensitivity", label: "Sensitivity", single: true });
+      await tx.insert(facetValues).values(
+        ["public", "internal", "confidential", "restricted"].map((value) => ({
+          tenantId: t.tenantId,
+          facet: "sensitivity",
+          value,
+          label: value,
+          approved: true,
+          // As the general-business pack sets them: every value sets a level, two restrict.
+          ...(value === "public"
+            ? { visibility: "readable" as const, exposure: "full" as const }
+            : value === "internal"
+              ? { visibility: "discoverable" as const, exposure: "commercial-only" as const }
+              : value === "confidential"
+                ? { exposure: "local-only" as const }
+                : { visibility: "hidden" as const, exposure: "metadata-only" as const }),
+        })),
+      );
+      return boss.id;
+    });
+    await indexEverySite();
+
+    // Every file here, by its id there.
+    const refs = await db.withTenant(t.tenantId, (tx) =>
+      tx
+        .select({ externalId: sourceRefs.externalId, objectId: sourceRefs.objectId })
+        .from(sourceRefs)
+        .innerJoin(
+          objects,
+          and(eq(objects.tenantId, sourceRefs.tenantId), eq(objects.id, sourceRefs.objectId)),
+        )
+        .where(isNull(objects.deletedAt)),
+    );
+    const there = new Map(refs.map((r) => [r.objectId, r.externalId.split(":")[1] as string]));
+    const hereOf = new Map([...there].map(([objectId, id]) => [id, objectId]));
+    const files = tenant.items.filter((i) => i.kind === "file");
+    expect(there.size).toBe(files.length + 1); // and the seeded tenant's own file
+
+    // What a rule would tag from the files' sensitivity, as trusted tags.
+    await db.withTenant(t.tenantId, async (tx) => {
+      for (const item of files) {
+        for (const tag of item.labels.filter((l) => l.startsWith("sensitivity:"))) {
+          const out = await proposeTag(tx, t.tenantId, {
+            objectId: hereOf.get(item.id) as string,
+            tag,
+            source: "rule",
+            appliedBy: "rule:test",
+            confidence: 1,
+          });
+          expect(out.applied, tag).toBe(true);
+        }
+      }
+    });
+
+    const report = await db.withTenant(
+      t.tenantId,
+      (tx) =>
+        healthReport(
+          tx,
+          t.tenantId,
+          { userId: admin },
+          { limit: 10_000, asOf: new Date(tenant.now), largeBytes: 400 },
+        ),
+      VIEW_TRANSACTION,
+    );
+    const found = (section: HealthSection) => {
+      const finding = report.sections[section];
+      expect(finding.count, section).toBe(finding.items.length);
+      // (But for the file the test database is seeded with, which no site has.)
+      return finding.items
+        .filter((i) => i.objectId !== t.objectId)
+        .map((i) => there.get(i.objectId) as string)
+        .sort();
+    };
+    const seeded = (kind: string) =>
+      tenant.problems
+        .filter((p) => p.kind === kind)
+        .map((p) => p.itemId)
+        .filter((id) => hereOf.has(id));
+    const ids = (keep: (item: (typeof files)[number]) => boolean) =>
+      files
+        .filter(keep)
+        .map((i) => i.id)
+        .sort();
+    const unique = (list: string[]) => [...new Set(list)].sort();
+
+    // Section for section, the seeded list exactly.
+    // (A link that has lapsed by today's clock shares nothing any more: the fake's lapse
+    // within ninety days of the day it was made up.)
+    const linked = (i: (typeof files)[number]) =>
+      i.acl.some(
+        (a) =>
+          a.principal === "anyone-with-link" &&
+          (a.expiresAt === undefined || Date.parse(a.expiresAt) > Date.now() + 120_000),
+      );
+    expect(found("publicLinks")).toEqual(ids(linked));
+    expect(seeded("anyone-link")).toEqual(expect.arrayContaining(found("publicLinks")));
+    // Someone outside, by an invitation (the seeded "external guest") or named as any user is.
+    // Or in a group that has access: what the group reads, the guest reads.
+    const guestIds = new Set(tenant.users.filter((u) => u.guest).map((u) => u.id));
+    const outside = new Set([
+      ...[...guestIds].map((id) => `user:${id}`),
+      ...tenant.groups
+        .filter((g) => g.members.some((m) => guestIds.has(m)))
+        .map((g) => `group:${g.id}`),
+    ]);
+    expect(found("guests")).toEqual(
+      ids((i) => i.acl.some((a) => a.principal.startsWith("guest:") || outside.has(a.principal))),
+    );
+    expect(found("guests")).toEqual(expect.arrayContaining(unique(seeded("external-guest"))));
+    expect(found("stale")).toEqual(unique(seeded("stale")));
+    expect(found("duplicates")).toEqual(unique(seeded("duplicate")));
+    for (const section of ["publicLinks", "guests", "stale", "duplicates"] as const) {
+      expect(report.sections[section].count, section).toBeGreaterThan(0);
+    }
+
+    // Former staff: who made a file (the seeded "orphaned owner"), and also who changed it
+    // last or still holds a grant on it.
+    const left = new Set(tenant.users.filter((u) => !u.active).map((u) => u.id));
+    const former = found("formerStaff");
+    expect(former).toEqual(
+      ids(
+        (i) =>
+          left.has(i.createdBy) ||
+          left.has(i.modifiedBy) ||
+          i.acl.some((a) => a.principal.startsWith("user:") && left.has(a.principal.slice(5))),
+      ),
+    );
+    expect(former).toEqual(expect.arrayContaining(seeded("orphaned-owner")));
+    expect(seeded("orphaned-owner").length).toBeGreaterThan(0);
+
+    // Shared with most of the organization: a grant to a group holding half its current
+    // members or more. Sensitive files among those, or behind a public link: the seeded
+    // "sensitive in an open site", and more.
+    const current = new Set(tenant.users.filter((u) => u.active && !u.guest).map((u) => u.id));
+    const wide = new Set(
+      tenant.groups
+        .filter((g) => {
+          const members = g.members.filter((m) => current.has(m)).length;
+          return members >= 10 && members >= 0.5 * current.size;
+        })
+        .map((g) => `group:${g.id}`),
+    );
+    expect(wide.size).toBeGreaterThan(0);
+    const open = (i: (typeof files)[number]) => i.acl.some((a) => wide.has(a.principal));
+    expect(found("organization")).toEqual(ids(open));
+    const sensitive = (i: (typeof files)[number]) =>
+      i.labels.includes("sensitivity:confidential") || i.labels.includes("sensitivity:restricted");
+    const exposed = found("sensitiveWide");
+    expect(exposed).toEqual(ids((i) => sensitive(i) && (open(i) || linked(i))));
+    expect(exposed).toEqual(expect.arrayContaining(seeded("sensitive-in-open-site")));
+    expect(seeded("sensitive-in-open-site").length).toBeGreaterThan(0);
+
+    // Large files, by the size asked for (the fake's are cut down to be read whole).
+    expect(found("large")).toEqual(ids((i) => i.size > 400));
+    expect(report.sections.large.count).toBeGreaterThan(0);
+
+    // The totals are the tenant's; the one file no source dated is said to be so.
+    expect(report.files).toBe(files.length + 1);
+    expect(report.undated).toBe(1);
+    expect(report.unattributed).toBe(1);
+    // Everyone the source names is provisioned here, so nobody is unknown or unmatched.
+    expect(report.unknownPeople).toBe(0);
+    expect(report.sections.unmatched.count).toBe(0);
+    // Every file listed says why.
+    for (const [name, finding] of Object.entries(report.sections)) {
+      expect(
+        finding.items.filter((i) => i.detail === ""),
+        name,
+      ).toEqual([]);
+    }
+    const copies = new Map<string, number[]>();
+    for (const i of files) copies.set(i.contentKey, [...(copies.get(i.contentKey) ?? []), i.size]);
+    const wasted = [...copies.values()]
+      .filter((sizes) => sizes.length > 1)
+      .reduce((sum, sizes) => sum + (sizes.length - 1) * (sizes[0] as number), 0);
+    expect(report.sections.duplicates.bytes).toBe(wasted);
+    // A listed file says why, in words an owner can read.
+    expect(report.sections.publicLinks.items[0]?.detail).toMatch(/^link-anyone \(read/);
+    expect(report.sections.stale.items[0]?.detail).toMatch(/^unchanged since \d{4}-\d{2}-\d{2}$/);
+    expect(report.sections.guests.items[0]?.detail).toMatch(/^(guest \S+@\S+|grant to .+) \(/);
+    // Those who left are still in the directory's groups: said once, as people.
+    expect(report.formerStaffInGroups).toBe(
+      tenant.users.filter((u) => !u.active && tenant.groups.some((g) => g.members.includes(u.id)))
+        .length,
+    );
   }, 240_000);
 });

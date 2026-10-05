@@ -145,15 +145,16 @@ export function checkItem(item: unknown, description?: ConnectorDescription): st
     }
     if (Number.isNaN(Date.parse(item.modifiedAt))) return "modifiedAt must be a real time";
   }
-  if (item.modifiedBy !== undefined) {
-    const by = item.modifiedBy;
+  for (const field of ["modifiedBy", "createdBy"] as const) {
+    const by = item[field];
+    if (by === undefined) continue;
     if (
       !isObject(by) ||
       !text(by.id, LIMITS.principalId) ||
       (by.email !== undefined && !text(by.email, LIMITS.principalId)) ||
       (by.name !== undefined && !text(by.name, LIMITS.principalId))
     ) {
-      return "modifiedBy";
+      return field;
     }
   }
   if (item.kind === "file") {

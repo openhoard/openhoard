@@ -3,6 +3,7 @@ import {
   ingest,
   IngestError,
   markSourceItemSeen,
+  noteSourceFacts,
   removeFromSource,
   sourceItemState,
   type IngestInput,
@@ -750,9 +751,25 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
         // can change without its eTag changing.
         const permissions = (acl ??= await permissionsOf(item));
         if (state && !state.deleted && state.etag === item.etag && !reconciling) {
+          // What the source says of it that isn't recorded yet (an item recorded before this
+          // was kept), without recording the item again.
+          const facts = factsOf(item);
+          const said =
+            (facts.modifiedAt?.getTime() ?? null) === (state.facts.modifiedAt?.getTime() ?? null) &&
+            (facts.sourceModifiedBy ?? null) === state.facts.sourceModifiedBy &&
+            (facts.sourceCreatedBy ?? null) === state.facts.sourceCreatedBy;
           // (A source with none of its own is looked at when the item is next recorded.)
-          if (permissions.basis !== "owner-only") {
-            tally(await transaction((tx) => grant(tx, state.objectId, permissions)));
+          if (permissions.basis !== "owner-only" || !said) {
+            const outcome = await transaction(async (tx) => {
+              // Grants first: they may take the principals' lock, which comes before the item.
+              const granted =
+                permissions.basis === "owner-only"
+                  ? undefined
+                  : await grant(tx, state.objectId, permissions);
+              if (!said) await noteSourceFacts(tx, tenantId, source, item.externalId, facts);
+              return granted;
+            });
+            if (outcome) tally(outcome);
           }
           report.counts.unchanged++;
           return;
@@ -906,9 +923,24 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     }
   }
 
+  /** What the source says of the item besides its content, as the catalog keeps it. */
+  function factsOf(item: SourceItem) {
+    const at = item.modifiedAt === undefined ? NaN : Date.parse(item.modifiedAt);
+    const kept = (id: string | undefined) =>
+      id !== undefined && id !== "" && [...id].length <= 1024 && !id.includes("\0")
+        ? id
+        : undefined;
+    return {
+      // Only times the catalog records (1970 to 9999); others are left out, not refused.
+      modifiedAt: at >= 0 && at < Date.UTC(10000, 0, 1) ? new Date(at) : undefined,
+      sourceModifiedBy: kept(item.modifiedBy?.id),
+      sourceCreatedBy: kept(item.createdBy?.id),
+    };
+  }
+
   function input(item: SourceItem, content: { blobId: string; size: number }): IngestInput {
     const author = item.modifiedBy ? options.authorOf?.(item.modifiedBy) : undefined;
-    const at = item.modifiedAt === undefined ? NaN : Date.parse(item.modifiedAt);
+    const facts = factsOf(item);
     return {
       source,
       externalId: item.externalId,
@@ -920,8 +952,9 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
       ...(author !== undefined && author.startsWith("user:") && isId("user", author.slice(5))
         ? { authorId: author }
         : {}),
-      // Only times the catalog records (1970 to 9999); others are left out, not refused.
-      ...(at >= 0 && at < Date.UTC(10000, 0, 1) ? { modifiedAt: new Date(at) } : {}),
+      ...(facts.modifiedAt === undefined ? {} : { modifiedAt: facts.modifiedAt }),
+      ...(facts.sourceModifiedBy === undefined ? {} : { sourceModifiedBy: facts.sourceModifiedBy }),
+      ...(facts.sourceCreatedBy === undefined ? {} : { sourceCreatedBy: facts.sourceCreatedBy }),
       ...(item.contentVersion === undefined ? {} : { sourceVersion: item.contentVersion }),
       etag: item.etag,
       // The parser's text, which is what was checked, never the connector's.

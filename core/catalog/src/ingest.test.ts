@@ -19,6 +19,7 @@ import {
   IngestError,
   normalizeMime,
   markSourceItemSeen,
+  noteSourceFacts,
   removeFromSource,
   sourceItemState,
   type IngestInput,
@@ -428,6 +429,7 @@ describe("markSourceItemSeen", () => {
       objectId: r.objectId,
       etag: "e1",
       deleted: false,
+      facts: { modifiedAt: null, sourceModifiedBy: null, sourceCreatedBy: null },
       current: { seq: 1, sourceVersion: "c7", blobId: (await content("x")).blobId },
     });
     expect(await inTenant((tx) => markSourceItemSeen(tx, t.tenantId, "sharepoint", "nope"))).toBe(
@@ -446,8 +448,33 @@ describe("sourceItemState", () => {
       objectId: r.objectId,
       etag: "e1",
       deleted: false,
+      facts: { modifiedAt: null, sourceModifiedBy: null, sourceCreatedBy: null },
       current: { seq: 1, sourceVersion: "c7", blobId: (await content("x")).blobId },
     });
+    // What the source says of it besides its content (T-1001): kept as said when it is
+    // recorded, and for an item it hasn't changed; what can't be kept is left out, not refused.
+    const at = new Date("2024-03-02T01:00:00.000Z");
+    await item("a", "x", {
+      etag: "e2",
+      modifiedAt: at,
+      sourceModifiedBy: "aad-ana",
+      sourceCreatedBy: "x".repeat(1025),
+    });
+    expect((await state("a"))?.facts).toEqual({
+      modifiedAt: at,
+      sourceModifiedBy: "aad-ana",
+      sourceCreatedBy: null,
+    });
+    const note = (id: string, facts: Parameters<typeof noteSourceFacts>[4]) =>
+      inTenant((tx) => noteSourceFacts(tx, t.tenantId, "sharepoint", id, facts));
+    expect(await note("a", { sourceCreatedBy: "aad-bo" })).toBe(true);
+    expect((await state("a"))?.facts).toEqual({
+      modifiedAt: null,
+      sourceModifiedBy: null,
+      sourceCreatedBy: "aad-bo",
+    });
+    expect((await state("a"))?.etag).toBe("e2");
+    expect(await note("nope", {})).toBe(false);
     await inTenant((tx) => removeFromSource(tx, t.tenantId, "sharepoint", "a"));
     expect((await state("a"))?.deleted).toBe(true);
   });

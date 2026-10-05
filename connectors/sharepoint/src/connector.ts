@@ -155,7 +155,7 @@ const DESCRIPTION: ConnectorDescription = {
 
 /** What is asked of Graph for each item: what an event is made of, and no more. */
 const ITEM_FIELDS =
-  "id,name,size,eTag,file,folder,package,root,deleted,parentReference,lastModifiedDateTime,lastModifiedBy,webUrl";
+  "id,name,size,eTag,file,folder,package,root,deleted,parentReference,lastModifiedDateTime,lastModifiedBy,createdBy,webUrl";
 /** An id of Graph's as it may go into a URL and an externalId: no separator of either. */
 const GRAPH_ID = /^[A-Za-z0-9!_.~-]{1,512}$/;
 const MAX_DRIVES = 5000;
@@ -519,11 +519,21 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     const externalId = externalIdOf(drive.id, id);
     const contentVersion = kind === "file" ? contentVersionOf(raw) : undefined;
     const modified = Date.parse(str(raw.lastModifiedDateTime) ?? "");
-    const by =
-      isObject(raw.lastModifiedBy) && isObject(raw.lastModifiedBy.user)
-        ? raw.lastModifiedBy.user
-        : {};
-    const byId = str(by.id);
+    /** A person as Graph's identity set names them, or undefined when it names none. */
+    const person = (set: unknown) => {
+      const user = isObject(set) && isObject(set.user) ? set.user : {};
+      const id = str(user.id);
+      const [email, name] = [str(user.email), str(user.displayName)];
+      return id === undefined
+        ? undefined
+        : {
+            id,
+            ...(email === undefined ? {} : { email }),
+            ...(name === undefined ? {} : { name }),
+          };
+    };
+    const modifiedBy = person(raw.lastModifiedBy);
+    const createdBy = person(raw.createdBy);
     const url = parentId === null ? (drive.webUrl ?? str(raw.webUrl)) : str(raw.webUrl);
     const mediaType = isObject(raw.file) ? str(raw.file.mimeType) : undefined;
     const item: SourceItem = {
@@ -542,21 +552,15 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
           }
         : {}),
       ...(Number.isFinite(modified) ? { modifiedAt: new Date(modified).toISOString() } : {}),
-      ...(byId === undefined
-        ? {}
-        : {
-            modifiedBy: {
-              id: byId,
-              ...(str(by.email) === undefined ? {} : { email: str(by.email) as string }),
-              ...(str(by.displayName) === undefined ? {} : { name: str(by.displayName) as string }),
-            },
-          }),
+      ...(modifiedBy === undefined ? {} : { modifiedBy }),
+      ...(createdBy === undefined ? {} : { createdBy }),
       ...(url !== undefined && checkUrl(url) === null ? { url } : {}),
     };
-    // Who changed it last is worth less than the item: left out when it can't be kept.
-    if (checkItem(item, description) !== null && item.modifiedBy !== undefined) {
-      delete (item as { modifiedBy?: unknown }).modifiedBy;
-    }
+    // Who changed it last, or made it, is worth less than the item: left out when it can't
+    // be kept.
+    const loose = item as { modifiedBy?: unknown; createdBy?: unknown };
+    if (checkItem(item, description) === "modifiedBy") delete loose.modifiedBy;
+    if (checkItem(item, description) === "createdBy") delete loose.createdBy;
     // Nothing is yielded that the runner would refuse. An item it can't serve is warned of by
     // its id, which the runner takes as mentioned: it is there, and not taken for gone.
     return checkItem(item, description) === null

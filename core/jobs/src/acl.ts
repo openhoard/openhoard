@@ -5,10 +5,12 @@ import {
   queryRows,
   revokeGrants,
   revokeGrantsBy,
+  sourceShares,
   type GrantRole,
+  type SHARE_KINDS,
   type Tx,
 } from "@openhoard/core-db";
-import { sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   findGroupByExternalId,
   findUserByEmail,
@@ -177,10 +179,20 @@ export async function applySourceAcl(
   // What the source says, in OpenHoard's principals. Two of its principals may be one here (a
   // user named directly and by an invitation): the stronger role, the later expiry.
   const wanted = new Map<string, Wanted>();
+  const shares = new Map<string, Share>();
   for (const entry of acl.entries) {
     const expiry = entry.expiresAt === undefined ? null : new Date(entry.expiresAt);
     if (expiry !== null && !(expiry.getTime() > now + EXPIRY_MARGIN_MS)) continue;
     const principal = await resolver.principalOf(tx, entry.principal);
+    const share = shareOf(entry.principal, principal !== null);
+    if (share) {
+      shares.set(`${share.kind} ${share.key}`, {
+        ...share,
+        role: entry.role,
+        inherited: entry.inherited,
+        expiresAt: expiry,
+      });
+    }
     if (principal === null) {
       const p = entry.principal;
       if (p.kind === "group") outcome.unmappedGroups.push(p.id);
@@ -212,7 +224,10 @@ export async function applySourceAcl(
     }
   }
   const add = [...wanted].filter(([principal]) => !keep.has(principal));
-  if (revoke.length === 0 && add.length === 0) return outcome;
+  if (revoke.length === 0 && add.length === 0) {
+    await keepShares(tx, tenantId, source, objectId, [...shares.values()]);
+    return outcome;
+  }
 
   // Revoked first: a grant replaced by a weaker one is never live beside it. One statement
   // each way, so the tenant's principals are recomputed once for the file, not once a grant.
@@ -229,6 +244,9 @@ export async function applySourceAcl(
   });
   // Retired or deleted since they were matched: nobody now, and not remembered as someone.
   for (const principal of made.unknown) resolver.forget(principal);
+  // After the grants, which take the principals' lock: that lock comes before the object's
+  // (core/catalog locks.ts), which a row naming the object takes a share of.
+  await keepShares(tx, tenantId, source, objectId, [...shares.values()]);
   const added = add
     .filter(([principal]) => !made.unknown.includes(principal))
     .map(([principal, want]) => ({ principal, role: want.role }));
@@ -253,6 +271,64 @@ export async function applySourceAcl(
   return outcome;
 }
 
+interface Share {
+  kind: (typeof SHARE_KINDS)[number];
+  key: string;
+  role: AclRole;
+  inherited: boolean;
+  expiresAt: Date | null;
+  matched: boolean;
+}
+
+/**
+ * What an entry is beyond a grant, for the File Health Report (core/db source_shares): a
+ * sharing link, the whole organization, a guest, or a person or group that matched nobody.
+ * A user or group that matched is a grant, and nothing here.
+ */
+function shareOf(
+  p: AclPrincipal,
+  matched: boolean,
+): Pick<Share, "kind" | "key" | "matched"> | null {
+  switch (p.kind) {
+    case "link":
+      return { kind: `link-${p.scope}`, key: p.id, matched: false };
+    case "organization":
+      return { kind: "organization", key: "", matched: false };
+    case "guest":
+      return { kind: "guest", key: p.email, matched };
+    case "user":
+    case "group":
+      return matched ? null : { kind: p.kind, key: p.id, matched: false };
+  }
+}
+
+/**
+ * Makes the source's shares on the object equal to `shares`: one read, and a write only when
+ * they differ. They give nobody anything, so no lock on the principals and no audit event.
+ */
+async function keepShares(
+  tx: Tx,
+  tenantId: string,
+  source: string,
+  objectId: string,
+  shares: readonly Share[],
+): Promise<void> {
+  const mine = and(
+    eq(sourceShares.tenantId, tenantId),
+    eq(sourceShares.source, source),
+    eq(sourceShares.objectId, objectId),
+  );
+  const line = (s: Share) =>
+    JSON.stringify([s.kind, s.key, s.role, s.inherited, s.expiresAt?.getTime() ?? null, s.matched]);
+  const held = (await tx.select().from(sourceShares).where(mine)).map(line).sort();
+  const want = shares.map(line).sort();
+  if (held.length === want.length && held.every((h, i) => h === want[i])) return;
+  if (held.length > 0) await tx.delete(sourceShares).where(mine);
+  if (shares.length > 0) {
+    await tx.insert(sourceShares).values(shares.map((s) => ({ tenantId, source, objectId, ...s })));
+  }
+}
+
 /**
  * Takes back every grant the source made: for a source whose permissions are no longer
  * imported, which leaves its files to their owner. Audited as one `grant.import` event when
@@ -264,6 +340,10 @@ export async function withdrawSourceGrants(
   source: string,
 ): Promise<number> {
   const granter = sourceGranter(source);
+  // What it shared is no longer known either.
+  await tx
+    .delete(sourceShares)
+    .where(and(eq(sourceShares.tenantId, tenantId), eq(sourceShares.source, source)));
   const revoked = await revokeGrantsBy(tx, tenantId, granter, granter);
   if (revoked > 0) {
     await appendAudit(tx, tenantId, {

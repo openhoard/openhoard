@@ -16,6 +16,7 @@ Part of the OpenHoard trusted core. See [../README.md](../README.md) and
   provider wrote it, or why none did) and the vocabulary a model may propose from (T-405).
 - [`risk.ts`](src/risk.ts): the injection detector's `risk:injection` flag (T-408).
 - [`explain.ts`](src/explain.ts): "why can X see this?" (T-606).
+- [`health.ts`](src/health.ts): the File Health Report's queries (T-1001).
 - [`packs.ts`](src/packs.ts): declarative packs, planned as a reviewed diff and applied only if
   their tests pass (T-607); see [packs/](../../packs/README.md).
 - [`rules.ts`](src/rules.ts): the rule tagger (T-403), deterministic tags from path, site,
@@ -411,6 +412,64 @@ which lives in the audit log.
 
 It is for admins and owners only: it shows real titles, every tag, grant ids and who locked an
 account. Run it in one snapshot: `db.withTenant(tenant, work, VIEW_TRANSACTION)`.
+
+## File Health Report
+
+`healthReport(tx, tenant, { userId }, options)` (T-1001) is what a tenant's admin should look at
+among the files OpenHoard indexes, found from what the catalog already holds:
+
+| Section         | A live file is listed when                                                                                                                                                                         |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `publicLinks`   | its source shares it by a link anyone can open                                                                                                                                                     |
+| `organization`  | its source shares it with the whole organization, or a group holding most of the tenant's current members (`wideGroupShare`, 0.5) has a grant reaching it                                          |
+| `sensitiveWide` | it is in either of those and carries a trusted tag whose value restricts it: visibility `hidden`, or exposure `metadata-only` or `local-only`                                                      |
+| `guests`        | its source shares it with someone outside, or a guest, or a group a guest is in, holds a grant reaching it                                                                                         |
+| `formerStaff`   | someone locked, disabled by the identity provider or retired made it or changed it last (as the source says, unless they were provisioned again), owns it, or holds a grant reaching it themselves |
+| `unmatched`     | its source shares it with a person or group OpenHoard doesn't know (a SharePoint site group, someone not provisioned): they get nothing here                                                       |
+| `stale`         | its source last saw it change more than `staleAfterDays` ago (1095)                                                                                                                                |
+| `duplicates`    | another live file's current content is the same, byte for byte (empty files aside); `bytes` is what the extra copies take                                                                          |
+| `large`         | its current content is over `largeBytes` (1 GiB)                                                                                                                                                   |
+
+A grant reaches a file when it is live and on the file, or on a tag the file carries as a
+trusted tag, as `authorize()` reads grants. Each section has a count and bytes over all its
+files, and the first `limit` (100) of them, largest (or oldest) first, each with its title,
+where it is at its source, its size and a line saying why.
+
+What it reads: sharing beyond grants is `source_shares` (core/jobs keeps it equal to a source's
+permissions: links, "everyone", guests, and people or groups that matched nobody here), read
+while it hasn't lapsed; who made and last changed a file and when is on `source_refs`, as the
+source said at the last sync, matched to users by their `external_id` when the report is read
+(someone provisioned again under the same id has not left).
+
+What it can't say:
+
+- A file no source dated isn't judged for `stale` (`undated`), and one no source named a maker
+  or changer of isn't judged for those (`unattributed`). Makers and changers are matched by the
+  id the identity provider gave them (`external_id`) only: one that matches nobody provisioned
+  here is counted, not listed (`unknownPeople`), since unknown is not gone. That is someone who
+  left before OpenHoard was connected, and every file in a tenant whose people are local
+  accounts.
+- What someone who left can still reach through a group they are in isn't listed file by file
+  (it would be every file of a site): `formerStaffInGroups` counts those people, to take out of
+  their groups.
+- Sharing is known only for sources whose permissions are imported, and for files synced since
+  it has been kept: complete after the source's next full crawl. A file with none kept reads as
+  not shared.
+- A file every member can find or read by its visibility level alone isn't listed (that is the
+  tenant's own setting; `explainLevels()` says why), and pack rules that permit beyond grants
+  aren't followed.
+- Of the problems the fake tenant is seeded with (packages/testkit), it finds public links,
+  guests, files made by someone who left, stale files, duplicates and sensitive files in an
+  open site. It does not look for broken inheritance or over-long paths (the catalog keeps
+  neither an item's path nor which matched permissions are inherited); a file name carrying
+  instructions is the injection detector's flag (`risk:injection`), not a section here.
+
+It is for tenant admins only, like `whoCanAccess()`, and checks the asker is one itself
+(`HealthError` `not-admin`): it names every live file by its real title, whoever may read it.
+It opens nothing: a file's content still goes through the gate. Run it in one snapshot
+(`VIEW_TRANSACTION`). Every section reads each live file's current version, and the sections
+that follow grants do so file by file: about twenty statements over the tenant's files, not
+measured on a large one.
 
 ## Tagging
 
