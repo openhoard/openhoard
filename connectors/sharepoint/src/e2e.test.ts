@@ -152,7 +152,9 @@ async function indexEverySite(): Promise<void> {
 
 describe("a fake tenant through the sync runner", () => {
   it("is fully indexed, site by site", async () => {
-    setUp(600);
+    // (Small enough for the Windows runner, which takes eight times as long: 600 items ran to
+    // within seconds of this test's four minutes there. The slow run below does 10,000.)
+    setUp(250);
     await indexEverySite();
     // Again: nothing is read a second time, and nothing is taken for gone.
     const site = f.tenant.sites[0] as { id: string };
