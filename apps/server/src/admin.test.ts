@@ -2,9 +2,21 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAudit } from "@openhoard/core-audit";
-import { newId, openDatabase, sourceSyncs, zones, type Database } from "@openhoard/core-db";
-import { openTestDatabase, TEST_POSTGRES_ENV } from "@openhoard/core-db/testing";
-import { addMember, createGroup, createUser } from "@openhoard/core-identity";
+import { markProcessed, proposeTag, VIEW_TRANSACTION, viewObjects } from "@openhoard/core-catalog";
+import {
+  addGrant,
+  facetValues,
+  newId,
+  objects,
+  objectTags,
+  openDatabase,
+  sourceSyncs,
+  zones,
+  type Database,
+} from "@openhoard/core-db";
+import { openTestDatabase, seedTenant, TEST_POSTGRES_ENV } from "@openhoard/core-db/testing";
+import { addMember, createGroup, createUser, resolvePrincipal } from "@openhoard/core-identity";
+import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
 import { SoftAuthenticator } from "@openhoard/core-identity/testing";
 import { startJobs } from "@openhoard/core-jobs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -888,5 +900,207 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
       err: () => {},
     });
     expect(bad).toBe(1);
+  });
+});
+
+describe("openhoard admin review (T-1403)", { timeout: 180_000 }, () => {
+  it("approves an assistant's proposed tag as a person who may tag the file, and the tag's grant applies", async () => {
+    // A file, an editor of it, and someone holding a grant on a tag it doesn't carry yet.
+    const made = await inspect(async (db) => {
+      const t = await seedTenant(db, 7);
+      return db.withTenant(t.tenantId, async (tx) => {
+        await markProcessed(tx, t.tenantId, { versionId: t.versionId, title: "Report 7.docx" });
+        await tx.update(objects).set({ title: "Plan\tQ3\n.docx" });
+        const person = async (name: string) =>
+          (
+            await createUser(tx, t.tenantId, {
+              email: `${name}@example.com`,
+              displayName: name,
+              source: "local",
+              kind: "member",
+            })
+          ).id;
+        const [editor, holder] = [await person("ed"), await person("gia")];
+        await tx.insert(facetValues).values(
+          ["globex", "initech"].map((value) => ({
+            tenantId: t.tenantId,
+            facet: "client",
+            value,
+            label: value,
+            approved: true,
+          })),
+        );
+        const grant = (principal: string, role: "read" | "write", target: object) =>
+          addGrant(tx, t.tenantId, {
+            principal: `user:${principal}`,
+            role,
+            target: target as { objectId: string },
+            grantedBy: "user:admin",
+          });
+        await grant(editor, "write", { objectId: t.objectId });
+        const propose = async (tag: string) => {
+          const out = await proposeTag(
+            tx,
+            t.tenantId,
+            {
+              objectId: t.objectId,
+              tag,
+              source: "model",
+              appliedBy: "model:agent/cli_x",
+              confidence: 1,
+            },
+            { review: "agent" },
+          );
+          if (out.applied) throw new Error("applied");
+          return out.reviewId;
+        };
+        const reviews = [await propose("client:globex"), await propose("client:initech")];
+        await grant(holder, "read", { tag: "client:globex" });
+        return { ...t, editor, holder, reviews };
+      });
+    });
+    const { tenantId } = made;
+    const [first, second] = made.reviews as [string, string];
+    const reads = (userId: string) =>
+      inspect((db) =>
+        db.withTenant(
+          tenantId,
+          async (tx) => {
+            const principal = await resolvePrincipal(tx, tenantId, userId);
+            if (!principal) throw new Error("no principal");
+            const [card] = await viewObjects(
+              tx,
+              tenantId,
+              new Authorizer(createCedarEngine()),
+              { principal, client: { id: "openhoard-web", trust: "first-party" } },
+              [made.objectId],
+            );
+            return card?.shape === "card" && card.readable;
+          },
+          VIEW_TRANSACTION,
+        ),
+      );
+    const review = (...argv: string[]) => admin("review", ...argv, "--tenant", tenantId);
+    expect(await reads(made.holder)).toBe(false);
+
+    // The inbox, as the editor's: one item a line, the title's control characters gone.
+    const listed = await review("list", "--user", "ed@example.com");
+    expect(listed.code, listed.err).toBe(0);
+    const lines = listed.out.trimEnd().split("\n");
+    expect(lines.map((l) => l.split("\t").slice(0, 5))).toEqual([
+      [first, "client:globex", "agent", "model:agent/cli_x", "1.00"],
+      [second, "client:initech", "agent", "model:agent/cli_x", "1.00"],
+    ]);
+    expect(lines[0]?.split("\t").slice(6)).toEqual(["-", made.objectId, "Plan Q3 .docx"]);
+    // Someone who can't tag the file sees none of it, and can't decide it.
+    const others = await review("list", "--user", made.holder);
+    expect(others).toMatchObject({ code: 0, out: "" });
+    expect(others.err).toContain("Nothing waits");
+    const refused = await review("approve", "--user", made.holder, "--id", first);
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("no open review item");
+    expect(await reads(made.holder)).toBe(false);
+    // The seeded reader reads the file and may not tag it.
+    const reader = await review("approve", "--user", "ana-7@example.com", "--id", first);
+    expect(reader.code).toBe(1);
+    expect(reader.err).toContain("may not tag that file");
+
+    const approved = await review("approve", "--user", made.editor, "--id", first);
+    expect(approved.code, approved.err).toBe(0);
+    expect(approved.out).toBe(`${first}\n`);
+    expect(approved.err).toContain("Approved client:globex");
+    // The grant the tag implies now gives the file.
+    expect(await reads(made.holder)).toBe(true);
+
+    const merged = await review("merge", "--user", made.editor, "--id", second, "--into", "globex");
+    expect(merged.code, merged.err).toBe(0);
+    const tags = await inspect((db) =>
+      db.withTenant(tenantId, (tx) => tx.select().from(objectTags)),
+    );
+    expect(tags.map((r) => [r.value, r.reviewed]).sort()).toEqual([
+      ["acme-7", false],
+      ["globex", true],
+    ]);
+    const empty = await review("list", "--user", made.editor);
+    expect(empty.out).toBe("");
+    expect(empty.err).toContain("Nothing waits");
+
+    // A value the vocabulary doesn't have is a tenant admin's to approve: the editor isn't one
+    // until the operator makes them one.
+    const fresh = await inspect((db) =>
+      db.withTenant(tenantId, async (tx) => {
+        const out = await proposeTag(tx, tenantId, {
+          objectId: made.objectId,
+          tag: "client:newco",
+          source: "model",
+          appliedBy: "model:test/m",
+          confidence: 0.9,
+        });
+        if (out.applied) throw new Error("applied");
+        return out.reviewId;
+      }),
+    );
+    expect((await review("list", "--user", made.editor)).out.split("\t")[6]).toBe("admin");
+    const notAdmin = await review("approve", "--user", made.editor, "--id", fresh);
+    expect(notAdmin.code).toBe(1);
+    expect(notAdmin.err).toContain("isn't a tenant admin");
+    expect(
+      (await admin("user", "grant-admin", "--tenant", tenantId, "--user", made.editor)).code,
+    ).toBe(0);
+    const asAdmin = await review("approve", "--user", made.editor, "--id", fresh);
+    expect(asAdmin.code, asAdmin.err).toBe(0);
+
+    // Decided already, and misuse.
+    const again = await review("reject", "--user", made.editor, "--id", first);
+    expect(again.code).toBe(1);
+    expect((await review("approve", "--user", made.editor, "--id", "nope")).code).toBe(2);
+    expect((await review("approve", "--id", first)).code).toBe(2);
+    expect((await review("reject", "--user", made.editor, "--id", first, "--replace")).code).toBe(
+      2,
+    );
+    expect((await review("merge", "--user", made.editor, "--id", first)).code).toBe(2);
+    expect((await review("list", "--user", made.editor, "--limit", "0")).code).toBe(2);
+    expect((await review("list", "--user", "nobody@example.com")).code).toBe(1);
+    expect((await review("reject", "--user", "nobody@example.com", "--id", first)).code).toBe(1);
+
+    const events = await inspect(async (db) => {
+      const out: string[] = [];
+      await exportAudit(db, tenantId, {}, "ndjson", (s: string) => void out.push(s));
+      return out
+        .join("")
+        .split("\n")
+        .filter(Boolean)
+        .map(
+          (l) =>
+            JSON.parse(l) as {
+              actor: string;
+              action: string;
+              decision: string;
+              object?: string;
+              detail?: Record<string, unknown>;
+            },
+        )
+        .filter((e) => e.action === "tag.review");
+    });
+    expect(events.every((e) => e.actor === ADMIN_ACTOR)).toBe(true);
+    expect(
+      events.map((e) => [e.decision, e.detail?.review, e.detail?.refusal ?? e.detail?.outcome]),
+    ).toEqual([
+      ["deny", first, "not-found"],
+      ["deny", first, "refused"],
+      ["allow", first, "approved"],
+      ["allow", second, "merged"],
+      ["deny", fresh, "not-admin"],
+      ["allow", fresh, "approved"],
+      ["deny", first, "not-found"],
+      ["deny", first, "unknown-user"],
+    ]);
+    // A refusal names the file it was about, for the record only.
+    expect(events.slice(0, 2).map((e) => e.object)).toEqual([made.objectId, made.objectId]);
+    expect(events[3]?.detail).toMatchObject({ into: "client:globex", reason: "agent" });
+    expect(events[2]?.detail).toMatchObject({
+      outcome: "approved",
+      reviewer: `user:${made.editor}`,
+    });
   });
 });

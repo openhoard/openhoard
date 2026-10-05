@@ -3,8 +3,11 @@ export * from "./rank.js";
 export type * from "./types.js";
 export {
   approveReview,
+  decisionReach,
   DEFAULT_MIN_CONFIDENCE,
+  type DecisionKind,
   type DecisionOptions,
+  type DecisionResult,
   listOpenReviews,
   mergeReview,
   proposeTag,
@@ -16,6 +19,21 @@ export {
   type TagProposal,
   type TagSource,
 } from "./tagging.js";
+export {
+  decideReview,
+  REVIEW_INBOX_MAX,
+  ReviewAccessError,
+  reviewInbox,
+  reviewItemFor,
+  type DecideInput,
+  type Decided,
+  type ListedReviewItem,
+  type ReviewAccessErrorCode,
+  type ReviewDecision,
+  type Reviewer,
+  type ReviewInbox,
+  type ReviewItem,
+} from "./review-inbox.js";
 export {
   clearPrimaryTag,
   primaryTagOf,

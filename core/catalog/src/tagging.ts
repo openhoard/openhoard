@@ -334,19 +334,7 @@ async function loosens(
     );
   // A value a pack's policies name (a forbid, most likely) may guard more than levels show:
   // taking it off counts as loosening, to be safe.
-  const named = await queryRows<{ n: number }>(
-    tx,
-    sql`select count(*)::int as n from tenant_packs
-        where tenant_id = ${tenantId}
-          and (${sql.join(
-            others.map(
-              (o) =>
-                sql`position(${tagOf(facet, o.value)} in coalesce(content->'policies', '{}')::text) > 0`,
-            ),
-            sql` or `,
-          )})`,
-  );
-  if ((named[0]?.n ?? 0) > 0) return true;
+  if (await namedByPolicy(tx, tenantId, facet, others)) return true;
   const mine = rows.find((r) => r.value === value);
   const looser = <T extends string>(
     order: readonly T[],
@@ -364,6 +352,29 @@ async function loosens(
 }
 
 /** The object's values of `facet` other than `value`. */
+/** Whether an applied pack's policies name one of these values of the facet. */
+async function namedByPolicy(
+  tx: Tx,
+  tenantId: string,
+  facet: string,
+  values: readonly { value: string }[],
+): Promise<boolean> {
+  if (values.length === 0) return false;
+  const named = await queryRows<{ n: number }>(
+    tx,
+    sql`select count(*)::int as n from tenant_packs
+        where tenant_id = ${tenantId}
+          and (${sql.join(
+            values.map(
+              (o) =>
+                sql`position(${tagOf(facet, o.value)} in coalesce(content->'policies', '{}')::text) > 0`,
+            ),
+            sql` or `,
+          )})`,
+  );
+  return (named[0]?.n ?? 0) > 0;
+}
+
 async function otherValues(
   tx: Tx,
   tenantId: string,
@@ -536,6 +547,14 @@ export function listOpenReviews(tx: Tx, tenantId: string, limit = 100) {
     .limit(limit);
 }
 
+/** What a decision did besides resolving its item. */
+export interface DecisionResult {
+  /** The tags of a single-value facet the decision took off the object (with `replace`). */
+  replaced: string[];
+  /** The other open items the decision closed: those proposing a rejected new value. */
+  alsoClosed: string[];
+}
+
 /**
  * Approves an open item: the tag applies, marked reviewed, and a new value joins the approved
  * vocabulary.
@@ -546,7 +565,7 @@ export async function approveReview(
   reviewId: string,
   reviewer: string,
   options: DecisionOptions = {},
-): Promise<void> {
+): Promise<DecisionResult> {
   const { now } = options;
   const item = await openItem(tx, tenantId, reviewId);
   if (item.reason === "primary") {
@@ -554,7 +573,7 @@ export async function approveReview(
     checkPerson(reviewer, "confirms a primary tag");
     await makePrimary(tx, tenantId, item.objectId, tagOf(item.facet, item.value), reviewer);
     await resolve(tx, tenantId, [reviewId], { decision: "approved", resolvedBy: reviewer }, now);
-    return;
+    return { replaced: [], alsoClosed: [] };
   }
   const others = await replacing(tx, tenantId, item, item.value, reviewer, options);
   await tx
@@ -569,6 +588,7 @@ export async function approveReview(
     );
   await applyReviewed(tx, tenantId, item, item.value, others, reviewer);
   await resolve(tx, tenantId, [reviewId], { decision: "approved", resolvedBy: reviewer }, now);
+  return { replaced: others.map((o) => tagOf(item.facet, o.value)), alsoClosed: [] };
 }
 
 export interface DecisionOptions {
@@ -625,7 +645,8 @@ async function replacing(
 /**
  * Rejects an open item: nothing is applied, and an unreviewed model tag already on the object is
  * taken off. Rejecting a new value rejects it everywhere: every other open item proposing the
- * same value is closed too, and the value stays unapproved (it is kept, as the record).
+ * same value is closed too, and the value stays unapproved (it is kept, as the record). Not
+ * once the value has been approved meanwhile (on another file): then only this item closes.
  */
 export async function rejectReview(
   tx: Tx,
@@ -633,13 +654,13 @@ export async function rejectReview(
   reviewId: string,
   reviewer: string,
   options: Pick<DecisionOptions, "now"> = {},
-): Promise<void> {
+): Promise<DecisionResult> {
   const { now } = options;
   const item = await openItem(tx, tenantId, reviewId);
   if (item.reason === "primary") {
     // The tag itself stays; only the model's pick of the home is turned down.
     await resolve(tx, tenantId, [reviewId], { decision: "rejected", resolvedBy: reviewer }, now);
-    return;
+    return { replaced: [], alsoClosed: [] };
   }
   await tx
     .delete(objectTags)
@@ -654,7 +675,10 @@ export async function rejectReview(
       ),
     );
   const ids = [reviewId];
-  if (item.reason === "new-value") {
+  // (A value approved since the item was filed is the vocabulary's: only this item is turned
+  // down.)
+  const known = await findValue(tx, tenantId, item.facet, item.value);
+  if (item.reason === "new-value" && known?.approved !== true) {
     // The value's lock (taken by openItem) keeps other decisions on these items out; id order
     // keeps this in line with anything else that locks several of them.
     const others = await tx
@@ -675,6 +699,7 @@ export async function rejectReview(
     ids.push(...others.map((o) => o.id));
   }
   await resolve(tx, tenantId, ids, { decision: "rejected", resolvedBy: reviewer }, now);
+  return { replaced: [], alsoClosed: ids.slice(1) };
 }
 
 /**
@@ -688,7 +713,7 @@ export async function mergeReview(
   intoValue: string,
   reviewer: string,
   options: DecisionOptions = {},
-): Promise<void> {
+): Promise<DecisionResult> {
   const { now } = options;
   const item = await openItem(tx, tenantId, reviewId);
   if (item.reason === "primary") {
@@ -715,9 +740,63 @@ export async function mergeReview(
     { decision: "merged", mergedInto: intoValue, resolvedBy: reviewer },
     now,
   );
+  return { replaced: others.map((o) => tagOf(item.facet, o.value)), alsoClosed: [] };
 }
 
 type ReviewRow = typeof tagReviews.$inferSelect;
+
+/** A decision on an open item, for {@link decisionReach}. */
+export type DecisionKind =
+  { decision: "approve" } | { decision: "reject" } | { decision: "merge"; into: string };
+
+/**
+ * How far a decision on an open item reaches, for whoever decides who may make it:
+ *
+ * - `file`: no further than a person tagging the file themselves could go;
+ * - `vocabulary`: the item's value isn't approved vocabulary. Approving it approves the value
+ *   for every file; rejecting it closes every open item proposing it, on any file;
+ * - `loosens`: it takes a restriction off the file, which a person tagging can't. Approving or
+ *   merging would replace a value of a single-value facet that sets a tighter level (or that a
+ *   pack's policies name); or rejecting turns down a value that sets a level or that a policy
+ *   names, which tightens the file while it waits.
+ *
+ * Null when there is no such open item. Reads without locks: decide in the same transaction,
+ * after the locks openItem() takes, for an answer that holds (review-inbox.ts decideReview()).
+ */
+export async function decisionReach(
+  tx: Tx,
+  tenantId: string,
+  reviewId: string,
+  how: DecisionKind,
+): Promise<"file" | "vocabulary" | "loosens" | null> {
+  const [item] = await tx
+    .select()
+    .from(tagReviews)
+    .where(and(eq(tagReviews.tenantId, tenantId), eq(tagReviews.id, reviewId)));
+  if (!item || item.resolvedAt !== null) return null;
+  // The model's pick of the home, among tags the file carries: the file's own matter.
+  if (item.reason === "primary") return "file";
+  const known = await findValue(tx, tenantId, item.facet, item.value);
+  if (how.decision === "reject") {
+    if (known?.approved !== true) return item.reason === "new-value" ? "vocabulary" : "file";
+    const restricts =
+      known.visibility !== null ||
+      known.exposure !== null ||
+      (await namedByPolicy(tx, tenantId, item.facet, [item]));
+    return restricts ? "loosens" : "file";
+  }
+  if (how.decision === "approve" && known?.approved !== true) return "vocabulary";
+  const value = how.decision === "merge" ? how.into : item.value;
+  const [facet] = await tx
+    .select({ single: facets.single })
+    .from(facets)
+    .where(and(eq(facets.tenantId, tenantId), eq(facets.key, item.facet)));
+  if (!facet?.single) return "file";
+  const others = await otherValues(tx, tenantId, item.objectId, item.facet, value);
+  return others.length > 0 && (await loosens(tx, tenantId, item.facet, value, others))
+    ? "loosens"
+    : "file";
+}
 
 /**
  * The open item, locked, so two reviewers can't both resolve it. Locks in the order of locks.ts:

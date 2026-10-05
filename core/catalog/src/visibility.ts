@@ -482,6 +482,11 @@ export interface ViewOptions {
    * content (exposure, for an AI client). Not with `search`.
    */
   content?: boolean;
+  /**
+   * The caller wants to tag the files (the review inbox, T-1403): only views of files they
+   * read and `tag` is authorized on are kept.
+   */
+  tag?: boolean;
 }
 
 /**
@@ -605,6 +610,11 @@ export async function viewObjects(
         client: request.client,
       });
       if (kind === "forbid" || kind === "error") continue;
+    }
+    if (options.tag === true) {
+      if (!canRead) continue;
+      const tag = authz.authorize({ principal, action: "tag", resource, client: request.client });
+      if (!tag.allow) continue;
     }
     if (wantsContent) {
       if (!canRead) continue;

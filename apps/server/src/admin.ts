@@ -5,10 +5,20 @@ import { appendAudit } from "@openhoard/core-audit";
 import {
   APPLY_TRANSACTION,
   applyPack,
+  decideReview,
   PackError,
   planPack,
+  REVIEW_INBOX_MAX,
+  ReviewAccessError,
+  reviewInbox,
+  reviewItemFor,
+  TagError,
+  tenantPolicies,
+  VIEW_TRANSACTION,
   type PackChange,
   type PackPlan,
+  type ReviewDecision,
+  type ReviewItem,
 } from "@openhoard/core-catalog";
 import {
   createTenant,
@@ -56,6 +66,7 @@ import {
   startJobs,
   type SourceSyncState,
 } from "@openhoard/core-jobs";
+import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
 import { adminGroupOf, ensureDataDir, loadConfig, type Config } from "./config.js";
 import { retrying } from "./retry.js";
 
@@ -88,6 +99,10 @@ import { retrying } from "./retry.js";
  *   admin source confirm-reconcile --tenant ten_… --source <name>
  *   admin source discard-reconcile --tenant ten_… --source <name>
  *   admin source accept-identity   --tenant ten_… --source <name>
+ *   admin review list    --tenant ten_… --user <usr_… | email | userName> [--limit 100]
+ *   admin review approve --tenant ten_… --user <…> --id rev_… [--replace]
+ *   admin review reject  --tenant ten_… --user <…> --id rev_…
+ *   admin review merge   --tenant ten_… --user <…> --id rev_… --into <value> [--replace]
  *
  * It reads the server's configuration (and `--data-dir`, as the server does) and opens the same
  * database. The embedded database (PGlite) belongs to one process at a time, so while the
@@ -138,6 +153,20 @@ import { retrying } from "./retry.js";
  * is now another one (another disk at the path) syncs again only once accepted
  * (`source.accept-identity`), which starts a crawl from the beginning. Both are audited, refusals
  * too.
+ *
+ * `review …` is the tag review inbox (T-406, T-1403) until the app has one: what models and AI
+ * assistants proposed and a person must decide. A decision is a person's, so each command
+ * names one (`--user`), and they see and decide only what they could in the app: items on
+ * files they may tag (core/catalog review-inbox.ts). Being the operator, or a tenant admin,
+ * gives no more. A decision that reaches further than the file takes a tenant admin who may
+ * tag the file: approving or rejecting a value the vocabulary doesn't have, and taking a
+ * restriction off the file (rejecting a value that sets a level, or replacing a tighter one).
+ * `list` prints an item a line: id, tag, reason, who proposed it, confidence, when, `admin`
+ * when some decision on it takes one, the file's id and title. `approve` applies the tag (grants on it then
+ * count for the file), `reject` drops it, `merge` applies an approved value of the same facet
+ * instead; `--replace` confirms taking another value of a single-value facet off the file.
+ * Audited as `tag.review`, acted by `system:admin-cli` for the person; a refused decision too
+ * (`refusal`: why), unless the tenant doesn't exist.
  */
 
 export const ADMIN_ACTOR = "system:admin-cli";
@@ -217,6 +246,14 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
   source accept-identity --tenant <ten_…> --source <name>
                                                    accept that the source is now another one
                                                    (it is crawled again from the beginning)
+  review list --tenant <ten_…> --user <usr_…|email|userName> [--limit <1-${REVIEW_INBOX_MAX}>]
+                                                   the proposed tags that person may decide
+  review approve --tenant <ten_…> --user <…> --id <rev_…> [--replace]
+                                                   apply the proposed tag, as that person
+  review reject --tenant <ten_…> --user <…> --id <rev_…>
+                                                   turn the proposed tag down
+  review merge --tenant <ten_…> --user <…> --id <rev_…> --into <value> [--replace]
+                                                   apply an approved value of the facet instead
 `;
 
 class UsageError extends Error {}
@@ -242,6 +279,9 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         hours: { type: "string" },
         file: { type: "string" },
         "plan-hash": { type: "string" },
+        into: { type: "string" },
+        limit: { type: "string" },
+        replace: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -281,6 +321,10 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "source confirm-reconcile",
     "source discard-reconcile",
     "source accept-identity",
+    "review list",
+    "review approve",
+    "review reject",
+    "review merge",
   ];
   if (!known.includes(command)) {
     io.err(`unknown command: ${command}\n\n${USAGE}`);
@@ -389,6 +433,41 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
           sourceArg(values.source),
           io,
         );
+      case "review list":
+        return await reviewList(
+          db,
+          config,
+          tenantArg(values.tenant),
+          need(values.user, "--user"),
+          values.limit,
+          io,
+        );
+      case "review approve":
+      case "review reject":
+      case "review merge": {
+        const id = need(values.id, "--id");
+        if (!isId("review", id)) throw new UsageError(`not a review item id: ${id}`);
+        const replace = values.replace === true;
+        if (command !== "review merge" && values.into !== undefined) {
+          throw new UsageError("--into goes with review merge");
+        }
+        if (command === "review reject" && replace) {
+          throw new UsageError("--replace goes with review approve or merge");
+        }
+        return await reviewDecide(
+          db,
+          config,
+          tenantArg(values.tenant),
+          need(values.user, "--user"),
+          id,
+          command === "review approve"
+            ? { decision: "approve", replace }
+            : command === "review reject"
+              ? { decision: "reject" }
+              : { decision: "merge", into: need(values.into, "--into"), replace },
+          io,
+        );
+      }
       default:
         return await tokenRevoke(db, tenantArg(values.tenant), need(values.id, "--id"), io);
     }
@@ -1559,5 +1638,193 @@ async function sourceChange(
         ? `Discarded: nothing was removed; the next sync crawls ${source} afresh, guarded again.\n`
         : `Accepted: the next sync of ${source} records what it is now, and crawls it again.\n`,
   );
+  return 0;
+}
+
+/** Text from the catalog on one line of a terminal: no control characters. */
+const oneLine = (text: string) => text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, " ");
+
+/** The text's characters, without the halves of a pair left alone (audit text must be whole). */
+const wellFormed = (text: string) => [...text].filter((c) => !/^[\ud800-\udfff]$/.test(c));
+
+/** The person a `review` command names; "none" or "ambiguous" with the reason said. */
+async function reviewerNamed(
+  db: Database,
+  tenantId: string,
+  named: string,
+  io: AdminIo,
+): Promise<User | "no-tenant" | "none" | "ambiguous"> {
+  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
+    io.err(`no tenant ${tenantId}\n`);
+    return "no-tenant";
+  }
+  const user = await namedUser(db, tenantId, named);
+  if (user === "none" || user === "ambiguous") {
+    io.err(
+      user === "none"
+        ? `tenant ${tenantId} has no user ${oneLine(named)}\n`
+        : `${oneLine(named)} names more than one user: use the usr_… id\n`,
+    );
+  }
+  return user;
+}
+
+/** The tenant's policies, compiled: what the server decides with (tools/context.ts). */
+const authorizerOf = async (tx: Tx, tenantId: string) =>
+  new Authorizer(createCedarEngine(await tenantPolicies(tx, tenantId)));
+
+/** `review list`: the open items the person may decide, oldest first, one a line. */
+async function reviewList(
+  db: Database,
+  config: Config,
+  tenantId: string,
+  named: string,
+  limitArg: string | undefined,
+  io: AdminIo,
+): Promise<number> {
+  const limit = limitArg === undefined ? 100 : Number(limitArg);
+  if (!Number.isInteger(limit) || limit < 1 || limit > REVIEW_INBOX_MAX) {
+    throw new UsageError(`--limit is 1 to ${REVIEW_INBOX_MAX}`);
+  }
+  const user = await reviewerNamed(db, tenantId, named, io);
+  if (typeof user === "string") return 1;
+  const reviewer = { userId: user.id, adminGroupId: adminGroupOf(config.auth)(tenantId) };
+  let inbox;
+  try {
+    inbox = await db.withTenant(
+      tenantId,
+      async (tx) => reviewInbox(tx, tenantId, await authorizerOf(tx, tenantId), reviewer, limit),
+      VIEW_TRANSACTION,
+    );
+  } catch (e) {
+    if (!(e instanceof ReviewAccessError)) throw e;
+    io.err(`${user.id} can't review: not a current user\n`);
+    return 1;
+  }
+  for (const i of inbox.items) {
+    io.out(
+      [
+        i.id,
+        i.tag,
+        i.reason,
+        oneLine(i.appliedBy ?? i.source),
+        i.confidence.toFixed(2),
+        i.createdAt.toISOString(),
+        i.admin ? "admin" : "-",
+        i.objectId,
+        oneLine(i.title),
+      ].join("\t") + "\n",
+    );
+  }
+  const who = oneLine(user.email ?? user.id);
+  if (inbox.items.length === 0 && !inbox.capped) {
+    io.err(`Nothing waits for ${who} to decide: no open item is on a file they may tag.\n`);
+  } else if (inbox.more) {
+    io.err(`More wait: decide some of these and list again.\n`);
+  }
+  if (inbox.capped) {
+    io.err(
+      `So many files have open items that not all were looked at for ${who}: there may be more that deciding these won't bring up.\n`,
+    );
+  }
+  return 0;
+}
+
+/** `review approve | reject | merge`: the person's decision, checked as theirs, audited. */
+async function reviewDecide(
+  db: Database,
+  config: Config,
+  tenantId: string,
+  named: string,
+  reviewId: string,
+  how: ReviewDecision,
+  io: AdminIo,
+): Promise<number> {
+  const asked = {
+    review: reviewId,
+    asked: how.decision,
+    ...(how.decision === "merge"
+      ? { into: wellFormed(oneLine(how.into)).slice(0, 200).join("") }
+      : {}),
+  };
+  const refused = async (detail: Record<string, string>, message?: string, object?: string) => {
+    await db.withTenant(tenantId, (tx) =>
+      appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "tag.review",
+        decision: "deny",
+        ...(object === undefined ? {} : { object }),
+        detail: { ...asked, ...detail },
+      }),
+    );
+    if (message !== undefined) io.err(`${message}\n`);
+    return 1;
+  };
+  const user = await reviewerNamed(db, tenantId, named, io);
+  if (user === "no-tenant") return 1;
+  if (typeof user === "string") {
+    return refused({ refusal: user === "none" ? "unknown-user" : "ambiguous-user" });
+  }
+  const who = oneLine(user.email ?? user.id);
+  const reviewer = `user:${user.id}`;
+  const adminGroupId = adminGroupOf(config.auth)(tenantId);
+  const denied = (e: ReviewAccessError) =>
+    refused(
+      { reviewer, refusal: e.code },
+      e.code === "refused"
+        ? `${who} may not tag that file, so can't decide ${reviewId}`
+        : e.code === "not-admin"
+          ? `${who} isn't a tenant admin: ${e.message}`
+          : e.code === "unknown-reviewer"
+            ? `${user.id} can't review: not a current user`
+            : `no open review item ${reviewId} that ${who} may decide`,
+      e.objectId,
+    );
+  let item: ReviewItem;
+  try {
+    item = await db.withTenant(
+      tenantId,
+      async (tx) =>
+        reviewItemFor(
+          tx,
+          tenantId,
+          await authorizerOf(tx, tenantId),
+          { userId: user.id, adminGroupId },
+          reviewId,
+          how,
+        ),
+      VIEW_TRANSACTION,
+    );
+  } catch (e) {
+    if (!(e instanceof ReviewAccessError)) throw e;
+    return denied(e);
+  }
+  let done;
+  try {
+    done = await retrying(() =>
+      db.withTenant(tenantId, (tx) =>
+        decideReview(
+          tx,
+          tenantId,
+          { reviewId, userId: user.id, adminGroupId, actor: ADMIN_ACTOR },
+          how,
+        ),
+      ),
+    );
+  } catch (e) {
+    if (e instanceof ReviewAccessError) return denied(e);
+    if (!(e instanceof TagError)) throw e;
+    return refused({ reviewer, refusal: e.code }, oneLine(e.message), item.objectId);
+  }
+  const file = `"${oneLine(item.title)}" (${done.objectId})`;
+  const off = done.replaced.length > 0 ? `, replacing ${done.replaced.join(", ")}` : "";
+  io.err(
+    how.decision === "reject"
+      ? `Rejected ${done.tag} on ${file}, for ${who}${done.alsoClosed > 0 ? `; ${done.alsoClosed} other open items proposing the value closed with it` : ""}.\n`
+      : item.reason === "primary"
+        ? `Confirmed ${done.tag} as the home of ${file}, for ${who}.\n`
+        : `${how.decision === "merge" ? `Merged ${done.tag} into` : "Approved"} ${done.applied ?? done.tag} on ${file}${off}, for ${who}: grants on the tag now count for the file.\n`,
+  );
+  io.out(`${reviewId}\n`);
   return 0;
 }

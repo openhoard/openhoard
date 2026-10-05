@@ -887,7 +887,29 @@ node apps/server/dist/main.js admin source resume --tenant ten_… --source <nam
 node apps/server/dist/main.js admin source confirm-reconcile --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source discard-reconcile --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source accept-identity --tenant ten_… --source <name>
+node apps/server/dist/main.js admin review list --tenant ten_… --user <usr_…|email|userName> [--limit 100]
+node apps/server/dist/main.js admin review approve --tenant ten_… --user <usr_…|email|userName> --id rev_… [--replace]
+node apps/server/dist/main.js admin review reject --tenant ten_… --user <usr_…|email|userName> --id rev_…
+node apps/server/dist/main.js admin review merge --tenant ten_… --user <usr_…|email|userName> --id rev_… --into <value> [--replace]
 ```
+
+- **The review inbox (T-1403).** Tags that models and AI assistants (the `tag` tool) proposed
+  wait for a person. Until the app has an inbox, `review list` prints the open items on files
+  one person may tag, an item a line (id, tag, reason, who proposed it, confidence, when,
+  `admin` when some decision on it takes a tenant admin, the file's id and title), and
+  `review approve`, `reject` and `merge` decide an item as that person. A decision is a person's, so
+  `--user` is required (a `usr_…` id, an email or a userName), and that person sees and decides
+  only items on files they may tag: they read the file, and own it or hold write access to it.
+  Being the operator or a tenant admin gives no more. Two kinds of decision reach further than
+  the file and take a tenant admin who may also tag it: approving or rejecting a value the
+  vocabulary doesn't have yet (approving it approves it for every file; rejecting it closes
+  every open item proposing it), and taking a restriction off the file (rejecting a value that
+  sets a visibility or exposure level, or `--replace` of a tighter value). Anyone who may tag
+  the file may `merge` a new value `--into` an approved one of the same facet. Approving applies
+  the tag, and grants on that tag then count for the file; `--replace` confirms taking another
+  value of a single-value facet off the file. Audited as `tag.review`, acted by
+  `system:admin-cli` with the reviewer named; a refused decision is audited too (`refusal` says
+  why). An item on a file no admin may tag waits until one is given access.
 
 - **Admins.** `user grant-admin` makes the tenant's first admin (the person must exist: provisioned
   over SCIM, or invited), and is the way back in when a tenant has none left. `--user` takes an

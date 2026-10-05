@@ -454,8 +454,21 @@ The inbox is `tag_reviews` in core/db. `approveReview()`, `rejectReview()` and `
 decide items, and items stay as the record of who decided:
 
 - **Approve:** the tag applies, marked reviewed. A new value joins the vocabulary.
-- **Reject:** nothing applies. Rejecting a new value closes every item that proposes it.
+- **Reject:** nothing applies. Rejecting a new value closes every item that proposes it, unless
+  the value has been approved since.
 - **Merge:** an existing approved value is applied instead.
+
+Those three trust their caller. [`review-inbox.ts`](src/review-inbox.ts) (T-1403) is the inbox
+as one person may have it: `reviewInbox()` lists, and `reviewItemFor()` gives, only items on
+files that person may tag (`viewObjects()` with `tag: true`: they read the file and `tag` is
+authorized; a tenant admin as such gets nothing more). `decisionReach()` says how far a
+decision goes: `vocabulary` (approving or rejecting a value that isn't approved: it counts for
+every file) and `loosens` (rejecting a value that sets a level, which tightens the file while
+it waits, or replacing a tighter value of a single-value facet) also take a tenant admin;
+merging a new value into an approved one doesn't. `decideReview()` makes the decision and
+appends the `tag.review` audit record in the same transaction. Check in a snapshot, then decide
+in a write transaction, as the `tag` tool does; `decideReview()` checks again that the person
+is still current and, under the decision's locks, how far it reaches.
 
 Access decisions read tags through `tagsForDecisions()`:
 

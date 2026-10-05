@@ -28,6 +28,10 @@ const SURFACE = {
     "openContent",
     // The caller's own activity (T-506), every file through the gate; records nothing.
     "recentObjects",
+    // The review inbox as one person may see it (T-1403): each file through the gate, and
+    // `tag` authorized on it.
+    "reviewInbox",
+    "reviewItemFor",
     "searchObjects",
     "suggestTitles",
     "viewBySource",
@@ -45,6 +49,9 @@ const SURFACE = {
     "applyRuleTags",
     "approveReview",
     "clearPrimaryTag",
+    // A person's decision on a review item, audited; the caller checks them with
+    // reviewItemFor() first.
+    "decideReview",
     "ingest",
     // Takes the object's lock for the enrichment step that writes after it.
     "lockCurrentVersion",
@@ -91,6 +98,8 @@ const SURFACE = {
     "explainLevels",
     "levelsFor",
     "listActivity",
+    // How far a decision on a review item reaches (T-1403): for decideReview()'s own check.
+    "decisionReach",
     "listOpenReviews",
     // For enrichment (core/jobs): the approved vocabulary a model may propose from (T-405).
     "modelVocabulary",
@@ -134,6 +143,8 @@ const SURFACE = {
   value: [
     "ACTIVITY_PAGE",
     "ActivityBuffer",
+    "ReviewAccessError",
+    "REVIEW_INBOX_MAX",
     "APPLY_TRANSACTION",
     "BUILTIN_RULE_PREFIX",
     "DEFAULT_MIN_CONFIDENCE",
@@ -170,7 +181,16 @@ const RECORDING = {
   viewBySource: "view",
   viewObject: "view",
 } as const;
-const LISTING = ["recentObjects", "searchObjects", "suggestTitles", "viewObjects"] as const;
+const LISTING = [
+  "recentObjects",
+  "reviewInbox",
+  "reviewItemFor",
+  "searchObjects",
+  "suggestTitles",
+  "viewObjects",
+] as const;
+/** Gated reads kept outside read.ts, beside what they belong with. */
+const ELSEWHERE: readonly string[] = ["recentObjects", "reviewInbox", "reviewItemFor"];
 
 /** The gated reads in search.ts, which reach viewObjects() through gatedMatches(). */
 const SEARCH: readonly string[] = ["searchObjects", "suggestTitles"];
@@ -209,7 +229,7 @@ describe("the catalog's export surface", () => {
     const names = starts.map((m) => m[1]).sort();
     expect(names).toEqual(
       SURFACE.gated
-        .filter((n) => n !== "viewObjects" && n !== "recentObjects" && !SEARCH.includes(n))
+        .filter((n) => n !== "viewObjects" && !ELSEWHERE.includes(n) && !SEARCH.includes(n))
         .sort(),
     );
     for (const [i, m] of starts.entries()) {
@@ -230,6 +250,28 @@ describe("the catalog's export surface", () => {
       ).toBe(true);
       const firstQuery = before.search(/\btx\s*\./);
       if (firstQuery > -1) expect(snapshot).toBeLessThan(firstQuery);
+    }
+  });
+
+  it("keeps the review inbox's reads snapshot-first, reading only review items besides the gate", () => {
+    const text = source("./review-inbox.ts");
+    for (const name of ["reviewInbox", "reviewItemFor"]) {
+      const from = text.indexOf(`export async function ${name}(`);
+      expect(from, name).toBeGreaterThan(-1);
+      const whole = text.slice(from, text.indexOf("\n}\n", from) + 2);
+      const body = whole.slice(whole.search(/\): Promise<[^\n]*\{\n/));
+      const snapshot = body.indexOf("requireSnapshot(tx");
+      expect(snapshot, `${name} doesn't check the snapshot`).toBeGreaterThan(-1);
+      // Before anything else that takes the transaction.
+      expect(body.search(/\btx\b/), name).toBe(snapshot + "requireSnapshot(".length);
+      expect(body, `${name} never reaches the gate`).toMatch(/\bviewObjects\(/);
+      // What it tells of a file comes from the gate: its own queries read review items only.
+      const queried = [...body.matchAll(/\.from\((\w+)\)/g)].map((q) => q[1]);
+      expect(queried.length, name).toBeGreaterThan(0);
+      expect(
+        queried.every((table) => table === "tagReviews"),
+        `${name} reads ${queried.join()}`,
+      ).toBe(true);
     }
   });
 
@@ -286,6 +328,33 @@ describe("the catalog's export surface", () => {
         client: { id: "openhoard-web", trust: "first-party" },
         activity: new catalog.ActivityBuffer(),
       };
+      // An open review item on the file, for the inbox's reads.
+      const { facetValues } = await import("@openhoard/core-db");
+      await db.withTenant(t.tenantId, (tx) =>
+        tx.insert(facetValues).values({
+          tenantId: t.tenantId,
+          facet: "client",
+          value: "globex",
+          label: "Globex",
+          approved: true,
+        }),
+      );
+      const proposed = await db.withTenant(t.tenantId, (tx) =>
+        catalog.proposeTag(
+          tx,
+          t.tenantId,
+          {
+            objectId: t.objectId,
+            tag: "client:globex",
+            source: "model",
+            appliedBy: "model:test/m",
+            confidence: 1,
+          },
+          { review: "agent" },
+        ),
+      );
+      const waiting = proposed.applied ? "" : proposed.reviewId;
+      expect(waiting).not.toBe("");
       // One call per gated export: a new one fails here until it has a case.
       const CALLS: Record<(typeof SURFACE.gated)[number], (tx: Tx) => Promise<unknown>> = {
         viewObjects: (tx) => catalog.viewObjects(tx, t.tenantId, deny, request, [t.objectId]),
@@ -303,6 +372,15 @@ describe("the catalog's export surface", () => {
           catalog.suggestTitles(tx, t.tenantId, deny, request, { prefix: "report" }),
         recentObjects: async (tx) =>
           (await catalog.recentObjects(tx, t.tenantId, deny, request)).items,
+        reviewInbox: async (tx) =>
+          (await catalog.reviewInbox(tx, t.tenantId, deny, { userId: t.userId })).items,
+        reviewItemFor: (tx) =>
+          catalog
+            .reviewItemFor(tx, t.tenantId, deny, { userId: t.userId }, waiting)
+            .catch((e: unknown) => {
+              if (e instanceof catalog.ReviewAccessError && e.code === "not-found") return null;
+              throw e;
+            }),
       };
       expect(Object.keys(CALLS).sort()).toEqual([...SURFACE.gated].sort());
       // The seeded file is unprocessed, so hidden to anyone authorize() refuses.
@@ -373,6 +451,20 @@ describe("the catalog's export surface", () => {
           suggestTitles: (tx) =>
             catalog.suggestTitles(tx, t.tenantId, authz, request, { prefix: "report" }),
           recentObjects: (tx) => catalog.recentObjects(tx, t.tenantId, authz, request),
+          reviewInbox: (tx) => catalog.reviewInbox(tx, t.tenantId, authz, { userId: t.userId }),
+          reviewItemFor: (tx) =>
+            catalog
+              .reviewItemFor(
+                tx,
+                t.tenantId,
+                authz,
+                { userId: t.userId },
+                "rev_00000000000000000000000000",
+              )
+              .catch((e: unknown) => {
+                if (e instanceof catalog.ReviewAccessError && e.code === "not-found") return null;
+                throw e;
+              }),
         };
         const got = await db.withTenant(t.tenantId, calls[name], catalog.VIEW_TRANSACTION);
         return { got, events: activity.take() };
