@@ -11,6 +11,7 @@ import {
   objectTags,
   openDatabase,
   queryRows,
+  sourceShares,
   sourceSyncs,
   zones,
   type Database,
@@ -1324,5 +1325,146 @@ describe("openhoard admin audit (T-1404)", { timeout: 180_000 }, () => {
 
     // Another tenant's chain is its own.
     expect((await admin("audit", "verify", "--tenant", other)).out).toMatch(/^ok\t4\t/);
+  });
+});
+
+describe("openhoard admin health report (T-1002)", { timeout: 180_000 }, () => {
+  it("gives a tenant admin the report as a page and as a sheet, and nobody else", async () => {
+    // A tenant with one file its source shares by a public link, and a member besides.
+    const made = await inspect(async (db) => {
+      const t = await seedTenant(db, 9);
+      await db.withTenant(t.tenantId, async (tx) => {
+        await tx.update(objects).set({ title: "=Payroll\t2026.xlsx" });
+        await tx.insert(sourceShares).values({
+          tenantId: t.tenantId,
+          source: "sharepoint",
+          objectId: t.objectId,
+          kind: "link-anyone",
+          key: "L1",
+          role: "read",
+          inherited: false,
+          matched: false,
+        });
+        await createUser(tx, t.tenantId, {
+          email: "boss@example.com",
+          displayName: "Boss",
+          source: "local",
+        });
+      });
+      return t;
+    });
+    const { tenantId } = made;
+    expect(
+      (await admin("user", "grant-admin", "--tenant", tenantId, "--user", "boss@example.com")).code,
+    ).toBe(0);
+    const health = (...argv: string[]) => admin("health", "report", ...argv, "--tenant", tenantId);
+
+    // The page: what was found, why it matters, the file in plain words; then what is clean.
+    const page = await health("--user", "boss@example.com");
+    expect(page.code, page.err).toBe(0);
+    expect(page.out).toMatch(
+      /^File health report for Tenant 9, \d{1,2} [A-Z][a-z]{2} \d{4}\nOpenHoard looked at 1 file \(1\.2 KB in all\)\.\n1 thing to look at, most pressing first; 8 checks found nothing\.\n/,
+    );
+    expect(page.out).toContain("Open to anyone with the link: 1 file\n");
+    expect(page.out).toContain(
+      "  - =Payroll 2026.xlsx: anyone with the link can view, with no end date\n",
+    );
+    expect(page.out).toContain("Nothing found:\n");
+    expect(page.out).toContain("  - Larger than 1 GB\n");
+    expect(page.out).toContain("What this report can't tell you:\n");
+
+    // The sheet, to a new file: a line for the file, its title kept from running as a formula.
+    const file = join(dir, "health.csv");
+    const sheet = await health("--user", "boss@example.com", "--format", "csv", "--out", file);
+    expect(sheet.code, sheet.err).toBe(0);
+    expect(sheet.out).toBe("");
+    expect(sheet.err).toContain(": 1 row in ");
+    const written = readFileSync(file, "utf8");
+    // (Marked as UTF-8, for the spreadsheet that opens it.)
+    expect(written.charCodeAt(0)).toBe(0xfeff);
+    const lines = written.slice(1).split("\r\n");
+    expect(lines[0]).toBe("finding,title,size_bytes,why,where,detail,source,section,object_id");
+    expect(lines[1]).toBe(
+      `Open to anyone with the link,'=Payroll 2026.xlsx,1234,"anyone with the link can view, with no end date",,link-anyone (read),sharepoint,publicLinks,${made.objectId}`,
+    );
+    expect(lines).toHaveLength(3);
+    if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
+    // Never over a file that exists, which is found out before anything is read or recorded.
+    const over = await health("--user", "boss@example.com", "--format", "csv", "--out", file);
+    expect(over.code).toBe(1);
+    expect(over.err).toContain("exists");
+    expect(readFileSync(file, "utf8")).toBe(written);
+    const nowhere = await health("--user", "boss@example.com", "--out", join(dir, "no", "x.txt"));
+    expect(nowhere.code).toBe(1);
+    expect(nowhere.err).toContain(join(dir, "no", "x.txt"));
+
+    // Thresholds: with a megabyte counted as large the file still isn't, and the page says
+    // what it was judged by; the page goes to a file as well.
+    const tuned = join(dir, "page.txt");
+    expect(
+      (
+        await health(
+          "--user",
+          "boss@example.com",
+          "--large-mb",
+          "1",
+          "--stale-days",
+          "30",
+          "--out",
+          tuned,
+        )
+      ).code,
+    ).toBe(0);
+    const tunedPage = readFileSync(tuned, "utf8");
+    expect(tunedPage).toContain("  - Larger than 1 MB\n");
+    expect(tunedPage).toContain("  - Not changed in 30 days or more\n");
+    expect(tunedPage.charCodeAt(0)).not.toBe(0xfeff);
+
+    // Not an admin (no file is left behind for a report that wasn't made), nobody, and misuse.
+    const refusedTo = join(dir, "refused.txt");
+    const member = await health("--user", "ana-9@example.com", "--out", refusedTo);
+    expect(member.code).toBe(1);
+    expect(member.out).toBe("");
+    expect(member.err).toContain("isn't a tenant admin");
+    expect(existsSync(refusedTo)).toBe(false);
+    expect((await health("--user", "nobody@example.com")).code).toBe(1);
+    for (const bad of [
+      [],
+      ["--user", "boss@example.com", "--format", "pdf"],
+      ["--user", "boss@example.com", "--limit", "0"],
+      ["--user", "boss@example.com", "--limit", "10001"],
+      ["--user", "boss@example.com", "--stale-days", "x"],
+      ["--user", "boss@example.com", "--large-mb", "0"],
+    ]) {
+      expect((await health(...bad)).code, bad.join(" ")).toBe(2);
+    }
+
+    // Every report read is in the log, with who it was for; refusals too.
+    const events = await inspect(async (db) => {
+      const out: string[] = [];
+      await exportAudit(db, tenantId, { action: "health.report" }, "ndjson", (chunk: string) => {
+        out.push(chunk);
+      });
+      return out
+        .join("")
+        .split("\n")
+        .filter(Boolean)
+        .map(
+          (l) =>
+            JSON.parse(l) as { actor: string; decision: string; detail: Record<string, unknown> },
+        );
+    });
+    expect(events.every((e) => e.actor === ADMIN_ACTOR)).toBe(true);
+    expect(
+      events.map((e) => [e.decision, e.detail.format, e.detail.refusal ?? e.detail.publicLinks]),
+    ).toEqual([
+      ["allow", "text", 1],
+      ["allow", "csv", 1],
+      ["allow", "text", 1],
+      ["deny", "text", "not-admin"],
+      ["deny", "text", "unknown-user"],
+    ]);
+    expect(events[0]?.detail).toMatchObject({ files: 1, duplicates: 0 });
+    expect(String(events[0]?.detail.reader)).toMatch(/^user:usr_/);
   });
 });

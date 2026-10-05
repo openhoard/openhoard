@@ -891,10 +891,28 @@ node apps/server/dist/main.js admin review list --tenant ten_… --user <usr_…
 node apps/server/dist/main.js admin review approve --tenant ten_… --user <usr_…|email|userName> --id rev_… [--replace]
 node apps/server/dist/main.js admin review reject --tenant ten_… --user <usr_…|email|userName> --id rev_…
 node apps/server/dist/main.js admin review merge --tenant ten_… --user <usr_…|email|userName> --id rev_… --into <value> [--replace]
+node apps/server/dist/main.js admin health report --tenant ten_… --user <a tenant admin> [--format text|csv] [--out <new file>] [--limit <n>] [--stale-days <n>] [--large-mb <n>]
 node apps/server/dist/main.js admin audit verify --tenant ten_…
 node apps/server/dist/main.js admin audit export --tenant ten_… [--format ndjson|csv] [--out <new file>] [--actor …] [--action …] [--decision allow|deny] [--client …] [--object …] [--from <time>] [--to <time>]
 ```
 
+- **The File Health Report (T-1001, T-1002).** `health report` says what a tenant's admin
+  should look at among its files: files labelled as restricted yet widely shared, open to
+  anyone with a link, shared with people outside, tied to people who have left, shared with
+  the whole organization, unchanged for years, duplicated, very large, or shared with people
+  OpenHoard doesn't know ([core/catalog](../../core/catalog/README.md#file-health-report) has
+  what each means and what it can't see). As text (the default) it is a page for the tenant's
+  owner, in plain words: each finding, most pressing first, with why it matters, what to do and
+  its first files (`--limit`, 10 a finding) with who can open each; then what is clean and what
+  couldn't be checked. As CSV it has a line for every file listed (`--limit` a finding, 10,000
+  by default and at most; it says which findings have more): the finding, the file, why in
+  plain words, where it is, and the report's compact detail. Text a spreadsheet would run as a
+  formula gets a leading apostrophe, and a sheet written with `--out` is marked as UTF-8. It
+  names files by their real titles whoever may read them, so it is a tenant admin's: `--user`
+  names one, and each report read is audited (`health.report`: who it was for, the format, each
+  finding's count), a refusal too. `--stale-days` (1095) and `--large-mb` (1024) move two
+  thresholds, and the page says what it was judged by. `--out` writes a new file, never over
+  an existing one.
 - **The audit log (T-702, T-703, T-1404).** `audit verify` checks a tenant's whole chain: every
   hash and link, and that the columns queries read say what the hashed events say. It prints
   `ok`, the number of events and the head hash (exit 0), or `failed`, how many events check

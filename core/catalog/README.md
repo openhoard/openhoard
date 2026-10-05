@@ -464,6 +464,16 @@ What it can't say:
   neither an item's path nor which matched permissions are inherited); a file name carrying
   instructions is the injection detector's flag (`risk:injection`), not a section here.
 
+Each file listed carries its `reasons` (who can open it and how, who left, since when) and the
+same as one compact `detail` line. [`health-format.ts`](src/health-format.ts) (T-1002) turns a
+report into what its reader gets, in words that need no knowledge of OpenHoard ("can view",
+"your own labels", "people outside your organization"): `healthText()`, a page for the tenant's
+owner (each finding, most pressing first, with why it matters, what to do and its first files;
+then what is clean and what couldn't be checked), and `healthCsv()`, a line for every file
+listed. `reasonText()` words one reason; `healthWording()` a finding, for the thresholds it was
+judged by. An operator runs both as `openhoard admin health report`
+([apps/server](../../apps/server/README.md)).
+
 It is for tenant admins only, like `whoCanAccess()`, and checks the asker is one itself
 (`HealthError` `not-admin`): it names every live file by its real title, whoever may read it.
 It opens nothing: a file's content still goes through the gate. Run it in one snapshot

@@ -132,6 +132,15 @@ export function csvLine(e: AuditEvent): string {
   return `${cells.map(quote).join(",")}\r\n`;
 }
 
+/**
+ * One CSV record of text cells (RFC 4180, CRLF-terminated), with the same defence as the audit
+ * export's: text a spreadsheet would run as a formula gets a leading apostrophe. For other
+ * exports of the tenant's own text (the File Health Report).
+ */
+export function csvRecord(cells: readonly (string | undefined)[]): string {
+  return `${cells.map((c) => quote(text(c))).join(",")}\r\n`;
+}
+
 /** Neutralizes text a spreadsheet would evaluate as a formula. */
 function text(value: string | undefined): string {
   if (value === undefined) return "";

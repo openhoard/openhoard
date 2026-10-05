@@ -140,10 +140,24 @@ export {
   healthReport,
   type HealthFinding,
   type HealthItem,
+  type HealthReason,
   type HealthOptions,
   type HealthReport,
   type HealthSection,
 } from "./health.js";
+export {
+  HEALTH_CSV_COLUMNS,
+  HEALTH_PAGE_ORDER,
+  healthCsv,
+  healthCsvCut,
+  healthText,
+  healthWording,
+  plainLine,
+  readableBytes,
+  reasonsText,
+  reasonText,
+  type HealthTextOptions,
+} from "./health-format.js";
 export { recentObjects, type RecentItem, type RecentQuery, type RecentResult } from "./recent.js";
 export {
   ACTIVITY_PAGE,

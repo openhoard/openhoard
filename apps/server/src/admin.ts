@@ -12,6 +12,12 @@ import {
   APPLY_TRANSACTION,
   applyPack,
   decideReview,
+  HEALTH_SECTIONS,
+  healthCsv,
+  healthCsvCut,
+  HealthError,
+  healthReport,
+  healthText,
   PackError,
   planPack,
   REVIEW_INBOX_MAX,
@@ -21,6 +27,8 @@ import {
   TagError,
   tenantPolicies,
   VIEW_TRANSACTION,
+  type HealthOptions,
+  type HealthReport,
   type PackChange,
   type PackPlan,
   type ReviewDecision,
@@ -113,6 +121,9 @@ import { retrying } from "./retry.js";
  *   admin audit export --tenant ten_… [--format ndjson|csv] [--out <new file>] [--actor <principal>]
  *                      [--action <name>] [--decision allow|deny] [--client <id>] [--object <id>]
  *                      [--from <time>] [--to <time>]
+ *   admin health report --tenant ten_… --user <admin: usr_… | email | userName>
+ *                       [--format text|csv] [--out <new file>] [--limit <n>]
+ *                       [--stale-days <n>] [--large-mb <n>]
  *
  * It reads the server's configuration (and `--data-dir`, as the server does) and opens the same
  * database. The embedded database (PGlite) belongs to one process at a time, so while the
@@ -191,6 +202,15 @@ import { retrying } from "./retry.js";
  * format and how many events) once it ends, so the chain's head moves by that one event; one
  * that fails or whose reader goes away part way is audited as `incomplete`, and its file is
  * removed.
+ *
+ * `health report` (T-1001, T-1002) is the File Health Report: what a tenant's admin should
+ * look at among its files (core/catalog health.ts). As text, a page for the tenant's owner:
+ * each finding, why it matters, what to do and its first few files (`--limit`, 10). As CSV,
+ * a line for every file listed, for a spreadsheet (`--limit` per section, 10,000, the most;
+ * it says which sections have more). It names files by their real titles, so it is a tenant
+ * admin's to read: `--user` names one, and it is audited (`health.report`: who it was for,
+ * the format and each finding's count), a refusal too. `--stale-days` and `--large-mb` move
+ * two of its thresholds. `--out` writes a new file, never over an existing one.
  */
 
 export const ADMIN_ACTOR = "system:admin-cli";
@@ -290,6 +310,10 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
                [--actor <principal>] [--action <name>] [--decision allow|deny]
                [--client <id>] [--object <id>] [--from <time>] [--to <time>]
                                                    write the tenant's audit events, filtered
+  health report --tenant <ten_…> --user <a tenant admin> [--format text|csv] [--out <new file>]
+                [--limit <files listed per finding>] [--stale-days <n>] [--large-mb <n>]
+                                                   the File Health Report: what to look at
+                                                   among the tenant's files, and why
 `;
 
 class UsageError extends Error {}
@@ -327,6 +351,8 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         object: { type: "string" },
         from: { type: "string" },
         to: { type: "string" },
+        "stale-days": { type: "string" },
+        "large-mb": { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -372,6 +398,7 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "review merge",
     "audit verify",
     "audit export",
+    "health report",
   ];
   if (!known.includes(command)) {
     io.err(`unknown command: ${command}\n\n${USAGE}`);
@@ -519,6 +546,15 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         return await auditVerify(db, tenantArg(values.tenant), io);
       case "audit export":
         return await auditExport(db, tenantArg(values.tenant), exportArgs(values), io);
+      case "health report":
+        return await healthCommand(
+          db,
+          config,
+          tenantArg(values.tenant),
+          need(values.user, "--user"),
+          healthArgs(values),
+          io,
+        );
       default:
         return await tokenRevoke(db, tenantArg(values.tenant), need(values.id, "--id"), io);
     }
@@ -2108,4 +2144,188 @@ async function auditExport(
       `${path === undefined ? "" : ` to ${path}`}.\n`,
   );
   return 0;
+}
+
+interface HealthArgs {
+  format: "text" | "csv";
+  out: string | undefined;
+  options: HealthOptions & { limit: number };
+}
+
+/** The byte order mark: what tells a spreadsheet a file is UTF-8. */
+const UTF8_MARK = String.fromCharCode(0xfeff);
+
+/** `health report`'s options, checked. */
+function healthArgs(values: {
+  format?: string | undefined;
+  out?: string | undefined;
+  limit?: string | undefined;
+  "stale-days"?: string | undefined;
+  "large-mb"?: string | undefined;
+}): HealthArgs {
+  const format = values.format ?? "text";
+  if (format !== "text" && format !== "csv") throw new UsageError("--format is text or csv");
+  if (values.out === "") throw new UsageError("--out is a file's path");
+  const whole = (flag: string, value: string | undefined, min: number, max: number) => {
+    if (value === undefined) return undefined;
+    const n = /^\d{1,9}$/.test(value) ? Number(value) : Number.NaN;
+    if (!(n >= min && n <= max))
+      throw new UsageError(`${flag} is a whole number, ${min} to ${max}`);
+    return n;
+  };
+  const staleAfterDays = whole("--stale-days", values["stale-days"], 1, 36_500);
+  const largeMb = whole("--large-mb", values["large-mb"], 1, 1_000_000);
+  return {
+    format,
+    out: values.out,
+    options: {
+      // A page shows a few files a finding; a sheet has them all, as far as one read goes.
+      limit: whole("--limit", values.limit, 1, 10_000) ?? (format === "text" ? 10 : 10_000),
+      ...(staleAfterDays === undefined ? {} : { staleAfterDays }),
+      ...(largeMb === undefined ? {} : { largeBytes: largeMb * 1024 * 1024 }),
+    },
+  };
+}
+
+/** `health report`: the tenant's File Health Report, for one of its admins; audited. */
+async function healthCommand(
+  db: Database,
+  config: Config,
+  tenantId: string,
+  named: string,
+  args: HealthArgs,
+  io: AdminIo,
+): Promise<number> {
+  const tenant = await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId));
+  if (!tenant) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  const audit = (decision: "allow" | "deny", detail: Record<string, string | number>) =>
+    db.withTenant(tenantId, (tx) =>
+      appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "health.report",
+        decision,
+        detail: { format: args.format, ...detail },
+      }),
+    );
+  const user = await namedUser(db, tenantId, named);
+  if (user === "none" || user === "ambiguous") {
+    await audit("deny", { refusal: user === "none" ? "unknown-user" : "ambiguous-user" });
+    io.err(
+      user === "none"
+        ? `tenant ${tenantId} has no user ${oneLine(named)}\n`
+        : `${oneLine(named)} names more than one user: use the usr_… id\n`,
+    );
+    return 1;
+  }
+  const reader = `user:${user.id}`;
+  // The file first: a report nobody can be handed isn't read, or recorded as read. A new
+  // file, its owner's alone where the system has file modes, never over one that exists.
+  const path = args.out === undefined ? undefined : resolve(io.cwd ?? process.cwd(), args.out);
+  let fd: number | undefined;
+  if (path !== undefined) {
+    try {
+      fd = openSync(path, "wx", 0o600);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      io.err(
+        code === "EEXIST"
+          ? `${path} exists: a report is written to a new file\n`
+          : `cannot write ${path}: ${code ?? oneLine((e as Error).message)}\n`,
+      );
+      return 1;
+    }
+  }
+  /** Closes the file, and removes it unless the report is in it whole. */
+  const finish = (whole: boolean) => {
+    if (fd === undefined || path === undefined) return;
+    const file = fd;
+    fd = undefined;
+    let closed = true;
+    try {
+      closeSync(file);
+    } catch {
+      closed = false;
+    }
+    if (whole && closed) return;
+    try {
+      unlinkSync(path);
+    } catch {
+      // Gone already, or not ours to remove.
+    }
+    if (whole) throw new Error(`cannot finish writing ${path}`);
+  };
+  try {
+    let report: HealthReport;
+    try {
+      report = await db.withTenant(
+        tenantId,
+        (tx) =>
+          healthReport(
+            tx,
+            tenantId,
+            { userId: user.id, adminGroupId: adminGroupOf(config.auth)(tenantId) },
+            args.options,
+          ),
+        VIEW_TRANSACTION,
+      );
+    } catch (e) {
+      if (!(e instanceof HealthError)) throw e;
+      finish(false);
+      await audit("deny", { reader, refusal: e.code });
+      io.err(
+        e.code === "not-admin"
+          ? `${oneLine(user.email ?? user.id)} isn't a tenant admin: the report names every file by its title, so it is an admin's to read (admin user grant-admin makes one)\n`
+          : `${e.message}\n`,
+      );
+      return 1;
+    }
+    const text =
+      args.format === "csv"
+        ? healthCsv(report)
+        : healthText(report, { tenant: tenant.name, show: args.options.limit });
+
+    // Recorded before it is handed over: a report that was read is in the log, whatever
+    // becomes of the writing of it.
+    const counts = Object.fromEntries(HEALTH_SECTIONS.map((s) => [s, report.sections[s].count]));
+    await audit("allow", { reader, files: report.files, ...counts });
+
+    try {
+      if (fd === undefined) {
+        await (io.write ?? ((chunk: string) => Promise.resolve(io.out(chunk))))(text);
+      } else {
+        // (A sheet opened by a double click is read as UTF-8 only when it says so.)
+        writeFileSync(fd, args.format === "csv" ? `${UTF8_MARK}${text}` : text);
+        finish(true);
+      }
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      io.err(
+        code === "EPIPE" || code === "ERR_STREAM_DESTROYED"
+          ? `The reader stopped: the report is incomplete.\n`
+          : `cannot write the report${path === undefined ? "" : ` to ${path}`}: ${code ?? oneLine((e as Error).message)}\n`,
+      );
+      return 1;
+    }
+    if (args.format === "csv") {
+      const rows = HEALTH_SECTIONS.reduce((n, s) => n + report.sections[s].items.length, 0);
+      io.err(
+        `File health report of ${tenantId}: ${rows} ${rows === 1 ? "row" : "rows"}` +
+          `${path === undefined ? "" : ` in ${path}`}.\n`,
+      );
+      for (const { section, missing } of healthCsvCut(report)) {
+        io.err(
+          `${section} lists its first ${report.sections[section].items.length}: ${missing} more aren't in the sheet.\n`,
+        );
+      }
+    } else if (path !== undefined) {
+      io.err(`File health report of ${tenantId} written to ${path}.\n`);
+    }
+    return 0;
+  } finally {
+    // Whatever went wrong on the way: no file left that isn't the report.
+    finish(false);
+  }
 }

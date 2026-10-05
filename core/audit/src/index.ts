@@ -2,6 +2,7 @@ export * from "./chain.js";
 export { appendAudit, verifyAudit, type AuditRecord, type AuditVerifyResult } from "./store.js";
 export {
   csvLine,
+  csvRecord,
   CSV_COLUMNS,
   exportAudit,
   type AuditFilter,

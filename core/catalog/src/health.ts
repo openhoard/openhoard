@@ -1,4 +1,4 @@
-import { isId, queryRows, type Tx } from "@openhoard/core-db";
+import { isId, queryRows, type SHARE_KINDS, type Tx } from "@openhoard/core-db";
 import { isAdmin } from "@openhoard/core-identity";
 import { sql, type SQL } from "drizzle-orm";
 import { requireSnapshot } from "./visibility.js";
@@ -98,8 +98,90 @@ export interface HealthItem {
   url: string | null;
   /** Its current content's size in bytes. */
   bytes: number;
-  /** Why it is listed, in a few words: who, what, since when. Text from the source: data. */
+  /**
+   * Why it is listed, piece by piece, for whoever words it for people (health-format.ts
+   * reasonText()). Names in it are the tenant's own text, some from a source: data.
+   */
+  reasons: HealthReason[];
+  /** The reasons in one compact line, for logs and sheets: `link-anyone (read, until …)`. */
   detail: string;
+}
+
+type Role = "read" | "write" | "owner";
+
+/** One reason a file is listed. `tag`: the grant is on that tag, which the file carries. */
+export type HealthReason =
+  /** What the source shares it with beyond grants (core/db source_shares). */
+  | {
+      k: "share";
+      share: (typeof SHARE_KINDS)[number];
+      /** A guest's email, or the source's id of a person or group; empty otherwise. */
+      who: string;
+      role: Role;
+      /** The day it lapses (YYYY-MM-DD, UTC), or null. */
+      until: string | null;
+    }
+  /** A group holding most of the tenant's people has a grant reaching it. */
+  | { k: "group"; name: string; members: number; role: Role; tag: string | null }
+  /** A trusted tag that restricts it. */
+  | { k: "label"; tag: string }
+  /** A guest holds a grant reaching it, theirs or (`via`) a group's they are in. */
+  | { k: "guest"; name: string; via: string | null; role: Role; tag: string | null }
+  /** Someone who left made it, changed it last, or owns it. */
+  | { k: "made" | "changed" | "owned"; name: string }
+  /** Someone who left still holds a grant reaching it. */
+  | { k: "former"; name: string; role: Role; tag: string | null }
+  | { k: "stale"; since: string }
+  | { k: "copies"; others: number }
+  | { k: "large"; over: number };
+
+/** The reasons in one compact line (HealthItem.detail). */
+function compact(reasons: readonly HealthReason[]): string {
+  const through = (r: { role: Role; tag: string | null }) =>
+    `${r.role}${r.tag === null ? "" : ` through ${r.tag}`}`;
+  const parts: string[] = [];
+  const labels = reasons.flatMap((r) => (r.k === "label" ? [r.tag] : []));
+  if (labels.length > 0) parts.push(labels.join(", "));
+  const former = reasons.flatMap((r) => (r.k === "former" ? [`${r.name} (${through(r)})`] : []));
+  for (const r of reasons) {
+    switch (r.k) {
+      case "share":
+        parts.push(
+          `${r.share}${r.who === "" || r.share.startsWith("link-") ? "" : ` ${r.who}`} (${r.role}${r.until === null ? "" : `, until ${r.until}`})`,
+        );
+        break;
+      case "group":
+        parts.push(`group ${r.name} (${r.members} people, ${through(r)})`);
+        break;
+      case "guest":
+        parts.push(
+          `grant to ${r.name}${r.via === null ? "" : ` in group ${r.via}`} (${through(r)})`,
+        );
+        break;
+      case "made":
+        parts.push(`made by ${r.name}`);
+        break;
+      case "changed":
+        parts.push(`last changed by ${r.name}`);
+        break;
+      case "owned":
+        parts.push(`owned by ${r.name}`);
+        break;
+      case "stale":
+        parts.push(`unchanged since ${r.since}`);
+        break;
+      case "copies":
+        parts.push(`same content as ${r.others} other file${r.others === 1 ? "" : "s"}`);
+        break;
+      case "large":
+        parts.push(`over ${r.over} bytes`);
+        break;
+      default:
+        break;
+    }
+  }
+  if (former.length > 0) parts.push(`still granted to ${former.join(", ")}`);
+  return parts.join("; ");
 }
 
 export interface HealthFinding {
@@ -132,6 +214,13 @@ export interface HealthReport {
    * of the groups.
    */
   formerStaffInGroups: number;
+  /** What the findings were judged by: the options, with their defaults filled in. */
+  thresholds: {
+    staleAfterDays: number;
+    largeBytes: number;
+    wideGroupShare: number;
+    wideGroupMin: number;
+  };
   sections: Record<HealthSection, HealthFinding>;
 }
 
@@ -242,20 +331,25 @@ export async function healthReport(
         ? []
         : await queryRows<Row>(
             tx,
-            sql`${withs} select f.object_id, f.title, f.source, f.url, f.bytes, ${detail} as detail
+            sql`${withs} select f.object_id, f.title, f.source, f.url, f.bytes,
+                         coalesce(${detail}, '[]'::jsonb)::text as detail
                   from f where ${where} order by ${order}, f.object_id limit ${limit}`,
           );
     return {
       count,
       bytes: Number(total?.bytes ?? 0),
-      items: rows.map((r) => ({
-        objectId: r.object_id,
-        title: r.title,
-        source: r.source,
-        url: r.url,
-        bytes: Number(r.bytes ?? 0),
-        detail: r.detail ?? "",
-      })),
+      items: rows.map((r) => {
+        const reasons = JSON.parse(r.detail ?? "[]") as HealthReason[];
+        return {
+          objectId: r.object_id,
+          title: r.title,
+          source: r.source,
+          url: r.url,
+          bytes: Number(r.bytes ?? 0),
+          reasons,
+          detail: compact(reasons),
+        };
+      }),
     };
   };
 
@@ -279,14 +373,18 @@ export async function healthReport(
   /** A share that hasn't lapsed, as `s`, of the file. */
   const liveShare = (kinds: SQL) => sql`s.tenant_id = ${tenantId} and s.object_id = f.object_id
       and s.kind in (${kinds}) and (s.expires_at is null or s.expires_at > now())`;
-  /** A file's shares of some kinds, as text: `kind key (role[, until …])`, joined. */
+  /** Reasons (jsonb arrays, null for none) joined into one array. */
+  const all = (...parts: SQL[]) =>
+    sql.join(
+      parts.map((part) => sql`coalesce(${part}, '[]'::jsonb)`),
+      sql` || `,
+    );
+  /** A file's shares of some kinds that haven't lapsed, as reasons. */
   const shares = (kinds: SQL) => sql`
-    (select string_agg(
-              s.kind || case when s.key = '' or s.kind like 'link-%' then '' else ' ' || s.key end
-                || ' (' || s.role || case when s.expires_at is null then ''
-                     else ', until ' || to_char(s.expires_at at time zone 'UTC', 'YYYY-MM-DD') end
-                || ')',
-              '; ' order by s.kind, s.key)
+    (select jsonb_agg(jsonb_build_object(
+              'k', 'share', 'share', s.kind, 'who', s.key, 'role', s.role,
+              'until', to_char(s.expires_at at time zone 'UTC', 'YYYY-MM-DD'))
+              order by s.kind, s.key)
        from source_shares s where ${liveShare(kinds)})`;
   const shared = (kinds: SQL) =>
     sql`exists (select 1 from source_shares s where ${liveShare(kinds)})`;
@@ -306,9 +404,6 @@ export async function healthReport(
         join grants g on g.tenant_id = gt.tenant_id and g.facet = gt.facet and g.value = gt.value
        where gt.tenant_id = ${tenantId} and gt.object_id = f.object_id
          and (gt.source <> 'model' or gt.reviewed) and ${live}) g`;
-  /** How a grant is held, in words: on the file, or through a tag. */
-  const how = sql`g.role || coalesce(' through ' || g.tag, '')`;
-
   // Groups that hold most of the tenant's current members.
   const wide = sql`wide as (
     select g.id, g.name, count(*)::int as members
@@ -327,13 +422,17 @@ export async function healthReport(
   const wideGrant = sql`exists (select 1 from ${reaching} join wide w on ${toWide})`;
   const orgKinds = sql`'link-organization', 'organization'`;
   const everyone = sql`(${shared(orgKinds)} or ${wideGrant})`;
-  const everyoneDetail = sql`nullif(concat_ws('; ', ${shares(orgKinds)},
-    (select string_agg(distinct 'group ' || w.name || ' (' || w.members || ' people, ' || ${how} || ')', '; ')
-       from ${reaching} join wide w on ${toWide})), '')`;
+  const everyoneDetail = all(
+    shares(orgKinds),
+    sql`(select jsonb_agg(distinct jsonb_build_object(
+                  'k', 'group', 'name', w.name, 'members', w.members, 'role', g.role, 'tag', g.tag))
+           from ${reaching} join wide w on ${toWide})`,
+  );
   // Trusted tags (not a model's unreviewed guess) whose value restricts the file: the tightest
   // visibility, or an exposure that keeps content from commercial AI clients.
   const sensitive = sql`
-    (select string_agg(t.facet || ':' || t.value, ', ' order by t.facet, t.value)
+    (select jsonb_agg(jsonb_build_object('k', 'label', 'tag', t.facet || ':' || t.value)
+                      order by t.facet, t.value)
        from object_tags t
        join facet_values fv on fv.tenant_id = t.tenant_id and fv.facet = t.facet and fv.value = t.value
       where t.tenant_id = ${tenantId} and t.object_id = f.object_id
@@ -345,8 +444,13 @@ export async function healthReport(
     sql`(select min(gone.display_name) from gone where gone.external_id = ${column})`;
   const leftOwner = sql`(select min(u.display_name) from stopped u where 'user:' || u.id = f.owner_id)`;
   const leftGrants = sql`
-    (select string_agg(distinct u.display_name || ' (' || ${how} || ')', ', ')
+    (select jsonb_agg(distinct jsonb_build_object(
+              'k', 'former', 'name', u.display_name, 'role', g.role, 'tag', g.tag))
        from ${reaching} join stopped u on g.principal = 'user:' || u.id)`;
+  /** One reason naming a person, when there is one. */
+  const named = (k: string, name: SQL) =>
+    sql`(select jsonb_build_array(jsonb_build_object('k', ${k}::text, 'name', n.name))
+           from (select ${name} as name) n where n.name is not null)`;
   /*
    * Guests a grant reaching the file is for: theirs, or their group's (`via` names it). `u` is
    * the guest. Someone outside reads what their groups read, like anyone.
@@ -396,7 +500,7 @@ export async function healthReport(
     ),
     organization: await section(everyoneDetail, everyone, sql`f.bytes desc`, { with: wide }),
     sensitiveWide: await section(
-      sql`concat_ws('; ', ${sensitive}, ${shares(sql`'link-anyone'`)}, ${everyoneDetail})`,
+      all(sensitive, shares(sql`'link-anyone'`), everyoneDetail),
       sql`${sensitive} is not null and (${everyone} or ${shared(sql`'link-anyone'`)})`,
       sql`f.bytes desc`,
       { with: wide },
@@ -404,22 +508,27 @@ export async function healthReport(
     guests: await section(
       // (A guest the source names by invitation, who has an account, holds its grant too:
       // said once, as the share.)
-      sql`concat_ws('; ', ${shares(sql`'guest'`)},
-            (select string_agg(distinct 'grant to ' || u.display_name ||
-                                 coalesce(' in group ' || u.via, '') || ' (' || ${how} || ')', '; ')
+      all(
+        shares(sql`'guest'`),
+        sql`(select jsonb_agg(distinct jsonb_build_object(
+                      'k', 'guest', 'name', u.display_name, 'via', u.via, 'role', g.role,
+                      'tag', g.tag))
                from ${guestHolders}
               where not (u.via is null and g.granted_by like 'source:%' and exists (
                       select 1 from source_shares s
                        where ${liveShare(sql`'guest'`)} and s.matched
-                         and lower(s.key) = lower(u.email)))))`,
+                         and lower(s.key) = lower(u.email))))`,
+      ),
       sql`(${shared(sql`'guest'`)} or exists (select 1 from ${guestHolders}))`,
       sql`f.bytes desc`,
     ),
     formerStaff: await section(
-      sql`concat_ws('; ', 'made by ' || ${leftBy(sql`f.source_created_by`)},
-            'last changed by ' || ${leftBy(sql`f.source_modified_by`)},
-            'owned by ' || ${leftOwner},
-            'still granted to ' || ${leftGrants})`,
+      all(
+        named("made", leftBy(sql`f.source_created_by`)),
+        named("changed", leftBy(sql`f.source_modified_by`)),
+        named("owned", leftOwner),
+        leftGrants,
+      ),
       sql`(${leftBy(sql`f.source_created_by`)} is not null
            or ${leftBy(sql`f.source_modified_by`)} is not null
            or ${leftOwner} is not null or ${leftGrants} is not null)`,
@@ -431,13 +540,13 @@ export async function healthReport(
       sql`f.bytes desc`,
     ),
     stale: await section(
-      sql`'unchanged since ' || to_char(f.source_modified_at at time zone 'UTC', 'YYYY-MM-DD')`,
+      sql`jsonb_build_array(jsonb_build_object('k', 'stale', 'since',
+            to_char(f.source_modified_at at time zone 'UTC', 'YYYY-MM-DD')))`,
       sql`f.source_modified_at < ${asOf} - make_interval(days => ${staleAfterDays})`,
       sql`f.source_modified_at`,
     ),
     duplicates: await section(
-      sql`(select 'same content as ' || (d.copies - 1) || ' other file' ||
-                    case when d.copies > 2 then 's' else '' end
+      sql`(select jsonb_build_array(jsonb_build_object('k', 'copies', 'others', d.copies - 1))
              from d where d.blob_id = f.blob_id)`,
       sql`f.blob_id in (select d.blob_id from d)`,
       sql`f.bytes desc, f.blob_id`,
@@ -448,7 +557,7 @@ export async function healthReport(
       },
     ),
     large: await section(
-      sql`pg_size_pretty(f.bytes::bigint)`,
+      sql`jsonb_build_array(jsonb_build_object('k', 'large', 'over', ${largeBytes}::bigint))`,
       sql`f.bytes > ${largeBytes}`,
       sql`f.bytes desc`,
     ),
@@ -472,6 +581,7 @@ export async function healthReport(
     unattributed: Number(totals?.unattributed ?? 0),
     unknownPeople: Number(totals?.unknown_people ?? 0),
     formerStaffInGroups: Number(totals?.in_groups ?? 0),
+    thresholds: { staleAfterDays, largeBytes, wideGroupShare: wideShare, wideGroupMin: wideMin },
     sections,
   };
 }

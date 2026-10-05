@@ -493,7 +493,17 @@ describe("the file health report", () => {
     );
     expect(got.sections.duplicates.items.slice(0, 2).map((i) => i.bytes)).toEqual([2000, 2000]);
     expect(got.sections.large).toMatchObject({ count: 5, bytes: 2 * 2000 + 3 * 500 });
-    expect(got.sections.large.items[0]?.detail).toMatch(/^2000 bytes$/);
+    expect(got.sections.large.items[0]).toMatchObject({
+      detail: "over 499 bytes",
+      reasons: [{ k: "large", over: 499 }],
+    });
+    expect(got.thresholds).toEqual({
+      staleAfterDays: 1095,
+      largeBytes: 499,
+      wideGroupShare: 0.5,
+      wideGroupMin: 10,
+    });
+    expect(got.sections.duplicates.items[0]?.reasons).toEqual([{ k: "copies", others: 1 }]);
     // The count is of all, the list of the first few.
     const few = await report({ asOf, largeBytes: 499, limit: 2 });
     expect(few.sections.large).toMatchObject({ count: 5 });
