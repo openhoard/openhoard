@@ -1,5 +1,6 @@
 import { Component, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { SignedOut, type Api, type Me } from "./api.js";
+import { Clients } from "./clients.js";
 import { Overview } from "./overview.js";
 import { BASE, Link, usePath } from "./router.js";
 
@@ -41,7 +42,10 @@ const STICK_MS = 60_000;
 export const signInUrl = (returnTo: string) =>
   `/auth/sign-in?return_to=${encodeURIComponent(returnTo === BASE || returnTo.startsWith(`${BASE}/`) ? returnTo : `${BASE}/`)}`;
 
-const PAGES: readonly { path: string; label: string }[] = [{ path: "/", label: "Overview" }];
+const PAGES: readonly { path: string; label: string }[] = [
+  { path: "/", label: "Overview" },
+  { path: "/clients", label: "AI clients" },
+];
 
 export function App({ api, browser }: { api: Api; browser: Browser }) {
   const [session, setSession] = useState<Session>({ state: "loading" });
@@ -114,6 +118,23 @@ export function App({ api, browser }: { api: Api; browser: Browser }) {
     }
     setSession({ state: "signed-out" });
   };
+
+  /**
+   * A fresh sign-in, for what the server asks one for. The session is ended first: the sign-in
+   * page sends whoever is signed in straight back, as they were.
+   */
+  const signInAgain = useCallback(async () => {
+    try {
+      await api.signOut();
+    } catch (err) {
+      if (!(err instanceof SignedOut)) return false;
+    }
+    // Noted as any trip to the sign-in is: one that doesn't stick is said, not repeated.
+    browser.remember(TRIED, String(browser.now()));
+    setSession({ state: "leaving" });
+    browser.leave(signInUrl(browser.here()));
+    return true;
+  }, [api, browser]);
 
   const page = PAGES.find((p) => p.path === path);
   const inside = session.state === "in" && session.me.admin;
@@ -217,7 +238,11 @@ export function App({ api, browser }: { api: Api; browser: Browser }) {
       <main id="main" tabIndex={-1}>
         {page ? (
           <Failsafe key={path}>
-            <Overview api={api} tenantId={me.tenantId} onSignedOut={toSignIn} />
+            {page.path === "/clients" ? (
+              <Clients api={api} onSignedOut={toSignIn} onSignInAgain={signInAgain} />
+            ) : (
+              <Overview api={api} tenantId={me.tenantId} onSignedOut={toSignIn} />
+            )}
           </Failsafe>
         ) : (
           <>

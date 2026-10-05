@@ -2,6 +2,7 @@ import { appendAudit, type AuditRecord } from "@openhoard/core-audit";
 import { AI_CLIENT_TRUSTS, isId, lockPrincipals, type Database, type Tx } from "@openhoard/core-db";
 import {
   approvedTrust,
+  clientPeople,
   decideClient,
   findUserByEmail,
   findUserByUserName,
@@ -33,7 +34,7 @@ import { retrying } from "./retry.js";
  * The admin API (T-106): a tenant's admins decide which AI clients its people may connect, and
  * who else is an admin. JSON over HTTP, for the admin UI to come (T-9xx) and for scripts.
  *
- *   GET    /api/admin/clients                 every client the tenant's people tried
+ *   GET    /api/admin/clients                 every client the tenant's people tried, and its use
  *   POST   /api/admin/clients/:key/approve    {"trust": "local" | "commercial" | "consumer"}
  *   POST   /api/admin/clients/:key/refuse     a pending client
  *   POST   /api/admin/clients/:key/revoke     an approved client: its grants and tokens end
@@ -194,11 +195,24 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
 
   app.get("/api/admin/clients", async (c) => {
     const { tenantId } = c.get("auth") as SignedIn;
-    const clients = await db.withTenant(tenantId, (tx) => listClients(tx, tenantId), {
-      isolationLevel: "repeatable read",
-      accessMode: "read only",
+    const [clients, people] = await db.withTenant(
+      tenantId,
+      async (tx) => [await listClients(tx, tenantId), await clientPeople(tx, tenantId)] as const,
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+    return c.json({
+      clients: clients.map((client) => {
+        const shown = showClient(auth, tenantId, client);
+        return {
+          ...shown,
+          // Its use (T-904). How many people it acts for now: a count, never who; none for a
+          // client that gets nothing now (taken out of the config since), whatever it holds.
+          people: shown.approved ? (people.get(client.clientKey) ?? 0) : 0,
+          // The last request made with a token of it, to within a minute.
+          lastUsedAt: client.lastUsedAt?.toISOString() ?? null,
+        };
+      }),
     });
-    return c.json({ clients: clients.map((client) => showClient(auth, tenantId, client)) });
   });
 
   for (const action of ["approve", "refuse", "revoke"] as const) {
@@ -443,6 +457,8 @@ function showClient(auth: AuthConfig, tenantId: string, client: OAuthClient) {
     trust,
     status: client.status,
     managedBy: listed ? "config" : "app",
+    /** The label the config gives it, when it lists it: the only one an approval here may use. */
+    configTrust: listed?.trust ?? null,
     requestedBy: client.requestedBy,
     requestedAt: client.requestedAt.toISOString(),
     decidedBy: client.decidedBy,

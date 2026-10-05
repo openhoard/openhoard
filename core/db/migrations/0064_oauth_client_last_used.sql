@@ -1,0 +1,2 @@
+ALTER TABLE "oauth_clients" ADD COLUMN "last_used_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "oauth_clients" ADD CONSTRAINT "oauth_clients_last_used" CHECK (last_used_at is null or last_used_at >= requested_at);

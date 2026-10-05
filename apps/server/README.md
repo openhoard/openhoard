@@ -598,16 +598,16 @@ server on the next request (the principal epoch).
 
 The **admin API** is JSON under `/api/admin`, for the admin web app (below) and for scripts:
 
-| Route                                  | What it does                                                                 |
-| -------------------------------------- | ---------------------------------------------------------------------------- |
-| `GET /api/admin/clients`               | Every client the tenant's people tried                                       |
-| `POST /api/admin/clients/:key/approve` | `{"trust": "local"}` (or `commercial`, `consumer`); relabels an approved one |
-| `POST /api/admin/clients/:key/refuse`  | A pending client                                                             |
-| `POST /api/admin/clients/:key/revoke`  | An approved client: its grants and tokens end                                |
-| `GET /api/admin/admins`                | The tenant's admins, how (`role`, `group`), and if they count now            |
-| `POST /api/admin/admins`               | `{"userId": "usr_…"}`, or `{"email": …}`, or `{"userName": …}`               |
-| `DELETE /api/admin/admins/:userId`     | Takes the role away                                                          |
-| `GET /api/admin/sources`               | Each connector sync: its `standing`, phase, reconcile, last run, stop        |
+| Route                                  | What it does                                                                  |
+| -------------------------------------- | ----------------------------------------------------------------------------- |
+| `GET /api/admin/clients`               | Every client the tenant's people tried, with its use (`people`, `lastUsedAt`) |
+| `POST /api/admin/clients/:key/approve` | `{"trust": "local"}` (or `commercial`, `consumer`); relabels an approved one  |
+| `POST /api/admin/clients/:key/refuse`  | A pending client                                                              |
+| `POST /api/admin/clients/:key/revoke`  | An approved client: its grants and tokens end                                 |
+| `GET /api/admin/admins`                | The tenant's admins, how (`role`, `group`), and if they count now             |
+| `POST /api/admin/admins`               | `{"userId": "usr_…"}`, or `{"email": …}`, or `{"userName": …}`                |
+| `DELETE /api/admin/admins/:userId`     | Takes the role away                                                           |
+| `GET /api/admin/sources`               | Each connector sync: its `standing`, phase, reconcile, last run, stop         |
 
 - **Who.** A person signed in with the session cookie (above), who is an admin, through
   OpenHoard's own app (an AI client's token never administers). Anyone else gets 401 or 403, and
@@ -617,6 +617,9 @@ The **admin API** is JSON under `/api/admin`, for the admin web app (below) and 
 - **A recent sign-in.** Approving a client and changing who is an admin take a sign-in within
   `auth.adminSignInMinutes` (default 15): otherwise 403 with `"signIn": "/auth/sign-in"`.
   Refusing and revoking a client never do, so an emergency cut-off is never a sign-in away.
+- **A client's use** (T-904): `people` is how many people hold a connection through it that
+  still stands (a count, never who); `lastUsedAt` is the last request made with a token of it,
+  recorded at most once a minute (`oauth_clients.last_used_at`), as SCIM tokens' is.
 - **What identifies a client** is shown first: its metadata document URL (`clientId`), or for a
   dynamically registered client its `redirectUris` (where its codes go). The name it gives itself
   is `claimedName`: anyone can call themselves Claude. `managedBy` says whether the config
@@ -642,8 +645,10 @@ read into memory when the server starts and served as they are.
 - **Its policy** allows this origin's own script, styles and images and requests to this origin,
   and nothing else: no inline script or style, no other site, no framing.
 - **Without a build** (a checkout nobody built) the server says so once and runs without it.
-- Today it is the shell and an overview of the sources (`GET /api/admin/sources`). The review
-  inbox, AI clients, audit and File Health pages come next (T-902 to T-905, T-1002).
+- Today: an overview of the sources (`GET /api/admin/sources`), and the AI clients page
+  (T-904: approve with a trust label, refuse, relabel, revoke, and each client's use, over the
+  admin API above). The review inbox, audit and File Health pages come next (T-903, T-905,
+  T-1002).
 
 ## The MCP server (T-801)
 

@@ -1,7 +1,14 @@
 import { createHash, randomBytes } from "node:crypto";
-import { oauthCodes, oauthGrants, oauthTokens, type Database, type Tx } from "@openhoard/core-db";
+import {
+  oauthClients,
+  oauthCodes,
+  oauthGrants,
+  oauthTokens,
+  type Database,
+  type Tx,
+} from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createServiceAccount,
@@ -22,6 +29,7 @@ import {
   getClient,
   grantIsLive,
   issueCode,
+  clientPeople,
   listClients,
   MAX_PENDING_CLIENTS,
   MAX_PENDING_PER_PERSON,
@@ -34,6 +42,7 @@ import {
   refreshGrant,
   revokeByToken,
   revokeGrant,
+  touchClient,
   revokeUserGrants,
   type OAuthClient,
   type OAuthScope,
@@ -627,6 +636,68 @@ describe("revocation and pruning", () => {
     const s = await tokens();
     expect(await write((tx) => revokeGrant(tx, t.tenantId, s.grantId, "user:admin"))).toBe(true);
     expect(await write((tx) => revokeGrant(tx, t.tenantId, s.grantId, "user:admin"))).toBe(false);
+  });
+
+  it("count the people a client acts for now, and record its last request at most once a minute", async () => {
+    expect(await write((tx) => clientPeople(tx, t.tenantId))).toEqual(new Map());
+    await approve();
+    const first = await tokens();
+    const second = await tokens();
+    const people = async () =>
+      (await write((tx) => clientPeople(tx, t.tenantId))).get(client.clientKey);
+    // Two grants, one person.
+    expect(await people()).toBe(1);
+    // Other tenants see nothing of it.
+    const other = await seedTenant(db, 2);
+    expect(await db.withTenant(other.tenantId, (tx) => clientPeople(tx, other.tenantId))).toEqual(
+      new Map(),
+    );
+
+    // No request yet: a first one is worth recording, and the next ones within the minute not.
+    const used = async () =>
+      (await write((tx) => getClient(tx, t.tenantId, client.clientKey)))?.lastUsedAt ?? null;
+    expect(await used()).toBeNull();
+    expect(await check(first.accessToken)).toMatchObject({ ok: true, stale: true });
+    expect(await write((tx) => touchClient(tx, t.tenantId, client.clientKey))).toBe(true);
+    const at = (await used()) as Date;
+    expect(Math.abs(Date.now() - at.getTime())).toBeLessThan(60_000);
+    expect(await check(second.accessToken)).toMatchObject({ ok: true, stale: false });
+    expect(await write((tx) => touchClient(tx, t.tenantId, client.clientKey))).toBe(false);
+    expect(await used()).toEqual(at);
+    // Over a minute later it is recorded again.
+    await write((tx) =>
+      tx
+        .update(oauthClients)
+        .set({
+          requestedAt: sql`now() - interval '3 minutes'`,
+          lastUsedAt: sql`now() - interval '2 minutes'`,
+        })
+        .where(eq(oauthClients.clientKey, client.clientKey)),
+    );
+    expect(await check(first.accessToken)).toMatchObject({ ok: true, stale: true });
+    expect(await write((tx) => touchClient(tx, t.tenantId, client.clientKey))).toBe(true);
+    const again = (await used()) as Date;
+    expect(Math.abs(Date.now() - again.getTime())).toBeLessThan(60_000);
+    // Another tenant can't touch it, whichever tenant it names.
+    await write((tx) =>
+      tx
+        .update(oauthClients)
+        .set({ lastUsedAt: sql`now() - interval '2 minutes'` })
+        .where(eq(oauthClients.clientKey, client.clientKey)),
+    );
+    for (const named of [t.tenantId, other.tenantId]) {
+      expect(
+        await db.withTenant(other.tenantId, (tx) => touchClient(tx, named, client.clientKey)),
+      ).toBe(false);
+    }
+    expect(Date.now() - ((await used()) as Date).getTime()).toBeGreaterThan(100_000);
+
+    // Revoked grants no longer count as people; its last request stays.
+    for (const g of [first, second]) {
+      await write((tx) => revokeGrant(tx, t.tenantId, g.grantId, "user:admin"));
+    }
+    expect(await people()).toBeUndefined();
+    expect(await used()).not.toBeNull();
   });
 
   it("prunes what ended", async () => {

@@ -309,6 +309,9 @@ describe("the AI-client allowlist (T-106)", () => {
         managedBy: "app",
         requestedBy: `user:${member.id}`,
         claimedName: "Claude (really)",
+        // Nobody is connected through it yet.
+        people: 0,
+        lastUsedAt: null,
       }),
     ]);
     expect(listed.clients[0]).not.toHaveProperty("name");
@@ -331,10 +334,30 @@ describe("the AI-client allowlist (T-106)", () => {
     });
     const first = await connect(person);
     const tokens = first.tokens as Record<string, string>;
+    // Connected, and no request made yet.
+    const connected = (await (await boss.api("GET", "/clients")).json()) as {
+      clients: { people: number; lastUsedAt: string | null }[];
+    };
+    expect(connected.clients[0]).toMatchObject({ people: 1, lastUsedAt: null });
     expect(await mcp(tokens.access_token as string)).toEqual({
       status: 200,
       client: { id: CLIENT_ID, trust: "commercial" },
     });
+
+    // Its use shows on the list (T-904): one person, and the request just made. Never who.
+    const inUse = (await (await boss.api("GET", "/clients")).json()) as {
+      clients: { people: number; lastUsedAt: string }[];
+    };
+    expect(inUse.clients[0]?.people).toBe(1);
+    const lastRequest = inUse.clients[0]?.lastUsedAt as string;
+    expect(Math.abs(Date.now() - Date.parse(lastRequest))).toBeLessThan(60_000);
+    // A second request within the minute isn't written again.
+    await mcp(tokens.access_token as string);
+    const still = (await (await boss.api("GET", "/clients")).json()) as {
+      clients: { lastUsedAt: string }[];
+    };
+    expect(still.clients[0]?.lastUsedAt).toBe(lastRequest);
+    expect(JSON.stringify(inUse)).not.toContain(memberPerson.upn);
 
     // A new label reaches the next request of the token already out (and so policy: T-604).
     await boss.api("POST", `/clients/${key}/approve`, { trust: "consumer" });
@@ -359,6 +382,11 @@ describe("the AI-client allowlist (T-106)", () => {
     const again = await connect(person);
     expect(again.tokens).toBeUndefined();
     expect(again.text).toContain("refused this client");
+    const after = (await (await boss.api("GET", "/clients")).json()) as {
+      clients: { people: number; lastUsedAt: string | null }[];
+    };
+    expect(after.clients[0]).toMatchObject({ people: 0, status: "refused" });
+    expect(after.clients[0]?.lastUsedAt).not.toBeNull();
     // Revoking twice isn't a thing: it was refused already.
     expect((await boss.api("POST", `/clients/${key}/revoke`, {})).status).toBe(409);
 
@@ -401,8 +429,10 @@ describe("the AI-client allowlist (T-106)", () => {
     };
     expect(listed.clients[0]).toMatchObject({
       managedBy: "config",
+      configTrust: "commercial",
       approved: true,
       trust: "commercial",
+      people: 1,
     });
     for (const [action, body] of [
       ["revoke", {}],
@@ -417,6 +447,33 @@ describe("the AI-client allowlist (T-106)", () => {
       "oauth-client.revoke:deny:config-managed",
       "oauth-client.approve:deny:config-managed",
     ]);
+
+    // Taken out of the config: it gets nothing, and acts for nobody, whatever grants it holds.
+    app = build();
+    const after = await signedIn(adminPerson);
+    const lapsed = (await (await after.api("GET", "/clients")).json()) as {
+      clients: Record<string, unknown>[];
+    };
+    expect(lapsed.clients[0]).toMatchObject({
+      status: "approved",
+      managedBy: "app",
+      configTrust: null,
+      approved: false,
+      trust: null,
+      people: 0,
+    });
+    expect(await mcp(tokens.access_token as string)).toEqual({ status: 401 });
+    // Approved here, it is let in again, for those who had connected it too; refused, it is
+    // cut off for good.
+    expect((await after.api("POST", `/clients/${key}/approve`, { trust: "local" })).status).toBe(
+      200,
+    );
+    expect(await mcp(tokens.access_token as string)).toMatchObject({
+      status: 200,
+      client: { trust: "local" },
+    });
+    expect((await after.api("POST", `/clients/${key}/revoke`, {})).status).toBe(200);
+    expect(await mcp(tokens.access_token as string)).toEqual({ status: 401 });
   });
 
   it("checks the request: JSON, a known client, a trust label", async () => {

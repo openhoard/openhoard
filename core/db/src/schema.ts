@@ -1944,9 +1944,12 @@ export const oauthClients = pgTable(
     requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
     decidedBy: text("decided_by"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
+    /** The last request made with a token of it, to within a minute (T-904); null when none. */
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.clientKey] }),
+    check("oauth_clients_last_used", sql`last_used_at is null or last_used_at >= requested_at`),
     check("oauth_clients_key_format", sql.raw(`client_key ~ '${HEX64}'`)),
     check("oauth_clients_kind_valid", sql`kind in ('cimd', 'dcr')`),
     check("oauth_clients_ref_length", sql`char_length(client_ref) between 1 and 2048`),

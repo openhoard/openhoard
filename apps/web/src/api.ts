@@ -46,25 +46,71 @@ export interface Source {
   lastCounts: Record<string, number> | null;
 }
 
+export type Trust = "local" | "commercial" | "consumer";
+/** The kinds an admin chooses from, the one given least first. */
+export const TRUSTS: readonly Trust[] = ["consumer", "commercial", "local"];
+
+/** An AI client, as GET /api/admin/clients gives it (what the pages use of it). */
+export interface Client {
+  clientKey: string;
+  /** What identifies it: its metadata document's URL, or (null) the addresses below. */
+  clientId: string | null;
+  /** Where a sign-in through it returns to. */
+  redirectUris: string[];
+  status: "pending" | "approved" | "refused";
+  /** The label it gets tokens with now; null when it gets none. */
+  trust: Trust | null;
+  /** Who decides: this app's admins, or the server's config file. */
+  managedBy: "app" | "config";
+  /** The label the config gives it, when it lists it: the only one it can be approved with. */
+  configTrust: Trust | null;
+  requestedAt: string | null;
+  /** What it calls itself: shown, never trusted. */
+  claimedName: string;
+  /** People connected through it now, and when it last got a token. */
+  people: number;
+  lastUsedAt: string | null;
+}
+
+/** What an admin does about a client. */
+export type ClientDecision = { action: "approve"; trust: Trust } | { action: "refuse" | "revoke" };
+
+/**
+ * How a change ended. `sign-in-again`: the server wants a recent sign-in for it. `conflict`:
+ * it no longer applies (someone else decided, or the server's config decides). `gone`: the
+ * client is no longer there (a request nobody decided lapses after 30 days).
+ */
+export type Changed = "done" | "sign-in-again" | "conflict" | "gone" | "refused" | "failed";
+
 export interface Api {
   me(): Promise<Me>;
   sources(): Promise<Source[]>;
+  clients(): Promise<Client[]>;
+  decideClient(clientKey: string, decision: ClientDecision): Promise<Changed>;
   signOut(): Promise<void>;
 }
 
 export function createApi(fetcher: typeof fetch): Api {
-  async function ask(path: string, method: "GET" | "POST"): Promise<Response> {
+  async function send(path: string, method: "GET" | "POST", body?: unknown): Promise<Response> {
     let res: Response;
     try {
       res = await fetcher(path, {
         method,
         credentials: "same-origin",
-        headers: { accept: "application/json" },
+        headers: {
+          accept: "application/json",
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
     } catch {
       throw new ApiError(0);
     }
     if (res.status === 401) throw new SignedOut();
+    return res;
+  }
+  async function ask(path: string, method: "GET" | "POST"): Promise<Response> {
+    const res = await send(path, method);
     if (!res.ok) throw new ApiError(res.status);
     return res;
   }
@@ -87,6 +133,31 @@ export function createApi(fetcher: typeof fetch): Api {
       const body = (await get("/api/admin/sources")) as { sources?: unknown } | null;
       if (!Array.isArray(body?.sources)) throw new ApiError(200);
       return body.sources.map(asSource);
+    },
+    async clients() {
+      const body = (await get("/api/admin/clients")) as { clients?: unknown } | null;
+      if (!Array.isArray(body?.clients)) throw new ApiError(200);
+      return body.clients.map(asClient);
+    },
+    async decideClient(clientKey, decision) {
+      if (!/^[0-9a-f]{64}$/.test(clientKey)) return "failed";
+      let res: Response;
+      try {
+        res = await send(
+          `/api/admin/clients/${clientKey}/${decision.action}`,
+          "POST",
+          decision.action === "approve" ? { trust: decision.trust } : {},
+        );
+      } catch (err) {
+        if (err instanceof SignedOut) throw err;
+        return "failed";
+      }
+      if (res.ok) return "done";
+      if (res.status === 409) return "conflict";
+      if (res.status === 404) return "gone";
+      if (res.status !== 403) return "failed";
+      const why = (await res.json().catch(() => null)) as { signIn?: unknown } | null;
+      return typeof why?.signIn === "string" ? "sign-in-again" : "refused";
     },
     async signOut() {
       await ask("/auth/logout", "POST");
@@ -128,4 +199,36 @@ function asStanding(x: unknown): Standing {
           ? st.code === null || typeof st.code === "string"
           : true;
   return (whole ? st : { is: "unknown" }) as Standing;
+}
+
+/** A client as the pages use it; a row that isn't one means this isn't the server's answer. */
+function asClient(x: unknown): Client {
+  if (typeof x !== "object" || x === null) throw new ApiError(200);
+  const c = x as Record<string, unknown>;
+  const status = c.status;
+  if (
+    typeof c.clientKey !== "string" ||
+    (status !== "pending" && status !== "approved" && status !== "refused")
+  ) {
+    throw new ApiError(200);
+  }
+  const text = (v: unknown) => (typeof v === "string" ? v : null);
+  return {
+    clientKey: c.clientKey,
+    clientId: text(c.clientId),
+    redirectUris: Array.isArray(c.redirectUris)
+      ? c.redirectUris.filter((u): u is string => typeof u === "string")
+      : [],
+    status,
+    trust: (TRUSTS as readonly unknown[]).includes(c.trust) ? (c.trust as Trust) : null,
+    // Anything but the app's own is someone else's to decide: no buttons offered.
+    managedBy: c.managedBy === "app" ? "app" : "config",
+    configTrust: (TRUSTS as readonly unknown[]).includes(c.configTrust)
+      ? (c.configTrust as Trust)
+      : null,
+    requestedAt: text(c.requestedAt),
+    claimedName: text(c.claimedName) ?? "",
+    people: typeof c.people === "number" && Number.isFinite(c.people) ? c.people : 0,
+    lastUsedAt: text(c.lastUsedAt),
+  };
 }

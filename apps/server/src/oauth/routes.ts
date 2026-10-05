@@ -18,6 +18,7 @@ import {
   redeemCode,
   refreshGrant,
   revokeByToken,
+  touchClient,
   userPrincipal,
   type GrantResult,
   type OAuthScope,
@@ -814,6 +815,13 @@ export function mountOAuth(
         }
         c.header("www-authenticate", `Bearer ${challenge({ error: "invalid_token" })}`);
         return c.json({ error: "invalid_token" }, 401);
+      }
+      // The client's last request, for its admins (T-904): any request its token is good for,
+      // whatever becomes of it. At most a write a minute, and never a reason to refuse.
+      if (check.stale) {
+        await db
+          .withTenant(tenantId, (tx) => touchClient(tx, tenantId, check.clientKey))
+          .catch((err: unknown) => log?.warn({ err }, "oauth: recording a client's use failed"));
       }
       if (!check.scopes.includes(scope)) {
         c.header(

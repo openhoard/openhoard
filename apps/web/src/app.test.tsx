@@ -54,6 +54,8 @@ function fakeApi(over: Partial<Api> = {}): Api {
   return {
     me: vi.fn(async () => ADA),
     sources: vi.fn(async () => [FINANCE]),
+    clients: vi.fn(async () => []),
+    decideClient: vi.fn(async () => "done" as const),
     signOut: vi.fn(async () => undefined),
     ...over,
   };
@@ -332,6 +334,55 @@ describe("the admin shell (T-901)", () => {
       window.dispatchEvent(new PopStateEvent("popstate"));
     });
     expect(host.querySelector("main h1")?.textContent).toBe("Nothing here");
+  });
+
+  it("has the AI clients page in the sections, at its own path", async () => {
+    window.history.replaceState(null, "", "/admin/clients");
+    const api = fakeApi();
+    await show(api, fakeBrowser("/admin/clients").browser);
+    expect(host.querySelector('nav a[aria-current="page"]')?.textContent).toBe("AI clients");
+    expect(host.querySelector("main h1")?.textContent).toBe("AI clients");
+    expect(document.title).toBe("AI clients · OpenHoard");
+    expect(api.clients).toHaveBeenCalledTimes(1);
+    expect(api.sources).not.toHaveBeenCalled();
+  });
+
+  it("gets a fresh sign-in by ending the session first, then signing in back to the page", async () => {
+    window.history.replaceState(null, "", "/admin/clients");
+    const waiting = {
+      clientKey: "a".repeat(64),
+      clientId: "https://client.example/x.json",
+      redirectUris: [],
+      status: "pending" as const,
+      trust: null,
+      managedBy: "app" as const,
+      configTrust: null,
+      requestedAt: null,
+      claimedName: "X",
+      people: 0,
+      lastUsedAt: null,
+    };
+    const api = fakeApi({
+      clients: vi.fn(async () => [waiting]),
+      decideClient: vi.fn(async () => "sign-in-again" as const),
+    });
+    const { browser, left, notes } = fakeBrowser("/admin/clients");
+    await show(api, browser);
+    await click(host.querySelector('input[value="local"]') as HTMLInputElement);
+    await click(button("Approve"));
+
+    // Signing out fails: still signed in, still here, and told so.
+    vi.mocked(api.signOut).mockRejectedValueOnce(new ApiError(0));
+    await click(button("Sign out and in again"));
+    expect(left).toEqual([]);
+    expect(text()).toContain("Signing out didn't go through");
+
+    await click(button("Sign out and in again"));
+    expect(api.signOut).toHaveBeenCalledTimes(2);
+    expect(left).toEqual(["/auth/sign-in?return_to=%2Fadmin%2Fclients"]);
+    expect(text()).toContain("Taking you to sign in");
+    // Noted like any trip to the sign-in: one that doesn't stick is said, not repeated.
+    expect(notes.size).toBe(1);
   });
 
   it("reads the app's path out of the address", () => {

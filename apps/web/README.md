@@ -3,9 +3,9 @@
 OpenHoard's admin web app (T-901): React, built by Vite to static files that `apps/server`
 serves at `/admin/` (see "The admin web app" in [apps/server/README.md](../server/README.md)).
 
-It is a shell so far: who is signed in, the way around, the way out, and an overview of the
-tenant's sources. Pages for the review inbox, AI clients, the audit log and the File Health
-Report are added to it.
+It has the shell (who is signed in, the way around, the way out) and two pages: an overview of
+the tenant's sources, and the AI clients its people may connect. Pages for the review inbox,
+the audit log and the File Health Report are added to it.
 
 ## How it is put together
 
@@ -35,8 +35,8 @@ pnpm --filter @openhoard/web dev          # with reloads, at http://127.0.0.1:51
 `dev` sends `/auth` and `/api` to a server on this machine (`OPENHOARD_DEV_SERVER`,
 `http://127.0.0.1:7420` by default). Sign in at that server first (in the same browser): cookies
 are the host's, whatever the port, so the dev page is signed in too. Anything that changes
-something (Sign out is the one so far) is refused there by the server's Origin check, and shows
-as "couldn't be reached": use the built app for those.
+something (Sign out, a decision on an AI client) is refused there by the server's Origin check,
+and shows as a failure or "not allowed": use the built app for those.
 
 ## Browsers
 

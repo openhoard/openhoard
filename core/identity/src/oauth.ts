@@ -141,6 +141,8 @@ export interface OAuthClient extends OAuthClientInput {
   requestedAt: Date;
   decidedBy: string | null;
   decidedAt: Date | null;
+  /** The last request made with a token of it, to within a minute; null when none. */
+  lastUsedAt: Date | null;
 }
 
 /**
@@ -175,6 +177,7 @@ const toClient = (r: ClientRow): OAuthClient => ({
   requestedAt: r.requestedAt,
   decidedBy: r.decidedBy,
   decidedAt: r.decidedAt,
+  lastUsedAt: r.lastUsedAt,
 });
 
 /**
@@ -287,6 +290,55 @@ export async function listClients(tx: Tx, tenantId: string): Promise<OAuthClient
     .where(eq(oauthClients.tenantId, tenantId))
     .orderBy(oauthClients.requestedAt);
   return rows.map(toClient);
+}
+
+/**
+ * How many people each client acts for now in the tenant, by client key, for the admins' list
+ * (T-904): those holding a grant that still stands (not revoked, not expired). A count only: who
+ * they are is not an admin's to read here. A client nobody is connected through has no entry.
+ */
+export async function clientPeople(tx: Tx, tenantId: string): Promise<Map<string, number>> {
+  const rows = await tx
+    .select({
+      clientKey: oauthGrants.clientKey,
+      people: sql<number>`count(distinct ${oauthGrants.userId})::int`,
+    })
+    .from(oauthGrants)
+    .where(
+      and(
+        eq(oauthGrants.tenantId, tenantId),
+        isNull(oauthGrants.revokedAt),
+        sql`${oauthGrants.expiresAt} > now()`,
+      ),
+    )
+    .groupBy(oauthGrants.clientKey);
+  return new Map(rows.map((r) => [r.clientKey, Number(r.people)]));
+}
+
+/** How long a client's last use stays as recorded before a request records it again. */
+const CLIENT_TOUCH_SECONDS = 60;
+
+/**
+ * Records that a client made a request now (for admins: when it last did), as SCIM tokens and
+ * sessions record their use: at most once a minute, so a busy client costs one write a minute.
+ * Returns whether it was written.
+ */
+export async function touchClient(tx: Tx, tenantId: string, clientKey: string): Promise<boolean> {
+  const rows = await tx
+    .update(oauthClients)
+    .set({ lastUsedAt: sql`greatest(statement_timestamp(), ${oauthClients.requestedAt})` })
+    .where(
+      and(
+        eq(oauthClients.tenantId, tenantId),
+        eq(oauthClients.clientKey, clientKey),
+        or(
+          isNull(oauthClients.lastUsedAt),
+          sql`${oauthClients.lastUsedAt} < statement_timestamp() - make_interval(secs => ${CLIENT_TOUCH_SECONDS})`,
+        ),
+      ),
+    )
+    .returning({ clientKey: oauthClients.clientKey });
+  return rows.length > 0;
 }
 
 /**
@@ -751,6 +803,8 @@ export type AccessCheck =
       tokenId: string;
       clientKey: string;
       scopes: OAuthScope[];
+      /** The client's last recorded request is over a minute old: record this one. */
+      stale: boolean;
     }
   | { ok: false; refused: AccessRefusal; grantId?: string };
 
@@ -784,6 +838,14 @@ export async function checkAccessToken(
       userId: oauthGrants.userId,
       clientKey: oauthGrants.clientKey,
       scopes: oauthTokens.scopes,
+      // By the database's clock, as the write is (touchClient()): the client has no request
+      // recorded in the last minute.
+      clientStale: sql<boolean>`not exists (
+        select 1 from ${oauthClients}
+        where ${oauthClients.tenantId} = ${oauthGrants.tenantId}
+          and ${oauthClients.clientKey} = ${oauthGrants.clientKey}
+          and ${oauthClients.lastUsedAt} >= statement_timestamp() - make_interval(secs => ${CLIENT_TOUCH_SECONDS})
+      )`,
     })
     .from(oauthTokens)
     .innerJoin(
@@ -817,6 +879,7 @@ export async function checkAccessToken(
     tokenId: m[2] as string,
     clientKey: row.clientKey,
     scopes: row.scopes as OAuthScope[],
+    stale: row.clientStale,
   };
 }
 

@@ -14,6 +14,13 @@ ul{padding-left:1.2rem}label{display:block;margin:.4rem 0}button,a.button{font:i
 button.primary{background:#8a5a00;border-color:#8a5a00;color:#fff}
 @media (prefers-color-scheme:dark){body{background:#17171a;color:#eee}code,.host{background:#333}button,a.button{background:#222;color:#eee}}`;
 
+/** A trust label in an admin's words (apps/web/src/words.ts TRUST_WORDS has the same). */
+const TRUST_LABELS: Record<string, string> = {
+  local: "Stays on our computers",
+  commercial: "Organization AI",
+  consumer: "Personal AI",
+};
+
 export function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) =>
     c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === '"' ? "&quot;" : "&#39;",
@@ -315,11 +322,13 @@ export function pendingPage(
       : "";
   const labels =
     approval.configTrust === undefined
-      ? `<p>To approve, choose how far to trust it with what is in files:</p>
-<label><input type="radio" name="trust" value="consumer"> <strong>Consumer</strong>: an AI service on consumer terms. Gets only files whose exposure is full.</label>
-<label><input type="radio" name="trust" value="commercial"> <strong>Commercial</strong>: an AI service under business terms. Also gets commercial-only files.</label>
-<label><input type="radio" name="trust" value="local"> <strong>Local</strong>: runs on your own machines. Also gets local-only files.</label>`
-      : `<p>The server's config approves it, trusted as <strong>${escapeHtml(approval.configTrust)}</strong>. Approving lifts the refusal, with that label.</p>`;
+      ? // The same three kinds, in the same words, as the admin web app's AI clients page
+        // (apps/web/src/words.ts TRUST_WORDS): change both together.
+        `<p>To approve, say what kind of app it is. That decides which files' content it is given:</p>
+<label><input type="radio" name="trust" value="consumer"> <strong>Personal AI.</strong> An AI app on personal or free terms, including paid personal plans. Gets the content only of files cleared for any AI.</label>
+<label><input type="radio" name="trust" value="commercial"> <strong>Organization AI.</strong> An AI service your organization has a business agreement with. Gets everything except files marked &ldquo;our computers only&rdquo;.</label>
+<label><input type="radio" name="trust" value="local"> <strong>Stays on our computers.</strong> The AI runs on your own machines; nothing leaves them. A desktop app that uses a cloud AI doesn't count.</label>`
+      : `<p>The server's config approves it, as <strong>${escapeHtml(TRUST_LABELS[approval.configTrust] ?? approval.configTrust)}</strong>. Approving lifts the refusal, with that label.</p>`;
   return page(
     "Approve this client?",
     `<h1>${escapeHtml(clientName)} ${refused ? "was refused" : "isn't approved yet"}</h1>

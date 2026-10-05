@@ -602,7 +602,7 @@ describe("clients need an admin", () => {
       const { url } = authorizeUrl();
       const page = await asked(browser, url);
       expect(page.status).toBe(200);
-      expect(page.html).toContain("trusted as <strong>local</strong>");
+      expect(page.html).toContain("as <strong>Stays on our computers</strong>");
       expect(page.html).not.toContain('name="trust"');
       // Whatever label is sent, the config's is the one it gets.
       const lifted = await decide(browser, {

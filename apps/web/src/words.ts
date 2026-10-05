@@ -1,4 +1,4 @@
-import type { Source } from "./api.js";
+import type { Client, Source, Trust } from "./api.js";
 
 /*
  * A source's sync in an admin's words. Which state it is in, and so which command lifts it, the
@@ -157,4 +157,125 @@ export function when(iso: string, locale?: string): string {
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return iso;
   return at.toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" });
+}
+
+/*
+ * AI clients (T-904). A client is shown by what identifies it, which it can't choose freely: the
+ * address of the document it publishes about itself, or the addresses a sign-in through it
+ * returns to. The name it gives itself is anyone's to claim.
+ */
+
+/**
+ * A trust label for an admin: where what the app reads ends up, which decides what it is given
+ * (core/policy exposureAllowsContent()). By where the content goes, not where the program runs:
+ * a desktop app that talks to a cloud AI is that cloud AI's kind. The server's own approval page
+ * says the same in the same words (apps/server oauth/pages.ts): change both together.
+ */
+export const TRUST_WORDS: Record<Trust, { label: string; means: string }> = {
+  consumer: {
+    label: "Personal AI",
+    means:
+      "An AI app on personal or free terms, including paid personal plans. Gets the content only of files cleared for any AI.",
+  },
+  commercial: {
+    label: "Organization AI",
+    means:
+      "An AI service your organization has a business agreement with. Gets everything except files marked \u201Cour computers only\u201D.",
+  },
+  local: {
+    label: "Stays on our computers",
+    means:
+      "The AI runs on your own machines; nothing leaves them. A desktop app that uses a cloud AI doesn't count.",
+  },
+};
+
+/**
+ * The site a client is identified by, and the addresses under it. Addresses are shown as the
+ * browser would go to them (an international look-alike of a known site shows in its `xn--`
+ * form, as in the title), never as the client wrote them.
+ */
+export function clientIdentity(c: Pick<Client, "clientId" | "redirectUris">): {
+  title: string;
+  detail: string;
+  addresses: string[];
+  /** Where a sign-in through it returns to, when that isn't what identifies it. */
+  returnsTo: string[];
+} {
+  const returns = [...new Set(c.redirectUris.map(asWritten))];
+  if (c.clientId !== null) {
+    return {
+      title: hostOf(c.clientId) ?? asWritten(c.clientId),
+      detail: "Identified by the document it publishes about itself at:",
+      addresses: [asWritten(c.clientId)],
+      returnsTo: returns,
+    };
+  }
+  const hosts = [...new Set(c.redirectUris.map((u) => hostOf(u) ?? asWritten(u)))];
+  const local = hosts.length > 0 && hosts.every((h) => LOOPBACK.has(h));
+  return {
+    title: local ? "A program on the person's own computer" : hosts.join(", ") || "Unknown app",
+    detail: local
+      ? "It registered itself. Any program on that computer can register the same way. A sign-in through it returns to:"
+      : "It registered itself. A sign-in through it returns to:",
+    addresses: returns,
+    returnsTo: [],
+  };
+}
+
+/** An address as a browser would go to it; one that isn't an address, with nothing unprintable. */
+function asWritten(url: string): string {
+  try {
+    return new URL(url).href;
+  } catch {
+    try {
+      return encodeURI(url);
+    } catch {
+      // Half a character: not text a browser could show or go to.
+      return "(an address that can't be shown)";
+    }
+  }
+}
+
+const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+function hostOf(url: string): string | null {
+  try {
+    return new URL(url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How much a client is in use: the people connected through it now, and the last request it
+ * made (to within a minute).
+ */
+export function clientUseText(c: Pick<Client, "people" | "lastUsedAt">, locale?: string): string {
+  const connected =
+    c.people > 0
+      ? `${count(c.people, "person", "people")} connected through it.`
+      : "Nobody is connected through it.";
+  const last =
+    c.lastUsedAt === null
+      ? "No request made yet."
+      : `Last request made ${when(c.lastUsedAt, locale)}.`;
+  return `${connected} ${last}`;
+}
+
+/** Where a client stands for an admin: what it gets now, and who can change that. */
+export type ClientStanding =
+  /** Nobody decided, and it gets nothing. */
+  | "waiting"
+  /** It gets tokens, and admins here decide. */
+  | "approved"
+  /** It gets tokens because the server's config lists it: the config decides. */
+  | "approved-by-config"
+  /** An admin refused or revoked it. */
+  | "refused"
+  /** The config approved it and no longer lists it: it gets nothing until approved here. */
+  | "lapsed";
+
+export function clientStanding(c: Pick<Client, "status" | "trust" | "managedBy">): ClientStanding {
+  if (c.trust !== null) return c.managedBy === "config" ? "approved-by-config" : "approved";
+  return c.status === "pending" ? "waiting" : c.status === "refused" ? "refused" : "lapsed";
 }
