@@ -27,8 +27,17 @@ if (adminAt !== undefined || solo !== undefined) {
   const args = process.argv.slice(2);
   const at = adminAt ?? (solo as { at: number }).at;
   const rest = [...args.slice(0, at), ...args.slice(at + 1)];
+  // A reader that goes away (`… | head`) or a full disk fails the write. A command that waits
+  // for its writes (io.write) handles that itself; for the rest it is remembered, so that what
+  // was to be printed (a one-time token) and wasn't is not reported as success.
+  let lost: Error | undefined;
+  process.stdout.on("error", (e: Error) => (lost ??= e));
   const io = {
     out: (s: string) => void process.stdout.write(s),
+    write: (s: string) =>
+      new Promise<void>((done, fail) => {
+        process.stdout.write(s, (err) => (err ? fail(err) : done()));
+      }),
     err: (s: string) => void process.stderr.write(s),
     // How to run this again, for the next commands printed.
     command: `node "${process.argv[1] ?? "main.js"}"`,
@@ -46,6 +55,10 @@ if (adminAt !== undefined || solo !== undefined) {
   await Promise.all(
     [process.stdout, process.stderr].map((s) => new Promise((done) => s.write("", done))),
   );
+  if (code === 0 && lost !== undefined) {
+    process.stderr.write(`standard output could not be written: ${lost.message}\n`);
+    process.exit(1);
+  }
   process.exit(code);
 }
 

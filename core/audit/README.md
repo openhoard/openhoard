@@ -39,6 +39,9 @@ Every access decision and every AI read leaves an event in its tenant's **hash c
   - CSV follows RFC 4180. Text a spreadsheet would run as a formula gets a leading
     apostrophe (CSV injection), so use NDJSON when the bytes must match the log.
 
+An operator runs both as `openhoard admin audit verify` and `admin audit export`
+([apps/server](../../apps/server/README.md), T-1404).
+
 Verify and export read the chain as it was when they started (up to its last seq then), a page
 at a time, each page in its own short read-only transaction, and do their work (checking,
 writing to the sink) outside any transaction. The chain is append-only, so that gives the same

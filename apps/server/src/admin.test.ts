@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAudit } from "@openhoard/core-audit";
@@ -10,6 +10,7 @@ import {
   objects,
   objectTags,
   openDatabase,
+  queryRows,
   sourceSyncs,
   zones,
   type Database,
@@ -19,6 +20,7 @@ import { addMember, createGroup, createUser, resolvePrincipal } from "@openhoard
 import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
 import { SoftAuthenticator } from "@openhoard/core-identity/testing";
 import { startJobs } from "@openhoard/core-jobs";
+import { sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ADMIN_ACTOR, adminArgument, runAdmin } from "./admin.js";
 import { createApp } from "./app.js";
@@ -1102,5 +1104,225 @@ describe("openhoard admin review (T-1403)", { timeout: 180_000 }, () => {
       outcome: "approved",
       reviewer: `user:${made.editor}`,
     });
+  });
+});
+
+describe("openhoard admin audit (T-1404)", { timeout: 180_000 }, () => {
+  it("verifies a chain, exports it filtered, and fails once any row is tampered with", async () => {
+    const tenantId = (await admin("tenant", "create", "--name", "Acme")).out.trim();
+    const other = (await admin("tenant", "create", "--name", "Other")).out.trim();
+    // A few events: the creation, two users, an admin granted.
+    for (const name of ["ana", "bo"]) {
+      await admin(
+        "user",
+        "create",
+        "--tenant",
+        tenantId,
+        "--email",
+        `${name}@example.com`,
+        "--name",
+        name,
+      );
+    }
+    await admin("user", "grant-admin", "--tenant", tenantId, "--user", "ana@example.com");
+    const audit = (...argv: string[]) => admin("audit", ...argv, "--tenant", tenantId);
+
+    const verified = await audit("verify");
+    expect(verified.code, verified.err).toBe(0);
+    const [state, count, head] = verified.out.trim().split("\t");
+    expect([state, count]).toEqual(["ok", "4"]);
+    expect(head).toMatch(/^[0-9a-f]{64}$/);
+    // Verifying writes nothing: the same chain, the same head.
+    expect((await audit("verify")).out).toBe(verified.out);
+
+    // NDJSON: the events as hashed, the last one's hash the head.
+    const all = await audit("export");
+    expect(all.code, all.err).toBe(0);
+    const events = all.out
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { seq: number; action: string; hash: string; tenantId: string });
+    expect(events.map((e) => e.action)).toEqual([
+      "tenant.create",
+      "user.create",
+      "user.create",
+      "admin.grant",
+    ]);
+    expect(events.at(-1)?.hash).toBe(head);
+    expect(events.every((e) => e.tenantId === tenantId)).toBe(true);
+    expect(all.err).toContain("Exported 4 audit events");
+
+    // Filtered, as CSV, to a new file that is never written over.
+    const file = join(dir, "users.csv");
+    const csv = await audit("export", "--format", "csv", "--action", "user.create", "--out", file);
+    expect(csv.code, csv.err).toBe(0);
+    expect(csv.out).toBe("");
+
+    const lines = readFileSync(file, "utf8").trimEnd().split("\r\n");
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatch(/^seq,at,actor,action,/);
+    if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
+    const over = await audit("export", "--out", file);
+    expect(over.code).toBe(1);
+    expect(over.err).toContain("exists");
+    expect(readFileSync(file, "utf8").trimEnd().split("\r\n")).toHaveLength(3);
+
+    // By time: everything is before tomorrow, nothing before 2000.
+    const tomorrow = new Date(Date.now() + 86_400_000).toISOString();
+    expect(
+      (await audit("export", "--from", "2000-01-01", "--to", tomorrow)).out.split("\n"),
+    ).toHaveLength(7);
+    expect((await audit("export", "--to", "2000-01-01")).out).toBe("");
+    // (Times as other tools write them are taken: a leap day, microseconds, an offset.)
+    for (const time of ["2024-02-29", "2026-10-01T09:30:00.123456Z", "2026-10-01T00:30:00+05:30"]) {
+      expect((await admin("audit", "export", "--tenant", other, "--to", time)).code, time).toBe(0);
+    }
+    // Each export is in the log after it: the filter, the format, how many.
+    const exportsLogged = (
+      await audit("export", "--action", "audit.export", "--decision", "allow")
+    ).out
+      .trimEnd()
+      .split("\n")
+      .map((l) => JSON.parse(l) as { actor: string; detail: Record<string, unknown> });
+    expect(exportsLogged.map((e) => e.detail)).toMatchObject([
+      { format: "ndjson", events: 4 },
+      { format: "csv", events: 2, action: "user.create" },
+      { format: "ndjson", events: 6, from: "2000-01-01T00:00:00.000Z", to: tomorrow },
+      { format: "ndjson", events: 0, to: "2000-01-01T00:00:00.000Z" },
+    ]);
+    expect(exportsLogged.every((e) => e.actor === ADMIN_ACTOR)).toBe(true);
+
+    // Misuse.
+    for (const bad of [
+      ["export", "--format", "xml"],
+      ["export", "--decision", "maybe"],
+      ["export", "--from", "yesterday"],
+      ["export", "--from", "2026-10-01T09:30"],
+      ["export", "--from", "2026-02-31"],
+      ["export", "--from", "2023-02-29"],
+      ["export", "--to", "2026-10-01T24:00:00Z"],
+      ["export", "--to", "2026-13-01"],
+      ["export", "--from", "2026-10-02", "--to", "2026-10-01"],
+      ["export", "--actor", ""],
+      ["export", "--out", ""],
+    ]) {
+      expect((await audit(...bad)).code, bad.join(" ")).toBe(2);
+    }
+    expect((await admin("audit", "verify")).code).toBe(2);
+    expect((await admin("audit", "verify", "--tenant", newId("tenant"))).code).toBe(1);
+
+    // Tampering, as the database's owner with the guards off: any row, any column.
+    const mine = sql`tenant_id = ${tenantId}`;
+    const tamper = (change: ReturnType<typeof sql>) =>
+      inspect((db) =>
+        db.withTenant(tenantId, async (tx) => {
+          await tx.execute(sql`alter table audit.events disable trigger events_append_only`);
+          await tx.execute(sql`alter table audit.events no force row level security`);
+          await tx.execute(change);
+          await tx.execute(sql`alter table audit.events force row level security`);
+          await tx.execute(sql`alter table audit.events enable trigger events_append_only`);
+        }),
+      );
+    const rowAt = async (seq: number) => {
+      const [row] = await inspect((db) =>
+        db.withTenant(tenantId, (tx) =>
+          queryRows<{ actor: string; event: string; hash: string }>(
+            tx,
+            sql`select actor, event, hash from audit.events where seq = ${seq} and ${mine}`,
+          ),
+        ),
+      );
+      if (!row) throw new Error(`no event ${seq}`);
+      return row;
+    };
+    const restore = (seq: number, row: { actor: string; event: string; hash: string }) =>
+      tamper(
+        sql`update audit.events set actor = ${row.actor}, event = ${row.event}, hash = ${row.hash}
+            where seq = ${seq} and ${mine}`,
+      );
+    const length = Number((await audit("verify")).out.split("\t")[1]);
+    for (const [seq, change] of [
+      // A column queries read.
+      [2, sql`update audit.events set actor = 'user:mallory' where seq = 2 and ${mine}`],
+      // The event and its column together: only the hash tells.
+      [
+        2,
+        sql`update audit.events
+            set actor = 'system:mallory', event = replace(event, ${ADMIN_ACTOR}, 'system:mallory')
+            where seq = 2 and ${mine}`,
+      ],
+      // The event's text alone.
+      [
+        3,
+        sql`update audit.events set event = replace(event, 'user.create', 'user.erased')
+            where seq = 3 and ${mine}`,
+      ],
+      // The newest event's hash.
+      [
+        length,
+        sql`update audit.events set hash = ${"a".repeat(64)} where seq = ${length} and ${mine}`,
+      ],
+    ] as const) {
+      const row = await rowAt(seq);
+      await tamper(change);
+      const broken = await audit("verify");
+      expect(broken.code, `seq ${seq}`).toBe(1);
+      expect(broken.out).toBe(`failed\t${seq - 1}\t${seq}\n`);
+      expect(broken.err).toContain(`does not verify at event ${seq}`);
+      // Put back, the chain verifies again.
+      await restore(seq, row);
+      expect((await audit("verify")).code).toBe(0);
+    }
+    // A row removed from the middle.
+    const second = await inspect((db) =>
+      db.withTenant(tenantId, (tx) =>
+        queryRows<Record<string, unknown>>(
+          tx,
+          sql`select * from audit.events where seq = 2 and ${mine}`,
+        ),
+      ),
+    );
+    expect(second).toHaveLength(1);
+    await tamper(sql`delete from audit.events where seq = 2 and ${mine}`);
+    expect((await audit("verify")).out).toBe("failed\t1\t3\n");
+
+    // An export that fails part way leaves no file that looks whole, and is in the log as taken.
+    const part = join(dir, "part.ndjson");
+    const whole = await audit("export", "--out", part);
+    expect(whole.code).toBe(0);
+    rmSync(part);
+    await tamper(sql`update audit.events set event = '{' where seq = 3 and ${mine}`);
+    const cut = await audit("export", "--out", part);
+    expect(cut.code).toBe(1);
+    expect(cut.err).toContain("failed, incomplete (up to 1 events)");
+    expect(existsSync(part)).toBe(false);
+    // So is one whose reader goes away.
+    let err = "";
+    const piped = await runAdmin(
+      ["audit", "export", "--tenant", tenantId, "--action", "admin.grant", "--data-dir", dir],
+      {
+        env: {},
+        out: () => {},
+        err: (text) => void (err += text),
+        write: () => Promise.reject(Object.assign(new Error("write EPIPE"), { code: "EPIPE" })),
+        ...(shared
+          ? { open: async () => ({ ...(shared as Database), close: async () => {} }) }
+          : {}),
+      },
+    );
+    expect(piped).toBe(1);
+    expect(err).toContain("The reader stopped");
+    const taken = (await audit("export", "--action", "audit.export", "--from", "2000-01-01")).out
+      .trimEnd()
+      .split("\n")
+      .map((l) => (JSON.parse(l) as { detail: Record<string, unknown> }).detail)
+      .filter((d) => d.incomplete === true);
+    expect(taken).toMatchObject([
+      { events: 1, format: "ndjson" },
+      { events: 1, action: "admin.grant" },
+    ]);
+
+    // Another tenant's chain is its own.
+    expect((await admin("audit", "verify", "--tenant", other)).out).toMatch(/^ok\t4\t/);
   });
 });

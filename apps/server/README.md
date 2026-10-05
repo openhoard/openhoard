@@ -891,8 +891,27 @@ node apps/server/dist/main.js admin review list --tenant ten_… --user <usr_…
 node apps/server/dist/main.js admin review approve --tenant ten_… --user <usr_…|email|userName> --id rev_… [--replace]
 node apps/server/dist/main.js admin review reject --tenant ten_… --user <usr_…|email|userName> --id rev_…
 node apps/server/dist/main.js admin review merge --tenant ten_… --user <usr_…|email|userName> --id rev_… --into <value> [--replace]
+node apps/server/dist/main.js admin audit verify --tenant ten_…
+node apps/server/dist/main.js admin audit export --tenant ten_… [--format ndjson|csv] [--out <new file>] [--actor …] [--action …] [--decision allow|deny] [--client …] [--object …] [--from <time>] [--to <time>]
 ```
 
+- **The audit log (T-702, T-703, T-1404).** `audit verify` checks a tenant's whole chain: every
+  hash and link, and that the columns queries read say what the hashed events say. It prints
+  `ok`, the number of events and the head hash (exit 0), or `failed`, how many events check
+  out and the first that doesn't (exit 1): any row changed, removed from the middle, inserted
+  or moved from another tenant fails it. It writes nothing, so the head stays the chain's until
+  the next event. Keep that hash somewhere the database's owner can't write: a chain cut short
+  at its end, or rewritten whole, still verifies, and only a head kept elsewhere shows it.
+  `audit export` writes the tenant's events, filtered by actor, action, decision, client, object
+  and time (`--from` included, `--to` not; a date, or a time with its zone), as NDJSON (each
+  line the event exactly as hashed, with its hash) or CSV (for spreadsheets: text a spreadsheet
+  would run as a formula gets a leading apostrophe), to standard output or to a new file
+  (`--out`: never over an existing file, and its owner's alone where the system has file
+  modes; on Windows it has its folder's permissions). An export is itself audited
+  (`audit.export`: the filter, the format, how many events) once it ends, so the head moves by
+  that one event: the last line's hash of an unfiltered NDJSON export is the head as exported.
+  An export that fails, or whose reader goes away part way, is audited as `incomplete`, and its
+  file is removed; one that can't be recorded fails, and its file is removed too.
 - **The review inbox (T-1403).** Tags that models and AI assistants (the `tag` tool) proposed
   wait for a person. Until the app has an inbox, `review list` prints the open items on files
   one person may tag, an item a line (id, tag, reason, who proposed it, confidence, when,

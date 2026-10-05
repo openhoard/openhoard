@@ -1,7 +1,13 @@
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { appendAudit } from "@openhoard/core-audit";
+import {
+  appendAudit,
+  exportAudit,
+  verifyAudit,
+  type AuditFilter,
+  type ExportFormat,
+} from "@openhoard/core-audit";
 import {
   APPLY_TRANSACTION,
   applyPack,
@@ -103,6 +109,10 @@ import { retrying } from "./retry.js";
  *   admin review approve --tenant ten_… --user <…> --id rev_… [--replace]
  *   admin review reject  --tenant ten_… --user <…> --id rev_…
  *   admin review merge   --tenant ten_… --user <…> --id rev_… --into <value> [--replace]
+ *   admin audit verify --tenant ten_…
+ *   admin audit export --tenant ten_… [--format ndjson|csv] [--out <new file>] [--actor <principal>]
+ *                      [--action <name>] [--decision allow|deny] [--client <id>] [--object <id>]
+ *                      [--from <time>] [--to <time>]
  *
  * It reads the server's configuration (and `--data-dir`, as the server does) and opens the same
  * database. The embedded database (PGlite) belongs to one process at a time, so while the
@@ -162,11 +172,25 @@ import { retrying } from "./retry.js";
  * tag the file: approving or rejecting a value the vocabulary doesn't have, and taking a
  * restriction off the file (rejecting a value that sets a level, or replacing a tighter one).
  * `list` prints an item a line: id, tag, reason, who proposed it, confidence, when, `admin`
- * when some decision on it takes one, the file's id and title. `approve` applies the tag (grants on it then
- * count for the file), `reject` drops it, `merge` applies an approved value of the same facet
+ * when some decision on it takes one, the file's id and title. `approve` applies the tag
+ * (grants on it then count for the file), `reject` drops it, `merge` applies an approved value of the same facet
  * instead; `--replace` confirms taking another value of a single-value facet off the file.
  * Audited as `tag.review`, acted by `system:admin-cli` for the person; a refused decision too
  * (`refusal`: why), unless the tenant doesn't exist.
+ *
+ * `audit verify` (T-702, T-1404) checks a tenant's whole audit chain (core/audit verifyAudit()):
+ * every hash and link, and that the columns queries read agree with the hashed events. It
+ * prints `ok`, the number of events and the head hash, or the first event that doesn't check
+ * out, and exits 1. It writes nothing, so the head it prints is the chain's until the next
+ * event: keep it somewhere the database's owner can't write, since a chain cut short or
+ * rewritten whole verifies. `audit export` (T-703) writes the tenant's events, filtered, as
+ * NDJSON (each line the event as hashed, with its hash) or CSV, to standard output or to a new
+ * file (`--out`, never over an existing one; its owner's alone where the system has file
+ * modes). Times are ISO 8601 with a zone (`2026-10-01T00:00:00Z`) or a date, taken as UTC;
+ * `--from` is included, `--to` is not. An export is audited (`audit.export`: the filter, the
+ * format and how many events) once it ends, so the chain's head moves by that one event; one
+ * that fails or whose reader goes away part way is audited as `incomplete`, and its file is
+ * removed.
  */
 
 export const ADMIN_ACTOR = "system:admin-cli";
@@ -192,6 +216,12 @@ export interface AdminIo {
   cwd?: string;
   /** Standard output: what a script would read (the token, ids). */
   out: (text: string) => void;
+  /**
+   * Standard output for a stream (an export): resolves once the reader has taken the text, so
+   * a slow reader slows the writer instead of filling memory, and rejects when the reader has
+   * gone. Default: `out`.
+   */
+  write?: (text: string) => Promise<void>;
   /** Standard error: messages for the person. */
   err: (text: string) => void;
   /** Opens the database (tests); the default opens the configured one. */
@@ -254,6 +284,12 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
                                                    turn the proposed tag down
   review merge --tenant <ten_…> --user <…> --id <rev_…> --into <value> [--replace]
                                                    apply an approved value of the facet instead
+  audit verify --tenant <ten_…>                    check the tenant's audit chain, and print
+                                                   its length and head hash
+  audit export --tenant <ten_…> [--format ndjson|csv] [--out <new file>]
+               [--actor <principal>] [--action <name>] [--decision allow|deny]
+               [--client <id>] [--object <id>] [--from <time>] [--to <time>]
+                                                   write the tenant's audit events, filtered
 `;
 
 class UsageError extends Error {}
@@ -282,6 +318,15 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         into: { type: "string" },
         limit: { type: "string" },
         replace: { type: "boolean" },
+        format: { type: "string" },
+        out: { type: "string" },
+        actor: { type: "string" },
+        action: { type: "string" },
+        decision: { type: "string" },
+        client: { type: "string" },
+        object: { type: "string" },
+        from: { type: "string" },
+        to: { type: "string" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -325,6 +370,8 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "review approve",
     "review reject",
     "review merge",
+    "audit verify",
+    "audit export",
   ];
   if (!known.includes(command)) {
     io.err(`unknown command: ${command}\n\n${USAGE}`);
@@ -468,6 +515,10 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
           io,
         );
       }
+      case "audit verify":
+        return await auditVerify(db, tenantArg(values.tenant), io);
+      case "audit export":
+        return await auditExport(db, tenantArg(values.tenant), exportArgs(values), io);
       default:
         return await tokenRevoke(db, tenantArg(values.tenant), need(values.id, "--id"), io);
     }
@@ -1826,5 +1877,235 @@ async function reviewDecide(
         : `${how.decision === "merge" ? `Merged ${done.tag} into` : "Approved"} ${done.applied ?? done.tag} on ${file}${off}, for ${who}: grants on the tag now count for the file.\n`,
   );
   io.out(`${reviewId}\n`);
+  return 0;
+}
+
+/** `audit verify`: the tenant's whole chain, checked; `ok`, its length and head on stdout. */
+async function auditVerify(db: Database, tenantId: string, io: AdminIo): Promise<number> {
+  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  const result = await verifyAudit(db, tenantId);
+  if (!result.ok) {
+    io.out(`failed\t${result.count}\t${result.seq}\n`);
+    io.err(
+      `The audit chain of ${tenantId} does not verify at event ${result.seq}: ${oneLine(result.problem)}. ` +
+        `The ${result.count} events before it check out; nothing from it on can be trusted as written.\n`,
+    );
+    return 1;
+  }
+  io.out(`ok\t${result.count}\t${result.head}\n`);
+  io.err(
+    result.count === 0
+      ? `The audit chain of ${tenantId} is empty.\n`
+      : `The audit chain of ${tenantId} verifies: ${result.count} events, every hash and link. ` +
+          `Keep the head hash where the database's owner can't write: a chain cut short or rewritten whole verifies too.\n`,
+  );
+  return 0;
+}
+
+/** An export goes out in pieces of about this many characters. */
+const EXPORT_CHUNK = 64 * 1024;
+
+interface ExportArgs {
+  format: ExportFormat;
+  out: string | undefined;
+  filter: AuditFilter;
+  /** The filter as given, for the audit record. */
+  asked: Record<string, string>;
+}
+
+/** A time for `--from` / `--to`: a date (UTC) or a full ISO 8601 time with its zone. */
+function timeArg(value: string, flag: string): Date {
+  const iso =
+    /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
+  const m = iso.exec(value);
+  const at = m ? new Date(value) : new Date(Number.NaN);
+  // A day the month doesn't have, or hour 24, is read as a later one: refused, not shifted.
+  const [, y, mo, d, h = "00"] = m ?? [];
+  const day = m ? new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d))) : at;
+  const real =
+    Number.isFinite(at.getTime()) &&
+    day.getUTCMonth() === Number(mo) - 1 &&
+    day.getUTCDate() === Number(d) &&
+    Number(h) < 24 &&
+    at.getUTCFullYear() >= 1970 &&
+    at.getUTCFullYear() <= 9999;
+  if (!real) {
+    throw new UsageError(
+      `${flag} is a date (2026-10-01, UTC) or a time with its zone (2026-10-01T09:30:00Z)`,
+    );
+  }
+  return at;
+}
+
+/** `audit export`'s options, checked. */
+function exportArgs(values: {
+  format?: string | undefined;
+  out?: string | undefined;
+  actor?: string | undefined;
+  action?: string | undefined;
+  decision?: string | undefined;
+  client?: string | undefined;
+  object?: string | undefined;
+  from?: string | undefined;
+  to?: string | undefined;
+}): ExportArgs {
+  const format = values.format ?? "ndjson";
+  if (format !== "ndjson" && format !== "csv") throw new UsageError("--format is ndjson or csv");
+  const { decision } = values;
+  if (decision !== undefined && decision !== "allow" && decision !== "deny") {
+    throw new UsageError("--decision is allow or deny");
+  }
+  if (values.out === "") throw new UsageError("--out is a file's path");
+  const filter: AuditFilter = {};
+  const asked: Record<string, string> = {};
+  for (const key of ["actor", "action", "client", "object"] as const) {
+    const value = values[key];
+    if (value === undefined) continue;
+    // What the log can hold (core/audit store.ts): anything else matches nothing.
+    const whole = wellFormed(value).join("") === value;
+    if (value === "" || value.length > 1024 || !whole || value.includes("\0")) {
+      throw new UsageError(`--${key} is not a value the audit log holds`);
+    }
+    filter[key] = value;
+    asked[key] = value;
+  }
+  if (decision !== undefined) {
+    filter.decision = decision;
+    asked.decision = decision;
+  }
+  for (const key of ["from", "to"] as const) {
+    const value = values[key];
+    if (value === undefined) continue;
+    filter[key] = timeArg(value, `--${key}`);
+    asked[key] = (filter[key] as Date).toISOString();
+  }
+  if (filter.from && filter.to && filter.from >= filter.to) {
+    throw new UsageError("--from must be before --to");
+  }
+  return { format, out: values.out, filter, asked };
+}
+
+/** `audit export`: the tenant's events, filtered, to stdout or a new file; then audited. */
+async function auditExport(
+  db: Database,
+  tenantId: string,
+  args: ExportArgs,
+  io: AdminIo,
+): Promise<number> {
+  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  let fd: number | undefined;
+  const path = args.out === undefined ? undefined : resolve(io.cwd ?? process.cwd(), args.out);
+  if (path !== undefined) {
+    try {
+      // A new file, its owner's alone: never over one that exists.
+      fd = openSync(path, "wx", 0o600);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      io.err(
+        code === "EEXIST"
+          ? `${path} exists: an export is written to a new file\n`
+          : `cannot write ${path}: ${code ?? (e as Error).message}\n`,
+      );
+      return 1;
+    }
+  }
+  // Written in pieces of some size, each awaited: a slow reader slows the export.
+  const file = fd;
+  const deliver =
+    file !== undefined
+      ? // (Until every byte is written: one write may take only part.)
+        (text: string) => writeFileSync(file, text)
+      : (io.write ?? ((text: string) => Promise.resolve(io.out(text))));
+  let sunk = 0;
+  let header = args.format === "csv";
+  let pending = "";
+  const record = (incomplete: boolean) =>
+    db.withTenant(tenantId, (tx) =>
+      appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "audit.export",
+        decision: "allow",
+        detail: {
+          format: args.format,
+          events: sunk,
+          ...(incomplete ? { incomplete: true } : {}),
+          ...args.asked,
+        },
+      }),
+    );
+  let failure: unknown;
+  try {
+    await exportAudit(db, tenantId, args.filter, args.format, async (chunk) => {
+      pending += chunk;
+      // (A CSV's first line is its header, not an event.)
+      if (header) header = false;
+      else sunk++;
+      if (pending.length < EXPORT_CHUNK) return;
+      const text = pending;
+      pending = "";
+      await deliver(text);
+    });
+    if (pending !== "") await deliver(pending);
+  } catch (e) {
+    failure = e ?? new Error("the export failed");
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch (e) {
+        failure ??= e;
+      }
+    }
+  }
+  const remove = () => {
+    if (path === undefined) return;
+    try {
+      unlinkSync(path);
+    } catch {
+      // Gone already, or not ours to remove: the message says what happened.
+    }
+  };
+  const said = (e: unknown) => oneLine(e instanceof Error ? e.message : String(e));
+  if (failure !== undefined) {
+    // No file left that looks like an export; what got out is recorded as taken.
+    remove();
+    const code = (failure as NodeJS.ErrnoException).code;
+    io.err(
+      code === "EPIPE" || code === "ERR_STREAM_DESTROYED"
+        ? `The reader stopped: the export of ${tenantId} is incomplete (up to ${sunk} events).\n`
+        : `The export of ${tenantId} failed, incomplete (up to ${sunk} events): ${said(failure)}\n`,
+    );
+    try {
+      await record(true);
+    } catch (e) {
+      io.err(`And it could not be recorded in the audit log: ${said(e)}\n`);
+    }
+    return 1;
+  }
+  // After the export, so the record isn't in it: the next one shows this one was taken.
+  try {
+    await record(false);
+  } catch (e) {
+    // An export nobody can see was taken is not left lying about.
+    remove();
+    io.err(
+      `The export of ${tenantId} could not be recorded in the audit log: ${said(e)}\n` +
+        (path === undefined
+          ? `What was written to standard output is an export the log doesn't show.\n`
+          : `${path} was removed.\n`),
+    );
+    return 1;
+  }
+  const written = sunk;
+  io.err(
+    `Exported ${written} audit event${written === 1 ? "" : "s"} of ${tenantId} as ${args.format}` +
+      `${path === undefined ? "" : ` to ${path}`}.\n`,
+  );
   return 0;
 }

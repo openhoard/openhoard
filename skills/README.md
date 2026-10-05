@@ -50,6 +50,6 @@ text and summaries come back as untrusted data, and every call and every AI read
 5. **Try them:** "Find the Acme QBR deck and open it", "What CSVs was I looking at yesterday?
    I'm in America/Denver", "Who can see the salary sheet? Can Bo?"
 
-The audit log (core/audit `exportAudit`; a CLI command for it is still to come) shows what
+The audit log (`openhoard admin audit export --tenant ten_…`) shows what
 happened: one `mcp.tool` record per call, `ai.read` for every content read and summary shown,
 `tag.propose` for proposals, and `object.open` denials where exposure kept content back.
