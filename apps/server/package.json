@@ -33,6 +33,7 @@
     "@openhoard/core-policy": "workspace:^",
     "@openhoard/core-storage": "workspace:^",
     "@openhoard/sdk": "workspace:^",
+    "@openhoard/web": "workspace:^",
     "drizzle-orm": "^0.45.3",
     "hono": "^4.8.0",
     "imapflow": "^2.2.1",

@@ -222,6 +222,7 @@ describe("GET /api/admin/sources", () => {
       sources: [
         {
           source: "fs-docs",
+          standing: { is: "current" },
           scheduled: true,
           lastStatus: "done",
           lastCounts: { files: 2 },

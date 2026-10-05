@@ -16,5 +16,10 @@ export default tseslint.config(
       ],
     },
   },
+  // The admin web app runs in a browser.
+  {
+    files: ["apps/web/src/**"],
+    languageOptions: { globals: { ...globals.browser } },
+  },
   prettier,
 );

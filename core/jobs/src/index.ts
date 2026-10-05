@@ -70,7 +70,9 @@ export {
   recordSyncRun,
   resumeSource,
   sourceStopped,
+  syncStanding,
   type SourceSyncState,
+  type SyncStanding,
   type SyncRunRecord,
   type SyncRunStatus,
 } from "./sync-admin.js";

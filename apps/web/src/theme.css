@@ -1,0 +1,371 @@
+/*
+ * Charcoal and gold, in the light and the dark the person's system asks for. Colors are named
+ * once here; each pair of text on its background keeps a contrast of 4.5 or more.
+ */
+:root {
+  color-scheme: light dark;
+  --charcoal: #15110d;
+  --gold: #f2a93b;
+  --bg: #faf8f3;
+  --surface: #ffffff;
+  --text: #1c1813;
+  --muted: #5f574b;
+  --line: #e2dccf;
+  --edge: #8c8372;
+  --accent: #7a4f00;
+  --primary-bg: #15110d;
+  --primary-text: #f7c85c;
+  --ok-bg: #e3f3e8;
+  --ok-text: #1e6b3a;
+  --busy-bg: #f6ecd3;
+  --busy-text: #6b4700;
+  --attention-bg: #fde8df;
+  --attention-text: #8a2c0d;
+  --focus: #7a4f00;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15110d;
+    --surface: #1f1a14;
+    --text: #f1ebdf;
+    --muted: #b3a996;
+    --line: #3a3126;
+    --edge: #857a67;
+    --accent: #f2a93b;
+    --primary-bg: #f2a93b;
+    --primary-text: #15110d;
+    --ok-bg: #173222;
+    --ok-text: #8fd6a6;
+    --busy-bg: #3a2c0c;
+    --busy-text: #f7c85c;
+    --attention-bg: #3d1c10;
+    --attention-text: #ffb59a;
+    --focus: #f7c85c;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font:
+    100%/1.5 system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text);
+  background: var(--bg);
+}
+
+h1 {
+  font-size: 1.5rem;
+  line-height: 1.25;
+  margin: 0 0 1rem;
+}
+
+h2 {
+  font-size: 1.1rem;
+  margin: 1.5rem 0 0.25rem;
+}
+
+h3 {
+  font-size: 1rem;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+p {
+  margin: 0.5rem 0;
+}
+
+a {
+  color: var(--accent);
+}
+
+:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+main:focus {
+  outline: none;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 0.925rem;
+}
+
+button,
+a.button {
+  display: inline-block;
+  font: inherit;
+  line-height: 1.25;
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+button.primary,
+a.button.primary {
+  color: var(--primary-text);
+  background: var(--primary-bg);
+  border-color: var(--primary-bg);
+  font-weight: 600;
+}
+
+/* The shell: a bar across the top, the sections beside the page. */
+.shell {
+  display: grid;
+  grid-template-columns: 13rem minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  min-height: 100vh;
+}
+
+.top {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 1.25rem;
+  color: #f1ebdf;
+  background: var(--charcoal);
+  border-bottom: 2px solid var(--gold);
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: 1.1rem;
+  letter-spacing: 0.01em;
+}
+
+.top .brand {
+  color: #f7c85c;
+}
+
+.who {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.who-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top button {
+  color: #f1ebdf;
+  background: transparent;
+  border-color: #6b5f4d;
+  white-space: nowrap;
+}
+
+.top :focus-visible {
+  outline-color: #f7c85c;
+}
+
+.side {
+  padding: 1rem 0.75rem;
+  border-right: 1px solid var(--line);
+}
+
+.side ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.side a {
+  display: block;
+  padding: 0.4rem 0.75rem;
+  border-radius: 6px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.side a[aria-current="page"] {
+  font-weight: 600;
+  background: var(--busy-bg);
+  box-shadow: inset 3px 0 0 var(--gold);
+}
+
+.shell > main {
+  padding: 1.5rem 2rem 3rem;
+  max-width: 60rem;
+  min-width: 0;
+}
+
+.skip {
+  position: absolute;
+  left: -100rem;
+  top: 0.5rem;
+  padding: 0.4rem 0.8rem;
+  color: var(--charcoal);
+  background: #f7c85c;
+  border-radius: 6px;
+  z-index: 1;
+}
+
+.skip:focus {
+  left: 0.5rem;
+}
+
+/* A page with nothing around it: signing in, signed out, not an admin. */
+.alone {
+  max-width: 32rem;
+  margin: 0 auto;
+  padding: 4rem 1.25rem;
+}
+
+.alone .brand {
+  margin-bottom: 1.5rem;
+}
+
+.alone button,
+.alone a.button {
+  margin-top: 0.75rem;
+}
+
+.cards {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.card,
+.notice {
+  padding: 0.9rem 1.1rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.notice {
+  margin-top: 1rem;
+  border-color: var(--attention-text);
+}
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.badge {
+  flex: none;
+  padding: 0.1rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge-ok {
+  color: var(--ok-text);
+  background: var(--ok-bg);
+}
+
+.badge-busy {
+  color: var(--busy-text);
+  background: var(--busy-bg);
+}
+
+.badge-attention {
+  color: var(--attention-text);
+  background: var(--attention-bg);
+}
+
+.next ul {
+  margin: 0.25rem 0;
+  padding-left: 1.1rem;
+}
+
+.next li {
+  margin: 0.4rem 0;
+}
+
+.next p {
+  margin: 0;
+}
+
+code {
+  display: block;
+  margin-top: 0.25rem;
+  padding: 0.35rem 0.5rem;
+  font:
+    0.85rem/1.4 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  /* A command is copied whole: it scrolls sideways on a narrow screen instead of breaking. */
+  white-space: nowrap;
+  overflow-x: auto;
+  -webkit-user-select: all;
+  user-select: all;
+}
+
+.next {
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid var(--gold);
+  background: var(--busy-bg);
+  border-radius: 0 6px 6px 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 45rem) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto 1fr;
+  }
+
+  .side {
+    padding: 0.5rem 0.75rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .side ul {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+  }
+
+  .side a[aria-current="page"] {
+    box-shadow: inset 0 -3px 0 var(--gold);
+  }
+
+  .shell > main {
+    padding: 1.25rem 1rem 2.5rem;
+  }
+}

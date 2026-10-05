@@ -46,6 +46,94 @@ export interface SourceSyncState {
   updatedAt: Date;
 }
 
+/**
+ * Where a source's sync stands, as the one thing to tell its admin: what waits on them first
+ * (and for what), else how the sync is going. The admin CLI and the admin API word it; which
+ * state it is, and so which command lifts it, is decided here.
+ */
+export type SyncStanding =
+  /** The guard holds removals for an admin: `confirm-reconcile` or `discard-reconcile`. */
+  | { is: "held"; count: number }
+  /** An admin confirmed the removals; the next sync makes them. */
+  | { is: "confirmed"; count: number }
+  /** The source is not the one first synced: `accept-identity`, if that is meant. */
+  | { is: "identity-changed" }
+  /** A failure stopped the schedule: `resume`, once what the code names is fixed. */
+  | { is: "stopped"; code: string }
+  /** Nothing runs until the source's configured owner has signed in once. */
+  | { is: "waiting-for-owner" }
+  /**
+   * The last crawl couldn't read part of the source, so it removed nothing: what was deleted
+   * there may still be listed. Only a crawl from the beginning settles it (`discard-reconcile`).
+   */
+  | { is: "deferred" }
+  /** No scheduled run has ended yet. */
+  | { is: "not-run" }
+  /** A crawl from the beginning is under way (the first, or one an admin or the schedule began). */
+  | { is: "reading" }
+  /** A delta ran out of time with changes left; the next run continues. */
+  | { is: "catching-up" }
+  /** The last run ended early (the source unreachable, throttled, resumed after a failure). */
+  | { is: "retrying"; code: string | null }
+  /** The last run was cancelled (the server stopping); the next runs on schedule. */
+  | { is: "cancelled" }
+  /** The last delta finished: the catalog has what the source had then. */
+  | { is: "current" };
+
+export function syncStanding(
+  s: Pick<
+    SourceSyncState,
+    | "phase"
+    | "reconcileHeld"
+    | "reconcileConfirmed"
+    | "reconcileDeferred"
+    | "stoppedAt"
+    | "stoppedError"
+    | "lastStatus"
+    | "lastError"
+  >,
+): SyncStanding {
+  const confirmed =
+    s.reconcileHeld !== null &&
+    s.reconcileConfirmed !== null &&
+    s.reconcileHeld <= s.reconcileConfirmed;
+  // A hold nobody confirmed (or one grown past what was confirmed) comes before the stop its
+  // guard made: resuming would only hold it again. A stop for anything else comes before the
+  // hold: deciding the hold wouldn't lift it.
+  const byGuard =
+    s.stoppedAt === null ||
+    s.stoppedError === "reconcile-guard" ||
+    s.stoppedError === "delete-guard";
+  if (s.reconcileHeld !== null && !confirmed && byGuard) {
+    return { is: "held", count: s.reconcileHeld };
+  }
+  if (s.stoppedAt !== null) {
+    return s.stoppedError === "source-identity"
+      ? { is: "identity-changed" }
+      : { is: "stopped", code: s.stoppedError ?? "failed" };
+  }
+  if (s.reconcileHeld !== null && confirmed) return { is: "confirmed", count: s.reconcileHeld };
+  if (s.reconcileDeferred && s.phase === "delta") return { is: "deferred" };
+  switch (s.lastStatus) {
+    case null:
+      return { is: "not-run" };
+    case "cancelled":
+      return { is: "cancelled" };
+    case "retry":
+      return s.lastError === "unknown-owner"
+        ? { is: "waiting-for-owner" }
+        : { is: "retrying", code: s.lastError };
+    // An admin acted since (the stop is lifted): a crawl from the beginning after a discard or
+    // an accepted identity, else the schedule runs it again.
+    case "failed":
+      return s.phase === "crawl" ? { is: "reading" } : { is: "retrying", code: s.lastError };
+    case "partial":
+      return s.phase === "crawl" ? { is: "reading" } : { is: "catching-up" };
+    case "done":
+      return s.phase === "crawl" ? { is: "reading" } : { is: "current" };
+  }
+}
+
 /** Every source's sync in the tenant, by source. */
 export async function listSourceSyncs(tx: Tx, tenantId: string): Promise<SourceSyncState[]> {
   const rows = await tx

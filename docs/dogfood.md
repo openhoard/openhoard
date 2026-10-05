@@ -311,8 +311,9 @@ resume`; for a held deletion use `source confirm-reconcile` or `discard-reconcil
   address changes on every run, so it needs a new invite, passkey and client connection each
   time; a **named tunnel on your own domain** keeps them. Or use a real identity provider: Entra with SCIM
   (apps/server README, "Testing with a new Entra tenant").
-- **No web UI** for sign-in links, sources or approvals yet: the commands above and the admin API
-  (T-901..T-905).
+- **A web UI for more than looking**: `<its address>/admin/` shows who you are and where each
+  source stands (T-901). Sign-in links, deciding what a source waits on and approvals are still
+  the commands above and the admin API (T-902..T-905).
 - **An `openhoard` command**: for now the commands run through `node …\apps\server\dist\main.js`
   (the `oh` function).
 - **Opening files in their Windows app** (`open` with mode native) waits for the local agent

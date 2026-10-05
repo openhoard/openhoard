@@ -19,7 +19,7 @@ import {
   type OAuthClient,
   type User,
 } from "@openhoard/core-identity";
-import { listSourceSyncs } from "@openhoard/core-jobs";
+import { listSourceSyncs, syncStanding } from "@openhoard/core-jobs";
 import { mayAdminister, type AuthzClient, type ClientTrust } from "@openhoard/core-policy";
 import type { Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -407,6 +407,8 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
         connector: s.connector,
         zoneId: s.zoneId,
         phase: s.phase,
+        // The one thing to tell an admin: what waits on them, else how it is going (core/jobs).
+        standing: syncStanding(s),
         scheduled: s.stoppedAt === null,
         stoppedAt: s.stoppedAt?.toISOString() ?? null,
         stoppedError: s.stoppedError,

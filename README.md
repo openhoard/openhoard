@@ -102,6 +102,7 @@ The core makes every trust decision. Plugins extend what OpenHoard can **reach**
 | `clients/`                | Web app, desktop client, Office/Teams integrations                                                  |
 | `packages/schemas`        | Versioned JSON Schemas for plugin manifests and other contracts                                     |
 | `apps/server`, `apps/cli` | The gateway (HTTP, soon MCP) and the `openhoard` CLI (npm; PyPI twin in `packages/cli-py`)          |
+| `apps/web`                | The admin web app (React, Vite): static files the server serves at `/admin/`                        |
 | `assets/`                 | Logo and brand assets                                                                               |
 
 ## Try it

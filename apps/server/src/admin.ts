@@ -78,6 +78,7 @@ import {
   listSourceSyncs,
   resumeSource,
   startJobs,
+  syncStanding,
   type SourceSyncState,
 } from "@openhoard/core-jobs";
 import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
@@ -1099,6 +1100,16 @@ async function sourceList(db: Database, tenantId: string, io: AdminIo): Promise<
   return 0;
 }
 
+/** What lifts a stop: the command for what the source waits on (core/jobs syncStanding()). */
+function stopAdvice(s: SourceSyncState): string {
+  const standing = syncStanding(s);
+  return standing.is === "held"
+    ? "source confirm-reconcile removes what is held, source discard-reconcile reads the source again instead"
+    : standing.is === "identity-changed"
+      ? "source accept-identity, if the source is meant to be another one now"
+      : "fix the cause, then source resume";
+}
+
 function reconcileText(s: SourceSyncState): string {
   return s.reconcileHeld !== null
     ? `reconcile held: ${s.reconcileHeld} to remove` +
@@ -1266,7 +1277,7 @@ async function sourceStatus(
       [
         "state",
         s.stoppedAt !== null
-          ? `STOPPED since ${s.stoppedAt.toISOString()} (${s.stoppedError ?? "failed"}): fix the cause, then source resume`
+          ? `STOPPED since ${s.stoppedAt.toISOString()} (${s.stoppedError ?? "failed"}): ${stopAdvice(s)}`
           : "scheduled",
       ],
       ["phase", s.phase],

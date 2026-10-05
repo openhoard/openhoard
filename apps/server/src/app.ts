@@ -4,6 +4,7 @@ import { secureHeaders } from "hono/secure-headers";
 import type { Database } from "@openhoard/core-db";
 import type { Logger } from "pino";
 import { mountAdminApi } from "./admin-api.js";
+import { builtAdminUi, mountAdminUi } from "./admin-ui.js";
 import { mountAuth, type AuthEnv } from "./auth.js";
 import { adminGroupOf, type Config } from "./config.js";
 import { loginKey } from "./login-state.js";
@@ -31,6 +32,11 @@ export interface AppDeps {
   uploads?: Pick<UploadDeps, "store" | "tenantKey" | "enqueue">;
   /** SCIM limits (tests lower or raise them). */
   scim?: ScimOptions;
+  /**
+   * The directory of the admin web app's build (T-901), or null to serve none. By default, the
+   * build of `@openhoard/web` installed beside the server.
+   */
+  adminUi?: string | null;
 }
 
 /** What each app must finish before the database closes (see closeApp()). */
@@ -90,6 +96,12 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
     const shared = { auth: config.auth, db: deps.db, key, ...(log ? { log } : {}) };
     // Before sign-in's checks: a share the browser didn't take acts for nobody (web-app.ts).
     if (config.uploads) mountShareFallback(app);
+    // The admin web app (T-901): static files that need no session. What it shows it asks
+    // /auth/me and the admin API for.
+    mountAdminUi(app, {
+      dir: deps.adminUi === undefined ? builtAdminUi() : deps.adminUi,
+      ...(log ? { log } : {}),
+    });
     mountAuth(app, shared);
     // Tenant administration (T-106), behind the session and its CSRF check.
     mountAdminApi(app, { auth: config.auth, db: deps.db, ...(log ? { log } : {}) });

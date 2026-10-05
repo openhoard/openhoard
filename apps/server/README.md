@@ -596,7 +596,7 @@ all three), so a tenant can end up with no admin; the CLI makes a new one. Admin
 the person's principal (`principal.admin`, `/auth/me` says `admin`), and a change reaches every
 server on the next request (the principal epoch).
 
-The **admin API** is JSON under `/api/admin`, for the admin UI to come and for scripts:
+The **admin API** is JSON under `/api/admin`, for the admin web app (below) and for scripts:
 
 | Route                                  | What it does                                                                 |
 | -------------------------------------- | ---------------------------------------------------------------------------- |
@@ -607,7 +607,7 @@ The **admin API** is JSON under `/api/admin`, for the admin UI to come and for s
 | `GET /api/admin/admins`                | The tenant's admins, how (`role`, `group`), and if they count now            |
 | `POST /api/admin/admins`               | `{"userId": "usr_…"}`, or `{"email": …}`, or `{"userName": …}`               |
 | `DELETE /api/admin/admins/:userId`     | Takes the role away                                                          |
-| `GET /api/admin/sources`               | Each connector sync: phase, reconcile, last run (status, code, counts), stop |
+| `GET /api/admin/sources`               | Each connector sync: its `standing`, phase, reconcile, last run, stop        |
 
 - **Who.** A person signed in with the session cookie (above), who is an admin, through
   OpenHoard's own app (an AI client's token never administers). Anyone else gets 401 or 403, and
@@ -625,6 +625,25 @@ The **admin API** is JSON under `/api/admin`, for the admin UI to come and for s
   `oauth-client.revoke` (with the label, the previous one, and the status it was in), and
   `admin.grant`, `admin.revoke`; refusals say why (`sign-in-again`, `config-managed`,
   `status-changed`, `last-admin`, `admin-group`, …).
+
+## The admin web app (T-901)
+
+`<publicUrl>/admin/` is the admin web app: the static files `apps/web` builds (`pnpm build`),
+read into memory when the server starts and served as they are.
+
+- **It holds nothing of anyone's**, so the files need no session. The app asks `/auth/me` who is
+  signed in, sends whoever isn't to `/auth/sign-in` and back, and shows what the admin API
+  answers. A member who isn't an admin is told so and offered the way out; the API would refuse
+  them anyway.
+- **Any path under `/admin/` is the page** (the app has pages of its own), except a missing file
+  (anything under `assets/`, or ending like a web file: `.js`, `.css`, `.png`…), which is 404. Files under `assets/` are named
+  by their content and cached for good; the page is checked again on every load, so a new build
+  shows on the next one.
+- **Its policy** allows this origin's own script, styles and images and requests to this origin,
+  and nothing else: no inline script or style, no other site, no framing.
+- **Without a build** (a checkout nobody built) the server says so once and runs without it.
+- Today it is the shell and an overview of the sources (`GET /api/admin/sources`). The review
+  inbox, AI clients, audit and File Health pages come next (T-902 to T-905, T-1002).
 
 ## The MCP server (T-801)
 

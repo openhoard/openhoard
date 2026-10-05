@@ -21,7 +21,7 @@ import { addMember, createGroup, createUser, resolvePrincipal } from "@openhoard
 import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
 import { SoftAuthenticator } from "@openhoard/core-identity/testing";
 import { startJobs } from "@openhoard/core-jobs";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ADMIN_ACTOR, adminArgument, runAdmin } from "./admin.js";
 import { createApp } from "./app.js";
@@ -486,8 +486,27 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
     const status = await admin("source", "status", "--tenant", tenantId, "--source", "fs-docs");
     expect(status.code, status.err).toBe(0);
     expect(status.out).toContain("state: STOPPED since");
+    expect(status.out).toContain("(auth): fix the cause, then source resume\n");
     expect(status.out).toContain("last status: failed (auth)\n");
     expect(status.out).toContain("last counts: files 3, ingested 0\n");
+    // A stop names the command that lifts it: resuming a held clean-up would only hold it again.
+    for (const [stoppedError, reconcileHeld, advice] of [
+      ["reconcile-guard", 60, "source confirm-reconcile removes what is held"],
+      ["source-identity", null, "source accept-identity"],
+      ["auth", null, "fix the cause, then source resume"],
+    ] as const) {
+      await inspect((db) =>
+        db.withTenant(tenantId, (tx) =>
+          tx
+            .update(sourceSyncs)
+            .set({ stoppedError, reconcileHeld })
+            .where(eq(sourceSyncs.source, "fs-docs")),
+        ),
+      );
+      const shown = await admin("source", "status", "--tenant", tenantId, "--source", "fs-docs");
+      expect(shown.out).toContain(`(${stoppedError}): ${advice}`);
+      expect(shown.out.includes("then source resume")).toBe(stoppedError === "auth");
+    }
     expect((await admin("source", "status", "--tenant", tenantId, "--source", "nope")).code).toBe(
       1,
     );
