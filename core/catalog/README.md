@@ -317,7 +317,8 @@ filters inside the query, then uses the gate, then fuses:
    model; activity: the caller's own views, opens and edits in the last 30 days, T-205, at half
    weight) and fused with Reciprocal Rank Fusion (`fuseChannels()`, rank.ts). Ranks count
    survivors only, so a file the gate removed moves nobody. Title-only views are ordered
-   without their update time, which they don't show. Each hit has an `explanations[i]`: the
+   without when their file last changed (a card's `modifiedAt`: what the source says, never
+   later than now, else when OpenHoard recorded it), which they don't show. Each hit has an `explanations[i]`: the
    fused score, and per channel its rank (keyword: the fields its words matched, only among
    those the view shows; vector: the model and similarity).
 

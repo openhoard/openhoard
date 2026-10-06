@@ -626,9 +626,13 @@ export function bestModel(
   return best && { rank: best.rank, similarity: best.similarity, model: best.model };
 }
 
-/** A card's update time; -Infinity for a title-only view, which doesn't show one. */
+/**
+ * When a card's file last changed; -Infinity for a title-only view, which doesn't show it. The
+ * candidates' SQL cuts equal ranks by `updated_at` instead (when OpenHoard recorded a change):
+ * the two differ only past SEARCH_CANDIDATES rows of one rank.
+ */
 const updated = (view: ObjectView) =>
-  view.shape === "card" ? view.updatedAt.getTime() : Number.NEGATIVE_INFINITY;
+  view.shape === "card" ? view.modifiedAt.getTime() : Number.NEGATIVE_INFINITY;
 
 interface KeywordRow {
   id: string;

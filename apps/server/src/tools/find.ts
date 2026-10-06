@@ -125,8 +125,8 @@ export const find: McpTool = {
     const keep = (v: ObjectView) =>
       (a.kind === undefined || kindOf(v.mime) === a.kind) &&
       (mediaType === undefined || v.mime === mediaType) &&
-      (after === undefined || (v.shape === "card" && v.updatedAt >= after)) &&
-      (before === undefined || (v.shape === "card" && v.updatedAt < before));
+      (after === undefined || (v.shape === "card" && v.modifiedAt >= after)) &&
+      (before === undefined || (v.shape === "card" && v.modifiedAt < before));
 
     const { tenantId } = ctx.bearer;
     const out = await ctx.db.withTenant(
