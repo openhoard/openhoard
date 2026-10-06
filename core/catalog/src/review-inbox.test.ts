@@ -5,12 +5,14 @@ import {
   facetValues,
   newId,
   objects,
+  tenants,
   type Database,
   type Tx,
 } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { createUser, grantAdmin, lockUser, resolvePrincipal } from "@openhoard/core-identity";
 import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
+import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   decideReview,
@@ -21,7 +23,7 @@ import {
 } from "./review-inbox.js";
 import { primaryTagOf, proposePrimaryTag } from "./primary.js";
 import { listOpenReviews, proposeTag, TagError, tagsForDecisions } from "./tagging.js";
-import { markProcessed, VIEW_TRANSACTION, viewObjects } from "./visibility.js";
+import { levelsFor, markProcessed, VIEW_TRANSACTION, viewObjects } from "./visibility.js";
 
 /*
  * T-1403: the review inbox as a person sees it. The done-when: a tag an assistant proposed is
@@ -429,6 +431,106 @@ describe("the review inbox", () => {
     });
     expect(await audited()).toMatchObject([{ detail: { outcome: "rejected", alsoClosed: 1 } }]);
     expect(await inTenant((tx) => listOpenReviews(tx, t.tenantId))).toEqual([]);
+  });
+
+  it("leaves opening a file up past the tenant's default to a tenant admin", async () => {
+    // The tenant keeps files to those who may read them, and their content from every AI.
+    await inTenant((tx) =>
+      tx
+        .update(tenants)
+        .set({ defaultVisibility: "hidden", defaultExposure: "metadata-only" })
+        .where(eq(tenants.id, t.tenantId)),
+    );
+    await inTenant((tx) =>
+      tx.insert(facetValues).values([
+        {
+          tenantId: t.tenantId,
+          facet: "sensitivity",
+          value: "open",
+          label: "Open",
+          approved: true,
+          visibility: "readable",
+          exposure: "full",
+        },
+        {
+          tenantId: t.tenantId,
+          facet: "sensitivity",
+          value: "sealed",
+          label: "Sealed",
+          approved: true,
+          visibility: "hidden",
+          exposure: "metadata-only",
+        },
+      ]),
+    );
+    const levels = async () => {
+      const found = await view((tx) => levelsFor(tx, t.tenantId, [t.objectId]));
+      return found.get(t.objectId);
+    };
+    expect(await levels()).toMatchObject({ visibility: "hidden", exposure: "metadata-only" });
+
+    // A model's "open" waits, and approving it would put the first level on the file: one
+    // looser than the default it replaces. Not the editor's, however it is decided.
+    const open = await proposed("sensitivity:open");
+    expect(await code(item(editor, open, { decision: "approve" }))).toBe("not-admin");
+    expect(await code(decide(editor, open, { decision: "approve" }))).toBe("not-admin");
+    // Nor by filing a harmless suggestion under it.
+    const plain = await proposed("sensitivity:internal");
+    for (const how of [
+      { decision: "merge", into: "open" },
+      { decision: "merge", into: "open", replace: true },
+    ] as const) {
+      expect(await code(item(editor, plain, how))).toBe("not-admin");
+      expect(await code(decide(editor, plain, how))).toBe("not-admin");
+    }
+    expect(await levels()).toMatchObject({ visibility: "hidden", exposure: "metadata-only" });
+
+    // A value as tight as the default opens nothing: theirs. Nor does a value that sets no
+    // level at all.
+    await decide(editor, plain, { decision: "merge", into: "sealed" });
+    expect(await levels()).toMatchObject({ visibility: "hidden", exposure: "metadata-only" });
+    // With "sealed" on the file, "open" beside it changes nothing (the tightest wins), but
+    // in its place it would: an admin's.
+    expect(await code(decide(editor, open, { decision: "approve", replace: true }))).toBe(
+      "not-admin",
+    );
+    await inTenant((tx) => grantAdmin(tx, t.tenantId, editor, "system:admin-cli"));
+    await decide(editor, open, { decision: "approve", replace: true });
+    expect(await levels()).toMatchObject({ visibility: "readable", exposure: "full" });
+  });
+
+  it("leaves a file's first exposure level to a tenant admin when it lifts enrichment's ceiling", async () => {
+    // The tenant's default is everything to every AI. A file nothing classifies still goes to
+    // enrichment no further than providers on business terms (enrichmentExposure()).
+    await inTenant((tx) =>
+      tx.update(tenants).set({ defaultExposure: "full" }).where(eq(tenants.id, t.tenantId)),
+    );
+    await inTenant((tx) =>
+      tx.insert(facetValues).values([
+        {
+          tenantId: t.tenantId,
+          facet: "sensitivity",
+          value: "anyone",
+          label: "Anyone",
+          approved: true,
+          exposure: "full",
+        },
+        {
+          tenantId: t.tenantId,
+          facet: "sensitivity",
+          value: "business",
+          label: "Business",
+          approved: true,
+          exposure: "commercial-only",
+        },
+      ]),
+    );
+    // "full" is no looser than the default, but it is the file's first classification.
+    const anyone = await proposed("sensitivity:anyone");
+    expect(await code(decide(editor, anyone, { decision: "approve" }))).toBe("not-admin");
+    // One at the ceiling lifts nothing: the editor's.
+    const business = await proposed("sensitivity:business");
+    await decide(editor, business, { decision: "approve" });
   });
 
   it("leaves taking a restriction off a file to a tenant admin", async () => {

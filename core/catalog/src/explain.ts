@@ -58,6 +58,12 @@ export interface ExplainRequest {
    * T-111). A service account acts only through a key: without one, it is refused everything.
    */
   scope?: CredentialScope;
+  /**
+   * The file's title as whoever asks is shown it (viewObjects), for the words of the
+   * explanation: an AI client isn't given a flagged file's name here either. Defaults to the
+   * file's own.
+   */
+  shownTitle?: string;
 }
 
 /** A live grant that covers the action, and how the user holds it. */
@@ -266,7 +272,7 @@ export async function explainAccess(
       service: user.kind === "service",
     },
     object: {
-      title: object.title,
+      title: request.shownTitle ?? object.title,
       ownerId: object.ownerId,
       zone: object.zone,
       grantableTags: [...grantable].sort(),

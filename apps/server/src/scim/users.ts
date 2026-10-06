@@ -157,11 +157,16 @@ function userType(v: unknown): boolean {
 }
 
 /**
- * State from a POST or PUT body. `active` and `userType` default to `current` when absent (a PUT
- * never re-enables anyone, or makes a guest a member, by leaving something out); a POST passes
- * active and a member.
+ * State from a POST or PUT body. `active`, `userType` and `externalId` default to `current` when
+ * absent: a PUT never re-enables anyone, or makes a guest a member, by leaving something out,
+ * and never unties a person from their account at the provider (which is refused once they have
+ * signed in, and would take the rest of the PUT, a deactivation say, with it). A POST passes
+ * active, a member and no external id.
  */
-export function stateFromBody(body: Json, current: { active: boolean; guest: boolean }): UserState {
+export function stateFromBody(
+  body: Json,
+  current: { active: boolean; guest: boolean; externalId: string | null },
+): UserState {
   requireSchema(body, USER_SCHEMA);
   const name = field(body, "name");
   if (name !== undefined && name !== null && !isObject(name)) {
@@ -172,7 +177,7 @@ export function stateFromBody(body: Json, current: { active: boolean; guest: boo
   const kind = field(body, "userType");
   return {
     userName: text(field(body, "userName"), "userName"),
-    externalId: text(field(body, "externalId"), "externalId"),
+    externalId: text(field(body, "externalId"), "externalId") ?? current.externalId,
     displayName: text(field(body, "displayName"), "displayName"),
     givenName: part("givenName"),
     familyName: part("familyName"),
@@ -353,7 +358,7 @@ export async function scimUser(tx: Tx, tenantId: string, id: string): Promise<Us
 
 /** Creates a SCIM user from a POST body. */
 export async function createScimUser(tx: Tx, tenantId: string, body: Json, actor: string) {
-  const d = derive(stateFromBody(body, { active: true, guest: false }));
+  const d = derive(stateFromBody(body, { active: true, guest: false, externalId: null }));
   let u: User;
   try {
     u = await createUser(tx, tenantId, {

@@ -8,14 +8,21 @@ import {
   queryRows,
   tagOf,
   tagReviews,
+  tenants,
   type TAG_SOURCES,
   type Tx,
 } from "@openhoard/core-db";
 import { and, asc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import { EXPOSURE, VISIBILITY } from "@openhoard/core-policy";
+import {
+  EXPOSURE,
+  mostRestrictiveExposure,
+  mostRestrictiveVisibility,
+  VISIBILITY,
+} from "@openhoard/core-policy";
 import { lockObject, lockTagValue } from "./locks.js";
 import { makePrimary } from "./primary.js";
 import { TagError } from "./tag-error.js";
+import { UNCLASSIFIED_CEILING } from "./visibility.js";
 
 /*
  * Applying tags, and the review inbox (T-406). The one rule: nothing creates vocabulary, and
@@ -760,7 +767,9 @@ export type DecisionKind =
  *   merging would replace a value of a single-value facet that sets a tighter level (or that a
  *   pack's policies name); or the item's own value sets a level or is named by a policy, so it
  *   tightens the file while it waits, and the decision turns it down: rejecting it, or merging
- *   it into a value that doesn't set its levels as tightly.
+ *   it into a value that doesn't set its levels as tightly; or the value that goes on the file
+ *   leaves it more open than it is now, as the first trusted tag to set a level does when that
+ *   level is looser than the tenant's default.
  *
  * Null when there is no such open item. Reads without locks: decide in the same transaction,
  * after the locks openItem() takes, for an answer that holds (review-inbox.ts decideReview()).
@@ -807,11 +816,119 @@ export async function decisionReach(
     .select({ single: facets.single })
     .from(facets)
     .where(and(eq(facets.tenantId, tenantId), eq(facets.key, item.facet)));
-  if (!facet?.single) return "file";
-  const others = await otherValues(tx, tenantId, item.objectId, item.facet, value);
-  return others.length > 0 && (await loosens(tx, tenantId, item.facet, value, others))
-    ? "loosens"
-    : "file";
+  const others = facet?.single
+    ? await otherValues(tx, tenantId, item.objectId, item.facet, value)
+    : [];
+  if (others.length > 0 && (await loosens(tx, tenantId, item.facet, value, others))) {
+    return "loosens";
+  }
+  // And whatever it takes off or not: with the value on the file as a trusted tag, is the file
+  // more open than it is now? The first trusted tag that sets a level takes the place of the
+  // tenant's default, so one looser than the default opens the file by being applied.
+  return (await opensFile(tx, tenantId, item, value, others)) ? "loosens" : "file";
+}
+
+/**
+ * Whether deciding `item` so that `value` goes on its object as a trusted tag, in place of
+ * `replaced`, leaves the object's visibility or exposure looser than they are now: the levels
+ * visibility.ts collectLevels() gives a processed object (trusted tags' tightest, the tenant's
+ * default where none sets one, tightened by whatever waits or is unreviewed), before and after.
+ */
+async function opensFile(
+  tx: Tx,
+  tenantId: string,
+  item: ReviewRow,
+  value: string,
+  replaced: readonly { value: string }[],
+): Promise<boolean> {
+  const [tenant] = await tx
+    .select({ visibility: tenants.defaultVisibility, exposure: tenants.defaultExposure })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  if (!tenant) return true;
+  const applied = await tx
+    .select({
+      facet: objectTags.facet,
+      value: objectTags.value,
+      visibility: facetValues.visibility,
+      exposure: facetValues.exposure,
+      trusted: sql<boolean>`(${facetValues.approved} and (${objectTags.source} <> 'model' or ${objectTags.reviewed}))`,
+    })
+    .from(objectTags)
+    .innerJoin(
+      facetValues,
+      and(
+        eq(facetValues.tenantId, objectTags.tenantId),
+        eq(facetValues.facet, objectTags.facet),
+        eq(facetValues.value, objectTags.value),
+      ),
+    )
+    .where(and(eq(objectTags.tenantId, tenantId), eq(objectTags.objectId, item.objectId)));
+  const waiting = await tx
+    .select({
+      id: tagReviews.id,
+      visibility: facetValues.visibility,
+      exposure: facetValues.exposure,
+    })
+    .from(tagReviews)
+    .innerJoin(
+      facetValues,
+      and(
+        eq(facetValues.tenantId, tagReviews.tenantId),
+        eq(facetValues.facet, tagReviews.facet),
+        eq(facetValues.value, tagReviews.value),
+      ),
+    )
+    .where(
+      and(
+        eq(tagReviews.tenantId, tenantId),
+        eq(tagReviews.objectId, item.objectId),
+        isNull(tagReviews.resolvedAt),
+        ne(tagReviews.reason, "primary"),
+      ),
+    );
+  const mine = await findValue(tx, tenantId, item.facet, value);
+  type Level = { visibility: string | null; exposure: string | null };
+  const effective = (trusted: readonly Level[], tighten: readonly Level[]) => {
+    const set = <K extends keyof Level>(rows: readonly Level[], k: K) =>
+      rows.map((r) => r[k]).filter((l): l is string => l !== null);
+    return {
+      visibility: mostRestrictiveVisibility([
+        mostRestrictiveVisibility(set(trusted, "visibility"), tenant.visibility),
+        ...set(tighten, "visibility"),
+      ]),
+      // A file no trusted tag classifies goes to enrichment no further than the ceiling
+      // (enrichmentExposure()), whatever the tenant's default: its first such tag lifts that.
+      exposure: mostRestrictiveExposure([
+        set(trusted, "exposure").length > 0
+          ? mostRestrictiveExposure(set(trusted, "exposure"))
+          : mostRestrictiveExposure([tenant.exposure, UNCLASSIFIED_CEILING]),
+        ...set(tighten, "exposure"),
+      ]),
+    };
+  };
+  const isMine = (r: { facet: string; value: string }) =>
+    r.facet === item.facet && r.value === value;
+  const goes = (r: { facet: string; value: string }) =>
+    r.facet === item.facet && replaced.some((o) => o.value === r.value);
+  const before = effective(
+    applied.filter((r) => r.trusted === true),
+    [...applied.filter((r) => r.trusted !== true), ...waiting],
+  );
+  const after = effective(
+    [
+      ...applied.filter((r) => r.trusted === true && !goes(r) && !isMine(r)),
+      { visibility: mine?.visibility ?? null, exposure: mine?.exposure ?? null },
+    ],
+    [
+      ...applied.filter((r) => r.trusted !== true && !goes(r) && !isMine(r)),
+      ...waiting.filter((w) => w.id !== item.id),
+    ],
+  );
+  return (
+    VISIBILITY.indexOf(after.visibility) > VISIBILITY.indexOf(before.visibility) ||
+    EXPOSURE.indexOf(after.exposure) > EXPOSURE.indexOf(before.exposure)
+  );
 }
 
 /**

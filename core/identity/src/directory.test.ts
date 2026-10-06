@@ -139,6 +139,10 @@ describe("users", () => {
     ["an email with spaces", { email: "b o@example.com" }],
     ["a blank name", { displayName: "  " }],
     ["a long name", { displayName: "x".repeat(257) }],
+    // A name that would read as another row where names are listed.
+    ["a line break in a name", { displayName: "Bo\nusr_x\trole\tAdmin" }],
+    ["a tab in a name", { displayName: "Bo\tAdmin" }],
+    ["a line separator in a name", { displayName: "Bo\u2028Admin" }],
     ["an empty external id", { externalId: "", source: "scim" }],
     ["an external id for a local user", { externalId: "e-1" }],
     ["a zero-width space in an email", { email: "ana\u200b@example.com" }],
@@ -549,6 +553,19 @@ describe("groups", () => {
         ),
       ),
     ).toBe("conflict");
+    // A name is one line: this one would print as a second group where groups are listed.
+    for (const name of ["Staff\ngrp_x\tscim\t3\t\tIT Admins", "Staff\tAdmins"]) {
+      expect(
+        await code(
+          inTenant((tx) =>
+            createGroup(tx, t.tenantId, { name, source: "scim", externalId: "g-9" }),
+          ),
+        ),
+      ).toBe("invalid");
+      expect(await code(inTenant((tx) => renameGroup(tx, t.tenantId, g.id, name, "scim")))).toBe(
+        "invalid",
+      );
+    }
   });
 
   it("changes a group's external id, keeping it unique, as the managing source", async () => {

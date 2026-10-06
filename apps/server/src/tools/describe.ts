@@ -1,6 +1,6 @@
 import { listVersions, viewObject, VIEW_TRANSACTION } from "@openhoard/core-catalog";
-import { sourceRefs, users, type Tx } from "@openhoard/core-db";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { users } from "@openhoard/core-db";
+import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import {
   auditSummaries,
@@ -14,6 +14,7 @@ import {
   UNTRUSTED_NOTE,
 } from "./cards.js";
 import { answer, readRequest, refuse, type McpTool } from "./context.js";
+import { webLink } from "./links.js";
 
 /*
  * `describe` (T-802): one file's card, and for a reader its versions (number, date, size,
@@ -59,18 +60,6 @@ const SOURCE_NOTE =
 /** Longest address answered with: a longer one would crowd the card out of its budget. */
 const SOURCE_URL_MAX = 500;
 
-/** The http(s) address the file's source recorded for it, if it has one short enough. */
-async function webSource(tx: Tx, tenantId: string, objectId: string): Promise<string | undefined> {
-  const rows = await tx
-    .select({ url: sourceRefs.url })
-    .from(sourceRefs)
-    .where(and(eq(sourceRefs.tenantId, tenantId), eq(sourceRefs.objectId, objectId)))
-    .orderBy(asc(sourceRefs.source), asc(sourceRefs.externalId));
-  return rows
-    .map((r) => r.url)
-    .find((u): u is string => u !== null && /^https?:\/\//.test(u) && u.length <= SOURCE_URL_MAX);
-}
-
 export const describe: McpTool = {
   name: "describe",
   title: "Describe a file",
@@ -113,7 +102,7 @@ export const describe: McpTool = {
         const file = toCard(view, owners);
         const from =
           view.shape === "card" && view.readable
-            ? await webSource(tx, tenantId, view.id)
+            ? ((await webLink(tx, tenantId, view.id, SOURCE_URL_MAX)).link ?? undefined)
             : undefined;
         const versions = history.slice(0, VERSIONS_MAX).map((v) => ({
           number: v.seq,

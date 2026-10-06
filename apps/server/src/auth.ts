@@ -480,8 +480,13 @@ export function mountAuth(app: Hono<AuthEnv>, deps: AuthDeps): void {
       if (!got) throw new Error("no ID token");
       claims = got;
     } catch (err) {
-      log?.warn({ err, provider: p.id }, "sign-in: code exchange failed");
-      return refuse(providerError(err));
+      // Logged, not audited: nobody is known yet, and anyone can replay a callback with a
+      // sign-in cookie they started themselves, as often as they like.
+      log?.warn(
+        { err, provider: p.id, reason: providerError(err) },
+        "sign-in: code exchange failed",
+      );
+      return c.json(FAILED, 401);
     }
     const claim = externalIdClaim(p);
     const externalId = claim === undefined ? undefined : claims[claim];

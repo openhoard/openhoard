@@ -95,10 +95,11 @@ flag): approved, `exposure: metadata-only`, whatever packs or admins did to it. 
 or a pack put on is never cleared by the detector.
 
 `markNotInjection()` records a tenant admin's decision that an object is not an injection (never
-the owner's: an insider attack would come from the owner). It is for the version and content
-reviewed (`injection_reviews`: version and blob): while the object's current version has that
-content, the detector's flag comes off, the detector doesn't flag it again, and the summarize
-step summarizes it; a new version with other content is judged again. It checks the admin
+the owner's: an insider attack would come from the owner). It is for the version, content and
+name reviewed (`injection_reviews`: version, blob and title): while the object's current version
+has that content and the object that name, the detector's flag comes off, the detector doesn't
+flag it again, and the summarize step summarizes it; a new version with other content is judged
+again, and so is a renamed file (a review from before names were recorded covers nothing). It checks the admin
 (core/identity `isAdmin()`) and appends the `injection.review` audit record itself, in the same
 transaction; `clearInjectionReview()` (audited as `injection.review-withdrawn`) gives the
 detector back its say. The database refuses any change to `risk:injection`'s levels or its

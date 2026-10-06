@@ -1742,6 +1742,12 @@ export const injectionReviews = pgTable(
     versionId: text("version_id").notNull(),
     /** Its content: the decision holds for any version with these bytes. */
     blobId: text("blob_id").notNull(),
+    /**
+     * The file's name when it was reviewed: the decision holds while it has that name, since a
+     * name is scored too and reaches every card. Null for a review from before names were
+     * recorded, which covers nothing.
+     */
+    title: text("title"),
     reviewedBy: text("reviewed_by").notNull(),
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }).notNull().defaultNow(),
   },

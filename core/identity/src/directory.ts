@@ -190,8 +190,15 @@ function checkEmail(email: string): { email: string; key: string } {
 
 function checkName(what: string, name: string): string {
   const trimmed = typeof name === "string" ? name.trim() : "";
-  if (trimmed === "" || chars(trimmed) > 256 || INVISIBLE.test(trimmed.replace(/\s/gu, ""))) {
-    throw new IdentityError("invalid", `${what} must be 1 to 256 visible characters`);
+  if (
+    trimmed === "" ||
+    chars(trimmed) > 256 ||
+    // On one line: a name with a line break or a tab in it forges rows wherever names are
+    // listed (the admin CLI prints them tab-separated, one a line).
+    /[\p{Cc}\p{Zl}\p{Zp}]/u.test(trimmed) ||
+    INVISIBLE.test(trimmed.replace(/\s/gu, ""))
+  ) {
+    throw new IdentityError("invalid", `${what} must be 1 to 256 visible characters on one line`);
   }
   return trimmed;
 }
@@ -478,6 +485,10 @@ export interface UserChanges {
 /**
  * Changes a user's details, as the source that manages them. A clash with another current user's
  * email or external id is a `conflict`, even when that user appeared concurrently.
+ *
+ * The external id is what sign-in matches a person by, and what imported permissions name them
+ * by, so it is held: `invalid` once they have signed in, and before that a change takes back
+ * what sources granted them under the old one.
  */
 export async function updateUser(
   tx: Tx,
@@ -502,7 +513,43 @@ export async function updateUser(
   }
   if (changes.kind !== undefined) set.kind = checkKind(changes.kind);
   if (changes.externalId !== undefined) {
-    set.externalId = checkExternalId(changes.externalId, current.source);
+    const externalId = checkExternalId(changes.externalId, current.source);
+    if (externalId !== current.externalId) {
+      // Sign-in matched this person by it once, and imported permissions name them by it: given
+      // another account's id, that account would sign in as them and be granted their files.
+      // The row is locked (ownedUser), so a first sign-in is either before this or after it.
+      const [signedIn] = await tx
+        .select({ userId: userIdentities.userId })
+        .from(userIdentities)
+        .where(and(eq(userIdentities.tenantId, tenantId), eq(userIdentities.userId, userId)))
+        .limit(1);
+      if (signedIn) {
+        throw new IdentityError(
+          "invalid",
+          "externalId can't change once the person has signed in: remove them and add them again",
+        );
+      }
+      // What a source imported for whoever had the old id isn't theirs under a new one: the
+      // record would carry one account's files to another. The source grants again, to
+      // whoever its permissions name, as it next visits each file.
+      if (current.externalId !== null) {
+        await tx
+          .update(grants)
+          .set({
+            revokedAt: sql`greatest(now(), ${grants.createdAt})`,
+            revokedBy: "system:external-id-changed",
+          })
+          .where(
+            and(
+              eq(grants.tenantId, tenantId),
+              eq(grants.principal, userPrincipal(userId)),
+              sql`${grants.grantedBy} like 'source:%'`,
+              isNull(grants.revokedAt),
+            ),
+          );
+      }
+      set.externalId = externalId;
+    }
   }
   if (changes.userName !== undefined) {
     Object.assign(set, checkUserName(changes.userName, current.source));

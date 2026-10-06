@@ -1,0 +1,1 @@
+ALTER TABLE "injection_reviews" ADD COLUMN "title" text;

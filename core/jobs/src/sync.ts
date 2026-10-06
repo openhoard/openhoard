@@ -158,6 +158,13 @@ export interface SyncOptions {
    * connection's configuration.
    */
   reconcileGuard?: { maxFraction?: number; minItems?: number };
+  /**
+   * The largest file read ({@link SYNC_MAX_FILE_BYTES} by default). A larger one is left out
+   * (`too-large` in the report's skips) without being read: a file that takes longer to read
+   * than a run lasts would be met again by every run, and nothing after it, the source's
+   * permission changes included, would ever be applied.
+   */
+  maxFileBytes?: number;
   log?: JobsLogger;
   /** How the run waits; tests replace it. */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
@@ -235,6 +242,9 @@ export const MAX_REPORTED_SKIPS = 100;
 /** Items looked up per transaction when reconciling. */
 const RECONCILE_BATCH = 500;
 
+/** The largest file a sync reads by default: 2 GiB. */
+export const SYNC_MAX_FILE_BYTES = 2 * 1024 ** 3;
+
 /** No permissions of the source's: nobody but the object's owner. */
 const NO_ACL: ItemAcl = Object.freeze({ basis: "owner-only", entries: [] });
 
@@ -291,6 +301,7 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     warnings: [],
   };
   const maxItems = options.maxItems ?? Infinity;
+  const maxFileBytes = options.maxFileBytes ?? SYNC_MAX_FILE_BYTES;
   const guard = {
     maxFraction: options.reconcileGuard?.maxFraction ?? 0.25,
     minItems: options.reconcileGuard?.minItems ?? 50,
@@ -798,6 +809,9 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
             // Recorded with another size after all: read it.
             if (!(e instanceof IngestError && e.code === "blob-mismatch")) throw e;
           }
+        }
+        if (result === undefined && (item.size as number) > maxFileBytes) {
+          return skipSeen("too-large");
         }
         result ??= await record(await readContent(item));
         report.counts.ingested++;

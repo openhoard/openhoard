@@ -869,7 +869,7 @@ async function adminChange(
         return done;
       }),
     );
-    const who = `${user.displayName} (${user.id})`;
+    const who = `${oneLine(user.displayName)} (${user.id})`;
     if (change === "grant") {
       io.err(outcome.changed ? `${who} is an admin now.\n` : `${who} was an admin already.\n`);
     } else if (!outcome.changed) {
@@ -967,7 +967,7 @@ async function lockChange(
     if (!(e instanceof IdentityError)) throw e;
     return refused("unknown-user", `tenant ${tenantId} has no current person ${named}`);
   }
-  const who = `${user.displayName} (${user.id})`;
+  const who = `${oneLine(user.displayName)} (${user.id})`;
   if (change === "unlock") {
     io.err(
       outcome.changed
@@ -1018,7 +1018,13 @@ async function adminList(
           ? "locked"
           : "disabled";
     io.out(
-      [a.user.id, a.via.join("+"), state, a.user.email ?? "", a.user.displayName].join("\t") + "\n",
+      [
+        a.user.id,
+        a.via.join("+"),
+        state,
+        oneLine(a.user.email ?? ""),
+        oneLine(a.user.displayName),
+      ].join("\t") + "\n",
     );
   }
   if (admins.length === 0) {
@@ -1063,7 +1069,9 @@ async function groupList(
     });
     for (const { g, members } of rows) {
       const mark = g.id === adminGroup ? "\tadmin group" : "";
-      io.out(`${g.id}\t${g.source}\t${members}\t${g.externalId ?? ""}\t${g.name}${mark}\n`);
+      io.out(
+        `${g.id}\t${g.source}\t${members}\t${oneLine(g.externalId ?? "")}\t${oneLine(g.name)}${mark}\n`,
+      );
     }
     shown += rows.length;
     if (rows.length < MAX_LIST) break;
@@ -1437,7 +1445,7 @@ async function userCreate(
   }
   io.out(`${made.id}\n`);
   io.err(
-    `Created ${made.displayName} (${made.id}).\n` +
+    `Created ${oneLine(made.displayName)} (${made.id}).\n` +
       `Next: openhoard admin user sign-in-link --tenant ${tenantId} --user ${made.id}\n`,
   );
   return 0;
@@ -1517,7 +1525,7 @@ export async function signInLink(
   url.searchParams.set("token", link.token);
   io.out(`${url.href}\n`);
   io.err(
-    `A sign-in link for ${user.displayName} (${user.id}), shown once, good once, until ` +
+    `A sign-in link for ${oneLine(user.displayName)} (${user.id}), shown once, good once, until ` +
       `${link.expiresAt.toISOString()}: open it in the browser you'll use with OpenHoard.\n`,
   );
   return 0;
@@ -1599,7 +1607,7 @@ export async function invite(
   url.hash = issued.token;
   io.out(`${url.href}\n`);
   io.err(
-    `An invite for ${user.displayName} (${user.id}), shown once, good once, until ` +
+    `An invite for ${oneLine(user.displayName)} (${user.id}), shown once, good once, until ` +
       `${issued.expiresAt.toISOString()}: whoever opens it makes a passkey for them and is ` +
       `signed in, so send it only to them.` +
       (issued.revoked > 0 ? ` Their earlier invite no longer works.` : ``) +
@@ -1634,7 +1642,7 @@ async function passkeyList(
       ].join("\t") + "\n",
     );
   }
-  if (held.length === 0) io.err(`${user.displayName} (${user.id}) has no passkey.\n`);
+  if (held.length === 0) io.err(`${oneLine(user.displayName)} (${user.id}) has no passkey.\n`);
   return 0;
 }
 
@@ -1671,11 +1679,11 @@ async function passkeyRemove(
     return result;
   });
   if (!ended) {
-    io.err(`${user.displayName} (${user.id}) has no passkey ${passkeyId}\n`);
+    io.err(`${oneLine(user.displayName)} (${user.id}) has no passkey ${passkeyId}\n`);
     return 1;
   }
   io.err(
-    `Removed ${passkeyId}: it no longer signs ${user.displayName} in, and ended ` +
+    `Removed ${passkeyId}: it no longer signs ${oneLine(user.displayName)} in, and ended ` +
       `${ended.sessions} session(s) and ${ended.oauthGrants} AI client grant(s).\n`,
   );
   return 0;

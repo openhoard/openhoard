@@ -123,6 +123,10 @@ describe("a SharePoint site in the configuration", { timeout: 120_000 }, () => {
     expect(whole({ recrawlAfterDays: 0 })).toBe(false);
     expect(whole({ recrawlAfterDays: 0, importPermissions: false })).toBe(true);
     expect(whole({ recrawlAfterDays: 7 })).toBe(true);
+    // Nor so rarely that a removed permission could last a year here.
+    expect(whole({ recrawlAfterDays: 30 })).toBe(true);
+    expect(whole({ recrawlAfterDays: 31 })).toBe(false);
+    expect(whole({ recrawlAfterDays: 365, importPermissions: false })).toBe(true);
     expect(ok({ importPermissions: false })).toBe(true);
     expect(ok({ graphUnitsPerMinute: 100 })).toBe(false);
     expect(ok({ graphUnitsPerMinute: 2500 })).toBe(true);

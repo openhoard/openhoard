@@ -107,7 +107,7 @@ each library a folder at the top.
 | `certificate`         | `{ "certificateFile": …, "privateKeyFile": … }`: PEM files, absolute paths, readable by the server only. Preferred. Without it, the client secret below                   |
 | `authority`, `graph`  | a national cloud's addresses (https origins). Default: the global cloud's                                                                                                 |
 | `downloadHosts`       | hosts a file's bytes may be fetched from besides Graph. Default `[".sharepoint.com"]`                                                                                     |
-| `recrawlAfterDays`    | how old a crawl may be before the site is crawled again instead of followed. Default 7; 0 never                                                                           |
+| `recrawlAfterDays`    | how old a crawl may be before the site is crawled again instead of followed. Default 7; 0 never; 1 to 30 while permissions are imported                                   |
 | `importPermissions`   | whether SharePoint's permissions become grants here (below). Default true                                                                                                 |
 | `graphUnitsPerMinute` | Graph's resource units a minute the app may spend (below). Default 800, 250 at least                                                                                      |
 
@@ -178,8 +178,8 @@ source status`, as of the last run: a crawl's run counts the whole site, a later
   A sync visits what Graph's delta reports (a folder or library whose sharing changed has
   everything under it looked at again) and a crawl visits everything. Whether the delta
   reports sharing changes with this app's permissions is not yet verified on a real tenant:
-  until it is, take `recrawlAfterDays` as the bound (the configuration refuses 0 while
-  permissions are imported). A source that is
+  until it is, take `recrawlAfterDays` as the bound (the configuration refuses 0, and more
+  than 30, while permissions are imported). A source that is
   stopped (`admin source status`) visits nothing: its grants stay as they were.
 - **Cost.** One Graph request per file each time it is visited, five of Graph's units each: a
   crawl of 20,000 files is two hours of the default budget for permissions alone ("Pacing"
@@ -286,9 +286,15 @@ issuer), sign-in answers 503 "sign-in is unavailable", logs why, and tries again
 | `google`  | `https://accounts.google.com`                                            | nothing (T-109, for invited people)      |
 | `generic` | any issuer (https, or http on this machine only)                         | `sub`, only with `matchExternalId: true` |
 
-- **Matching.** A first sign-in's claim is matched once to a SCIM user's external id, and after
-  that only the linked (issuer, subject) counts. Sign-in never matches on email and never creates
-  anyone (core/identity `signIn()`).
+- **Matching.** A first sign-in's claim is matched to a SCIM user's external id and the
+  (issuer, subject) linked; after that the link finds them. Once someone has signed in, SCIM
+  can't change their external id (400): given another account's id, that account would sign in
+  as them and be granted what SharePoint shares with them. To change it, remove the person and
+  add them again. Before a first sign-in it can be corrected, and what a source granted them
+  under the old id is taken back until the source next visits each file. A PUT that leaves
+  `externalId` out keeps it. A new subject with the same external id (the app was registered again at the
+  provider) is linked as well. Sign-in never matches on email and never creates anyone
+  (core/identity `signIn()`).
 - **One matching provider per tenant.** A second one could claim the first one's people.
 - **Entra.** Entra's default SCIM mapping sends `mailNickname` as `externalId`. Map `objectId`
   to `externalId` in the provisioning app's attribute mappings instead, or people won't be
@@ -348,7 +354,9 @@ another tab).
 
 Every sign-in is written to the audit log (`auth.sign-in`), whether it was allowed or refused, and
 so is every sign-out (`auth.sign-out`). A refused person nobody provisioned is logged as
-`oidc:<id>` with the subject the provider gave, so an admin can link them.
+`oidc:<id>` with the subject the provider gave, so an admin can link them. A return from the
+provider that never proves who it is (an error, a code that doesn't exchange) is logged, not
+audited: anyone can make one, and each would be a record in the tenant's log.
 
 Later routes use `requireSignIn` and `c.get("auth")`: the tenant, the session and the
 principal.
@@ -554,7 +562,8 @@ request's credential scope, so policy refuses anything else. A token without the
 needs gets 403 with `error="insufficient_scope"` and the scopes to ask for.
 
 Every authorization and token decision is audited: `oauth.authorize`, `oauth.token` and
-`oauth.refresh`.
+`oauth.refresh`. A token request that is refused before it names anyone (a made-up code or
+refresh token) is logged instead: it needs no sign-in, so it must not write to the audit log.
 
 ## Tenant admins and the admin API (T-106)
 
@@ -707,7 +716,10 @@ read into memory when the server starts and served as they are.
     when exposure allows, cut to the budget and wrapped between `BEGIN-FILE-TEXT-<nonce>` and
     `END-FILE-TEXT-<nonce>` with a note that it is untrusted data. A link comes with a note that
     it is for the person to click, never for the agent to fetch; a `risk:injection` file gets
-    no link (a browsing agent could fetch the payload the flag keeps from it).
+    no link (a browsing agent could fetch the payload the flag keeps from it), and to an AI
+    client it has no name either, in any tool: its title reads as a file without one, since a
+    name is text its author chose. The same goes for a file enrichment hasn't finished with (a
+    new file, a new version, a rename): no name and no link until the detector has read it. The text served is never more than the injection detector read (1 MiB).
   - `tag` (id, facet:value; needs `files:tag`): a proposal in the review inbox (reason `agent`),
     never applied; only approved values, never one that sets a visibility or exposure level or
     has a live grant; the person must be allowed to tag the file; 30 per hour per person and
@@ -848,15 +860,15 @@ work on top-level attributes, and `excludedAttributes=members` skips loading mem
 **Users.** A SCIM user is an OpenHoard user of source `scim`, and its SCIM `id` is the OpenHoard
 id (`usr_…`).
 
-| SCIM                                 | OpenHoard                                                                   |
-| ------------------------------------ | --------------------------------------------------------------------------- |
-| `userName` (required)                | kept as sent; unique regardless of case                                     |
-| `externalId`                         | matched once at sign-in (T-102): map Entra's **objectId** here              |
-| `emails` (primary, else type `work`) | the email; with none, `userName` when it is an address, else refused        |
-| `displayName`                        | as sent; else `name.formatted`, else given and family name, else `userName` |
-| `name.givenName`, `name.familyName`  | kept                                                                        |
-| `active`                             | the provider's switch; `false` ends sessions and OAuth grants at once       |
-| `userType` (`Member`, `Guest`)       | the kind: a guest never discovers files; left out, the kind stays           |
+| SCIM                                 | OpenHoard                                                                                      |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------- |
+| `userName` (required)                | kept as sent; unique regardless of case                                                        |
+| `externalId`                         | matched at sign-in (T-102): map Entra's **objectId** here. Fixed once the person has signed in |
+| `emails` (primary, else type `work`) | the email; with none, `userName` when it is an address, else refused                           |
+| `displayName`                        | as sent; else `name.formatted`, else given and family name, else `userName`                    |
+| `name.givenName`, `name.familyName`  | kept                                                                                           |
+| `active`                             | the provider's switch; `false` ends sessions and OAuth grants at once                          |
+| `userType` (`Member`, `Guest`)       | the kind: a guest never discovers files; left out, the kind stays                              |
 
 - **Dropped attributes.** Anything else (title, phone numbers, addresses, other emails, the
   enterprise extension, a password) is accepted and dropped.

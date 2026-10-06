@@ -196,6 +196,20 @@ export function tagTool(
           object: a.id,
         });
       }
+      const person = JSON.stringify([tenantId, bearer.principal.userId]);
+      const perClient = JSON.stringify([tenantId, bearer.principal.userId, bearer.client.id]);
+      // Both must have room before either counts.
+      const room = () =>
+        personLimiter.hasRoom(person) && limiter.take(perClient) && personLimiter.take(person);
+      const tooMany = () =>
+        refuse(ctx, "Too many tag proposals from this app lately; try again later.", {
+          outcome: "rate-limited",
+          object: a.id,
+        });
+      // What the next two answers say of a value (it isn't one; it decides access) is the
+      // vocabulary's, which isn't everyone's to list: each such answer counts as a proposal, so
+      // nobody reads the vocabulary out by guessing.
+      if ((check === "unknown-value" || check === "levels") && !room()) return tooMany();
       if (check === "unknown-value") {
         return refuse(
           ctx,
@@ -210,19 +224,7 @@ export function tagTool(
           { outcome: "decides-access", object: a.id },
         );
       }
-      const person = JSON.stringify([tenantId, bearer.principal.userId]);
-      const perClient = JSON.stringify([tenantId, bearer.principal.userId, bearer.client.id]);
-      // Both must have room before either counts.
-      if (
-        !personLimiter.hasRoom(person) ||
-        !limiter.take(perClient) ||
-        !personLimiter.take(person)
-      ) {
-        return refuse(ctx, "Too many tag proposals from this app lately; try again later.", {
-          outcome: "rate-limited",
-          object: a.id,
-        });
-      }
+      if (!room()) return tooMany();
 
       const outcome = await ctx.db.withTenant(tenantId, async (tx) => {
         const live = await grantIsLive(tx, tenantId, bearer.grantId, { tokenId: bearer.tokenId });

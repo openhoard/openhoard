@@ -1,15 +1,12 @@
 import { randomBytes } from "node:crypto";
 import {
-  hasInjectionFlag,
+  INSPECTED_CHARS,
   openContent,
   readExtract,
   viewObject,
   VIEW_TRANSACTION,
   type ObjectView,
 } from "@openhoard/core-catalog";
-import { sourceRefs, type Tx } from "@openhoard/core-db";
-import { canonicalUrl, checkUrl } from "@openhoard/sdk";
-import { and, asc, eq, isNotNull } from "drizzle-orm";
 import { z } from "zod";
 import {
   CardSchema,
@@ -22,6 +19,7 @@ import {
   UNTRUSTED_NOTE,
 } from "./cards.js";
 import { actorOf, answer, readRequest, refuse, type McpTool } from "./context.js";
+import { webLink } from "./links.js";
 
 /*
  * `open` (T-803): a file the person can read, as a link to it in its own web app, or as its
@@ -146,14 +144,7 @@ export const open: McpTool = {
           });
         }
         if (a.mode === "link") {
-          if (await hasInjectionFlag(tx, tenantId, view.id)) {
-            return fit({
-              ...base,
-              reason:
-                "No link: this file is flagged as possibly carrying instructions for AI. The person can find it in OpenHoard.",
-            });
-          }
-          const found = await linkOf(tx, tenantId, view.id);
+          const found = await webLink(tx, tenantId, view.id);
           return fit({ ...base, ...found, ...(found.link !== null ? { note: LINK_NOTE } : {}) });
         }
         const opened = await openContent(tx, tenantId, authz, request, view.id);
@@ -177,7 +168,11 @@ export const open: McpTool = {
         if (extract?.status !== "extracted") {
           return fit({ ...base, reason: "No text has been extracted from this file (yet)." });
         }
-        const text = extract.text;
+        // No further than the injection detector reads: text past that was never scored, so
+        // it is never served. The extractor's default cap is the same megabyte; only a raised
+        // cap leaves more.
+        const whole = extract.text.length <= INSPECTED_CHARS;
+        const text = whole ? extract.text : extract.text.slice(0, INSPECTED_CHARS);
         const offset = a.offset ?? 0;
         if (offset > text.length || (offset > 0 && offset === text.length)) {
           return fit({ ...base, reason: "offset is past the end of the text" });
@@ -199,7 +194,7 @@ export const open: McpTool = {
         return {
           ...base,
           file: card,
-          content: { ...content, truncatedAtSource: extract.truncated },
+          content: { ...content, truncatedAtSource: extract.truncated || !whole },
           note: empty ? `${noteFor(nonce)} ${NO_ROOM}` : noteFor(nonce),
         };
       },
@@ -229,30 +224,6 @@ function whyNot(view: ObjectView): string {
   return view.shape === "card" && view.metadataOnly
     ? "Metadata only: this file's sensitivity keeps its content from this app (or it is flagged as possibly carrying instructions for AI). Offer the person a link instead (open with mode=link), for them to click."
     : "Its content can't be opened through this app.";
-}
-
-/** The source's web address for the file, checked and canonical, or why there is none. */
-async function linkOf(
-  tx: Tx,
-  tenantId: string,
-  objectId: string,
-): Promise<{ link: string | null; reason?: string }> {
-  const refs = await tx
-    .select({ url: sourceRefs.url })
-    .from(sourceRefs)
-    .where(
-      and(
-        eq(sourceRefs.tenantId, tenantId),
-        eq(sourceRefs.objectId, objectId),
-        isNotNull(sourceRefs.url),
-      ),
-    )
-    .orderBy(asc(sourceRefs.source), asc(sourceRefs.externalId));
-  for (const { url } of refs) {
-    // Https only to AI clients: never javascript:, data:, file: or a credentialed URL.
-    if (url !== null && checkUrl(url) === null) return { link: canonicalUrl(url) };
-  }
-  return { link: null, reason: "No web link is recorded for this file." };
 }
 
 /** Said with every link. */

@@ -187,6 +187,8 @@ export {
   applyInjectionFlag,
   clearInjectionReview,
   hasInjectionFlag,
+  INSPECTED_CHARS,
+  withheldFromAi,
   INJECTION_DETECTOR,
   INJECTION_TAG,
   injectionReviewOf,

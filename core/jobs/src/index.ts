@@ -51,6 +51,7 @@ export {
 export {
   MAX_REPORTED_SKIPS,
   runSync,
+  SYNC_MAX_FILE_BYTES,
   type SyncOptions,
   type SyncReport,
   type SyncStatus,

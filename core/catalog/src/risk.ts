@@ -4,6 +4,7 @@ import {
   injectionReviews,
   isId,
   objectTags,
+  objects,
   versions,
   type Tx,
 } from "@openhoard/core-db";
@@ -102,10 +103,39 @@ export async function hasInjectionFlag(tx: Tx, tenantId: string, objectId: strin
   return rows.length > 0;
 }
 
+/**
+ * How much of a file's text the injection detector reads, in UTF-16 units (core/summarize
+ * MAX_SCAN_CHARS; core/jobs tests that the two agree). Text past it was never scored, so no AI
+ * client is served it.
+ */
+export const INSPECTED_CHARS = 1024 * 1024;
+
+/**
+ * Why an AI client gets nothing the file's author wrote besides its content (its name, the web
+ * address its source recorded), or null when it may: the file is flagged, or the detector
+ * hasn't looked at its current version and name yet (a new version or a rename starts it over).
+ */
+export async function withheldFromAi(
+  tx: Tx,
+  tenantId: string,
+  objectId: string,
+): Promise<"flagged" | "unprocessed" | null> {
+  if (await hasInjectionFlag(tx, tenantId, objectId)) return "flagged";
+  const [current] = await tx
+    .select({ processedAt: versions.processedAt })
+    .from(versions)
+    .where(and(eq(versions.tenantId, tenantId), eq(versions.objectId, objectId)))
+    .orderBy(desc(versions.seq))
+    .limit(1);
+  return current?.processedAt ? null : "unprocessed";
+}
+
 /** An admin's "not an injection" decision on an object, for the content they reviewed. */
 export interface InjectionReview {
   versionId: string;
   blobId: string;
+  /** The file's name when it was reviewed; null for a review from before it was recorded. */
+  title: string | null;
   reviewedBy: string;
   reviewedAt: Date;
 }
@@ -121,6 +151,7 @@ export async function injectionReviewOf(
     .select({
       versionId: injectionReviews.versionId,
       blobId: injectionReviews.blobId,
+      title: injectionReviews.title,
       reviewedBy: injectionReviews.reviewedBy,
       reviewedAt: injectionReviews.reviewedAt,
     })
@@ -129,11 +160,15 @@ export async function injectionReviewOf(
   return row ?? null;
 }
 
-/** The object's current version and its content, or null. */
+/** The object's current version, its content and the object's name, or null. */
 async function currentVersionOf(tx: Tx, tenantId: string, objectId: string) {
   const [row] = await tx
-    .select({ versionId: versions.id, blobId: versions.blobId })
+    .select({ versionId: versions.id, blobId: versions.blobId, title: objects.title })
     .from(versions)
+    .innerJoin(
+      objects,
+      and(eq(objects.tenantId, versions.tenantId), eq(objects.id, versions.objectId)),
+    )
     .where(and(eq(versions.tenantId, tenantId), eq(versions.objectId, objectId)))
     .orderBy(desc(versions.seq))
     .limit(1);
@@ -141,8 +176,10 @@ async function currentVersionOf(tx: Tx, tenantId: string, objectId: string) {
 }
 
 /**
- * Whether an admin's "not an injection" decision covers the object's current version: it has
- * the content (blob) they reviewed. A new version with other bytes is judged again.
+ * Whether an admin's "not an injection" decision covers the object as it is now: its current
+ * version has the content (blob) they reviewed, and the file the name it had. A new version
+ * with other bytes is judged again, and so is a renamed file: a name is the author's text too,
+ * and whoever may rename a cleared file could otherwise write anything there for good.
  */
 export async function reviewedNotInjection(
   tx: Tx,
@@ -152,7 +189,7 @@ export async function reviewedNotInjection(
   const review = await injectionReviewOf(tx, tenantId, objectId);
   if (review === null) return false;
   const current = await currentVersionOf(tx, tenantId, objectId);
-  return current !== null && current.blobId === review.blobId;
+  return current !== null && current.blobId === review.blobId && current.title === review.title;
 }
 
 /** Why an injection review was refused. */

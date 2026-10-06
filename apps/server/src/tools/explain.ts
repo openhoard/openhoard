@@ -112,7 +112,12 @@ export const explain: McpTool = {
             ? await getUser(tx, tenantId, a.person)
             : await findUserByEmail(tx, tenantId, a.person);
           const e = who
-            ? await explainAccess(tx, tenantId, authz, { userId: who.id, objectId: view.id })
+            ? await explainAccess(tx, tenantId, authz, {
+                userId: who.id,
+                objectId: view.id,
+                // As this client is shown it: a flagged file has no name for an AI client.
+                shownTitle: view.title,
+              })
             : null;
           // Only someone with a path to the file (it's theirs, or a grant covers it, theirs or a
           // group's) is explained. Anyone else, and anyone who doesn't exist, gets the same
@@ -143,7 +148,7 @@ export const explain: McpTool = {
           expires: g.expiresAt?.toISOString() ?? null,
         });
         return {
-          file: { id: view.id, title: clip(list.title, TITLE_MAX) },
+          file: { id: view.id, title: clip(view.title, TITLE_MAX) },
           owner: list.ownerName,
           visibility: list.levels.visibility,
           exposure: list.levels.exposure,

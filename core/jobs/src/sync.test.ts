@@ -189,6 +189,33 @@ describe("runSync with the fs connector", () => {
     expect(enqueued).toHaveLength(3);
   });
 
+  it("leaves out a file too large to read in one run, without reading it, and goes on", async () => {
+    await put(["Small.md"], "ok\n");
+    await put(["Huge.bin"], "x".repeat(4096));
+    await put(["Zed.md"], "after it\n");
+    const { connector, reads } = counting(folder());
+    const first = await sync(connector, { maxFileBytes: 1024 });
+    // One file that takes longer to read than a run lasts would otherwise be met again by
+    // every run, and nothing after it (permission changes included) ever applied.
+    expect(first).toMatchObject({
+      status: "done",
+      counts: { files: 3, ingested: 2, skipped: 1 },
+      skipped: [{ reason: "too-large" }],
+    });
+    expect((await catalog()).map((r) => r.title)).toEqual(["Small.md", "Zed.md"]);
+    expect(reads).toHaveLength(2);
+    // A file recorded while it was small enough stays, at the version read; its growth past
+    // the limit is left out the same way.
+    await put(["Small.md"], "y".repeat(4096));
+    const second = await sync(connector, { maxFileBytes: 1024 });
+    expect(second).toMatchObject({ status: "done", skipped: [{ reason: "too-large" }] });
+    expect((await catalog()).find((r) => r.title === "Small.md")).toMatchObject({
+      deleted: false,
+      versions: 1,
+    });
+    expect(reads).toHaveLength(2);
+  });
+
   it("records edits as versions, renames and moves without reading again, deletes softly", async () => {
     await put(["Plan.md"], "# plan\n");
     await put(["Notes.txt"], "notes\n");

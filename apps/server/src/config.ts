@@ -588,6 +588,9 @@ export function mailPasswordEnv(id: string): string {
 
 export type MailboxConfig = z.infer<typeof MailboxSchema>;
 
+/** The longest a SharePoint source that imports permissions may go between crawls, in days. */
+export const MAX_RECRAWL_DAYS_WITH_ACL = 30;
+
 export const ConfigSchema = z
   .object({
     host: z.string().default("127.0.0.1"),
@@ -717,13 +720,13 @@ export const ConfigSchema = z
       if (
         source.connector === "sharepoint" &&
         source.importPermissions &&
-        source.recrawlAfterDays === 0
+        source.recrawlAfterDays !== undefined &&
+        (source.recrawlAfterDays === 0 || source.recrawlAfterDays > MAX_RECRAWL_DAYS_WITH_ACL)
       ) {
         ctx.addIssue({
           code: "custom",
           path: ["sources", i, "recrawlAfterDays"],
-          message:
-            "can't be 0 while permissions are imported: the periodic crawl bounds how long a removed permission lasts here",
+          message: `is 1 to ${MAX_RECRAWL_DAYS_WITH_ACL} while permissions are imported: the periodic crawl bounds how long a removed permission lasts here`,
         });
       }
     });

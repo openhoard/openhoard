@@ -15,6 +15,7 @@ import {
   redeemCode,
   resolvePrincipal,
   revokeScimToken,
+  signIn,
 } from "@openhoard/core-identity";
 import type { Hono } from "hono";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -568,6 +569,48 @@ describe("SCIM users", () => {
     expect((await createUser({ active: false })).active).toBe(false);
   });
 
+  it("holds the externalId of someone who has signed in, and still deactivates them", async () => {
+    const u = await createUser();
+    const id = u.id as string;
+    // Before anyone signs in, a mapping can be corrected.
+    const fixed = await call("PATCH", `/Users/${id}`, {
+      schemas: [PATCH],
+      Operations: [{ op: "replace", path: "externalId", value: "oid-corrected" }],
+    });
+    expect(fixed.body).toMatchObject({ externalId: "oid-corrected" });
+    const signedIn = await db.withTenant(t.tenantId, (tx) =>
+      signIn(tx, t.tenantId, {
+        issuer: "https://login.example/v2.0",
+        subject: "sub-1",
+        externalId: "oid-corrected",
+      }),
+    );
+    expect(signedIn).toMatchObject({ ok: true, linked: true });
+    // After: the id another account would be matched by is refused, however it is sent.
+    for (const op of [
+      { op: "replace", path: "externalId", value: "oid-someone-else" },
+      { op: "remove", path: "externalId" },
+    ]) {
+      expectError(await call("PATCH", `/Users/${id}`, { schemas: [PATCH], Operations: [op] }), 400);
+    }
+    expectError(await call("PUT", `/Users/${id}`, { ...u, externalId: "oid-someone-else" }), 400);
+    // The same id again is no change, and a PUT that leaves it out keeps it: the provider
+    // deactivating them must not be refused for what it didn't say.
+    const same = await call("PATCH", `/Users/${id}`, {
+      schemas: [PATCH],
+      Operations: [{ op: "replace", path: "externalId", value: "oid-corrected" }],
+    });
+    expect(same.status, JSON.stringify(same.body)).toBe(200);
+    const off = await call("PUT", `/Users/${id}`, {
+      schemas: [USER],
+      userName: u.userName,
+      emails: u.emails,
+      active: false,
+    });
+    expect(off.status, JSON.stringify(off.body)).toBe(200);
+    expect(off.body).toMatchObject({ active: false, externalId: "oid-corrected" });
+  });
+
   it("replaces a user with PUT; absent attributes go, absent active stays", async () => {
     const u = await createUser();
     const id = u.id as string;
@@ -584,7 +627,8 @@ describe("SCIM users", () => {
     expect(put.status, JSON.stringify(put.body)).toBe(200);
     expect(put.body).toMatchObject({ displayName: "Put Name", active: false });
     expect(put.body).not.toHaveProperty("name");
-    expect(put.body).not.toHaveProperty("externalId");
+    // Who they are at the provider stays, as `active` does.
+    expect(put.body).toMatchObject({ externalId: u.externalId });
     const back = await call("PUT", `/Users/${id}`, { ...entraUser(), active: true });
     expect(back.body).toMatchObject({ active: true });
     expectError(await call("PUT", `/Users/usr_${"0".repeat(26)}`, entraUser()), 404);

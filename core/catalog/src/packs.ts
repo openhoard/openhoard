@@ -904,6 +904,7 @@ async function plan(tx: Tx, tenantId: string, pack: Pack): Promise<PackPlan> {
       ]
     : [compiled.result];
   warnings.push(...unknownTestTags(pack, valuesAfter));
+  warnings.push(...unmatchedRules(pack));
   warnings.push(...loosenings(changes));
   return seal({
     action: "apply",
@@ -1002,6 +1003,22 @@ function unknownTestTags(pack: Pack, vocabulary: LevelMap): string[] {
       ? [`policy test "${t.name}" uses tags that aren't approved vocabulary: ${unknown.join(", ")}`]
       : [];
   });
+}
+
+/**
+ * Rules that can't match yet: enrichment gives rules a file's name and media type only, since
+ * neither the path nor the site is stored (core/jobs enrich.ts). Said at plan time, or an admin
+ * who writes "everything under HR/ is restricted" believes it holds.
+ */
+function unmatchedRules(pack: Pack): string[] {
+  const ids = (pack.rules ?? [])
+    .filter((r) => "when" in r && (r.when.path !== undefined || r.when.site !== undefined))
+    .map((r) => r.id);
+  return ids.length
+    ? [
+        `rules that go by a file's path or site never match yet, so they tag nothing: ${ids.join(", ")}`,
+      ]
+    : [];
 }
 
 /** The rules diff; `wholesale` shows every rule as removed and re-added. */

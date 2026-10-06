@@ -1,4 +1,4 @@
-import { sessions, type Database, type Tx } from "@openhoard/core-db";
+import { addGrant, grants, sessions, type Database, type Tx } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -14,6 +14,7 @@ import {
   unlinkIdentity,
   unlockUser,
   updateUser,
+  userPrincipal,
   type User,
 } from "./directory.js";
 import { PrincipalCache } from "./principal-cache.js";
@@ -101,6 +102,68 @@ describe("signIn", () => {
       signIn(tx, t.tenantId, { issuer: ISSUER, subject: "s-ana", externalId: "oid-other" }),
     );
     expect(again).toMatchObject({ ok: true, user: { id: ana.id }, linked: false });
+  });
+
+  it("keeps the external id of someone who has signed in, so nobody else is matched to them", async () => {
+    await write((tx) =>
+      signIn(tx, t.tenantId, { issuer: ISSUER, subject: "s-ana", externalId: "oid-ana" }),
+    );
+    // Whoever writes the directory (a SCIM token) gives Ana's record another account's id at
+    // the provider, for that account to sign in as her.
+    await expect(
+      write((tx) => updateUser(tx, t.tenantId, ana.id, { externalId: "oid-mallory" }, "scim")),
+    ).rejects.toMatchObject({ code: "invalid", message: expect.stringContaining("signed in") });
+    await expect(
+      write((tx) => updateUser(tx, t.tenantId, ana.id, { externalId: null }, "scim")),
+    ).rejects.toMatchObject({ code: "invalid" });
+    const taken = await write((tx) =>
+      signIn(tx, t.tenantId, { issuer: ISSUER, subject: "s-mallory", externalId: "oid-mallory" }),
+    );
+    expect(taken).toEqual({ ok: false, refused: "unknown", userId: null });
+    // The same id again changes nothing and is no error (a SCIM PUT sends everything).
+    await write((tx) => updateUser(tx, t.tenantId, ana.id, { externalId: "oid-ana" }, "scim"));
+    // The provider gives Ana a new subject (the app was registered again): its claim is hers.
+    expect(
+      await write((tx) =>
+        signIn(tx, t.tenantId, { issuer: ISSUER, subject: "s-ana-2", externalId: "oid-ana" }),
+      ),
+    ).toMatchObject({ ok: true, user: { id: ana.id }, linked: true });
+  });
+
+  it("lets the directory correct the external id of someone who never signed in", async () => {
+    // What a source imported for whoever had the old id doesn't follow the record to the new
+    // one; what a person granted does.
+    for (const grantedBy of ["source:sharepoint", "user:admin"]) {
+      await write((tx) =>
+        addGrant(tx, t.tenantId, {
+          principal: userPrincipal(ana.id),
+          role: "read",
+          target: { objectId: t.objectId },
+          grantedBy,
+        }),
+      );
+    }
+    await write((tx) => updateUser(tx, t.tenantId, ana.id, { externalId: "oid-ana-2" }, "scim"));
+    const held = await write((tx) =>
+      tx
+        .select({ grantedBy: grants.grantedBy, revokedBy: grants.revokedBy })
+        .from(grants)
+        .where(eq(grants.principal, userPrincipal(ana.id))),
+    );
+    expect(held.sort((a, b) => a.grantedBy.localeCompare(b.grantedBy))).toEqual([
+      { grantedBy: "source:sharepoint", revokedBy: "system:external-id-changed" },
+      { grantedBy: "user:admin", revokedBy: null },
+    ]);
+    expect(
+      await write((tx) =>
+        signIn(tx, t.tenantId, { issuer: ISSUER, subject: "s-ana", externalId: "oid-ana" }),
+      ),
+    ).toEqual({ ok: false, refused: "unknown", userId: null });
+    expect(
+      await write((tx) =>
+        signIn(tx, t.tenantId, { issuer: ISSUER, subject: "s-ana", externalId: "oid-ana-2" }),
+      ),
+    ).toMatchObject({ ok: true, user: { id: ana.id }, linked: true });
   });
 
   it("matches external ids of SCIM users only, and creates nobody", async () => {

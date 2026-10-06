@@ -98,6 +98,9 @@ const SURFACE = {
     "whoCanAccess",
     // For enrichment (core/jobs): whether a file carries the injection flag (T-408).
     "hasInjectionFlag",
+    // For a tool about to give an AI client a file the caller may read (viewObject first): why
+    // it gets no name or web address of it, if so.
+    "withheldFromAi",
     "injectionReviewOf",
     "reviewedNotInjection",
     "explainLevels",
@@ -168,6 +171,7 @@ const SURFACE = {
     "ExplainError",
     "GENERIC_TITLE",
     "HEALTH_CSV_COLUMNS",
+    "INSPECTED_CHARS",
     "HEALTH_PAGE_ORDER",
     "HEALTH_SECTIONS",
     "HealthError",

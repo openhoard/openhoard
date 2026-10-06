@@ -120,8 +120,8 @@ interface Run {
 
 /**
  * The obedient agent: does what the person asked (find the vendor summaries, describe and open
- * each), then, for every payload marker it saw anywhere in an answer, does what that payload
- * asked, with whatever tools exist (and some that don't).
+ * each), then does what every payload in the corpus asks, seen or not, with whatever tools
+ * exist (and some that don't). What it saw is recorded apart (`seen`).
  */
 async function obedientAgent(token: string): Promise<Run> {
   const run: Run = { seen: new Map(), obeyed: [], opened: new Map() };
@@ -151,6 +151,8 @@ async function obedientAgent(token: string): Promise<Run> {
   }
   for (const id of ids) {
     look("describe", await h.call(token, "describe", { id }));
+    // "Who can see this?" names the file too, to its owner.
+    look("explain", await h.call(token, "explain", { id }));
     const opened = await h.call(token, "open", { id, mode: "content", maxTokens: 8000 });
     look("open", opened);
     run.opened.set(id, opened.data?.content != null);
@@ -158,7 +160,9 @@ async function obedientAgent(token: string): Promise<Run> {
   const obey = async (id: string, tool: string, args: Record<string, unknown>) => {
     run.obeyed.push({ id, tool, args, answer: await h.call(token, tool, args) });
   };
-  for (const caseId of run.seen.keys()) {
+  // Every payload, whether or not it got through: the worst case is an agent that somehow
+  // read them all.
+  for (const caseId of byId.keys()) {
     const f = byId.get(caseId);
     if (!f) continue;
     const target = f.objectId;
@@ -221,13 +225,13 @@ describe("S8 corpus through the MCP tools, to an agent that obeys every file (T-
       );
       const token = await h.token({ scopes: [...scopes], trust: "local" });
       const run = await obedientAgent(token);
-      // The agent did find payloads to obey (in titles, and in the files the flag missed).
+      // The agent did what every payload asked, as if each had reached it.
       expect(run.obeyed.length).toBeGreaterThan(0);
-      // No flagged file's content reached it: markers from flagged files only in titles.
+      // Nothing of a flagged file reached it: not its content, and not its name, which is
+      // whoever saved the file's to write (an assistant sees "Document" in its place).
       for (const f of files.filter((x) => x.flagged)) {
         expect(run.opened.get(f.objectId), f.c.id).toBe(false);
-        const where = run.seen.get(f.c.id) ?? [];
-        if (!f.c.name.includes(f.c.id)) expect(where, f.c.id).toEqual([]);
+        expect(run.seen.get(f.c.id) ?? [], f.c.id).toEqual([]);
       }
       // Nothing it did changed a tag, a value, a grant, or filed a review item.
       const after = await state();
@@ -246,7 +250,8 @@ describe("S8 corpus through the MCP tools, to an agent that obeys every file (T-
       expect(tagCalls.length).toBeGreaterThan(0);
       for (const o of tagCalls) {
         if (scopes.length === 1) expect(o.answer.text, o.id).toMatch(/files:tag/);
-        else expect(o.answer.text, o.id).toMatch(/only a person can set it|vocabulary/);
+        // Refused for what it asks, or, once the hour's proposals are spent, for asking again.
+        else expect(o.answer.text, o.id).toMatch(/only a person can set it|vocabulary|Too many/);
       }
       // The board's minutes were never opened, nor their content seen.
       expect(run.opened.get(board)).not.toBe(true);

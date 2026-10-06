@@ -286,11 +286,9 @@ describe("the sign-in round trip is bound to its browser", () => {
     // Replayed with the same cookie: the provider refuses a code used twice.
     const replay = await app.request(callback, { headers: { cookie: `${name}=${value}` } });
     expect(replay.status).toBe(401);
+    // Logged, not audited (nobody is known): the one sign-in is the only record.
     const events = (await auditEvents()).filter((e) => e.action === "auth.sign-in");
-    expect(events.at(-1)).toMatchObject({
-      decision: "deny",
-      detail: { reason: "provider:invalid_grant" },
-    });
+    expect(events.map((e) => e.decision)).toEqual(["allow"]);
   });
 
   it("refuses another browser's state, even with its own cookie", async () => {
@@ -339,7 +337,7 @@ describe("the sign-in round trip is bound to its browser", () => {
     expect((await browser.go(first)).status).toBe(302);
   });
 
-  it("refuses a provider's error response, and audits it", async () => {
+  it("refuses a provider's error response, and logs it: nobody is known to audit", async () => {
     const browser = new Browser();
     const start = await browser.go(`${PUBLIC}/auth/login/dev`);
     const state = new URL(start.headers.get("location") ?? "").searchParams.get("state") ?? "";
@@ -348,8 +346,8 @@ describe("the sign-in round trip is bound to its browser", () => {
         `&iss=${encodeURIComponent(idp.issuer)}`,
     );
     expect(res.status).toBe(401);
-    const [event] = (await auditEvents()).filter((e) => e.action === "auth.sign-in");
-    expect(event).toMatchObject({ decision: "deny", detail: { reason: "provider:access_denied" } });
+    // Nor replayed as often as anyone likes: it adds nothing to the tenant's audit chain.
+    expect((await auditEvents()).filter((e) => e.action === "auth.sign-in")).toEqual([]);
   });
 
   it("returns only to this server, and knows only its providers", async () => {

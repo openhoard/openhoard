@@ -436,6 +436,23 @@ describe("planPack and applyPack", () => {
     expect(row?.contentHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it("warns about rules that go by path or site, which nothing gives them yet", async () => {
+    const byPath = small({
+      rules: [
+        { id: "hr", tag: "sensitivity:secret", when: { path: "HR/**" } },
+        { id: "pdf", tag: "sensitivity:secret", when: { extension: ["pdf"] } },
+        { id: "site", tag: "sensitivity:secret", when: { site: "Finance" } },
+      ],
+    });
+    expect((await plan(byPath)).warnings).toContain(
+      "rules that go by a file's path or site never match yet, so they tag nothing: hr, site",
+    );
+    const byName = small({
+      rules: [{ id: "pdf", tag: "sensitivity:secret", when: { extension: ["pdf"] } }],
+    });
+    expect((await plan(byName)).warnings.join()).not.toContain("never match");
+  });
+
   it("refuses rules on facets that won't exist, and a bad approver", async () => {
     const orphan = small({ rules: [{ id: "x", tag: "nowhere:x", when: { path: "**" } }] });
     await expect(plan(orphan)).rejects.toMatchObject({

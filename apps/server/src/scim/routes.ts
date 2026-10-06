@@ -490,11 +490,13 @@ export function mountScim<E extends Env>(app: Hono<E>, deps: ScimDeps): ScimHand
     const body = await bodyOf(c);
     return run(c, "scim.user.replace", "write", async (tx, actor) => {
       const current = await scimUser(tx, tenantOf(c), c.req.param("id"));
-      // A PUT without `active` or `userType` leaves them as they are: it never re-enables a user,
-      // or makes a guest a member, by omission.
+      // A PUT without `active`, `userType` or `externalId` leaves them as they are: it never
+      // re-enables a user, makes a guest a member, or unties them from their account at the
+      // provider, by omission.
       const next = stateFromBody(body(), {
         active: current.providerDisabled === null,
         guest: current.kind === "guest",
+        externalId: current.externalId,
       });
       return saved(c, current, await saving(tx, c, current, next, actor));
     });

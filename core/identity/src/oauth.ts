@@ -631,8 +631,13 @@ export async function redeemCode(
     .set({ usedAt: sql`now()` })
     .where(and(eq(oauthCodes.tenantId, tenantId), eq(oauthCodes.id, row.id)));
   if (!found.live) return refuse("code expired", { userId: row.userId });
-  if (row.clientKey !== given.clientKey) return refuse("code was for another client");
-  if (row.redirectUri !== given.redirectUri) return refuse("redirect_uri differs");
+  // A real code in the wrong hands is somebody's to know about: named, so it is audited.
+  if (row.clientKey !== given.clientKey) {
+    return refuse("code was for another client", { userId: row.userId });
+  }
+  if (row.redirectUri !== given.redirectUri) {
+    return refuse("redirect_uri differs", { userId: row.userId });
+  }
   if (row.resource !== given.resource) {
     return { ok: false, error: "invalid_target", reason: "resource differs", userId: row.userId };
   }

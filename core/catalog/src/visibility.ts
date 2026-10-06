@@ -202,7 +202,7 @@ export async function enrichmentExposure(
 }
 
 /** The most an unclassified file's content is exposed to enrichment (enrichmentExposure()). */
-const UNCLASSIFIED_CEILING: Exposure = "commercial-only";
+export const UNCLASSIFIED_CEILING: Exposure = "commercial-only";
 
 /**
  * Levels of `ids` (distinct, at most MAX_OBJECT_IDS), read in one snapshot the caller checked.
@@ -376,6 +376,9 @@ async function currentVersions(
 
 /** What non-readers see when a model's display title waits for the owner. */
 export const GENERIC_TITLE = "Document";
+
+/** risk.ts INJECTION_TAG (which imports from here). */
+const INJECTION = "risk:injection";
 
 /**
  * The title a non-reader sees.
@@ -654,11 +657,18 @@ export async function viewObjects(
       primaryTag: tags.primary !== null && shown.includes(tags.primary) ? tags.primary : null,
     };
     const sorted = (list: string[]) => [...list].sort();
+    // A file flagged as possibly carrying instructions for AI gives an AI client nothing its
+    // author wrote: not its content (the flag's exposure), and not its name either, which is
+    // theirs to write too and reaches every card. Nor of a file the detector hasn't looked at
+    // yet: a new file's name, or a new name, is as unread as its content. People, in
+    // OpenHoard's own app, see it.
+    const unnamed =
+      request.client.trust !== "first-party" && (!level.processed || tags.all.includes(INJECTION));
     if (decision.shape === "title-only") {
       views.set(row.id, {
         ...base,
         shape: "title-only",
-        title: nonReaderTitle(row),
+        title: unnamed ? GENERIC_TITLE : nonReaderTitle(row),
         tags: sorted(tags.public),
         requestAccess: true,
       });
@@ -673,7 +683,7 @@ export async function viewObjects(
       views.set(row.id, {
         ...base,
         shape: "card",
-        title: canRead ? row.title : nonReaderTitle(row),
+        title: unnamed ? GENERIC_TITLE : canRead ? row.title : nonReaderTitle(row),
         tags: sorted(shown),
         readable: canRead,
         updatedAt: row.updatedAt,

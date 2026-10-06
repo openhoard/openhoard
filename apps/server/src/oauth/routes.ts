@@ -719,11 +719,15 @@ export function mountOAuth(
                 ...(scopes ? { scopes } : {}),
                 clientTrust: configured(tenantId),
               });
+        // Audited once it is somebody's: a code or token that is nobody's (made up, or long
+        // gone) is logged. Anyone can send those, as many as they like, and each record is a
+        // link of the tenant's chain for good.
+        if (!r.ok && !r.userId) {
+          log?.info({ tenantId, grantType, reason: r.reason }, "oauth: token request refused");
+          return r;
+        }
         await audit(tx, tenantId, {
-          actor:
-            r.ok || r.userId
-              ? userPrincipal(r.ok ? r.userId : (r.userId as string))
-              : "oauth:unknown",
+          actor: userPrincipal(r.ok ? r.userId : (r.userId as string)),
           action: grantType === "authorization_code" ? "oauth.token" : "oauth.refresh",
           decision: r.ok ? "allow" : "deny",
           client: clientRef,

@@ -59,13 +59,16 @@ export interface SignInClaims {
   subject: string;
   /**
    * The person's id at the identity provider, when the provider is configured to match on one
-   * (Entra's `oid`): matched once to a SCIM user's external id, before the identity is linked.
+   * (Entra's `oid`): matched to a SCIM user's external id, and the identity linked to them.
    */
   externalId?: string;
 }
 
 export type SignInRefusal =
-  /** No linked identity, and nothing to match on. */
+  /**
+   * No linked identity, and nobody to match: no SCIM user has the external id claimed (or had
+   * it a moment ago and was given another before this sign-in locked their record).
+   */
   | "unknown"
   /** Locked, disabled by the provider, or a service account. */
   | "inactive";
@@ -103,6 +106,18 @@ export async function signIn(
     const match = await findUserByExternalId(tx, tenantId, claims.externalId);
     if (match && match.kind !== "service") {
       if (!match.active) return { ok: false, refused: "inactive", userId: match.id };
+      // Matched before the row was locked: whoever writes the directory (a SCIM token) may have
+      // given the record another external id since. Locked, it either still has this one, or
+      // the sign-in is nobody's. (Once someone has signed in, updateUser() refuses to change it,
+      // so a record that has an identity can't be handed to another account at the provider.)
+      const [now] = await tx
+        .select({ externalId: users.externalId })
+        .from(users)
+        .where(and(eq(users.tenantId, tenantId), eq(users.id, match.id)))
+        .for("update");
+      if (now?.externalId !== claims.externalId) {
+        return { ok: false, refused: "unknown", userId: null };
+      }
       // conflict: the pair belongs to someone else, which findUserByIdentity would have found
       // unless that user is retired (their identities are gone) or a service account (refused).
       linked = await linkIdentity(tx, tenantId, match.id, { issuer, subject });

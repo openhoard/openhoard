@@ -437,7 +437,9 @@ place up to `maxWaitMs` (30 s) and `attempts` (3), then the run stops with `retr
 that fails after its ingest committed is tried again for the committed version (never a second
 ingest); one that keeps failing ends the run with `retry` (`enqueue`), and the item, ingested
 but not enqueued, waits for the sweep. `runSync()` throws only for its own failures (the database
-unreachable, a bug). Connector warnings are listed in `warnings`.
+unreachable, a bug). Connector warnings are listed in `warnings`. A file larger than
+`maxFileBytes` (default `SYNC_MAX_FILE_BYTES`, 2 GiB) is skipped as `too-large` without being
+read, so one huge file can't fill the disk or hold a run.
 
 `budgetMs` and `maxItems` end a run at the first checkpoint after the time or the number of
 items (`partial`). Both can only stop at a checkpoint: a connector that never yields one runs
