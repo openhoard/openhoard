@@ -201,6 +201,17 @@ export async function enrichmentExposure(
     : mostRestrictiveExposure([found.exposure, UNCLASSIFIED_CEILING]);
 }
 
+/**
+ * CardView.modifiedAt, in SQL: the latest time a source gives for the file, held to now, else
+ * the object's own `updated_at`.
+ */
+const MODIFIED_AT = sql<Date>`least(
+  coalesce(
+    (select max(r.source_modified_at) from source_refs r
+      where r.tenant_id = ${objects.tenantId} and r.object_id = ${objects.id}),
+    ${objects.updatedAt}),
+  now())`.mapWith(objects.updatedAt);
+
 /** The most an unclassified file's content is exposed to enrichment (enrichmentExposure()). */
 export const UNCLASSIFIED_CEILING: Exposure = "commercial-only";
 
@@ -434,7 +445,15 @@ export interface CardView extends ViewBase {
   tags: string[];
   /** Whether the caller can read the file (and so open it). */
   readable: boolean;
+  /** When OpenHoard last recorded a change to the file: a new version, a rename, a restore. */
   updatedAt: Date;
+  /**
+   * When the file last changed, for people: what its source says (never later than now: a
+   * source's clock, or a file's own timestamp, is its author's to set), and when no source
+   * says, `updatedAt`. After a first crawl `updatedAt` is the day of the crawl for every
+   * file; this is the day each was last worked on.
+   */
+  modifiedAt: Date;
   /**
    * Metadata only: the card carries nothing derived from the content (no `summary`, and only
    * trusted tags for a reader), and the content can't be opened through it. True when the
@@ -520,6 +539,7 @@ export async function viewObjects(
       displayTitleBy: objects.displayTitleBy,
       ownerId: objects.ownerId,
       updatedAt: objects.updatedAt,
+      modifiedAt: MODIFIED_AT,
       zone: zones.kind,
       zoneId: zones.id,
     })
@@ -687,6 +707,7 @@ export async function viewObjects(
         tags: sorted(shown),
         readable: canRead,
         updatedAt: row.updatedAt,
+        modifiedAt: row.modifiedAt,
         metadataOnly: decision.metadataOnly,
         ...summary,
       });

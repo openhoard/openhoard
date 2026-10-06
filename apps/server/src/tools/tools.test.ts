@@ -191,6 +191,28 @@ describe("scenario 1: find by intent, then open in the file's own app", () => {
         .data,
     );
     expect(old.top?.title).toBe("Forecast old.csv");
+    // "Modified" is when the file last changed at its source, not when it was crawled: one
+    // recorded just now and last worked on in 2019 is an old file.
+    await h.addFile({
+      title: "Forecast 2019.csv",
+      mime: MIME.csv,
+      sourceModifiedAt: new Date("2019-06-01T12:00:00Z"),
+    });
+    const older = shaped(
+      "find",
+      (await h.call(token, "find", { query: "forecast", modifiedBefore: "2021-01-01T00:00:00Z" }))
+        .data,
+    );
+    const cards = [older.top, ...older.alternatives];
+    expect(cards.map((c) => c?.title).sort()).toEqual(["Forecast 2019.csv", "Forecast old.csv"]);
+    expect(cards.find((c) => c?.title === "Forecast 2019.csv")?.modified).toBe(
+      "2019-06-01T12:00:00.000Z",
+    );
+    const since = shaped(
+      "find",
+      (await h.call(token, "find", { query: "forecast 2019", modifiedAfter: "2025-01-01" })).data,
+    );
+    expect(since.total).toBe(0);
     // Tag filters go to the catalog as facet:value terms.
     await h.addFile({ title: "Forecast acme.xlsx", mime: MIME.xlsx, tags: ["client:acme"] });
     const tagged = shaped(

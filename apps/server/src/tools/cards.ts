@@ -12,7 +12,9 @@ import { actorOf, type ToolContext } from "./context.js";
  * - `title` as the caller is shown it (a non-reader's display title or "Document");
  * - `kind`, from the media type, for "the CSV" or "the deck";
  * - `modified` and `owner` (a display name) only on a card, never on a title-only view: a
- *   non-reader of a discoverable file learns its title and public tags, nothing more;
+ *   non-reader of a discoverable file learns its title and public tags, nothing more.
+ *   `modified` is when the file last changed at its source (the view's `modifiedAt`), not when
+ *   OpenHoard recorded it;
  * - `tags` as the view shows them (every tag for a reader, trusted ones on a metadata-only card,
  *   public ones for anyone else);
  * - `summary` only where the gate put one (a card that isn't metadata-only, exposure still
@@ -154,7 +156,7 @@ export function toCard(
     title: clip(view.title, TITLE_MAX),
     kind: kindOf(view.mime),
     mediaType: view.mime,
-    modified: view.shape === "card" ? view.updatedAt.toISOString() : null,
+    modified: view.shape === "card" ? view.modifiedAt.toISOString() : null,
     owner: view.shape === "card" ? (owners.get(view.ownerId) ?? null) : null,
     tags: view.tags.slice(0, TAGS_MAX),
     access: view.shape === "title-only" ? "title-only" : view.readable ? "read" : "card",
