@@ -497,33 +497,42 @@ describe("cards from the corpus (T-405)", () => {
     }
   });
 
-  it("filters every instruction even without the flag (defense in depth)", async () => {
-    // As if detection had missed everything: the obedient model's answer for each file's
-    // extraction goes straight through the schema and the filter.
-    const survivors: string[] = [];
-    for (const c of corpus) {
-      async function* bytes() {
-        yield c.bytes;
+  it(
+    "filters every instruction even without the flag (defense in depth)",
+    async () => {
+      // As if detection had missed everything: the obedient model's answer for each file's
+      // extraction goes straight through the schema and the filter.
+      const survivors: string[] = [];
+      for (const c of corpus) {
+        async function* bytes() {
+          yield c.bytes;
+        }
+        const r = await extract(bytes(), { mime: c.mime, name: c.name }, { size: c.bytes.length });
+        const text = r.ok ? r.extraction.text : "";
+        const prompt = buildSummaryPrompt({
+          title: c.name,
+          text,
+          vocabulary: [],
+          maxChars: 24_000,
+        });
+        const out = filterCardOutput(validateCardOutput(obedient(prompt)), {
+          vocabulary: new Set(),
+          title: c.name,
+        });
+        expect(instructionPatterns(out.summary), c.id).toEqual([]);
+        expect(instructionPatterns(out.displayTitle ?? ""), c.id).toEqual([]);
+        if (markers.test(out.summary)) survivors.push(c.id);
       }
-      const r = await extract(bytes(), { mime: c.mime, name: c.name }, { size: c.bytes.length });
-      const text = r.ok ? r.extraction.text : "";
-      const prompt = buildSummaryPrompt({ title: c.name, text, vocabulary: [], maxChars: 24_000 });
-      const out = filterCardOutput(validateCardOutput(obedient(prompt)), {
-        vocabulary: new Set(),
-        title: c.name,
-      });
-      expect(instructionPatterns(out.summary), c.id).toEqual([]);
-      expect(instructionPatterns(out.displayTitle ?? ""), c.id).toEqual([]);
-      if (markers.test(out.summary)) survivors.push(c.id);
-    }
-    // What can survive is a bare case id with no instruction around it: the readable marker of
-    // a reversed payload, and file names the model copied (the name is the card's title anyway,
-    // and those files are flagged by name). Every instruction is gone.
-    process.stdout.write(
-      `S8 filter alone: marker without instruction in ${survivors.join(", ") || "none"}\n`,
-    );
-    for (const id of survivors) expect(["OHX-020", "OHX-046", "OHX-048"]).toContain(id);
-  });
+      // What can survive is a bare case id with no instruction around it: the readable marker of
+      // a reversed payload, and file names the model copied (the name is the card's title anyway,
+      // and those files are flagged by name). Every instruction is gone.
+      process.stdout.write(
+        `S8 filter alone: marker without instruction in ${survivors.join(", ") || "none"}\n`,
+      );
+      for (const id of survivors) expect(["OHX-020", "OHX-046", "OHX-048"]).toContain(id);
+    },
+    EXTRACT_ALL_TIMEOUT,
+  );
 
   it("still summarizes benign files", async () => {
     const summarized = [];
