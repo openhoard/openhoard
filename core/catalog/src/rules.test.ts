@@ -3,7 +3,14 @@ import { facets, facetValues, objectTags, tagReviews, type Database } from "@ope
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { applyRuleTags, evaluateRules, globMatch, validateRules, type TagRule } from "./rules.js";
+import {
+  applyRuleTags,
+  evaluateRules,
+  globMatch,
+  rulePath,
+  validateRules,
+  type TagRule,
+} from "./rules.js";
 import { approveReview, proposeTag, rejectReview, tagsForDecisions } from "./tagging.js";
 
 /* The rule tagger (T-403). */
@@ -106,6 +113,17 @@ describe("evaluateRules", () => {
     const marked: TagRule[] = [{ id: "m", facet: "client", dictionary: { x: ["q̇a"] } }];
     expect(evaluateRules(marked, { title: "Q̇A report" })).toHaveLength(1);
     expect(evaluateRules(marked, { title: "q a" })).toHaveLength(0);
+  });
+});
+
+describe("rulePath", () => {
+  it("joins the names, and never lets a name pass for a folder", () => {
+    expect(rulePath(["Clients", "Acme", "Plan.docx"])).toBe("Clients/Acme/Plan.docx");
+    expect(rulePath(null)).toBeUndefined();
+    // A file named "Public/x" at the top isn't x in a folder Public.
+    const sly = rulePath(["Public/Plan.docx"]) as string;
+    expect(globMatch("Public/**", sly)).toBe(false);
+    expect(globMatch("Public/**", rulePath(["Public", "Plan.docx"]) as string)).toBe(true);
   });
 });
 

@@ -57,7 +57,7 @@ let base: string;
 let root: string;
 let stateDir: string;
 /** What the runner asked to enqueue, in order. */
-let enqueued: Pick<IngestResult, "versionId" | "created" | "renamed">[];
+let enqueued: Pick<IngestResult, "versionId" | "created" | "renamed" | "moved">[];
 const started: Jobs[] = [];
 
 beforeEach(async () => {
@@ -115,6 +115,7 @@ async function catalog(source = SOURCE) {
         title: objects.title,
         deleted: objects.deletedAt,
         url: sourceRefs.url,
+        path: sourceRefs.path,
       })
       .from(sourceRefs)
       .innerJoin(
@@ -166,6 +167,12 @@ describe("runSync with the fs connector", () => {
       phase: "crawl",
       counts: { files: 3, folders: 2, ingested: 3, unchanged: 0, skipped: 0, reconciled: 0 },
     });
+    // Where each is, as the source names it: for rules by folder.
+    expect((await catalog()).map((r) => r.path)).toEqual([
+      ["Finance", "Old", "2025.csv"],
+      ["Finance", "Budget.csv"],
+      ["Plan.md"],
+    ]);
     expect((await catalog()).map((r) => [r.title, r.deleted, r.versions])).toEqual([
       ["2025.csv", false, 1],
       ["Budget.csv", false, 1],
@@ -252,8 +259,9 @@ describe("runSync with the fs connector", () => {
     // be: a rename changes its change time, part of its content version, on most systems.)
     expect(reads).toContain(at("Plan.md")?.externalId);
     expect(reads).not.toContain(at("Spec.md")?.externalId);
-    // The new version and the rename go to enrichment; the move changes neither.
-    expect(enqueued.filter(needsEnrichment)).toHaveLength(2);
+    // The new version, the rename and the move all go to enrichment: rules go by content,
+    // name and folder.
+    expect(enqueued.filter(needsEnrichment)).toHaveLength(3);
   });
 
   it("resumes a killed crawl from its last checkpoint without duplicates", async () => {

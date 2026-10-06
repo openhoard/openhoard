@@ -28,7 +28,7 @@ Each pack is a folder with two files:
 
 **Homes.** A file's primary tag is its home: the one tag that says where it belongs, as its
 folder did (core/catalog `primary.ts`). A rule such as
-`{ "id": "apollo", "tag": "project:apollo", "when": { "path": "Projects/Apollo/**" }, "primary": true }`
+`{ "id": "apollo", "tag": "project:apollo", "when": { "path": "**/Projects/Apollo/**" }, "primary": true }`
 carries a folder layout over; a home a person chose is never replaced by a rule. A `single`
 facet (`sensitivity`) holds one value per file: a second value from a rule, pack or model, or a
 person's that would loosen a level, waits in review, and only a reviewer's explicit choice

@@ -143,7 +143,7 @@ export interface SyncJobDeps {
   tenantKey: SyncQueueOptions["tenantKey"];
   enqueue: (
     tenantId: string,
-    result: Pick<IngestResult, "versionId" | "created" | "renamed">,
+    result: Pick<IngestResult, "versionId" | "created" | "renamed" | "moved">,
   ) => Promise<unknown>;
   /** Sends the source's next run after `delayMs` (0: now), reusing a waiting one. */
   next: (payload: SyncPayload, delayMs: number) => Promise<unknown>;

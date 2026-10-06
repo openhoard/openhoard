@@ -129,7 +129,7 @@ export interface SyncOptions {
   /** Enqueues enrichment after an ingest commits: `jobs.enqueueAfterIngest`. */
   enqueue: (
     tenantId: string,
-    result: Pick<IngestResult, "versionId" | "created" | "renamed">,
+    result: Pick<IngestResult, "versionId" | "created" | "renamed" | "moved">,
   ) => Promise<unknown>;
   /**
    * The OpenHoard user (`user:usr_…`) the source's last editor is, or undefined (T-305 maps
@@ -971,6 +971,7 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
       ...(facts.sourceCreatedBy === undefined ? {} : { sourceCreatedBy: facts.sourceCreatedBy }),
       ...(item.contentVersion === undefined ? {} : { sourceVersion: item.contentVersion }),
       etag: item.etag,
+      path: item.path,
       // The parser's text, which is what was checked, never the connector's.
       ...(item.url === undefined ? {} : { url: canonicalUrl(item.url) }),
     };

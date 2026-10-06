@@ -124,7 +124,13 @@ one source item (source, external id) → one object → versions 1, 2, 3… →
 - **One blob per content.** Identical bytes in a tenant are one blob, however many objects and
   versions point at it.
 - **No empty versions.** An item seen again with the same content and media type adds no
-  version. Only its source reference (eTag, URL, sync time) and its title are refreshed.
+  version. Only its source reference (eTag, URL, sync time, path) and its title are refreshed.
+- **Where it is.** `path` (the names from the top of the source down to the item) is kept
+  with the source reference, as names, never joined. A change of folder is `moved`: like a
+  rename it starts enrichment over, since rules go by folder (`rulePath()` joins the names
+  for them, a `/` inside a name becoming `_`). An item recorded before paths were kept has
+  none until it next changes at its source or the source is crawled from the beginning;
+  `planPack()` warns of files without one when a pack has rules by path.
 - **Deletes are soft.** `removeFromSource()` marks the object deleted and keeps its rows.
   Ingesting the item again restores it.
 - **Zone and owner stay.** A crawl can't move an object to another zone or give it to someone

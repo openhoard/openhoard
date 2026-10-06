@@ -5,6 +5,7 @@ import {
   facetValues,
   objectTags,
   queryRows,
+  sourceRefs,
   tenantPacks,
   tenants,
   type Database,
@@ -436,7 +437,7 @@ describe("planPack and applyPack", () => {
     expect(row?.contentHash).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("warns about rules that go by path or site, which nothing gives them yet", async () => {
+  it("warns about rules that go by site, which nothing gives them yet", async () => {
     const byPath = small({
       rules: [
         { id: "hr", tag: "sensitivity:secret", when: { path: "HR/**" } },
@@ -445,12 +446,18 @@ describe("planPack and applyPack", () => {
       ],
     });
     expect((await plan(byPath)).warnings).toContain(
-      "rules that go by a file's path or site never match yet, so they tag nothing: hr, site",
+      "rules that go by a file's site never match yet, so they tag nothing: site",
     );
     const byName = small({
       rules: [{ id: "pdf", tag: "sensitivity:secret", when: { extension: ["pdf"] } }],
     });
     expect((await plan(byName)).warnings.join()).not.toContain("never match");
+    // And of the files a rule by path can't reach: the seeded one has no path recorded.
+    const unplaced = /^1 file\(s\) have no path recorded/;
+    expect((await plan(byPath)).warnings.filter((w) => unplaced.test(w))).toHaveLength(1);
+    expect((await plan(byName)).warnings.join()).not.toContain("no path recorded");
+    await inTenant((tx) => tx.update(sourceRefs).set({ path: ["HR", "a.docx"] }));
+    expect((await plan(byPath)).warnings.join()).not.toContain("no path recorded");
   });
 
   it("refuses rules on facets that won't exist, and a bad approver", async () => {

@@ -107,7 +107,9 @@ extract-text → injection-flag → rule-tags → summarize → embed
   versions' bytes are read: core/storage `blobContentSource()`, connectors' sources);
 - `injection-flag` (`injectionFlagStep`, [flag.ts](src/flag.ts), T-408), always;
 - `rule-tags` (`ruleTagStep`, core/catalog T-403), so rule tags are on a file before any model
-  sees it;
+  sees it. Rules get the file's name, its media type and where it is in its source (the path
+  ingest recorded with the source reference); a file moved to another folder is enriched
+  again, as a renamed one is. A rule on the site matches nothing yet;
 - `summarize` (`summarizeStep`, [summarize.ts](src/summarize.ts), T-405), only with `content`
   and `summarize: { router, budget }` (core/models): no model runs unless an admin configures
   one (the PRD's cost guard: nothing reads the whole corpus through a model by default);
@@ -337,9 +339,9 @@ out of retries goes to `enrich-failed`, the dead letter queue (in a partition of
 worker salvages it (above); what a salvage run can't process stays unprocessed, so hidden from
 non-readers: fail-closed.
 
-Two known gaps. The rule tagger sees the title and media type, not the path or site: neither is
-stored yet, and a step must decide from stored facts only, or a re-run would take off tags the
-first run gave. And a rename doesn't change rule tags until the job that follows it runs.
+Two known gaps. The rule tagger doesn't see the site: it isn't stored, and a step must decide
+from stored facts only, or a re-run would take off tags the first run gave. And a rename or a
+move doesn't change rule tags until the job that follows it runs.
 
 ## Connector sync
 

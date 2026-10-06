@@ -16,6 +16,7 @@ import { contentHash, scopedBlobId } from "./hash.js";
 import {
   blobIdOf,
   ingest,
+  sourcePathOf,
   IngestError,
   normalizeMime,
   markSourceItemSeen,
@@ -129,6 +130,7 @@ describe("ingest", () => {
       created: { object: false, version: false, blob: false },
       restored: false,
       renamed: true,
+      moved: false,
     });
     expect((await objectRow(first.objectId))?.title).toBe("Plan (final).docx");
     expect((await refRow("a"))?.etag).toBe("e2");
@@ -148,6 +150,56 @@ describe("ingest", () => {
       created: { version: false },
     });
     expect(await processedAt()).toBeNull();
+  });
+
+  it("records where the item is, and sends a moved one back through enrichment", async () => {
+    const at = (...path: string[]) => ({ path });
+    const r = await item("a", "v1", at("Clients", "Acme", "Plan.docx"));
+    expect(r).toMatchObject({ moved: false });
+    expect((await refRow("a"))?.path).toEqual(["Clients", "Acme", "Plan.docx"]);
+    expect(await inTenant((tx) => sourcePathOf(tx, t.tenantId, r.objectId))).toEqual([
+      "Clients",
+      "Acme",
+      "Plan.docx",
+    ]);
+    const processedAt = async () => (await versionsOf(r.objectId))[0]?.processedAt ?? null;
+    const processed = () =>
+      inTenant((tx) =>
+        tx.update(versions).set({ processedAt: new Date() }).where(eq(versions.id, r.versionId)),
+      );
+    await processed();
+    // The same place again, or nothing said of it: no move, and what is recorded stays.
+    expect(await item("a", "v1", at("Clients", "Acme", "Plan.docx"))).toMatchObject({
+      moved: false,
+    });
+    expect(await item("a", "v1")).toMatchObject({ moved: false });
+    expect((await refRow("a"))?.path).toEqual(["Clients", "Acme", "Plan.docx"]);
+    expect(await processedAt()).toBeInstanceOf(Date);
+    // Another folder: rules go by it, so enrichment starts over, with no new version.
+    expect(await item("a", "v1", at("HR", "Plan.docx"))).toMatchObject({
+      moved: true,
+      renamed: false,
+      created: { version: false },
+    });
+    expect((await refRow("a"))?.path).toEqual(["HR", "Plan.docx"]);
+    expect(await processedAt()).toBeNull();
+    await processed();
+    // Its own name in the path is the title's business, not a move.
+    expect(await item("a", "v1", at("HR", "Plan v2.docx"))).toMatchObject({ moved: false });
+    expect(await processedAt()).toBeInstanceOf(Date);
+    // A path that can't be kept is left out, never refused; the folders are then unknown.
+    for (const bad of [[], ["a", ""], ["a\0b", "x"], Array.from({ length: 1025 }, () => "d")]) {
+      expect(await item("a", "v1", { path: bad })).toMatchObject({ moved: true });
+      expect((await refRow("a"))?.path).toBeNull();
+      await item("a", "v1", at("HR", "Plan.docx"));
+    }
+    // A first recording, for an item known before paths were kept, is a move too.
+    const old = await item("b", "v2");
+    expect((await refRow("b"))?.path).toBeNull();
+    expect(await item("b", "v2", at("Plan.docx"))).toMatchObject({ moved: true });
+    expect(await inTenant((tx) => sourcePathOf(tx, t.tenantId, old.objectId))).toEqual([
+      "Plan.docx",
+    ]);
   });
 
   it("adds a version when the content changes, and numbers versions in order", async () => {

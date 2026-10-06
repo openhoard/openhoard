@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import {
   facets,
   facetValues,
+  objects,
   queryRows,
+  sourceRefs,
   tenantPacks,
   tenants,
   zones,
@@ -23,7 +25,7 @@ import {
   type Exposure,
   type Visibility,
 } from "@openhoard/core-policy";
-import { and, asc, eq, ne, sql } from "drizzle-orm";
+import { and, asc, count, eq, isNull, ne, sql } from "drizzle-orm";
 import { validateRules, type TagRule } from "./rules.js";
 
 /*
@@ -904,7 +906,7 @@ async function plan(tx: Tx, tenantId: string, pack: Pack): Promise<PackPlan> {
       ]
     : [compiled.result];
   warnings.push(...unknownTestTags(pack, valuesAfter));
-  warnings.push(...unmatchedRules(pack));
+  warnings.push(...unmatchedRules(pack), ...(await unplacedFiles(tx, tenantId, pack)));
   warnings.push(...loosenings(changes));
   return seal({
     action: "apply",
@@ -1006,17 +1008,41 @@ function unknownTestTags(pack: Pack, vocabulary: LevelMap): string[] {
 }
 
 /**
- * Rules that can't match yet: enrichment gives rules a file's name and media type only, since
- * neither the path nor the site is stored (core/jobs enrich.ts). Said at plan time, or an admin
- * who writes "everything under HR/ is restricted" believes it holds.
+ * Rules that can't match yet: enrichment gives rules a file's name, its path in its source and
+ * its media type, but no site, which isn't stored (core/jobs enrich.ts). Said at plan time, or
+ * an admin who writes "everything on the Finance site is restricted" believes it holds.
  */
 function unmatchedRules(pack: Pack): string[] {
   const ids = (pack.rules ?? [])
-    .filter((r) => "when" in r && (r.when.path !== undefined || r.when.site !== undefined))
+    .filter((r) => "when" in r && r.when.site !== undefined)
     .map((r) => r.id);
   return ids.length
+    ? [`rules that go by a file's site never match yet, so they tag nothing: ${ids.join(", ")}`]
+    : [];
+}
+
+/**
+ * Files that rules by path can't reach, when the pack has such rules: those with no path
+ * recorded (uploads and mail, which have none; and files a source recorded before paths were
+ * kept, until it next reports them). Said at plan time, or "everything under HR/ is
+ * confidential" is believed of files it doesn't hold for.
+ */
+async function unplacedFiles(tx: Tx, tenantId: string, pack: Pack): Promise<string[]> {
+  if (!(pack.rules ?? []).some((r) => "when" in r && r.when.path !== undefined)) return [];
+  const [row] = await tx
+    .select({ n: count() })
+    .from(sourceRefs)
+    .innerJoin(
+      objects,
+      and(eq(objects.tenantId, sourceRefs.tenantId), eq(objects.id, sourceRefs.objectId)),
+    )
+    .where(
+      and(eq(sourceRefs.tenantId, tenantId), isNull(sourceRefs.path), isNull(objects.deletedAt)),
+    );
+  const n = Number(row?.n ?? 0);
+  return n > 0
     ? [
-        `rules that go by a file's path or site never match yet, so they tag nothing: ${ids.join(", ")}`,
+        `${n} file(s) have no path recorded, so rules that go by path don't reach them: uploads, and files recorded before paths were kept, until their source is crawled from the beginning`,
       ]
     : [];
 }
