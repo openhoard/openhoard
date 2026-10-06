@@ -188,6 +188,16 @@ export {
   type VersionCard,
 } from "./cards.js";
 export {
+  AdminGrantError,
+  giveTagGrant,
+  listTagGrants,
+  TAG_GRANTS_MAX,
+  takeTagGrant,
+  type AdminGrantErrorCode,
+  type TagGrant,
+  type TagGrantInput,
+} from "./grant-admin.js";
+export {
   applyInjectionFlag,
   clearInjectionReview,
   hasInjectionFlag,
