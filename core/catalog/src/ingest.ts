@@ -10,7 +10,7 @@ import {
   zones,
   type Tx,
 } from "@openhoard/core-db";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import { writeActivity } from "./activity.js";
 import { contentHasher, scopedBlobId } from "./hash.js";
 import { lockObject, lockSourceItem } from "./locks.js";
@@ -95,6 +95,49 @@ export interface IngestInput {
    */
   sourceModifiedBy?: string;
   sourceCreatedBy?: string;
+  /**
+   * Where the item is in its source: names from the top down, its own name last (a connector's
+   * `SourceItem.path`). Kept with the source reference for rules by folder. One that can't be
+   * kept (empty, over {@link MAX_PATH_NAMES} names, a name empty, over 1024 characters or
+   * holding NUL) is left out, not refused. Omitted: what is recorded stays.
+   */
+  path?: readonly string[];
+}
+
+/** The most names a recorded path has: as deep as a connector may report (the SDK's limit). */
+export const MAX_PATH_NAMES = 1024;
+
+/** `path` as it is kept, or null when it can't be. */
+function keptPath(path: readonly string[]): string[] | null {
+  const ok =
+    path.length >= 1 &&
+    path.length <= MAX_PATH_NAMES &&
+    path.every(
+      (n) => typeof n === "string" && n !== "" && !n.includes("\0") && [...n].length <= 1024,
+    );
+  return ok ? [...path] : null;
+}
+
+const samePath = (a: readonly string[] | null, b: readonly string[] | null) =>
+  a === b || (a !== null && b !== null && a.length === b.length && a.every((n, i) => n === b[i]));
+
+/**
+ * Where the object is in its source, as last recorded: its first source reference's path (an
+ * object has one reference unless two sources name the same file). For enrichment, which
+ * decides from stored facts only.
+ */
+export async function sourcePathOf(
+  tx: Tx,
+  tenantId: string,
+  objectId: string,
+): Promise<string[] | null> {
+  const [ref] = await tx
+    .select({ path: sourceRefs.path })
+    .from(sourceRefs)
+    .where(and(eq(sourceRefs.tenantId, tenantId), eq(sourceRefs.objectId, objectId)))
+    .orderBy(asc(sourceRefs.source), asc(sourceRefs.externalId))
+    .limit(1);
+  return ref?.path ?? null;
 }
 
 export interface IngestResult {
@@ -110,6 +153,12 @@ export interface IngestResult {
    * current version is unprocessed until it finishes (T-603).
    */
   renamed: boolean;
+  /**
+   * True when the folders the item is in changed (`path` without its own name: that is the
+   * title's business), a first recording of them included. Rules go by folder, so a move needs
+   * enrichment again as a rename does.
+   */
+  moved: boolean;
 }
 
 export type IngestErrorCode =
@@ -158,7 +207,7 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
   }
 
   const [ref] = await tx
-    .select({ objectId: sourceRefs.objectId })
+    .select({ objectId: sourceRefs.objectId, path: sourceRefs.path })
     .from(sourceRefs)
     .where(
       and(
@@ -172,6 +221,7 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
     etag: input.etag ?? null,
     syncedAt: sql`now()`,
     ...sourceFactsOf(input),
+    ...(input.path === undefined ? {} : { path: keptPath(input.path) }),
   };
 
   if (!ref) {
@@ -209,6 +259,7 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
       created: { object: true, version: true, blob: blobCreated },
       restored: false,
       renamed: false,
+      moved: false,
     };
   }
 
@@ -246,18 +297,21 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
   const unchanged = latest?.blobId === content.blobId && latest.mime === mime;
   let version;
   const renamed = object.title !== input.title;
+  const folders = (p: readonly string[] | null) => (p === null ? null : p.slice(0, -1));
+  const moved =
+    input.path !== undefined && !samePath(folders(ref.path), folders(keptPath(input.path)));
   if (unchanged) {
     version = { versionId: latest.id, seq: latest.seq };
     const marker =
       input.sourceVersion !== undefined && input.sourceVersion !== latest.sourceVersion;
     // Title rules and the display title depend on the title: a rename starts enrichment over,
     // and until it finishes the object is unprocessed (hidden from non-readers).
-    if (marker || renamed) {
+    if (marker || renamed || moved) {
       await tx
         .update(versions)
         .set({
           ...(marker ? { sourceVersion: input.sourceVersion } : {}),
-          ...(renamed ? { processedAt: null } : {}),
+          ...(renamed || moved ? { processedAt: null } : {}),
         })
         .where(and(eq(versions.tenantId, tenantId), eq(versions.id, latest.id)));
     }
@@ -289,6 +343,7 @@ export async function ingest(tx: Tx, tenantId: string, input: IngestInput): Prom
     created: { object: false, version: !unchanged, blob: blobCreated },
     restored,
     renamed,
+    moved,
   };
 }
 

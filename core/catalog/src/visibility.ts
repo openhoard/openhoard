@@ -5,6 +5,7 @@ import {
   objects,
   objectTags,
   queryRows,
+  sourceRefs,
   tagOf,
   tagReviews,
   tenants,
@@ -26,7 +27,7 @@ import {
   type ProviderKind,
   type Visibility,
 } from "@openhoard/core-policy";
-import { and, desc, eq, inArray, isNotNull, isNull, max, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, isNull, max, ne, or, sql } from "drizzle-orm";
 import type { ActivityRecorder } from "./activity.js";
 import { lockObject } from "./locks.js";
 
@@ -826,6 +827,17 @@ export async function setDisplayTitle(
   return updated.length > 0;
 }
 
+/**
+ * What an enrichment job read of a version's object when it started: its title, and, when the
+ * job goes by it, where the file is in its source (core/catalog sourcePathOf(); null when none
+ * is recorded). Left out, the path isn't compared.
+ */
+export interface VersionSeen {
+  versionId: string;
+  title: string;
+  path?: readonly string[] | null;
+}
+
 /** Where a version stands for enrichment; see {@link lockCurrentVersion}. */
 export type VersionStanding =
   /** Its object's current version, under the title given. */
@@ -849,7 +861,7 @@ export type VersionStanding =
 export async function lockCurrentVersion(
   tx: Tx,
   tenantId: string,
-  input: { versionId: string; title: string },
+  input: VersionSeen,
 ): Promise<VersionStanding> {
   // A version never changes objects, so an unlocked read names the object to lock.
   const [version] = await tx
@@ -874,7 +886,20 @@ export async function lockCurrentVersion(
     .where(and(eq(objects.tenantId, tenantId), eq(objects.id, version.objectId)))
     .for("share");
   if (!object) return "gone";
-  return object.title === input.title ? "current" : "renamed";
+  if (object.title !== input.title) return "renamed";
+  // Moved is renamed, for a job: what it decided from the folders is as stale as from the name.
+  if (input.path !== undefined) {
+    const [ref] = await tx
+      .select({ path: sourceRefs.path })
+      .from(sourceRefs)
+      .where(and(eq(sourceRefs.tenantId, tenantId), eq(sourceRefs.objectId, version.objectId)))
+      .orderBy(asc(sourceRefs.source), asc(sourceRefs.externalId))
+      .limit(1)
+      // As the object's row above: the latest committed, or a retry in a snapshot.
+      .for("share");
+    if (JSON.stringify(ref?.path ?? null) !== JSON.stringify(input.path)) return "renamed";
+  }
+  return "current";
 }
 
 /**
@@ -886,7 +911,7 @@ export async function lockCurrentVersion(
 export async function markProcessed(
   tx: Tx,
   tenantId: string,
-  input: { versionId: string; title: string },
+  input: VersionSeen,
 ): Promise<boolean> {
   if ((await lockCurrentVersion(tx, tenantId, input)) !== "current") return false;
   const updated = await tx

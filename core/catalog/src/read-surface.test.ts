@@ -125,6 +125,8 @@ const SURFACE = {
     "readEmbeddings",
     "versionsWithoutEmbeddings",
     "sourceItemState",
+    // Where a file is in its source, for enrichment (rules by folder): no caller.
+    "sourcePathOf",
     "tenantPolicies",
     "tenantRules",
     // The whole vocabulary with open-item counts (T-903): for tenant admins only; it checks
@@ -137,6 +139,7 @@ const SURFACE = {
     "contentHash",
     "contentHasher",
     "evaluateRules",
+    "rulePath",
     "fuseChannels",
     "globMatch",
     "healthCsv",
@@ -185,6 +188,7 @@ const SURFACE = {
     "InjectionReviewError",
     "MAX_EMBEDDINGS_PER_VERSION",
     "MAX_OBJECT_IDS",
+    "MAX_PATH_NAMES",
     "MAX_QUERY_VECTORS",
     "PackError",
     "REPEAT_WINDOW_MS",

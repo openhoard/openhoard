@@ -3,6 +3,8 @@ import {
   enrichmentExposure,
   lockCurrentVersion,
   markProcessed,
+  rulePath,
+  sourcePathOf,
   markSuperseded,
   tenantRules,
   type ContentSource,
@@ -67,6 +69,11 @@ export interface EnrichTarget {
   seq: number;
   /** The object's title when the job started: the one markProcessed() is given. */
   title: string;
+  /**
+   * Where the file was in its source when the job started (core/catalog sourcePathOf()), given
+   * to markProcessed() with the title; null when none is recorded.
+   */
+  path: string[] | null;
   mime: string;
   blobId: string;
 }
@@ -152,13 +159,14 @@ export interface EnrichStep {
 
 /**
  * The rule tagger (core/catalog rules.ts, T-403) as a step, first in the pipeline so rule tags
- * are on the file before any model sees it. It applies the tenant's pack rules to the title the
- * job saw and the version's media type: applyRuleTags() makes the object's rule tags exactly
- * what the rules give, so running it twice changes nothing.
+ * are on the file before any model sees it. It applies the tenant's pack rules to the title and
+ * the place in its source the job saw, and the version's media type: applyRuleTags() makes the
+ * object's rule tags exactly what the rules give, so running it twice changes nothing.
  *
- * Rules on the path or the site don't match yet: neither is stored on the object, and a step
- * must decide from stored facts only (a re-run or the sweep has nothing else), or it would take
- * off tags a first run gave.
+ * A step decides from stored facts only (a re-run or the sweep has nothing else), so the path
+ * is the one recorded with the source reference; a file with none (an upload, or one recorded
+ * before paths were kept) matches no rule by path. Rules on the site don't match yet: it isn't
+ * stored.
  */
 export const ruleTagStep: EnrichStep = {
   name: "rule-tags",
@@ -168,6 +176,7 @@ export const ruleTagStep: EnrichStep = {
       await applyRuleTags(tx, target.tenantId, target.objectId, rules, {
         title: target.title,
         mime: target.mime,
+        ...(target.path === null ? {} : { path: rulePath(target.path) as string }),
       });
     });
   },
@@ -268,8 +277,10 @@ export function isEnrichPayload(data: unknown): data is EnrichPayload {
  * Whether an ingest result needs enrichment: a new version, or a rename, which ingest marks
  * unprocessed again (T-603). A restored object or a refreshed source reference doesn't.
  */
-export function needsEnrichment(result: Pick<IngestResult, "created" | "renamed">): boolean {
-  return result.created.version || result.renamed;
+export function needsEnrichment(
+  result: Pick<IngestResult, "created" | "renamed" | "moved">,
+): boolean {
+  return result.created.version || result.renamed || result.moved;
 }
 
 /**
@@ -323,6 +334,7 @@ export async function enrichVersion(
         const standing = await lockCurrentVersion(tx, tenantId, {
           versionId,
           title: target.title,
+          path: target.path,
         });
         return standing === "current"
           ? { standing, value: await work(tx) }
@@ -373,12 +385,12 @@ export async function enrichVersion(
   options.signal.throwIfAborted();
 
   const marked = await db.withTenant(tenantId, (tx) =>
-    markProcessed(tx, tenantId, { versionId, title: target.title }),
+    markProcessed(tx, tenantId, { versionId, title: target.title, path: target.path }),
   );
   if (marked) return "processed";
   // markProcessed() says no for a version that is gone, replaced, renamed, or marked already.
   const standing = await db.withTenant(tenantId, (tx) =>
-    lockCurrentVersion(tx, tenantId, { versionId, title: target.title }),
+    lockCurrentVersion(tx, tenantId, { versionId, title: target.title, path: target.path }),
   );
   return standing === "current"
     ? "already-processed"
@@ -431,7 +443,7 @@ async function readTarget(
     .from(versions)
     .where(and(eq(versions.tenantId, tenantId), eq(versions.objectId, row.objectId)));
   if (latest?.seq !== row.seq) return "superseded";
-  return { tenantId, versionId, ...row };
+  return { tenantId, versionId, ...row, path: await sourcePathOf(tx, tenantId, row.objectId) };
 }
 
 /** A step failed; the job fails with this and runs again later. `cause` is the step's error. */

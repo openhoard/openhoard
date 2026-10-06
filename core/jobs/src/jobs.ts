@@ -182,7 +182,7 @@ export interface Jobs {
    */
   enqueueAfterIngest(
     tenantId: string,
-    result: Pick<IngestResult, "versionId" | "created" | "renamed">,
+    result: Pick<IngestResult, "versionId" | "created" | "renamed" | "moved">,
   ): Promise<boolean>;
   /** Starts a maintenance run now, as the schedule does. Returns the job's id. */
   runMaintenance(): Promise<string | null>;

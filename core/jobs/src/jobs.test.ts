@@ -70,6 +70,8 @@ const PACK = {
     { id: "sheets", tag: "kind:spreadsheet", when: { extension: ["xlsx"] } },
     { id: "docs", tag: "kind:document", when: { extension: ["docx"] } },
     { id: "topics", facet: "topic", dictionary: { budget: ["Budget"] } },
+    // By folder: only an item whose source says where it is can match.
+    { id: "finance-folder", tag: "topic:budget", when: { path: "Finance/**" } },
     // Not in the vocabulary: every run proposes it, and it waits in review, once.
     { id: "forecasts", tag: "topic:forecast", when: { extension: ["xlsx"] } },
   ],
@@ -114,7 +116,7 @@ let items = 0;
 /** Ingests an item (a new one unless `externalId` is given) and returns the result. */
 function ingestItem(
   title: string,
-  options: { externalId?: string; blob?: number; tenant?: SeededTenant } = {},
+  options: { externalId?: string; blob?: number; tenant?: SeededTenant; path?: string[] } = {},
 ): Promise<IngestResult & { externalId: string; blob: number }> {
   const s = options.tenant ?? t;
   const k = ++items;
@@ -130,6 +132,7 @@ function ingestItem(
       title,
       ownerId: `user:${s.userId}`,
       content: { blobId: `b3t:${blob.toString(16).padStart(64, "a")}`, size: 10 },
+      ...(options.path ? { path: options.path } : {}),
     })),
   }));
 }
@@ -496,6 +499,7 @@ describe("the worker", () => {
         versionId: item.versionId,
         seq: 1,
         title: "Budget 2026.xlsx",
+        path: null,
         mime: "application/octet-stream",
         blobId: "unused",
       },
@@ -552,6 +556,62 @@ describe("the worker", () => {
     ]);
     const [view] = await nonReaderView(item.objectId);
     expect(view).toMatchObject({ title: "Forecast 2026.xlsx" });
+  });
+
+  it("tags by folder, and writes nothing for folders a move changed: the new place's job does", async () => {
+    const SHEET = { facet: "kind", value: "spreadsheet", source: "rule" };
+    const BUDGET = { facet: "topic", value: "budget", source: "rule" };
+    const item = await ingestItem("Notes.xlsx", { path: ["Finance", "2026", "Notes.xlsx"] });
+    let moved: IngestResult | undefined;
+    const move: { to?: string[] } = {};
+    const jobs = await start({
+      steps: [
+        {
+          name: "move-once",
+          async run() {
+            if (!move.to || moved) return;
+            // The source moves the file after the job read where it was. The rule tagger after
+            // this step would tag by the old folder: it must not.
+            moved = await ingestItem("Notes.xlsx", {
+              externalId: item.externalId,
+              blob: item.blob,
+              path: move.to,
+            });
+            await jobs.enqueueAfterIngest(t.tenantId, moved);
+          },
+        },
+        ruleTagStep,
+      ],
+    });
+    await jobs.enqueueAfterIngest(t.tenantId, item);
+    const [first] = await enrichJobs(jobs, item.versionId);
+    expect(output(await settled(jobs, QUEUES.enrich, first?.id ?? null))).toEqual({
+      outcome: "processed",
+    });
+    // Nothing in its name says budget: the folder does.
+    expect((await tagState(item.objectId)).tags).toEqual([SHEET, BUDGET]);
+
+    // Out of Finance, by a job that started while it was still there.
+    move.to = ["Archive", "Notes.xlsx"];
+    const stale = await ingestItem("Notes.xlsx", {
+      externalId: item.externalId,
+      blob: item.blob,
+      path: ["Finance", "Notes.xlsx"],
+    });
+    expect(stale).toMatchObject({ moved: true, renamed: false, versionId: item.versionId });
+    await jobs.enqueueAfterIngest(t.tenantId, stale);
+    const all = await waitFor(async () => {
+      const found = await enrichJobs(jobs, item.versionId);
+      return found.length === 3 && found.every((j) => j.state === "completed") ? found : null;
+    }, "the run after the move");
+    expect(all.map(output)).toEqual([
+      { outcome: "processed" },
+      { outcome: "renamed" },
+      { outcome: "processed" },
+    ]);
+    expect(moved).toMatchObject({ moved: true, versionId: item.versionId });
+    expect(await processedAt(item.versionId)).toBeInstanceOf(Date);
+    expect((await tagState(item.objectId)).tags).toEqual([SHEET]);
   });
 
   it("leaves a replaced version to the newer one's job", async () => {

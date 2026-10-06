@@ -274,6 +274,13 @@ export const sourceRefs = pgTable(
     sourceModifiedAt: timestamp("source_modified_at", { withTimezone: true }),
     sourceModifiedBy: text("source_modified_by"),
     sourceCreatedBy: text("source_created_by"),
+    /**
+     * Where the item is in its source: names from the top of what the connector serves down to
+     * the item, its own name last. For rules by folder, and for telling same-named files apart.
+     * Kept as names, never joined: a name may hold what another system reads as a separator.
+     * Null: not said, too long to keep, or recorded before this was kept.
+     */
+    path: text("path").array(),
   },
   (t) => [
     primaryKey({ columns: [t.tenantId, t.source, t.externalId] }),
@@ -285,6 +292,7 @@ export const sourceRefs = pgTable(
     index("source_refs_object_idx").on(t.tenantId, t.objectId),
     check("source_refs_source_format", sql`source ~ '^[a-z0-9][a-z0-9._-]{0,63}$'`),
     check("source_refs_external_id_length", sql`char_length(external_id) between 1 and 2048`),
+    check("source_refs_path_length", sql`cardinality(path) between 1 and 1024`),
     check(
       "source_refs_source_users_length",
       sql`char_length(source_modified_by) between 1 and 1024 and char_length(source_created_by) between 1 and 1024`,

@@ -8,7 +8,7 @@ import { proposeTag, type TagOutcome } from "./tagging.js";
  * The rule tagger (T-403): deterministic tags from where a file lives and what it is called,
  * applied before any model sees it. Rules come from packs and admins as data:
  *
- *   { id: "finance-folder", tag: "department:finance", when: { path: "Finance/**" } }
+ *   { id: "finance-folder", tag: "department:finance", when: { path: "Documents/Finance/**" } }
  *   { id: "spreadsheets", tag: "kind:spreadsheet", when: { extension: ["xlsx", "csv"] } }
  *   { id: "clients", facet: "client", dictionary: { acme: ["Acme", "Acme Corp"] } }
  *
@@ -20,7 +20,11 @@ import { proposeTag, type TagOutcome } from "./tagging.js";
 
 /** What rules can look at. Everything is optional; a condition on a missing field fails. */
 export interface RuleInput {
-  /** Path within its source, `/`-separated, e.g. `Clients/Acme/2026/Plan.docx`. */
+  /**
+   * Path within its source, `/`-separated, e.g. `Clients/Acme/2026/Plan.docx` (rulePath()). A
+   * SharePoint source's paths start with the library's name (`Documents/Clients/…`), so a rule
+   * for a folder wherever it is starts with two stars and a slash.
+   */
   path?: string;
   /** The source's site or drive name, e.g. a SharePoint site. */
   site?: string;
@@ -58,6 +62,15 @@ export interface DictionaryRule {
 }
 
 export type TagRule = MatchRule | DictionaryRule;
+
+/**
+ * A file's place in its source as rules read it: its names joined by `/`. A `/` inside a name
+ * becomes `_`, so a file named `Public/x` at the top is never taken for `x` in a folder
+ * `Public`. Null for no path.
+ */
+export function rulePath(path: readonly string[] | null): string | undefined {
+  return path === null ? undefined : path.map((n) => n.replaceAll("/", "_")).join("/");
+}
 
 /** The tags `rules` give an input, with the rule that gave each, sorted by tag. */
 export function evaluateRules(
