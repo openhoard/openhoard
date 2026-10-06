@@ -86,6 +86,8 @@ export interface FileInput {
   processed?: boolean;
   /** Last change; now by default. */
   updatedAt?: Date;
+  /** When the source says the file last changed. */
+  sourceModifiedAt?: Date;
 }
 
 export interface ToolAnswer {
@@ -282,6 +284,7 @@ export async function openHarness(
         externalId: `item-${objectId}`,
         objectId,
         url: input.url ?? null,
+        sourceModifiedAt: input.sourceModifiedAt ?? null,
       });
       const tags = [
         ...(input.tags ?? []).map((tag) => ({ tag, model: false })),

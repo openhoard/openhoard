@@ -4,6 +4,7 @@ import {
   newId,
   objects,
   objectTags,
+  sourceRefs,
   queryRows,
   tenants,
   versions,
@@ -354,10 +355,38 @@ describe("viewObjects", () => {
         tags: [t.tag, "kind:report", "sensitivity:restricted"],
         readable: true,
         updatedAt: expect.any(Date),
+        modifiedAt: expect.any(Date),
         primaryTag: null,
         metadataOnly: false,
       },
     ]);
+  });
+
+  it("says when the file last changed as its source does, never later than now", async () => {
+    const times = async () => {
+      const [card] = await view(reader());
+      if (card?.shape !== "card") throw new Error("no card");
+      return { modified: card.modifiedAt.getTime(), updated: card.updatedAt.getTime() };
+    };
+    const said = (at: Date | null) =>
+      inTenant((tx) =>
+        tx
+          .update(sourceRefs)
+          .set({ sourceModifiedAt: at })
+          .where(eq(sourceRefs.objectId, t.objectId)),
+      );
+    // No source says: when OpenHoard last recorded a change.
+    await said(null);
+    const none = await times();
+    expect(none.modified).toBe(none.updated);
+    // Crawled today, last worked on in 2019.
+    await said(new Date("2019-03-04T05:06:07Z"));
+    expect((await times()).modified).toBe(Date.parse("2019-03-04T05:06:07Z"));
+    // A timestamp from the future is its author's doing: held to now, so it can't lead every
+    // listing by recency for good.
+    await said(new Date("2099-01-01T00:00:00Z"));
+    const future = (await times()).modified;
+    expect(Math.abs(future - Date.now())).toBeLessThan(120_000);
   });
 
   it("shows the home to a reader, and to others only when it is a tag they see", async () => {

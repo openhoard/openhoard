@@ -703,7 +703,9 @@ read into memory when the server starts and served as they are.
   its activity buffer and audit trail, the tenant's policies (its packs' Cedar rules, compiled
   once per policy set) and the model the call reports (`_meta`).
   - `whoami`: the person, the client's id and trust, the scopes granted.
-  - `find` (query, tags, kind, media type, modified range, limit, cursor): a top match and
+  - `find` (query, tags, kind, media type, modified range, limit, cursor; "modified" is when
+    the file last changed at its source, never later than now, or when OpenHoard recorded it
+    if the source doesn't say): a top match and
     alternatives as compact cards (id, title as shown, kind, modified, owner's name, tags,
     summary where the card allows, and which channels matched: never a text snippet). Queries
     are embedded by local providers only, when an embeddings model is configured.
