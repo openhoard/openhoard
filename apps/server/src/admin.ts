@@ -36,11 +36,13 @@ import {
 } from "@openhoard/core-catalog";
 import {
   createTenant,
+  DEFAULT_GRANT_DAYS,
   getTenant,
   isId,
   newId,
   openDatabase,
   type Database,
+  type GrantRole,
   type Tx,
 } from "@openhoard/core-db";
 import {
@@ -50,6 +52,7 @@ import {
   getGroup,
   getUser,
   grantAdmin,
+  groupPrincipal,
   IdentityError,
   INVITE_MAX_HOURS,
   issueInvite,
@@ -68,7 +71,9 @@ import {
   SCIM_TOKEN_MAX_DAYS,
   SIGN_IN_LINK_MAX_MINUTES,
   unlockUser,
+  userPrincipal,
   type EndedAccess,
+  type Group,
   type User,
 } from "@openhoard/core-identity";
 import {
@@ -83,6 +88,7 @@ import {
 } from "@openhoard/core-jobs";
 import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
 import { adminGroupOf, ensureDataDir, loadConfig, type Config } from "./config.js";
+import { grantAdd, grantList, grantRevoke, type Named } from "./admin-grants.js";
 import { retrying } from "./retry.js";
 
 /*
@@ -114,6 +120,10 @@ import { retrying } from "./retry.js";
  *   admin source confirm-reconcile --tenant ten_… --source <name>
  *   admin source discard-reconcile --tenant ten_… --source <name>
  *   admin source accept-identity   --tenant ten_… --source <name>
+ *   admin grant add    --tenant ten_… (--user <…> | --group <grp_… | name>) --tag facet:value
+ *                      [--role read|write] [--days <n> | --forever]
+ *   admin grant list   --tenant ten_… [--user <…> | --group <…>]
+ *   admin grant revoke --tenant ten_… --id grt_…
  *   admin review list    --tenant ten_… --user <usr_… | email | userName> [--limit 100]
  *   admin review approve --tenant ten_… --user <…> --id rev_… [--replace]
  *   admin review reject  --tenant ten_… --user <…> --id rev_…
@@ -297,6 +307,13 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
   source accept-identity --tenant <ten_…> --source <name>
                                                    accept that the source is now another one
                                                    (it is crawled again from the beginning)
+  grant add --tenant <ten_…> (--user <usr_…|email|userName> | --group <grp_…|name>)
+            --tag <facet:value> [--role read|write] [--days <n> | --forever]
+                                                   let them read (or read and tag) every file
+                                                   that carries the tag; ${DEFAULT_GRANT_DAYS} days unless said
+  grant list --tenant <ten_…> [--user <…> | --group <…>]
+                                                   the grants on tags that people gave
+  grant revoke --tenant <ten_…> --id <grt_…>       take one back
   review list --tenant <ten_…> --user <usr_…|email|userName> [--limit <1-${REVIEW_INBOX_MAX}>]
                                                    the proposed tags that person may decide
   review approve --tenant <ten_…> --user <…> --id <rev_…> [--replace]
@@ -354,6 +371,10 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         to: { type: "string" },
         "stale-days": { type: "string" },
         "large-mb": { type: "string" },
+        group: { type: "string" },
+        tag: { type: "string" },
+        role: { type: "string" },
+        forever: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
     });
@@ -393,6 +414,9 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "source confirm-reconcile",
     "source discard-reconcile",
     "source accept-identity",
+    "grant add",
+    "grant list",
+    "grant revoke",
     "review list",
     "review approve",
     "review reject",
@@ -508,6 +532,26 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
           sourceArg(values.source),
           io,
         );
+      case "grant add": {
+        const tenantId = tenantArg(values.tenant);
+        const what = grantArgs(values);
+        const who = await principalNamed(db, tenantId, values, io);
+        return who === null ? 1 : await grantAdd(db, tenantId, who, what, ADMIN_ACTOR, io);
+      }
+      case "grant list": {
+        const tenantId = tenantArg(values.tenant);
+        const all = values.user === undefined && values.group === undefined;
+        const who = all ? undefined : await principalNamed(db, tenantId, values, io);
+        return who === null ? 1 : await grantList(db, tenantId, who, io);
+      }
+      case "grant revoke":
+        return await grantRevoke(
+          db,
+          tenantArg(values.tenant),
+          need(values.id, "--id"),
+          ADMIN_ACTOR,
+          io,
+        );
       case "review list":
         return await reviewList(
           db,
@@ -601,6 +645,71 @@ export async function openAdminDatabase(config: Config, io: AdminIo): Promise<Da
 function need(value: string | undefined, flag: string): string {
   if (value === undefined || value === "") throw new UsageError(`${flag} is required`);
   return value;
+}
+
+/** `grant add`'s role, tag and end: a role defaults to read, an end to the default days. */
+function grantArgs(values: {
+  tag?: string | undefined;
+  role?: string | undefined;
+  days?: string | undefined;
+  forever?: boolean | undefined;
+}): { role: GrantRole; tag: string; expiresAt?: Date | null } {
+  const tag = need(values.tag, "--tag");
+  const role = values.role ?? "read";
+  if (role !== "read" && role !== "write") throw new UsageError("--role is read or write");
+  if (values.forever === true && values.days !== undefined) {
+    throw new UsageError("--days or --forever, not both");
+  }
+  if (values.forever === true) return { role, tag, expiresAt: null };
+  if (values.days === undefined) return { role, tag };
+  const days = Number(values.days);
+  if (!Number.isInteger(days) || days < 1 || days > 3650) {
+    throw new UsageError("--days is 1 to 3650");
+  }
+  return { role, tag, expiresAt: new Date(Date.now() + days * 86_400_000) };
+}
+
+/**
+ * The person or group a `grant` command names with `--user` or `--group` (one of them); null,
+ * with the reason said, when there is none or more than one. A group goes by its id or its
+ * exact name.
+ */
+async function principalNamed(
+  db: Database,
+  tenantId: string,
+  values: { user?: string | undefined; group?: string | undefined },
+  io: AdminIo,
+): Promise<Named | null> {
+  if ((values.user === undefined) === (values.group === undefined)) {
+    throw new UsageError("name one of --user or --group");
+  }
+  if (values.user !== undefined) {
+    const user = await reviewerNamed(db, tenantId, need(values.user, "--user"), io);
+    if (typeof user === "string") return null;
+    return { principal: userPrincipal(user.id), label: oneLine(user.email ?? user.displayName) };
+  }
+  const named = need(values.group, "--group");
+  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
+    io.err(`no tenant ${tenantId}\n`);
+    return null;
+  }
+  const found = await db.withTenant(tenantId, async (tx) => {
+    if (isId("group", named)) {
+      const g = await getGroup(tx, tenantId, named);
+      return g ? [g] : [];
+    }
+    return (await listGroups(tx, tenantId, { name: named }, { limit: 2 })).groups;
+  });
+  if (found.length !== 1) {
+    io.err(
+      found.length === 0
+        ? `tenant ${tenantId} has no group ${oneLine(named)} (admin group list shows them)\n`
+        : `${oneLine(named)} names more than one group: use the grp_… id\n`,
+    );
+    return null;
+  }
+  const [group] = found as [Group];
+  return { principal: groupPrincipal(group.id), label: `The group ${oneLine(group.name)}` };
 }
 
 function sourceArg(value: string | undefined): string {

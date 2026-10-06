@@ -377,6 +377,15 @@ bench:recall -- --url postgres://…` runs the same at scale on native PostgreSQ
 conditions) into the candidate SQL, keep the gate as the final check, and drop the candidate cap
 so counts are exact. `search.test.ts` pins today's behaviour; flip that test when this lands.
 
+## Grants an admin makes
+
+`giveTagGrant()`, `takeTagGrant()` and `listTagGrants()` (grant-admin.ts) are the use case
+behind `admin grant …`: a role on a tag, for a person or a group. Each checks, acts and appends
+its audit record (`grant.add`, `grant.revoke`), so another door is the same use case. Only tag
+grants, never a source's: an imported grant is the source's to give and take, isn't listed, and
+can't be taken back here. A second live grant of the same role on the same tag to the same
+principal is refused (`exists`). Who may call them is the door's to check.
+
 ## Why can X see this?
 
 `whoCanAccess()` (T-806) is the list view of the same question for one file: its owner, every

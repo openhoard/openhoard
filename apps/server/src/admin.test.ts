@@ -1127,6 +1127,156 @@ describe("openhoard admin review (T-1403)", { timeout: 180_000 }, () => {
   });
 });
 
+describe("openhoard admin grant", { timeout: 180_000 }, () => {
+  it("lets a person read what a tag marks, by name or through a group, and takes it back", async () => {
+    // A processed file carrying the seeded tag, a person with no way to it, and a group of one.
+    const made = await inspect(async (db) => {
+      const t = await seedTenant(db, 8);
+      return db.withTenant(t.tenantId, async (tx) => {
+        await markProcessed(tx, t.tenantId, { versionId: t.versionId, title: "Report 8.docx" });
+        const person = async (name: string) =>
+          (
+            await createUser(tx, t.tenantId, {
+              email: `${name}@example.com`,
+              displayName: name,
+              source: "local",
+              kind: "member",
+            })
+          ).id;
+        const [ines, joe] = [await person("ines"), await person("joe")];
+        const team = await createGroup(tx, t.tenantId, { name: "Deal team", source: "local" });
+        await addMember(tx, t.tenantId, team.id, joe, "local");
+        return { ...t, ines, joe, team: team.id };
+      });
+    });
+    const { tenantId, tag } = made;
+    const reads = (userId: string) =>
+      inspect((db) =>
+        db.withTenant(
+          tenantId,
+          async (tx) => {
+            const principal = await resolvePrincipal(tx, tenantId, userId);
+            if (!principal) throw new Error("no principal");
+            const [card] = await viewObjects(
+              tx,
+              tenantId,
+              new Authorizer(createCedarEngine()),
+              { principal, client: { id: "openhoard-web", trust: "first-party" } },
+              [made.objectId],
+            );
+            return card?.shape === "card" && card.readable;
+          },
+          VIEW_TRANSACTION,
+        ),
+      );
+    const grant = (...argv: string[]) => admin("grant", ...argv, "--tenant", tenantId);
+    expect([await reads(made.ines), await reads(made.joe)]).toEqual([false, false]);
+
+    // To a person, by email: the id on standard output, the rest in words.
+    const one = await grant("add", "--user", "ines@example.com", "--tag", tag);
+    expect(one.code, one.err).toBe(0);
+    const id = one.out.trim();
+    expect(id).toMatch(/^grt_[0-9a-hjkmnp-tv-z]{26}$/);
+    expect(one.err).toContain(`ines@example.com may read every file tagged ${tag}`);
+    expect(one.err).toMatch(/ends \d{4}-\d\d-\d\d\.\n$/);
+    expect([await reads(made.ines), await reads(made.joe)]).toEqual([true, false]);
+
+    // To a group, by its name, for good, to read and tag.
+    const team = await grant(
+      "add",
+      "--group",
+      "Deal team",
+      "--tag",
+      tag,
+      "--role",
+      "write",
+      "--forever",
+    );
+    expect(team.code, team.err).toBe(0);
+    expect(team.err).toContain("The group Deal team may read and tag every file");
+    expect(team.err).toContain("never ends");
+    expect(await reads(made.joe)).toBe(true);
+
+    // Listed: a grant a line, newest first, with names; one person's on asking.
+    const listed = await grant("list");
+    expect(listed.code, listed.err).toBe(0);
+    const lines = listed.out.trimEnd().split("\n");
+    expect(lines[0]).toBe(
+      [
+        team.out.trim(),
+        "write",
+        tag,
+        `group:${made.team}`,
+        "Deal team",
+        "never",
+        "system:admin-cli",
+      ].join("\t"),
+    );
+    expect(lines.some((l) => l.startsWith(`${id}\tread\t${tag}\tuser:${made.ines}\tines\t`))).toBe(
+      true,
+    );
+    const hers = await grant("list", "--user", made.ines);
+    expect(hers.out.trimEnd().split("\n")).toHaveLength(1);
+    // Joe reads through his group: nothing is his by name, and the answer says where to look.
+    expect((await grant("list", "--user", "joe@example.com")).err).toContain(
+      "is listed under --group",
+    );
+    expect((await grant("list", "--group", made.team)).out).toContain(`group:${made.team}\t`);
+
+    // Refused, each said: a second of the same, a tag nobody approved, nobody, both or neither.
+    const again = await grant("add", "--user", made.ines, "--tag", tag);
+    expect(again.code).toBe(1);
+    expect(again.err).toContain(`already has read on ${tag}`);
+    expect((await grant("add", "--user", made.ines, "--tag", "client:nobody")).err).toContain(
+      "not an approved tag",
+    );
+    expect((await grant("add", "--group", "No such", "--tag", tag)).err).toContain("has no group");
+    for (const bad of [
+      ["add", "--tag", tag],
+      ["add", "--user", made.ines, "--group", made.team, "--tag", tag],
+      ["add", "--user", made.ines],
+      ["add", "--user", made.ines, "--tag", tag, "--role", "owner"],
+      ["add", "--user", made.ines, "--tag", tag, "--days", "0"],
+      ["add", "--user", made.ines, "--tag", tag, "--days", "9", "--forever"],
+      ["revoke"],
+    ]) {
+      expect((await grant(...bad)).code, bad.join(" ")).toBe(2);
+    }
+
+    // Taken back: she reads it no more; the group's stands.
+    const revoked = await grant("revoke", "--id", id);
+    expect(revoked.code, revoked.err).toBe(0);
+    expect([await reads(made.ines), await reads(made.joe)]).toEqual([false, true]);
+    expect((await grant("revoke", "--id", id)).err).toContain("no live tag grant");
+    // A tenant that isn't one is said to be none, whatever the command.
+    const nowhere = "ten_00000000000000000000000000";
+    for (const argv of [["list"], ["revoke", "--id", id]]) {
+      const r = await admin("grant", ...argv, "--tenant", nowhere);
+      expect([r.code, r.err]).toEqual([1, `no tenant ${nowhere}\n`]);
+    }
+
+    const actions = await inspect(async (db) => {
+      const lines: string[] = [];
+      await exportAudit(db, tenantId, {}, "ndjson", (s: string) => void lines.push(s));
+      return lines
+        .join("")
+        .trimEnd()
+        .split("\n")
+        .map(
+          (l) =>
+            JSON.parse(l) as { action: string; actor: string; detail?: { principal?: string } },
+        )
+        .filter((e) => e.action.startsWith("grant."))
+        .map((e) => [e.action, e.actor, e.detail?.principal]);
+    });
+    expect(actions).toEqual([
+      ["grant.add", "system:admin-cli", `user:${made.ines}`],
+      ["grant.add", "system:admin-cli", `group:${made.team}`],
+      ["grant.revoke", "system:admin-cli", `user:${made.ines}`],
+    ]);
+  });
+});
+
 describe("openhoard admin audit (T-1404)", { timeout: 180_000 }, () => {
   it("verifies a chain, exports it filtered, and fails once any row is tampered with", async () => {
     const tenantId = (await admin("tenant", "create", "--name", "Acme")).out.trim();

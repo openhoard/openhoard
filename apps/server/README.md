@@ -947,6 +947,9 @@ node apps/server/dist/main.js admin source resume --tenant ten_… --source <nam
 node apps/server/dist/main.js admin source confirm-reconcile --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source discard-reconcile --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source accept-identity --tenant ten_… --source <name>
+node apps/server/dist/main.js admin grant add --tenant ten_… (--user <usr_…|email|userName> | --group <grp_…|name>) --tag <facet:value> [--role read|write] [--days <n> | --forever]
+node apps/server/dist/main.js admin grant list --tenant ten_… [--user <…> | --group <…>]
+node apps/server/dist/main.js admin grant revoke --tenant ten_… --id grt_…
 node apps/server/dist/main.js admin review list --tenant ten_… --user <usr_…|email|userName> [--limit 100]
 node apps/server/dist/main.js admin review approve --tenant ten_… --user <usr_…|email|userName> --id rev_… [--replace]
 node apps/server/dist/main.js admin review reject --tenant ten_… --user <usr_…|email|userName> --id rev_…
@@ -990,6 +993,17 @@ node apps/server/dist/main.js admin audit export --tenant ten_… [--format ndjs
   that one event: the last line's hash of an unfiltered NDJSON export is the head as exported.
   An export that fails, or whose reader goes away part way, is audited as `incomplete`, and its
   file is removed; one that can't be recorded fails, and its file is removed too.
+- **Grants on a tag.** `grant add` lets a person or a group read (or, with `--role write`,
+  read and tag) every file that carries an approved tag, as far as the tenant's policies
+  allow (a file's visibility level holds back people with no grant, not these: a grant on a
+  broad tag reaches that tag's confidential files too, unless a policy forbids it): how the operator gives access by hand, for people a source's own permissions don't
+  reach (a SharePoint site's own groups match nobody here yet). It ends after 90 days unless
+  `--days` or `--forever` says otherwise. `grant list` prints the grants people gave, newest
+  first (id, role, tag, principal, name, end, who gave it), never the ones a source imported;
+  `grant revoke` takes one back, and refuses a source's. Audited `grant.add` and
+  `grant.revoke` as `system:admin-cli`; a refusal here (a tag nobody approved, a second of
+  the same) is said and not audited. The tag must already be on the files: a pack's rule by
+  folder puts it there.
 - **The review inbox (T-1403).** Tags that models and AI assistants (the `tag` tool) proposed
   wait for a person. Until the app has an inbox, `review list` prints the open items on files
   one person may tag, an item a line (id, tag, reason, who proposed it, confidence, when,

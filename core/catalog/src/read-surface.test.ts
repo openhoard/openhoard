@@ -45,6 +45,10 @@ const SURFACE = {
     // A tenant admin's "not an injection" decision and its withdrawal (T-408): checks the admin
     // and appends the audit record itself.
     "clearInjectionReview",
+    // An admin's grant on a tag, given and taken back (grant-admin.ts): each checks, acts and
+    // appends its audit record. Who may is the door's to check.
+    "giveTagGrant",
+    "takeTagGrant",
     "markNotInjection",
     "applyRuleTags",
     "approveReview",
@@ -96,6 +100,8 @@ const SURFACE = {
     // "Who can see this?" (T-806): grants on a file, for its owner and admins only, like
     // explainAccess.
     "whoCanAccess",
+    // The tag grants people gave, for a tenant admin or the operator: no file is named.
+    "listTagGrants",
     // For enrichment (core/jobs): whether a file carries the injection flag (T-408).
     "hasInjectionFlag",
     // For a tool about to give an AI client a file the caller may read (viewObject first): why
@@ -168,6 +174,7 @@ const SURFACE = {
     "BUILTIN_RULE_PREFIX",
     "DEFAULT_MIN_CONFIDENCE",
     "EXACT_SEARCH_ROWS",
+    "AdminGrantError",
     "ExplainError",
     "GENERIC_TITLE",
     "HEALTH_CSV_COLUMNS",
@@ -189,6 +196,7 @@ const SURFACE = {
     "PackError",
     "REPEAT_WINDOW_MS",
     "SEARCH_CANDIDATES",
+    "TAG_GRANTS_MAX",
     "TagError",
     "VECTOR_NEIGHBOURS",
     "VIEW_TRANSACTION",
