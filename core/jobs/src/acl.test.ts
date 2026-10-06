@@ -493,7 +493,7 @@ describe("a source's permissions", () => {
       "v2b",
     );
     await sync();
-    expect(await granted("plan.txt")).toEqual([`read user:${ana}`, `read user:${bo}`]);
+    expect(await granted("plan.txt")).toEqual([`read user:${ana}`, `read user:${bo}`].sort());
     expect(await expiryOf(`user:${bo}`)).toBeNull();
     await put(
       "plan.txt",
