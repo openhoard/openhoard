@@ -11,6 +11,7 @@ import { loginKey } from "./login-state.js";
 import { mountMcp, type EmbedDeps, type McpTool } from "./mcp.js";
 import type { MetadataFetcher } from "./oauth/clients.js";
 import { mountOAuth } from "./oauth/routes.js";
+import { mountReviewApi } from "./review-api.js";
 import { mountScim, type ScimOptions } from "./scim/routes.js";
 import { mountUploads, type UploadDeps } from "./uploads.js";
 import { mountShareFallback, mountWebApp } from "./web-app.js";
@@ -105,6 +106,8 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
     mountAuth(app, shared);
     // Tenant administration (T-106), behind the session and its CSRF check.
     mountAdminApi(app, { auth: config.auth, db: deps.db, ...(log ? { log } : {}) });
+    // The tag review inbox, for whoever is signed in (T-903).
+    mountReviewApi(app, { auth: config.auth, db: deps.db, ...(log ? { log } : {}) });
     // OpenHoard's OAuth authorization server for MCP clients (T-105), and the resource they reach.
     const { requireBearer } = mountOAuth(app, {
       ...shared,

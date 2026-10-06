@@ -243,3 +243,11 @@ export {
   type PackValue,
   type PolicyTest,
 } from "./packs.js";
+export {
+  tenantVocabulary,
+  VOCABULARY_MAX,
+  VocabularyError,
+  type Vocabulary,
+  type VocabularyFacet,
+  type VocabularyValue,
+} from "./vocabulary.js";

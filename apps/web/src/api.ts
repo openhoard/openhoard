@@ -82,9 +82,83 @@ export type ClientDecision = { action: "approve"; trust: Trust } | { action: "re
  */
 export type Changed = "done" | "sign-in-again" | "conflict" | "gone" | "refused" | "failed";
 
+/** Why a suggested tag waits for a person (core/catalog ReviewReason, and `primary`). */
+export type ReviewReason =
+  "new-value" | "low-confidence" | "sensitive" | "conflict" | "agent" | "primary";
+
+/** An open review item, as GET /api/review gives it. */
+export interface ReviewItem {
+  id: string;
+  /** The file's title, as the person is shown it. */
+  title: string;
+  /** `facet:value`. */
+  tag: string;
+  reason: ReviewReason | string;
+  /** Who suggested it: `model:…`, `user:…`, `rule:…`; null when not recorded. */
+  appliedBy: string | null;
+  confidence: number;
+  createdAt: string | null;
+  /** Some decision on it takes a tenant admin. */
+  admin: boolean;
+}
+
+export interface ReviewInbox {
+  items: ReviewItem[];
+  /** More wait than were listed. */
+  more: boolean;
+  /** So many files have open items that not all were looked at. */
+  capped: boolean;
+}
+
+export type ReviewDecision =
+  | { decision: "approve"; replace?: boolean }
+  | { decision: "reject" }
+  | { decision: "merge"; into: string; replace?: boolean };
+
+/**
+ * How a decision ended. `replace`: it would take another value of the same kind off the file;
+ * ask again with `replace`. `gone`: no longer open (decided meanwhile), or not the person's.
+ * `not-yours`: they may not tag the file. `admin-only`: it takes a tenant admin.
+ */
+export type Reviewed =
+  | { ended: "done"; applied: string | null; replaced: string[]; alsoClosed: number }
+  /** The tags that would come off the file. */
+  | { ended: "replace"; replaces: string[] }
+  | { ended: "gone" | "not-yours" | "admin-only" | "invalid" | "failed" };
+
+/** A value of the vocabulary, as GET /api/admin/vocabulary gives it. */
+export interface VocabularyValue {
+  value: string;
+  tag: string;
+  label: string;
+  approved: boolean;
+  visibility: string | null;
+  exposure: string | null;
+  /** Open review items proposing it. */
+  waiting: number;
+}
+
+export interface VocabularyFacet {
+  key: string;
+  label: string;
+  /** Shown on the card of a file someone can't open. */
+  public: boolean;
+  /** A file carries one value of it at most. */
+  single: boolean;
+  values: VocabularyValue[];
+}
+
+export interface Vocabulary {
+  facets: VocabularyFacet[];
+  cut: boolean;
+}
+
 export interface Api {
   me(): Promise<Me>;
   sources(): Promise<Source[]>;
+  review(): Promise<ReviewInbox>;
+  decideReview(id: string, decision: ReviewDecision): Promise<Reviewed>;
+  vocabulary(): Promise<Vocabulary>;
   clients(): Promise<Client[]>;
   decideClient(clientKey: string, decision: ClientDecision): Promise<Changed>;
   signOut(): Promise<void>;
@@ -159,6 +233,65 @@ export function createApi(fetcher: typeof fetch): Api {
       const why = (await res.json().catch(() => null)) as { signIn?: unknown } | null;
       return typeof why?.signIn === "string" ? "sign-in-again" : "refused";
     },
+    async review() {
+      const body = (await get("/api/review")) as Partial<ReviewInbox> | null;
+      if (!Array.isArray(body?.items)) throw new ApiError(200);
+      return {
+        items: body.items.map(asReviewItem),
+        more: body.more === true,
+        capped: body.capped === true,
+      };
+    },
+    async decideReview(id, decision) {
+      if (!/^rev_[0-9a-z]{26}$/.test(id)) return { ended: "failed" };
+      const { decision: what, ...rest } = decision;
+      let res: Response;
+      try {
+        res = await send(`/api/review/${id}/${what}`, "POST", rest);
+      } catch (err) {
+        if (err instanceof SignedOut) throw err;
+        return { ended: "failed" };
+      }
+      const body = (await res.json().catch(() => null)) as {
+        code?: unknown;
+        replaces?: unknown;
+        decided?: { applied?: unknown; replaced?: unknown; alsoClosed?: unknown };
+      } | null;
+      const tags = (x: unknown) =>
+        Array.isArray(x) ? x.filter((r): r is string => typeof r === "string") : [];
+      if (res.ok) {
+        const d = body?.decided;
+        return {
+          ended: "done",
+          applied: typeof d?.applied === "string" ? d.applied : null,
+          replaced: tags(d?.replaced),
+          alsoClosed: typeof d?.alsoClosed === "number" ? d.alsoClosed : 0,
+        };
+      }
+      if (res.status === 404) return { ended: "gone" };
+      if (res.status === 403) {
+        // Anything else refused (the server's own check of where the request came from, say)
+        // is not an answer about the item.
+        return {
+          ended:
+            body?.code === "not-admin"
+              ? "admin-only"
+              : body?.code === "refused"
+                ? "not-yours"
+                : "failed",
+        };
+      }
+      if (res.status === 409) {
+        if (body?.code === "conflict") return { ended: "replace", replaces: tags(body.replaces) };
+        return { ended: body?.code === "already-resolved" ? "gone" : "invalid" };
+      }
+      return { ended: res.status === 400 ? "invalid" : "failed" };
+    },
+    async vocabulary() {
+      const body = (await get("/api/admin/vocabulary")) as Partial<Vocabulary> | null;
+      if (!Array.isArray(body?.facets)) throw new ApiError(200);
+      return { facets: body.facets.map(asFacet), cut: body.cut === true };
+    },
     async signOut() {
       await ask("/auth/logout", "POST");
     },
@@ -230,5 +363,52 @@ function asClient(x: unknown): Client {
     claimedName: text(c.claimedName) ?? "",
     people: typeof c.people === "number" && Number.isFinite(c.people) ? c.people : 0,
     lastUsedAt: text(c.lastUsedAt),
+  };
+}
+
+const text = (v: unknown) => (typeof v === "string" ? v : null);
+
+function asReviewItem(x: unknown): ReviewItem {
+  if (typeof x !== "object" || x === null) throw new ApiError(200);
+  const i = x as Record<string, unknown>;
+  if (typeof i.id !== "string" || typeof i.tag !== "string") throw new ApiError(200);
+  return {
+    id: i.id,
+    title: text(i.title) ?? "",
+    tag: i.tag,
+    reason: text(i.reason) ?? "",
+    appliedBy: text(i.appliedBy),
+    confidence:
+      typeof i.confidence === "number" && Number.isFinite(i.confidence) ? i.confidence : 1,
+    createdAt: text(i.createdAt),
+    admin: i.admin === true,
+  };
+}
+
+function asFacet(x: unknown): VocabularyFacet {
+  if (typeof x !== "object" || x === null) throw new ApiError(200);
+  const f = x as Record<string, unknown>;
+  if (typeof f.key !== "string") throw new ApiError(200);
+  return {
+    key: f.key,
+    label: text(f.label) ?? f.key,
+    public: f.public === true,
+    single: f.single === true,
+    values: (Array.isArray(f.values) ? f.values : []).flatMap((y) => {
+      if (typeof y !== "object" || y === null) return [];
+      const v = y as Record<string, unknown>;
+      if (typeof v.value !== "string" || typeof v.tag !== "string") return [];
+      return [
+        {
+          value: v.value,
+          tag: v.tag,
+          label: text(v.label) ?? v.value,
+          approved: v.approved === true,
+          visibility: text(v.visibility),
+          exposure: text(v.exposure),
+          waiting: typeof v.waiting === "number" && Number.isFinite(v.waiting) ? v.waiting : 0,
+        },
+      ];
+    }),
   };
 }

@@ -636,6 +636,7 @@ async function replacing(
     throw new TagError(
       "conflict",
       `${tagOf(item.facet, value)} would replace ${names}: decide again with replace`,
+      others.map((o) => tagOf(item.facet, o.value)),
     );
   }
   checkPerson(reviewer, `replaces ${names}`);
@@ -757,8 +758,9 @@ export type DecisionKind =
  *   for every file; rejecting it closes every open item proposing it, on any file;
  * - `loosens`: it takes a restriction off the file, which a person tagging can't. Approving or
  *   merging would replace a value of a single-value facet that sets a tighter level (or that a
- *   pack's policies name); or rejecting turns down a value that sets a level or that a policy
- *   names, which tightens the file while it waits.
+ *   pack's policies name); or the item's own value sets a level or is named by a policy, so it
+ *   tightens the file while it waits, and the decision turns it down: rejecting it, or merging
+ *   it into a value that doesn't set its levels as tightly.
  *
  * Null when there is no such open item. Reads without locks: decide in the same transaction,
  * after the locks openItem() takes, for an answer that holds (review-inbox.ts decideReview()).
@@ -786,6 +788,20 @@ export async function decisionReach(
     return restricts ? "loosens" : "file";
   }
   if (how.decision === "approve" && known?.approved !== true) return "vocabulary";
+  // Merged into another value, the item's own no longer waits on the file: where it tightened
+  // the file meanwhile, that is a rejection of it by another name. (A merge mergeReview() will
+  // refuse anyway, into itself or into no approved value, is nobody's: it says why.)
+  if (how.decision === "merge" && how.into !== item.value) {
+    const target = VALUE_SLUG.test(how.into)
+      ? await findValue(tx, tenantId, item.facet, how.into)
+      : undefined;
+    if (
+      target?.approved === true &&
+      (await loosens(tx, tenantId, item.facet, how.into, [{ value: item.value }]))
+    ) {
+      return "loosens";
+    }
+  }
   const value = how.decision === "merge" ? how.into : item.value;
   const [facet] = await tx
     .select({ single: facets.single })

@@ -20,6 +20,7 @@ import {
   type OAuthClient,
   type User,
 } from "@openhoard/core-identity";
+import { tenantVocabulary, VIEW_TRANSACTION, VocabularyError } from "@openhoard/core-catalog";
 import { listSourceSyncs, syncStanding } from "@openhoard/core-jobs";
 import { mayAdminister, type AuthzClient, type ClientTrust } from "@openhoard/core-policy";
 import type { Context, Hono } from "hono";
@@ -42,6 +43,7 @@ import { retrying } from "./retry.js";
  *   POST   /api/admin/admins                  {"userId": "usr_…"} or {"email": …} or {"userName": …}
  *   DELETE /api/admin/admins/:userId
  *   GET    /api/admin/sources                 each connector sync and its last scheduled run
+ *   GET    /api/admin/vocabulary              every facet and value, and what waits in review
  *
  * - Signed in with the session cookie (T-102), as an admin (core/policy mayAdminister(): an
  *   active member with the admin role or in the tenant's admin group, through OpenHoard's own
@@ -437,6 +439,29 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
         updatedAt: s.updatedAt.toISOString(),
       })),
     });
+  });
+
+  // The tag vocabulary (T-903): every facet and value, the proposed too, with how many open
+  // review items propose each. Read-only; core checks again that the asker is an admin.
+  app.get("/api/admin/vocabulary", async (c) => {
+    const signedIn = c.get("auth") as SignedIn;
+    const { tenantId } = signedIn;
+    try {
+      const vocabulary = await db.withTenant(
+        tenantId,
+        (tx) =>
+          tenantVocabulary(tx, tenantId, {
+            userId: signedIn.principal.userId,
+            ...groupOf(tenantId),
+          }),
+        VIEW_TRANSACTION,
+      );
+      return c.json(vocabulary);
+    } catch (e) {
+      if (!(e instanceof VocabularyError)) throw e;
+      // An admin when the session was read, not now.
+      return c.json({ error: "forbidden" }, 403);
+    }
   });
 
   log?.debug("admin API mounted at /api/admin");

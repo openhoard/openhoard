@@ -55,6 +55,9 @@ function fakeApi(over: Partial<Api> = {}): Api {
     me: vi.fn(async () => ADA),
     sources: vi.fn(async () => [FINANCE]),
     clients: vi.fn(async () => []),
+    review: vi.fn(async () => ({ items: [], more: false, capped: false })),
+    decideReview: vi.fn(async () => ({ ended: "failed" as const })),
+    vocabulary: vi.fn(async () => ({ facets: [], cut: false })),
     decideClient: vi.fn(async () => "done" as const),
     signOut: vi.fn(async () => undefined),
     ...over,
@@ -383,6 +386,22 @@ describe("the admin shell (T-901)", () => {
     expect(text()).toContain("Taking you to sign in");
     // Noted like any trip to the sign-in: one that doesn't stick is said, not repeated.
     expect(notes.size).toBe(1);
+  });
+
+  it("has the review and vocabulary pages in the sections, at their own paths", async () => {
+    for (const [path, label, read] of [
+      ["/review", "Tags to review", "review"],
+      ["/vocabulary", "Vocabulary", "vocabulary"],
+    ] as const) {
+      act(() => root.unmount());
+      root = createRoot(host);
+      window.history.replaceState(null, "", `/admin${path}`);
+      const api = fakeApi();
+      await show(api, fakeBrowser(`/admin${path}`).browser);
+      expect(host.querySelector('nav a[aria-current="page"]')?.textContent).toBe(label);
+      expect(host.querySelector("main h1")?.textContent).toBe(label);
+      expect(api[read]).toHaveBeenCalled();
+    }
   });
 
   it("reads the app's path out of the address", () => {

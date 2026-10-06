@@ -608,6 +608,7 @@ The **admin API** is JSON under `/api/admin`, for the admin web app (below) and 
 | `POST /api/admin/admins`               | `{"userId": "usr_…"}`, or `{"email": …}`, or `{"userName": …}`                |
 | `DELETE /api/admin/admins/:userId`     | Takes the role away                                                           |
 | `GET /api/admin/sources`               | Each connector sync: its `standing`, phase, reconcile, last run, stop         |
+| `GET /api/admin/vocabulary`            | Every facet and value, the proposed too, and how many review items wait       |
 
 - **Who.** A person signed in with the session cookie (above), who is an admin, through
   OpenHoard's own app (an AI client's token never administers). Anyone else gets 401 or 403, and
@@ -629,6 +630,29 @@ The **admin API** is JSON under `/api/admin`, for the admin web app (below) and 
   `admin.grant`, `admin.revoke`; refusals say why (`sign-in-again`, `config-managed`,
   `status-changed`, `last-admin`, `admin-group`, …).
 
+## The review inbox over HTTP (T-903)
+
+What `admin review list | approve | reject | merge` do (T-1403), for the person signed in, as
+JSON for the web app. `core/catalog` decides who may see and decide what; `src/review-api.ts`
+wires it to the session.
+
+| Route                          | What it does                                                         |
+| ------------------------------ | -------------------------------------------------------------------- |
+| `GET /api/review?limit=100`    | The open items the person may decide, oldest first; `more`, `capped` |
+| `POST /api/review/:id/approve` | `{"replace": true}` to take a single-value facet's other value off   |
+| `POST /api/review/:id/reject`  |                                                                      |
+| `POST /api/review/:id/merge`   | `{"into": "<an approved value of the facet>"}`, and `replace`        |
+
+- **Who.** The session's person, not an admin as such: they see and decide items on files they
+  may tag. A decision that reaches past the file (new vocabulary, taking a restriction off)
+  takes a tenant admin who may also tag it. An admin sees nothing more by being one.
+- **Answers.** 404 for an item that isn't open or isn't theirs to see (alike); 403 with `code`
+  `refused` (they read the file, may not tag it) or `not-admin`; 409 with `code` `conflict`
+  (with `replaces`, the tags that would come off: ask again with `replace`),
+  `already-resolved` or `invalid`.
+- **Audit.** `tag.review`, as the person: each decision by core, each refusal here.
+- The whole vocabulary is an admin's to read: `GET /api/admin/vocabulary`.
+
 ## The admin web app (T-901)
 
 `<publicUrl>/admin/` is the admin web app: the static files `apps/web` builds (`pnpm build`),
@@ -645,10 +669,10 @@ read into memory when the server starts and served as they are.
 - **Its policy** allows this origin's own script, styles and images and requests to this origin,
   and nothing else: no inline script or style, no other site, no framing.
 - **Without a build** (a checkout nobody built) the server says so once and runs without it.
-- Today: an overview of the sources (`GET /api/admin/sources`), and the AI clients page
-  (T-904: approve with a trust label, refuse, relabel, revoke, and each client's use, over the
-  admin API above). The review inbox, audit and File Health pages come next (T-903, T-905,
-  T-1002).
+- Today: an overview of the sources (`GET /api/admin/sources`); tags to review and the
+  vocabulary (T-903, over the review API above); and AI clients (T-904: approve with a trust
+  label, refuse, relabel, revoke, and each client's use, over the admin API). The audit and
+  File Health pages come next (T-905, T-1002).
 
 ## The MCP server (T-801)
 

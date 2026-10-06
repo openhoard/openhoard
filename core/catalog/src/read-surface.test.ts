@@ -124,6 +124,9 @@ const SURFACE = {
     "sourceItemState",
     "tenantPolicies",
     "tenantRules",
+    // The whole vocabulary with open-item counts (T-903): for tenant admins only; it checks
+    // the asker is one itself, and reads no file.
+    "tenantVocabulary",
   ],
   pure: [
     "blobIdOf",
@@ -185,6 +188,8 @@ const SURFACE = {
     "TagError",
     "VECTOR_NEIGHBOURS",
     "VIEW_TRANSACTION",
+    "VOCABULARY_MAX",
+    "VocabularyError",
   ],
 } as const;
 

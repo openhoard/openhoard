@@ -3,9 +3,10 @@
 OpenHoard's admin web app (T-901): React, built by Vite to static files that `apps/server`
 serves at `/admin/` (see "The admin web app" in [apps/server/README.md](../server/README.md)).
 
-It has the shell (who is signed in, the way around, the way out) and two pages: an overview of
-the tenant's sources, and the AI clients its people may connect. Pages for the review inbox,
-the audit log and the File Health Report are added to it.
+It has the shell (who is signed in, the way around, the way out) and four pages: an overview of
+the tenant's sources, the tags AI suggested that wait for a person, the AI clients its people
+may connect, and the vocabulary. Pages for the audit log and the File Health Report are added
+to it.
 
 ## How it is put together
 

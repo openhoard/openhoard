@@ -1,4 +1,4 @@
-import type { Client, Source, Trust } from "./api.js";
+import type { Client, ReviewItem, Source, Trust } from "./api.js";
 
 /*
  * A source's sync in an admin's words. Which state it is in, and so which command lifts it, the
@@ -278,4 +278,79 @@ export type ClientStanding =
 export function clientStanding(c: Pick<Client, "status" | "trust" | "managedBy">): ClientStanding {
   if (c.trust !== null) return c.managedBy === "config" ? "approved-by-config" : "approved";
   return c.status === "pending" ? "waiting" : c.status === "refused" ? "refused" : "lapsed";
+}
+
+/*
+ * Tags to review, and the vocabulary (T-903). A tag is `facet:value`: shown as "kind: value",
+ * with the value's own label where the vocabulary has one.
+ */
+
+/** A tag's two halves. */
+export function tagParts(tag: string): { facet: string; value: string } {
+  const at = tag.indexOf(":");
+  return at <= 0
+    ? { facet: "", value: tag }
+    : { facet: tag.slice(0, at), value: tag.slice(at + 1) };
+}
+
+/**
+ * Why a suggested tag waits for a person. `inVocabulary`: the value has been approved since
+ * (on another file), whatever the item's own reason says.
+ */
+export function reviewReasonText(
+  item: Pick<ReviewItem, "reason" | "confidence">,
+  inVocabulary = false,
+): string {
+  if (item.reason === "new-value" && inVocabulary) {
+    return "This value was new when it was suggested; it has been added to your vocabulary since.";
+  }
+  switch (item.reason) {
+    case "agent":
+      return "An AI assistant suggested it while working for someone. Assistants can only suggest.";
+    case "low-confidence":
+      return `The AI that read the file wasn't sure (${Math.round(item.confidence * 100)}% confident).`;
+    case "new-value":
+      return "This value isn't in your vocabulary yet. Approving it adds it to the vocabulary, for use on any file.";
+    case "sensitive":
+      return "This tag changes who can see the file or which AI gets it, so a person decides.";
+    case "conflict":
+      return "The file already has another value of this kind, and it can only have one.";
+    case "primary":
+      return "The file already has this tag. The suggestion is to make it the file's main tag: where the file belongs.";
+    default:
+      return "It waits for a person to decide.";
+  }
+}
+
+/** Who suggested a tag, as far as an admin needs. */
+export function suggestedBy(appliedBy: string | null): string {
+  if (appliedBy === null) return "Suggested automatically";
+  if (appliedBy.startsWith("model:agent/")) return "Suggested by an AI assistant";
+  if (appliedBy.startsWith("model:")) return "Suggested by the AI that reads new files";
+  if (appliedBy.startsWith("user:")) return "Suggested by a person";
+  if (appliedBy.startsWith("rule:")) return "Suggested by a rule";
+  return "Suggested automatically";
+}
+
+const VISIBILITY_WORDS: Record<string, string> = {
+  hidden: "Hides the file from people who can't open it.",
+  discoverable: "People who can't open the file can see that it exists.",
+  readable:
+    "Everyone in your organization can see the file's card and summary, without being able to open it.",
+};
+
+const EXPOSURE_WORDS: Record<string, string> = {
+  "metadata-only": "No AI gets the file's content, only its details.",
+  "local-only": "Only AI that stays on your computers gets the file's content.",
+  "commercial-only": "Personal AI doesn't get the file's content.",
+  full: "Any approved AI gets the file's content.",
+};
+
+/** What carrying a value does to a file, in sentences; none for a value that only labels. */
+export function valueEffects(v: { visibility: string | null; exposure: string | null }): string[] {
+  const out: string[] = [];
+  if (v.visibility !== null)
+    out.push(VISIBILITY_WORDS[v.visibility] ?? `Visibility: ${v.visibility}.`);
+  if (v.exposure !== null) out.push(EXPOSURE_WORDS[v.exposure] ?? `AI access: ${v.exposure}.`);
+  return out;
 }

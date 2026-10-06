@@ -457,3 +457,61 @@ h3:focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 2px;
 }
+
+/* Tags to review, and the vocabulary. */
+.tag {
+  padding: 0.05rem 0.45rem;
+  background: var(--busy-bg);
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+
+.instead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+select {
+  font: inherit;
+  max-width: 100%;
+  padding: 0.35rem 0.5rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--edge);
+  border-radius: 6px;
+}
+
+.values {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.values li {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.6rem 1rem;
+  border-top: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+
+.values li:first-child {
+  border-top: 0;
+}
+
+.value-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.value-does {
+  font-size: 0.925rem;
+}

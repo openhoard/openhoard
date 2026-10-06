@@ -170,6 +170,131 @@ describe("what the admin pages ask the server", () => {
     await expect(ending(() => json({}, 401))).rejects.toBeInstanceOf(SignedOut);
   });
 
+  it("reads the review inbox and the vocabulary, and says how a decision ended", async () => {
+    const id = `rev_${"a".repeat(26)}`;
+    const answering = (res: () => Response | Promise<Response>) =>
+      createApi((async () => res()) as typeof fetch);
+    const inbox = await answering(() =>
+      json({
+        items: [
+          {
+            id,
+            tag: "client:globex",
+            title: "A",
+            reason: "agent",
+            confidence: 0.5,
+            admin: true,
+            objectId: "obj_1",
+          },
+        ],
+        more: true,
+      }),
+    ).review();
+    expect(inbox).toEqual({
+      items: [
+        {
+          id,
+          title: "A",
+          tag: "client:globex",
+          reason: "agent",
+          appliedBy: null,
+          confidence: 0.5,
+          createdAt: null,
+          admin: true,
+        },
+      ],
+      more: true,
+      capped: false,
+    });
+    for (const bad of [{}, { items: [null] }, { items: [{ id: 1 }] }]) {
+      await expect(answering(() => json(bad)).review()).rejects.toBeInstanceOf(ApiError);
+    }
+
+    const vocabulary = await answering(() =>
+      json({
+        facets: [
+          {
+            key: "client",
+            single: true,
+            values: [
+              { value: "x", tag: "client:x", approved: true, waiting: 2 },
+              null,
+              { value: 3 },
+            ],
+          },
+        ],
+      }),
+    ).vocabulary();
+    expect(vocabulary).toEqual({
+      cut: false,
+      facets: [
+        {
+          key: "client",
+          label: "client",
+          public: false,
+          single: true,
+          values: [
+            {
+              value: "x",
+              tag: "client:x",
+              label: "x",
+              approved: true,
+              visibility: null,
+              exposure: null,
+              waiting: 2,
+            },
+          ],
+        },
+      ],
+    });
+    await expect(answering(() => json({ facets: [{}] })).vocabulary()).rejects.toBeInstanceOf(
+      ApiError,
+    );
+
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      json({ decided: { applied: "client:globex", replaced: ["client:old"], alsoClosed: 2 } }),
+    );
+    const api = createApi(fetcher as typeof fetch);
+    expect(
+      await api.decideReview(id, { decision: "merge", into: "globex", replace: true }),
+    ).toEqual({
+      ended: "done",
+      applied: "client:globex",
+      replaced: ["client:old"],
+      alsoClosed: 2,
+    });
+    expect(fetcher).toHaveBeenLastCalledWith(
+      `/api/review/${id}/merge`,
+      expect.objectContaining({ method: "POST", body: '{"into":"globex","replace":true}' }),
+    );
+    expect(await api.decideReview("../x", { decision: "reject" })).toEqual({ ended: "failed" });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const ending = (res: () => Response | Promise<Response>) =>
+      answering(res).decideReview(id, { decision: "approve" });
+    expect(await ending(() => json({}))).toEqual({
+      ended: "done",
+      applied: null,
+      replaced: [],
+      alsoClosed: 0,
+    });
+    expect(await ending(() => json({ error: "x" }, 404))).toEqual({ ended: "gone" });
+    expect(await ending(() => json({ code: "refused" }, 403))).toEqual({ ended: "not-yours" });
+    expect(await ending(() => json({ code: "not-admin" }, 403))).toEqual({ ended: "admin-only" });
+    expect(await ending(() => json({ code: "conflict", replaces: ["a:b", 7] }, 409))).toEqual({
+      ended: "replace",
+      replaces: ["a:b"],
+    });
+    expect(await ending(() => json({ error: "forbidden" }, 403))).toEqual({ ended: "failed" });
+    expect(await ending(() => json({ code: "already-resolved" }, 409))).toEqual({ ended: "gone" });
+    expect(await ending(() => json({ code: "invalid" }, 409))).toEqual({ ended: "invalid" });
+    expect(await ending(() => json({ error: "x" }, 400))).toEqual({ ended: "invalid" });
+    expect(await ending(() => new Response("oops", { status: 500 }))).toEqual({ ended: "failed" });
+    expect(await ending(() => Promise.reject(new TypeError("offline")))).toEqual({
+      ended: "failed",
+    });
+    await expect(ending(() => json({}, 401))).rejects.toBeInstanceOf(SignedOut);
+  });
+
   it("doesn't take another server's answer for this one's", async () => {
     const answering = (res: () => Response) => createApi((async () => res()) as typeof fetch);
     // A proxy's sign-in page, a captive portal.

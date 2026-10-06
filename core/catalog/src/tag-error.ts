@@ -22,6 +22,8 @@ export class TagError extends Error {
   constructor(
     readonly code: TagErrorCode,
     message: string,
+    /** For `conflict`: the tags deciding with `replace` would take off the object. */
+    readonly replaces: readonly string[] = [],
   ) {
     super(message);
     this.name = "TagError";

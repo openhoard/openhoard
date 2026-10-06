@@ -2,7 +2,9 @@ import { Component, useCallback, useEffect, useRef, useState, type ReactNode } f
 import { SignedOut, type Api, type Me } from "./api.js";
 import { Clients } from "./clients.js";
 import { Overview } from "./overview.js";
+import { Review } from "./review.js";
 import { BASE, Link, usePath } from "./router.js";
+import { Vocabulary } from "./vocabulary.js";
 
 /*
  * The shell (T-901): who is signed in, the way around, the way out. It holds nothing of
@@ -44,7 +46,9 @@ export const signInUrl = (returnTo: string) =>
 
 const PAGES: readonly { path: string; label: string }[] = [
   { path: "/", label: "Overview" },
+  { path: "/review", label: "Tags to review" },
   { path: "/clients", label: "AI clients" },
+  { path: "/vocabulary", label: "Vocabulary" },
 ];
 
 export function App({ api, browser }: { api: Api; browser: Browser }) {
@@ -240,6 +244,10 @@ export function App({ api, browser }: { api: Api; browser: Browser }) {
           <Failsafe key={path}>
             {page.path === "/clients" ? (
               <Clients api={api} onSignedOut={toSignIn} onSignInAgain={signInAgain} />
+            ) : page.path === "/review" ? (
+              <Review api={api} onSignedOut={toSignIn} />
+            ) : page.path === "/vocabulary" ? (
+              <Vocabulary api={api} onSignedOut={toSignIn} />
             ) : (
               <Overview api={api} tenantId={me.tenantId} onSignedOut={toSignIn} />
             )}

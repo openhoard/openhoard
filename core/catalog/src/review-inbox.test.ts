@@ -448,6 +448,33 @@ describe("the review inbox", () => {
     expect((await inbox(editor)).items).toMatchObject([{ id: tighten, admin: true }]);
     expect(await code(item(editor, tighten, { decision: "reject" }))).toBe("not-admin");
     expect(await code(decide(editor, tighten, { decision: "reject" }))).toBe("not-admin");
+    // Merging it into a value that sets nothing is turning it down by another name.
+    for (const into of ["internal", "public"]) {
+      expect(await code(item(editor, tighten, { decision: "merge", into }))).toBe("not-admin");
+      expect(await code(decide(editor, tighten, { decision: "merge", into }))).toBe("not-admin");
+    }
+    // Into no value of the vocabulary, or into itself, it is refused for what it is.
+    for (const into of ["nope", "restricted"]) {
+      expect(await code(decide(editor, tighten, { decision: "merge", into }))).toBe("invalid");
+    }
+    // Into a value that hides the file as it does (and more), nothing is taken off: theirs.
+    await inTenant((tx) =>
+      tx.insert(facetValues).values({
+        tenantId: t.tenantId,
+        facet: "sensitivity",
+        value: "secret",
+        label: "Secret",
+        approved: true,
+        visibility: "hidden",
+        exposure: "metadata-only",
+      }),
+    );
+    const tighter = await proposed("sensitivity:restricted", t.objectId);
+    expect(tighter).toBe(tighten);
+    await item(editor, tighten, { decision: "merge", into: "secret" });
+    expect((await inTenant((tx) => listOpenReviews(tx, t.tenantId))).map((r) => r.id)).toEqual([
+      tighten,
+    ]);
     // Approving it only tightens: the editor's to do.
     await item(editor, tighten, { decision: "approve" });
     await decide(editor, tighten, { decision: "approve" });

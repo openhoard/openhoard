@@ -31,8 +31,9 @@ import { MAX_OBJECT_IDS, requireSnapshot, viewObjects, type ViewRequest } from "
  * - approving or rejecting a value the vocabulary doesn't have: it approves the value for every
  *   file, or closes every open item proposing it, on files this person may not see;
  * - taking a restriction off the file: rejecting a value that sets a visibility or exposure
- *   level (it tightens the file while it waits), or approving or merging in place of a tighter
- *   value of a single-value facet. A person tagging the file can do neither.
+ *   level (it tightens the file while it waits), merging it into a value that doesn't set its
+ *   levels as tightly, or approving or merging in place of a tighter value of a single-value
+ *   facet. A person tagging the file can do none of these.
  *
  * Merging a new value into an approved one is not such a decision: anyone who may tag the file
  * may. An item on a file no admin may tag waits until one may.
