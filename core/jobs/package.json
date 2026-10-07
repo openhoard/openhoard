@@ -31,7 +31,7 @@
     "@openhoard/enricher-extract": "workspace:^",
     "@openhoard/sdk": "workspace:^",
     "drizzle-orm": "^0.45.3",
-    "pg-boss": "12.33.1"
+    "pg-boss": "12.36.0"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*",
