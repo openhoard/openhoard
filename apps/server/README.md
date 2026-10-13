@@ -709,7 +709,9 @@ read into memory when the server starts and served as they are.
     alternatives as compact cards (id, title as shown, kind, modified, owner's name, tags, the
     folders the file is in on a reader's card that shows the real title (the deepest six, each
     clipped to 60 characters), summary where the card allows, and which channels matched:
-    never a text snippet). A folder's name finds a file for its readers only. Queries
+    never a text snippet). A folder's name finds a file for its readers only. Every word must
+    match; when no file holds them all, files holding some of them come back with
+    `anyWord: true`. Queries
     are embedded by local providers only, when an embeddings model is configured.
   - `recent` (period or from/to in an IANA `timeZone`, actions, kind, media type): the files the
     person themself viewed, opened or edited, from the activity log (T-506). Reads no content.

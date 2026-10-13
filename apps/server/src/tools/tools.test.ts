@@ -213,6 +213,13 @@ describe("scenario 1: find by intent, then open in the file's own app", () => {
       (await h.call(token, "find", { query: "forecast 2019", modifiedAfter: "2025-01-01" })).data,
     );
     expect(since.total).toBe(0);
+    // No file holds every word: the ones holding some come back, said as looser matches.
+    const loose = shaped("find", (await h.call(token, "find", { query: "forecast zebra" })).data);
+    expect(loose.anyWord).toBe(true);
+    expect(loose.total).toBeGreaterThan(0);
+    expect(shaped("find", (await h.call(token, "find", { query: "forecast" })).data).anyWord).toBe(
+      false,
+    );
     // A reader's card says which folders the file is in, and a folder's name finds it.
     await h.addFile({
       title: "Plan.docx",

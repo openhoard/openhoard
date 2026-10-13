@@ -131,14 +131,37 @@ describe("keyword search (T-501)", () => {
     expect(result.vectorPlans).toEqual([]);
   });
 
-  it("needs every word, which may sit in different fields", async () => {
+  it("needs every word, which may sit in different fields, before it takes any", async () => {
     const id = await doc({ title: "Budget review", text: "We propose cuts to travel." });
+    const other = await doc({ title: "Zebra crossings" });
     expect(await ids("budget cuts")).toEqual([id]);
-    expect(await ids("budget zebra")).toEqual([]);
+    expect(await search("budget cuts")).toMatchObject({ anyWord: false });
+    // No file holds both: each holding one of them comes back, said as looser.
+    expect(await search("budget zebra")).toMatchObject({ anyWord: true, total: 2 });
+    expect((await ids("budget zebra")).sort()).toEqual([id, other].sort());
     expect((await search("budget cuts")).explanations[0]?.channels.keyword?.fields).toEqual([
       "title",
       "body",
     ]);
+  });
+
+  it("falls back on the words as typed, and ranks by how many of them a file holds", async () => {
+    const many = await doc({ title: "Notes", text: "The board meeting went long." });
+    const titled = await doc({ title: "Board", text: "Nothing else here." });
+    const common = await doc({ title: "The plan", text: "From the start, the end." });
+    // More of the words beat a better field; "the" and "from" find nothing alone.
+    const found = await search("notes from the board meeting agenda");
+    expect(found).toMatchObject({ anyWord: true });
+    expect(found.hits.map((h) => h.id)).toEqual([many, titled]);
+    expect(found.hits.map((h) => h.id)).not.toContain(common);
+    // A common word with punctuation stuck to it is still a common word.
+    const punctuated = await search("(the, agenda!");
+    expect(punctuated).toMatchObject({ anyWord: true, total: 0 });
+    // One word, however it is punctuated or repeated: nothing to loosen.
+    await doc({ title: "Mail log", text: "an e mail went out to Brien" });
+    for (const query of ["e-mail", "O'Brien", "report report", "the a"]) {
+      expect(await search(query), query).toMatchObject({ total: 0, anyWord: false });
+    }
   });
 
   it("uses the simple configuration: no stemming, accents count, any script, dots and underscores split", async () => {
@@ -329,6 +352,8 @@ describe("vector search (T-502)", () => {
     await doc({ title: "Invoice", text: "amount due in thirty days", embed: { model: MODEL } });
     const result = await search(vectorQuery("safari animals", "zebra giraffe"));
     expect(result.hits.map((h) => h.id)).toEqual([zebra]);
+    // No keyword match, so it fell back to any word; the vectors were searched once, not again.
+    expect(result.anyWord).toBe(true);
     expect(result.vectorPlans).toEqual([{ model: MODEL, plan: "exact" }]);
     expect(result.explanations[0]?.channels).toMatchObject({
       vector: { rank: 1, model: MODEL },

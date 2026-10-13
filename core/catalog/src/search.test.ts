@@ -178,6 +178,78 @@ describe("searchObjects", () => {
     expect(await ids(reader, "finance")).toEqual([t.objectId]);
   });
 
+  it("matches any of the words when no file it may show holds them all, and says so", async () => {
+    const reader = person({ tagGrants: [t.tag] });
+    // "Report 1.docx" doesn't hold "board" or "deck": all-words finds nothing, any-word finds it.
+    expect(await search(reader, "report")).toMatchObject({ total: 1, anyWord: false });
+    const loose = await search(reader, "board report deck");
+    expect(loose).toMatchObject({ total: 1, anyWord: true });
+    expect(loose.hits.map((h) => h.id)).toEqual([t.objectId]);
+    expect(loose.explanations[0]?.channels.keyword?.fields).toEqual(["title"]);
+    // None of the words anywhere: still nothing.
+    expect(await search(reader, "invoice deck")).toMatchObject({ total: 0, anyWord: true });
+    // One word: nothing to loosen.
+    expect(await search(reader, "invoice")).toMatchObject({ total: 0, anyWord: false });
+    // A file holding more of the words ranks above one holding fewer.
+    const second = newId("object");
+    await write(async (tx) => {
+      await tx.insert(objects).values({
+        tenantId: t.tenantId,
+        id: second,
+        zoneId: t.zoneId,
+        title: "Board report draft.docx",
+        ownerId: "user:owner-1",
+      });
+      await tx.insert(versions).values({
+        tenantId: t.tenantId,
+        id: newId("version"),
+        objectId: second,
+        seq: 1,
+        blobId: t.blobId,
+        mime: "text/plain",
+        processedAt: new Date(),
+      });
+    });
+    const ranked = await search(
+      person({ objectGrants: [t.objectId, second] }),
+      "board report deck",
+    );
+    expect(ranked).toMatchObject({ anyWord: true });
+    expect(ranked.hits.map((h) => h.id)).toEqual([second, t.objectId]);
+    // All the words held by some file: no loosening, and the others aren't returned.
+    const tight = await search(person({ objectGrants: [t.objectId, second] }), "board report");
+    expect(tight).toMatchObject({ anyWord: false });
+    expect(tight.hits.map((h) => h.id)).toEqual([second]);
+  });
+
+  it("decides the fallback from what the caller may see, not from files they can't", async () => {
+    await setDefault("hidden");
+    const reader = person({ tagGrants: [t.tag] });
+    // A file the caller can't see holds every word.
+    const hidden = newId("object");
+    await write(async (tx) => {
+      await tx.insert(objects).values({
+        tenantId: t.tenantId,
+        id: hidden,
+        zoneId: t.zoneId,
+        title: "Acme layoffs report.docx",
+        ownerId: "user:someone-else",
+      });
+      await tx.insert(versions).values({
+        tenantId: t.tenantId,
+        id: newId("version"),
+        objectId: hidden,
+        seq: 1,
+        blobId: t.blobId,
+        mime: "text/plain",
+        processedAt: new Date(),
+      });
+    });
+    const found = await search(reader, "acme layoffs report");
+    expect(found).toMatchObject({ anyWord: true, total: 1 });
+    expect(found.hits.map((h) => h.id)).toEqual([t.objectId]);
+  });
+
   it("matches words in the title, and ranks by them", async () => {
     const reader = person({ tagGrants: [t.tag] });
     expect(await ids(reader, "report")).toEqual([t.objectId]);
@@ -195,7 +267,12 @@ describe("searchObjects", () => {
     ]) {
       expect(await ids(reader, query), query).toEqual([t.objectId]);
     }
-    expect(await ids(reader, "forecast.pdf")).toEqual([]);
+    // Every word must match first; "pdf" isn't there, so the file comes back only as a looser
+    // match on "forecast", said as such.
+    expect(await search(reader, "forecast.pdf")).toMatchObject({
+      hits: [{ id: t.objectId }],
+      anyWord: true,
+    });
   });
 
   it("matches a non-reader only against what they are shown", async () => {
@@ -268,6 +345,7 @@ describe("searchObjects", () => {
       totalIsLowerBound: false,
       facets: {},
       vectorPlans: [],
+      anyWord: false,
     });
     // A forbid on read makes the caller a non-reader: a discoverable file still lists, title only.
     await setDefault("discoverable");

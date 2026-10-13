@@ -38,6 +38,10 @@ import {
  *      no folders for a flagged file to keep their text from it, not their meaning);
  *    - anyone else: the title they are shown (nonReaderTitle()) and trusted tags of public
  *      facets.
+ *    Every word must match. When no file the caller ends up shown holds them all (judged after
+ *    the gate, step 4, so files they can't see change nothing), the search runs again matching
+ *    any of the words as typed (looseWords(): very common words left out), files holding more
+ *    of them ranked first, and says so (`anyWord`). The vector matches are the first pass's.
  * 3. Vector matches (T-502): the nearest chunks and summaries by each query embedding's model
  *    (core/models embedQuery()), among files whose content SQL expects the caller may have (a
  *    reader, exposure reaching the client). The plan is spike S1's rule, never the planner's:
@@ -184,6 +188,12 @@ export interface SearchResult {
   facets: Record<string, Record<string, number>>;
   /** The vector plan per query embedding used. */
   vectorPlans: VectorPlan[];
+  /**
+   * True when no file the caller may see held all of the words, so the words were matched one
+   * by one instead (any of them, files holding more of them ranked first). Say so: these are
+   * looser matches.
+   */
+  anyWord: boolean;
 }
 
 const TAG = /^[a-z][a-z0-9-]{0,63}:[a-z0-9][a-z0-9._-]{0,127}$/;
@@ -226,6 +236,7 @@ export async function searchObjects(
     totalIsLowerBound: false,
     facets: {},
     vectorPlans: [],
+    anyWord: false,
   };
   const text = typeof search.query === "string" ? search.query : "";
   if ([...text].length > QUERY_MAX || text.includes("\0")) return none;
@@ -233,8 +244,18 @@ export async function searchObjects(
   const tags = [...new Set(terms.filter((t) => TAG.test(t)))];
   const words = separate(terms.filter((t) => !TAG.test(t)).join(" ")).trim();
   const vectors = words === "" ? [] : checkVectors(search.vectors ?? []);
-  const found = await gatedMatches(tx, tenantId, authz, request, { words, tags, vectors }, tuning);
+  let found = await gatedMatches(tx, tenantId, authz, request, { words, tags, vectors }, tuning);
   if (!found) return none;
+  // No file the caller may see holds every word: match any of them. Decided from what passed the
+  // gate, never from SQL's candidates, so a file the caller can't see changes nothing. The
+  // vector matches don't depend on it: the first pass's are kept.
+  const loose = looseWords(words);
+  const anyWord =
+    loose !== null && !found.hits.some((h) => h.explanation.channels.keyword !== undefined);
+  if (anyWord) {
+    const again = { words, tags, vectors, anyWords: loose };
+    found = (await gatedMatches(tx, tenantId, authz, request, again, tuning, found)) ?? found;
+  }
   // Counted over what passed, from the tags each view shows: a hidden file or a hidden tag adds
   // nothing (T-505).
   // Prototype-free objects: a facet or value named `constructor` is just a name here.
@@ -255,6 +276,7 @@ export async function searchObjects(
           tx,
           tenantId,
           words,
+          anyWord ? loose : null,
           page.filter((h) => h.explanation.channels.keyword?.fields.includes("body")),
         )
       : new Map<string, Snippet>();
@@ -268,7 +290,51 @@ export async function searchObjects(
     totalIsLowerBound: found.lowerBound,
     facets,
     vectorPlans: found.plans,
+    anyWord,
   };
+}
+
+/**
+ * Words too common to find anything on their own: left out of the any-word fallback (the
+ * `simple` configuration keeps every word, so "the" would match nearly every file).
+ */
+const COMMON_WORDS = new Set(
+  (
+    "a an and are as at be by for from has have i in is it its me my of on or our that the " +
+    "this to was we were with you your"
+  ).split(" "),
+);
+/** Most words the any-word fallback matches on: the first ones given. */
+const MAX_LOOSE_WORDS = 8;
+
+/**
+ * The words the any-word fallback matches on, or null when there is nothing to loosen: the
+ * query's own words as typed (split on spaces, so "e-mail" or "O'Brien" stays one word, all of
+ * whose parts must match), each holding a letter or digit, once each in any case, without
+ * {@link COMMON_WORDS} and one-character words. Null unless the query had two or more such
+ * words and at least one is left.
+ */
+function looseWords(words: string): string[] | null {
+  const distinct = [
+    ...new Set(
+      words
+        .split(/\s+/)
+        // Punctuation at either end is the sentence's, not the word's: "the," is "the".
+        .map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").toLowerCase())
+        .filter((w) => w !== ""),
+    ),
+  ];
+  if (distinct.length < 2) return null;
+  const kept = distinct.filter((w) => [...w].length > 1 && !COMMON_WORDS.has(w));
+  return kept.length === 0 ? null : kept.slice(0, MAX_LOOSE_WORDS);
+}
+
+/** A tsquery matching any of `words`, each with all of its parts (`||` of plainto_tsquery). */
+function anyOf(words: readonly string[]): SQL {
+  return sql`(${sql.join(
+    words.map((w) => sql`plainto_tsquery('simple', ${w})`),
+    sql` || `,
+  )})`;
 }
 
 export interface SuggestQuery {
@@ -336,6 +402,11 @@ interface Match {
   vectors: readonly QueryVector[];
   /** Instead of words: a word in the title starts with this, in any case. */
   prefix?: string;
+  /**
+   * searchObjects()'s fallback: these words (looseWords()), any of them, instead of all of
+   * `words`; files holding more of them rank first.
+   */
+  anyWords?: readonly string[];
 }
 
 interface Hit {
@@ -496,7 +567,9 @@ async function gatedMatches(
   request: ViewRequest,
   match: Match,
   tuning: SearchTuning,
-): Promise<{ hits: Hit[]; lowerBound: boolean; plans: VectorPlan[] } | null> {
+  /** A first pass with the same vectors: its vector matches are taken, not searched again. */
+  prior?: Pick<Gated, "near" | "plans">,
+): Promise<Gated | null> {
   const caller = callerOf(request);
   if (caller === null) return null;
   const { tags, prefix } = match;
@@ -504,9 +577,9 @@ async function gatedMatches(
   const checked = rows.slice(0, SEARCH_CANDIDATES);
   const byId = new Map(checked.map((r) => [r.id, r]));
 
-  const near = new Map<string, { model: string; similarity: number }[]>();
-  const plans: VectorPlan[] = [];
-  for (const query of match.vectors) {
+  const near = new Map<string, { model: string; similarity: number }[]>(prior?.near);
+  const plans: VectorPlan[] = [...(prior?.plans ?? [])];
+  for (const query of prior === undefined ? match.vectors : []) {
     const found = await nearest(tx, tenantId, caller, query, tags, tuning);
     plans.push({ model: query.model, plan: found.plan });
     for (const n of found.near) {
@@ -608,7 +681,15 @@ async function gatedMatches(
     if (f.ranks.activity !== undefined) channels.activity = { rank: f.ranks.activity };
     return { view: s.view, explanation: { id: f.id, score: f.score, channels } };
   });
-  return { hits, lowerBound: rows.length > SEARCH_CANDIDATES, plans };
+  return { hits, lowerBound: rows.length > SEARCH_CANDIDATES, plans, near };
+}
+
+interface Gated {
+  hits: Hit[];
+  lowerBound: boolean;
+  plans: VectorPlan[];
+  /** The vector matches found, by object id, before the gate (for a second pass). */
+  near: ReadonlyMap<string, { model: string; similarity: number }[]>;
 }
 
 /**
@@ -732,9 +813,14 @@ async function keywordCandidates(
   match: Match,
 ): Promise<KeywordRow[]> {
   const { words, tags, prefix } = match;
-  const query = sql`plainto_tsquery('simple', ${words})`;
-  // Any of the words, for the explanation's fields (the match itself needs all of them).
-  const anyWord = sql`replace(plainto_tsquery('simple', ${words})::text, ' & ', ' | ')::tsquery`;
+  const loose = match.anyWords;
+  // Any of the words, for the explanation's fields; on the fallback, any of the loose words is
+  // also the match itself.
+  const anyWord =
+    loose === undefined
+      ? sql`replace(plainto_tsquery('simple', ${words})::text, ' & ', ' | ')::tsquery`
+      : anyOf(loose);
+  const query = loose === undefined ? sql`plainto_tsquery('simple', ${words})` : anyWord;
   // What each view may be matched on; these are the GIN-indexed expressions (migration 0053).
   const readerDoc = sql`(a.title_tsv || a.tags_tsv || a.path_tsv || a.summary_tsv || a.body_tsv)`;
   const otherDoc = sql`(a.other_title_tsv || a.public_tags_tsv)`;
@@ -764,7 +850,16 @@ async function keywordCandidates(
     where = sql`((d.title_tsv || d.tags_tsv || d.path_tsv || d.summary_tsv || d.body_tsv) @@ ${query}
                  or (d.other_title_tsv || d.public_tags_tsv) @@ ${query})`;
     text = (doc) => sql`${doc} @@ ${query}`;
-    rank = (doc) => sql`ts_rank(${WEIGHTS}, ${doc}, ${query})`;
+    // On the fallback, how many of the words a document holds comes first, then where: ts_rank
+    // alone goes by the field, so one common word in a title would beat three in the text.
+    rank =
+      loose === undefined
+        ? (doc) => sql`ts_rank(${WEIGHTS}, ${doc}, ${query})`
+        : (doc) =>
+            sql`(${sql.join(
+              loose.map((w) => sql`(${doc} @@ plainto_tsquery('simple', ${w}))::int`),
+              sql` + `,
+            )}) * 1000 + ts_rank(${WEIGHTS}, ${doc}, ${query})`;
     field = (doc) => sql`${doc} @@ ${anyWord}`;
   }
   const realTitle = sql`a.title`;
@@ -1031,6 +1126,8 @@ async function snippetsFor(
   tx: Tx,
   tenantId: string,
   words: string,
+  /** The fallback's words (looseWords()), when the search fell back to any of them. */
+  loose: readonly string[] | null,
   hits: readonly Hit[],
 ): Promise<Map<string, Snippet>> {
   const out = new Map<string, Snippet>();
@@ -1041,7 +1138,7 @@ async function snippetsFor(
     sql`select d.object_id as id,
                ts_headline('simple',
                  translate(left(x.text, 200000), ${START + STOP}, '  '),
-                 plainto_tsquery('simple', ${words}), ${options}) as headline
+                 ${loose === null ? sql`plainto_tsquery('simple', ${words})` : anyOf(loose)}, ${options}) as headline
           from search_documents d
           join version_extracts x on x.tenant_id = d.tenant_id and x.version_id = d.version_id
          where d.tenant_id = ${tenantId} and x.status = 'extracted'

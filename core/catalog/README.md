@@ -306,7 +306,10 @@ filters inside the query, then uses the gate, then fuses:
    wrote it, as the card shows it); a reader's metadata-only card (T-604) on the title, the
    folders and trusted tags; anyone else on the title they are shown and trusted tags of public
    facets, never the folders. The folders are those of the file's first source reference
-   (`sourcePathOf()`'s pick), without its own name.
+   (`sourcePathOf()`'s pick), without its own name. Every word must match; when no file the
+   caller is shown (after the gate) holds them all, the search is run again on any of the words
+   as typed (split on spaces only, so "e-mail" stays one word; very common words such as "the"
+   left out), files holding more of them first, and the result says so (`anyWord`).
    `facet:value` terms filter by the tags that view shows. Up to `SEARCH_CANDIDATES` (1,000).
 3. **Vector (T-502).** `vectors` are the query's words embedded, one per model (core/models
    `embedQuery()`: local providers only by default). For each, the nearest summaries and chunks
