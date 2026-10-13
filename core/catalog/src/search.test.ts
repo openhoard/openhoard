@@ -4,6 +4,7 @@ import {
   newId,
   objects,
   objectTags,
+  sourceRefs,
   tagReviews,
   tenants,
   versions,
@@ -144,6 +145,37 @@ describe("searchObjects", () => {
     await setDefault("hidden");
     await tag("kind:report", { source: "model", appliedBy: "model:m", confidence: 0.9 });
     expect(await ids(person({ tagGrants: ["kind:report"] }))).toEqual([]);
+  });
+
+  it("matches a reader on the folders the file is in, and nobody else", async () => {
+    const reader = person({ tagGrants: [t.tag] });
+    await write((tx) =>
+      tx
+        .update(sourceRefs)
+        .set({ path: ["Shared Documents", "Board_Minutes", "Report 1.docx"] })
+        .where(eq(sourceRefs.objectId, t.objectId)),
+    );
+    expect(await ids(reader, "minutes")).toEqual([t.objectId]);
+    expect(await ids(reader, "board report")).toEqual([t.objectId]);
+    expect((await search(reader, "minutes")).explanations[0]?.channels.keyword?.fields).toEqual([
+      "folders",
+    ]);
+    // A non-reader finds the file (discoverable) by its title, never by a folder's name.
+    expect(await ids(person(), "report")).toEqual([t.objectId]);
+    expect(await ids(person(), "minutes")).toEqual([]);
+    // The file's own name is the title's, not a folder's.
+    expect((await search(reader, "report")).explanations[0]?.channels.keyword?.fields).toEqual([
+      "title",
+    ]);
+    // Moved: matched on where it is now.
+    await write((tx) =>
+      tx
+        .update(sourceRefs)
+        .set({ path: ["Finance", "Report 1.docx"] })
+        .where(eq(sourceRefs.objectId, t.objectId)),
+    );
+    expect(await ids(reader, "minutes")).toEqual([]);
+    expect(await ids(reader, "finance")).toEqual([t.objectId]);
   });
 
   it("matches words in the title, and ranks by them", async () => {

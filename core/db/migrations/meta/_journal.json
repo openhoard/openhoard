@@ -470,6 +470,20 @@
       "when": 1791267466763,
       "tag": "0066_source_ref_path",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1791919625838,
+      "tag": "0067_search_path",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1791920197545,
+      "tag": "0068_injection_review_folders",
+      "breakpoints": true
     }
   ]
 }

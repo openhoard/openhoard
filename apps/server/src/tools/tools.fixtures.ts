@@ -88,6 +88,8 @@ export interface FileInput {
   updatedAt?: Date;
   /** When the source says the file last changed. */
   sourceModifiedAt?: Date;
+  /** Where the source has it: folders top down, its own name last. */
+  path?: string[];
 }
 
 export interface ToolAnswer {
@@ -285,6 +287,7 @@ export async function openHarness(
         objectId,
         url: input.url ?? null,
         sourceModifiedAt: input.sourceModifiedAt ?? null,
+        path: input.path ?? null,
       });
       const tags = [
         ...(input.tags ?? []).map((tag) => ({ tag, model: false })),

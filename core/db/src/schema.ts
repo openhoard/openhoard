@@ -1637,6 +1637,14 @@ export const searchDocuments = pgTable(
     publicTagsTsv: tsvector("public_tags_tsv")
       .notNull()
       .default(sql`''::tsvector`),
+    /**
+     * The folders the file is in (its first source reference's path without its own name, as
+     * core/catalog sourcePathOf() picks it), weight B: matched for readers only, as a reader's
+     * card shows them. A folder's name is as sensitive as a title and there is no display path.
+     */
+    pathTsv: tsvector("path_tsv")
+      .notNull()
+      .default(sql`''::tsvector`),
     summaryTsv: tsvector("summary_tsv")
       .notNull()
       .default(sql`''::tsvector`),
@@ -1756,6 +1764,13 @@ export const injectionReviews = pgTable(
      * recorded, which covers nothing.
      */
     title: text("title"),
+    /**
+     * The folders the file was in when it was reviewed (its first source reference's path
+     * without its own name; empty when none is recorded): the decision holds while it is still
+     * there, since folder names are scored with the name and reach readers' cards. Null for a
+     * review from before folders were recorded, which covers nothing.
+     */
+    folders: text("folders").array(),
     reviewedBy: text("reviewed_by").notNull(),
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }).notNull().defaultNow(),
   },

@@ -213,6 +213,14 @@ const MODIFIED_AT = sql<Date>`least(
     ${objects.updatedAt}),
   now())`.mapWith(objects.updatedAt);
 
+/**
+ * The path CardView.folders comes from, in SQL: the first source reference's (by source, then
+ * external id), as sourcePathOf() and the search document pick it.
+ */
+const SOURCE_PATH = sql<string[] | null>`(select r.path from source_refs r
+    where r.tenant_id = ${objects.tenantId} and r.object_id = ${objects.id}
+    order by r.source, r.external_id limit 1)`.mapWith(sourceRefs.path);
+
 /** The most an unclassified file's content is exposed to enrichment (enrichmentExposure()). */
 export const UNCLASSIFIED_CEILING: Exposure = "commercial-only";
 
@@ -456,6 +464,15 @@ export interface CardView extends ViewBase {
    */
   modifiedAt: Date;
   /**
+   * The folders the file is in at its source, top down (its path without its own name), on a
+   * reader's card only, and only where the card shows the real title: a folder's name is as
+   * sensitive as a title (there is no display path for non-readers), and as much its author's
+   * to write (an AI client sees none for a file the detector flagged or hasn't looked at; the
+   * detector scores the folders' names with the file's). Absent when no path is recorded or
+   * the file is at the top of its source.
+   */
+  folders?: string[];
+  /**
    * Metadata only: the card carries nothing derived from the content (no `summary`, and only
    * trusted tags for a reader), and the content can't be opened through it. True when the
    * file's exposure doesn't reach this AI client's trust (T-604; a file flagged
@@ -541,6 +558,7 @@ export async function viewObjects(
       ownerId: objects.ownerId,
       updatedAt: objects.updatedAt,
       modifiedAt: MODIFIED_AT,
+      path: SOURCE_PATH,
       zone: zones.kind,
       zoneId: zones.id,
     })
@@ -701,6 +719,7 @@ export async function viewObjects(
         !decision.metadataOnly && card && mayProcess(level.exposure, card.providerKind)
           ? { summary: card.summary }
           : {};
+      const folders = canRead && !unnamed && row.path !== null ? row.path.slice(0, -1) : [];
       views.set(row.id, {
         ...base,
         shape: "card",
@@ -709,6 +728,7 @@ export async function viewObjects(
         readable: canRead,
         updatedAt: row.updatedAt,
         modifiedAt: row.modifiedAt,
+        ...(folders.length > 0 ? { folders } : {}),
         metadataOnly: decision.metadataOnly,
         ...summary,
       });

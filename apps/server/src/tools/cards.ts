@@ -15,6 +15,8 @@ import { actorOf, type ToolContext } from "./context.js";
  *   non-reader of a discoverable file learns its title and public tags, nothing more.
  *   `modified` is when the file last changed at its source (the view's `modifiedAt`), not when
  *   OpenHoard recorded it;
+ * - `folders`, the folders the file is in at its source, top down, only where the view has them
+ *   (a reader's card showing the real title): the deepest {@link FOLDERS_MAX}, each clipped;
  * - `tags` as the view shows them (every tag for a reader, trusted ones on a metadata-only card,
  *   public ones for anyone else);
  * - `summary` only where the gate put one (a card that isn't metadata-only, exposure still
@@ -36,6 +38,10 @@ export const MAX_TOKENS = 8_000;
 export const TITLE_MAX = 200;
 /** Most tags a card carries. */
 export const TAGS_MAX = 12;
+/** Most folder names a card carries: the deepest, after a "…" for the ones left out. */
+export const FOLDERS_MAX = 6;
+/** Longest folder name a card carries, in characters. */
+export const FOLDER_MAX = 60;
 
 export const KINDS = [
   "document",
@@ -92,6 +98,8 @@ export const CardSchema = z.object({
   /** The owner's display name, on a card whose owner is a user; null otherwise. */
   owner: z.string().nullable(),
   tags: z.array(z.string()),
+  /** The folders it is in at its source, top down (a reader's card); "…" stands for more. */
+  folders: z.array(z.string()).optional(),
   /**
    * `read`: the caller can read it. `card`: a card of a file they can't read. `title-only`: they
    * may know it exists (request access).
@@ -132,6 +140,7 @@ export function clip(s: string, max: number): string {
 const WHY: Record<string, string> = {
   title: "title",
   tags: "tags",
+  folders: "folder",
   summary: "summary",
   body: "content",
 };
@@ -162,9 +171,16 @@ export function toCard(
     access: view.shape === "title-only" ? "title-only" : view.readable ? "read" : "card",
     metadataOnly: view.shape === "card" ? view.metadataOnly : true,
   };
+  if (view.shape === "card" && view.folders !== undefined) card.folders = foldersOf(view.folders);
   if (view.shape === "card" && view.summary !== undefined) card.summary = view.summary;
   if (why !== undefined) card.why = why;
   return card;
+}
+
+/** A view's folders as a card carries them: the deepest {@link FOLDERS_MAX}, each clipped. */
+export function foldersOf(folders: readonly string[]): string[] {
+  const kept = folders.slice(-FOLDERS_MAX).map((f) => clip(f, FOLDER_MAX));
+  return folders.length > FOLDERS_MAX ? ["…", ...kept] : kept;
 }
 
 /** Display names of the owners of the views that are cards, read in the caller's snapshot. */
@@ -217,7 +233,7 @@ export function clipTokens(s: string, tokens: number): string {
 
 /**
  * One card cut until the whole answer (`wrap(card)`) fits `budget`: without its summary, then
- * its tags and `why`, then with its owner's name and title clipped (the title keeps at least as
+ * its tags, folders and `why`, then with its owner's name and title clipped (the title keeps at least as
  * much room as the name), and at last with neither. A title is data too: a long one, or one in
  * CJK, can outweigh a small budget on its own.
  */
@@ -226,7 +242,7 @@ export function fitCard<C extends Card>(card: C, budget: number, wrap: (card: C)
   const { summary: _summary, ...rest } = card;
   let lean = rest as C;
   if (tokensOf(wrap(lean)) <= budget) return lean;
-  const { why: _why, ...bare } = lean;
+  const { why: _why, folders: _folders, ...bare } = lean;
   lean = { ...bare, tags: [] } as unknown as C;
   if (tokensOf(wrap(lean)) <= budget) return lean;
   const empty = { ...lean, title: "", owner: lean.owner === null ? null : "" } as C;

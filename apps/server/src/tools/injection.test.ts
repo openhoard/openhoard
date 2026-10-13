@@ -56,6 +56,7 @@ beforeAll(
         versionId,
         seq: 1,
         title: c.name,
+        path: null,
         mime: c.mime,
         blobId: h.seed.blobId,
       };

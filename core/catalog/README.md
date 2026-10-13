@@ -95,11 +95,12 @@ flag): approved, `exposure: metadata-only`, whatever packs or admins did to it. 
 or a pack put on is never cleared by the detector.
 
 `markNotInjection()` records a tenant admin's decision that an object is not an injection (never
-the owner's: an insider attack would come from the owner). It is for the version, content and
-name reviewed (`injection_reviews`: version, blob and title): while the object's current version
-has that content and the object that name, the detector's flag comes off, the detector doesn't
-flag it again, and the summarize step summarizes it; a new version with other content is judged
-again, and so is a renamed file (a review from before names were recorded covers nothing). It checks the admin
+the owner's: an insider attack would come from the owner). It is for the version, content, name
+and folders reviewed (`injection_reviews`: version, blob, title and folders): while the object's
+current version has that content and the object that name and those folders, the detector's
+flag comes off, the detector doesn't flag it again, and the summarize step summarizes it; a new
+version with other content is judged again, and so is a renamed or moved file (a review from
+before names, or folders, were recorded covers nothing). It checks the admin
 (core/identity `isAdmin()`) and appends the `injection.review` audit record itself, in the same
 transaction; `clearInjectionReview()` (audited as `injection.review-withdrawn`) gives the
 detector back its say. The database refuses any change to `risk:injection`'s levels or its
@@ -297,12 +298,15 @@ filters inside the query, then uses the gate, then fuses:
    or readable (the same rule as `levelsFor()`). A key's scope narrows it, and needs both
    `search` and `read`.
 2. **Keyword (T-501).** Words match each object's search document (core/db `search_documents`,
-   kept by triggers: title A, tag values B, summary C, extracted text D; `simple` configuration,
+   kept by triggers: title A, tag values and folder names B, summary C, extracted text D;
+   `simple` configuration,
    no stemming, see core/db), through its GIN indexes, ranked by weighted `ts_rank`. Each
    candidate is matched once per way it may be shown: a reader whose card isn't metadata-only
    on everything (the summary only while the file's exposure still allows the provider that
-   wrote it, as the card shows it); a reader's metadata-only card (T-604) on the title and
-   trusted tags; anyone else on the title they are shown and trusted tags of public facets.
+   wrote it, as the card shows it); a reader's metadata-only card (T-604) on the title, the
+   folders and trusted tags; anyone else on the title they are shown and trusted tags of public
+   facets, never the folders. The folders are those of the file's first source reference
+   (`sourcePathOf()`'s pick), without its own name.
    `facet:value` terms filter by the tags that view shows. Up to `SEARCH_CANDIDATES` (1,000).
 3. **Vector (T-502).** `vectors` are the query's words embedded, one per model (core/models
    `embedQuery()`: local providers only by default). For each, the nearest summaries and chunks

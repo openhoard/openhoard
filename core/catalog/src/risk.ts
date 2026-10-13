@@ -10,6 +10,7 @@ import {
 } from "@openhoard/core-db";
 import { isAdmin } from "@openhoard/core-identity";
 import { and, desc, eq, sql } from "drizzle-orm";
+import { sourcePathOf } from "./ingest.js";
 import { lockObject } from "./locks.js";
 import { BUILTIN_RULE_PREFIX } from "./rules.js";
 import { proposeTag } from "./tagging.js";
@@ -136,6 +137,8 @@ export interface InjectionReview {
   blobId: string;
   /** The file's name when it was reviewed; null for a review from before it was recorded. */
   title: string | null;
+  /** The folders it was in (empty: none recorded); null for a review from before they were. */
+  folders: string[] | null;
   reviewedBy: string;
   reviewedAt: Date;
 }
@@ -152,6 +155,7 @@ export async function injectionReviewOf(
       versionId: injectionReviews.versionId,
       blobId: injectionReviews.blobId,
       title: injectionReviews.title,
+      folders: injectionReviews.folders,
       reviewedBy: injectionReviews.reviewedBy,
       reviewedAt: injectionReviews.reviewedAt,
     })
@@ -160,7 +164,11 @@ export async function injectionReviewOf(
   return row ?? null;
 }
 
-/** The object's current version, its content and the object's name, or null. */
+/**
+ * The object's current version, its content, the object's name and the folders it is in (its
+ * first source reference's path without its own name, sourcePathOf(); empty when none is
+ * recorded), or null.
+ */
 async function currentVersionOf(tx: Tx, tenantId: string, objectId: string) {
   const [row] = await tx
     .select({ versionId: versions.id, blobId: versions.blobId, title: objects.title })
@@ -172,14 +180,20 @@ async function currentVersionOf(tx: Tx, tenantId: string, objectId: string) {
     .where(and(eq(versions.tenantId, tenantId), eq(versions.objectId, objectId)))
     .orderBy(desc(versions.seq))
     .limit(1);
-  return row ?? null;
+  if (!row) return null;
+  const path = await sourcePathOf(tx, tenantId, objectId);
+  return { ...row, folders: path === null ? [] : path.slice(0, -1) };
 }
+
+const sameNames = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((n, i) => n === b[i]);
 
 /**
  * Whether an admin's "not an injection" decision covers the object as it is now: its current
- * version has the content (blob) they reviewed, and the file the name it had. A new version
- * with other bytes is judged again, and so is a renamed file: a name is the author's text too,
- * and whoever may rename a cleared file could otherwise write anything there for good.
+ * version has the content (blob) they reviewed, and the file the name and folders it had. A new
+ * version with other bytes is judged again, and so is a renamed or moved file: names are the
+ * author's text too, and whoever may rename a cleared file, or a folder above it, could
+ * otherwise write anything there for good.
  */
 export async function reviewedNotInjection(
   tx: Tx,
@@ -189,7 +203,13 @@ export async function reviewedNotInjection(
   const review = await injectionReviewOf(tx, tenantId, objectId);
   if (review === null) return false;
   const current = await currentVersionOf(tx, tenantId, objectId);
-  return current !== null && current.blobId === review.blobId && current.title === review.title;
+  return (
+    current !== null &&
+    current.blobId === review.blobId &&
+    current.title === review.title &&
+    review.folders !== null &&
+    sameNames(current.folders, review.folders)
+  );
 }
 
 /** Why an injection review was refused. */

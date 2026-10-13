@@ -389,6 +389,51 @@ describe("viewObjects", () => {
     expect(Math.abs(future - Date.now())).toBeLessThan(120_000);
   });
 
+  it("shows the folders on a reader's card only, and not where the title is masked", async () => {
+    const at = (path: string[] | null) =>
+      inTenant((tx) =>
+        tx.update(sourceRefs).set({ path }).where(eq(sourceRefs.objectId, t.objectId)),
+      );
+    const through = (principal: AuthzPrincipal, trust: "first-party" | "commercial") =>
+      db.withTenant(
+        t.tenantId,
+        (tx) =>
+          viewObjects(tx, t.tenantId, authz, { principal, client: { id: "a-client", trust } }, [
+            t.objectId,
+          ]),
+        VIEW_TRANSACTION,
+      );
+    const folders = async (principal: AuthzPrincipal, trust: "first-party" | "commercial") => {
+      const [card] = await through(principal, trust);
+      if (card?.shape !== "card") throw new Error(`no card: ${card?.shape}`);
+      return card.folders;
+    };
+    await at(["Shared Documents", "HR", "Report 1.docx"]);
+    expect(await folders(reader(), "first-party")).toEqual(["Shared Documents", "HR"]);
+    expect(await folders(reader(), "commercial")).toEqual(["Shared Documents", "HR"]);
+    // A non-reader's card of a readable file: a folder's name is as sensitive as a title, and
+    // there is no display path.
+    await tag("sensitivity:public");
+    await inTenant((tx) => tx.delete(objectTags).where(eq(objectTags.value, "internal")));
+    expect(await view(person())).toMatchObject([{ shape: "card", readable: false }]);
+    expect(await folders(person(), "first-party")).toBeUndefined();
+    // Not looked at by the detector yet: an AI client gets neither the name nor the folders.
+    await inTenant((tx) =>
+      tx.update(versions).set({ processedAt: null }).where(eq(versions.id, t.versionId)),
+    );
+    expect(await through(reader(), "commercial")).toMatchObject([{ title: GENERIC_TITLE }]);
+    expect(await folders(reader(), "commercial")).toBeUndefined();
+    expect(await folders(reader(), "first-party")).toEqual(["Shared Documents", "HR"]);
+    await inTenant((tx) =>
+      tx.update(versions).set({ processedAt: new Date() }).where(eq(versions.id, t.versionId)),
+    );
+    // At the top of its source, or with no path recorded: no folders.
+    await at(["Report 1.docx"]);
+    expect(await folders(reader(), "first-party")).toBeUndefined();
+    await at(null);
+    expect(await folders(reader(), "first-party")).toBeUndefined();
+  });
+
   it("shows the home to a reader, and to others only when it is a tag they see", async () => {
     await inTenant((tx) =>
       tx

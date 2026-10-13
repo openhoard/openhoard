@@ -229,9 +229,19 @@ export interface InjectionVerdict {
 }
 
 /** What the detector looks at: all of it untrusted. */
+/** The most folder names detectInjection() scores: the deepest ones, nearest the file. */
+export const MAX_FOLDERS = 64;
+
 export interface InjectionInput {
   /** The file's name (the object's title). */
   name?: string;
+  /**
+   * The names of the folders the file is in, top down (its source path without its own name).
+   * Shown with the name to readers, so scored as names are: each on its own, and all of them
+   * with the name as one line (an instruction split across folders), the deepest
+   * {@link MAX_FOLDERS} only.
+   */
+  folders?: readonly string[];
   /** The visible text the extractor kept. */
   text?: string;
   /** The extractor's hidden-text signals (`{ kind, count, sample? }`), as stored. */
@@ -388,6 +398,20 @@ export function detectInjection(input: InjectionInput): InjectionVerdict {
     if (NAME_CONTROL.test(name)) add("name-control", "name", STRONG);
     if (/(?:^|[\\/])\.\.(?:[\\/]|$)/.test(name)) add("name-traversal", "name", STRONG);
     scan(name, "name", 1);
+  }
+  const folders = Array.isArray(input.folders) ? input.folders.slice(-MAX_FOLDERS) : [];
+  for (const folder of folders) {
+    if (flagged()) break;
+    if (typeof folder !== "string" || folder === "") continue;
+    const f = folder.slice(0, 1024);
+    if (NAME_CONTROL.test(f)) add("name-control", "name", STRONG);
+    scan(f, "name", 1);
+  }
+  // A card shows the folders one after another and then the name, so they are read as one
+  // line too: an instruction split across folders is still an instruction.
+  if (folders.length > 0 && !flagged()) {
+    const line = [...folders, name].filter((n) => typeof n === "string" && n !== "").join(" ");
+    scan(line.slice(0, MAX_FOLDERS * 1024 + 4096), "name", 1);
   }
 
   // Once flagged, the rest can't unflag it: later scans are skipped (the findings then list

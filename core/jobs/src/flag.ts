@@ -5,7 +5,7 @@ import type { EnrichStep, EnrichTarget } from "./enrich.js";
 /*
  * Injection flagging as an enrichment step, `injection-flag` (T-408): after text extraction and
  * before any tag rule or model, it scores the version for prompt injection (core/summarize
- * detectInjection(): the file name, the extracted text, the extractor's hidden-text signals and
+ * detectInjection(): the file name and its folders' names, the extracted text, the extractor's hidden-text signals and
  * the file's own metadata) and makes the object's `risk:injection` flag match (core/catalog
  * applyInjectionFlag()): flagged, the file is metadata-only for AI clients and its content
  * reaches no model, since the pipeline asks the exposure before every model step; not flagged
@@ -34,6 +34,8 @@ export async function scoreVersion(
   const extract = await read((tx) => readExtract(tx, target.tenantId, target.versionId));
   return detectInjection({
     name: target.title,
+    // Folders reach a reader's card with the name: a folder named to steer an AI flags the file.
+    ...(target.path === null ? {} : { folders: target.path.slice(0, -1) }),
     ...(extract?.status === "extracted"
       ? { text: extract.text, signals: extract.signals, metadata: extract.metadata }
       : {}),

@@ -180,6 +180,12 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
                 ],
                 "type": "string",
               },
+              "folders": {
+                "items": {
+                  "type": "string",
+                },
+                "type": "array",
+              },
               "id": {
                 "type": "string",
               },
@@ -292,6 +298,12 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
                     "title-only",
                   ],
                   "type": "string",
+                },
+                "folders": {
+                  "items": {
+                    "type": "string",
+                  },
+                  "type": "array",
                 },
                 "id": {
                   "type": "string",
@@ -493,6 +505,12 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
                 ],
                 "type": "string",
               },
+              "folders": {
+                "items": {
+                  "type": "string",
+                },
+                "type": "array",
+              },
               "id": {
                 "type": "string",
               },
@@ -688,6 +706,12 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
                 "title-only",
               ],
               "type": "string",
+            },
+            "folders": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
             },
             "id": {
               "type": "string",
@@ -936,6 +960,12 @@ exports[`the MCP tools' contract > pins what tools/list tells clients 1`] = `
                 "title-only",
               ],
               "type": "string",
+            },
+            "folders": {
+              "items": {
+                "type": "string",
+              },
+              "type": "array",
             },
             "id": {
               "type": "string",

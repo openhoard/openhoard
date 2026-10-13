@@ -26,14 +26,16 @@ import {
  *    tags or the tenant default, tightened by untrusted ones, hidden while unprocessed). A
  *    credential's scope narrows it (a service account's key).
  * 2. Keyword matches (T-501) against each object's search document (core/db searchDocuments:
- *    title A, tags B, summary C, extracted text D, `simple` configuration), found through its
+ *    title A, tags and folders B, summary C, extracted text D, `simple` configuration), found through its
  *    GIN indexes. Each candidate is matched once per way a caller may be shown it, and only on
  *    what that view shows:
  *    - a reader whose card isn't metadata-only (the content is theirs to have): title, every
- *      tag, the summary (only while the file's exposure still allows the provider that wrote
+ *      tag, the folders, the summary (only while the file's exposure still allows the provider that wrote
  *      it, as the card shows it) and the extracted text;
  *    - a reader's metadata-only card (T-604: the file's exposure doesn't reach this AI client,
- *      or it is flagged `risk:injection`): the title and trusted tags, nothing content-derived;
+ *      or it is flagged `risk:injection`): the title, folders and trusted tags, nothing
+ *      content-derived (names are the reader's to know: an AI client is shown "Document" and
+ *      no folders for a flagged file to keep their text from it, not their meaning);
  *    - anyone else: the title they are shown (nonReaderTitle()) and trusted tags of public
  *      facets.
  * 3. Vector matches (T-502): the nearest chunks and summaries by each query embedding's model
@@ -135,7 +137,8 @@ export interface SearchTuning {
 }
 
 /** A field a keyword match was on. */
-export type SearchField = "title" | "tags" | "summary" | "body";
+/** `folders`: the names of the folders the file is in (readers only, as their card shows). */
+export type SearchField = "title" | "tags" | "folders" | "summary" | "body";
 
 /** How a hit was found, for "why is this here?" (T-503). Ranks count from 1. */
 export interface HitExplanation {
@@ -423,6 +426,7 @@ function candidates(tenantId: string, caller: Caller, where: SQL): SQL {
              coalesce(d.summary_tsv, ${empty}) as summary_tsv,
              d.summary_provider_kind,
              coalesce(d.body_tsv, ${empty}) as body_tsv,
+             coalesce(d.path_tsv, ${empty}) as path_tsv,
              (o.owner_id = ${caller.owner}
               or o.id = any(${array(caller.readObjects)})
               or exists (
@@ -655,6 +659,7 @@ interface KeywordRow {
   f_title: boolean;
   f_tags: boolean;
   f_trusted_tags: boolean;
+  f_folders: boolean;
   f_summary: boolean;
   f_body: boolean;
   f_other_title: boolean;
@@ -682,6 +687,7 @@ function keywordFor(
           fields: fields([
             [row.f_title, "title"],
             [row.f_tags, "tags"],
+            [row.f_folders, "folders"],
             [withSummary && row.f_summary, "summary"],
             [row.f_body, "body"],
           ]),
@@ -693,6 +699,7 @@ function keywordFor(
           fields: fields([
             [row.f_title, "title"],
             [row.f_tags, "tags"],
+            [row.f_folders, "folders"],
           ]),
         };
       }
@@ -702,6 +709,7 @@ function keywordFor(
         fields: fields([
           [row.f_title, "title"],
           [row.f_trusted_tags, "tags"],
+          [row.f_folders, "folders"],
         ]),
       };
     }
@@ -728,11 +736,11 @@ async function keywordCandidates(
   // Any of the words, for the explanation's fields (the match itself needs all of them).
   const anyWord = sql`replace(plainto_tsquery('simple', ${words})::text, ' & ', ' | ')::tsquery`;
   // What each view may be matched on; these are the GIN-indexed expressions (migration 0053).
-  const readerDoc = sql`(a.title_tsv || a.tags_tsv || a.summary_tsv || a.body_tsv)`;
+  const readerDoc = sql`(a.title_tsv || a.tags_tsv || a.path_tsv || a.summary_tsv || a.body_tsv)`;
   const otherDoc = sql`(a.other_title_tsv || a.public_tags_tsv)`;
-  const noSummary = sql`(a.title_tsv || a.tags_tsv || a.body_tsv)`;
-  const metaDoc = sql`(a.title_tsv || a.tags_tsv)`;
-  const trustedDoc = sql`(a.title_tsv || a.trusted_tags_tsv)`;
+  const noSummary = sql`(a.title_tsv || a.tags_tsv || a.path_tsv || a.body_tsv)`;
+  const metaDoc = sql`(a.title_tsv || a.tags_tsv || a.path_tsv)`;
+  const trustedDoc = sql`(a.title_tsv || a.trusted_tags_tsv || a.path_tsv)`;
 
   let where = sql`true`;
   let text: (doc: SQL, title: SQL) => SQL;
@@ -753,7 +761,7 @@ async function keywordCandidates(
     field = () => sql`false`;
   } else {
     // Only documents holding the words, through the GIN indexes (the same expressions).
-    where = sql`((d.title_tsv || d.tags_tsv || d.summary_tsv || d.body_tsv) @@ ${query}
+    where = sql`((d.title_tsv || d.tags_tsv || d.path_tsv || d.summary_tsv || d.body_tsv) @@ ${query}
                  or (d.other_title_tsv || d.public_tags_tsv) @@ ${query})`;
     text = (doc) => sql`${doc} @@ ${query}`;
     rank = (doc) => sql`ts_rank(${WEIGHTS}, ${doc}, ${query})`;
@@ -790,6 +798,7 @@ async function keywordCandidates(
                  ${field(sql`a.title_tsv`)} as f_title,
                  ${field(sql`a.tags_tsv`)} as f_tags,
                  ${field(sql`a.trusted_tags_tsv`)} as f_trusted_tags,
+                 ${field(sql`a.path_tsv`)} as f_folders,
                  (a.summary_ok and ${field(sql`a.summary_tsv`)}) as f_summary,
                  (a.content_ok and ${field(sql`a.body_tsv`)}) as f_body,
                  ${field(sql`a.other_title_tsv`)} as f_other_title,

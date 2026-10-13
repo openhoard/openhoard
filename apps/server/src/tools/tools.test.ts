@@ -213,6 +213,18 @@ describe("scenario 1: find by intent, then open in the file's own app", () => {
       (await h.call(token, "find", { query: "forecast 2019", modifiedAfter: "2025-01-01" })).data,
     );
     expect(since.total).toBe(0);
+    // A reader's card says which folders the file is in, and a folder's name finds it.
+    await h.addFile({
+      title: "Plan.docx",
+      mime: MIME.docx,
+      path: ["Shared Documents", "Board Minutes", "Plan.docx"],
+    });
+    const byFolder = shaped("find", (await h.call(token, "find", { query: "board minutes" })).data);
+    expect(byFolder.top).toMatchObject({
+      title: "Plan.docx",
+      folders: ["Shared Documents", "Board Minutes"],
+      why: ["folder"],
+    });
     // Tag filters go to the catalog as facet:value terms.
     await h.addFile({ title: "Forecast acme.xlsx", mime: MIME.xlsx, tags: ["client:acme"] });
     const tagged = shaped(

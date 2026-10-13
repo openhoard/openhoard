@@ -118,8 +118,8 @@ router, budget }` with a provider that has an `embedModel`. Without one, search 
   only.
 
 **Injection flagging** (`injection-flag`, T-408). The step scores the version with core/summarize
-`detectInjection()`: the file name, the extracted text, the extractor's hidden-text signals
-(white, tiny, off-page and invisible text, hidden sheets and slides, comments, annotations,
+`detectInjection()`: the file name and its folders' names, the extracted text, the extractor's
+hidden-text signals (white, tiny, off-page and invisible text, hidden sheets and slides, comments, annotations,
 document properties, defined names, HTML comments, invisible characters, formulas) and the
 file's own metadata (title, sheet names). Flagged, it puts the trusted `risk:injection` tag on
 the object (core/catalog `applyInjectionFlag()`, applied by `rule:builtin/injection-detector`,

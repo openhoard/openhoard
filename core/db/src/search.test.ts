@@ -67,6 +67,36 @@ describe("search documents", () => {
     expect(await doc()).toMatchObject({ tags: "", trusted: "", public: "" });
   });
 
+  it("hold the folders of the file's first source reference, not its own name", async () => {
+    const folders = () =>
+      db.withTenant(t.tenantId, async (tx) => {
+        const { rows } = (await tx.execute(
+          `select path_tsv::text as path from search_documents where object_id = '${t.objectId}'`,
+        )) as unknown as { rows: { path: string }[] };
+        return rows[0]?.path;
+      });
+    expect(await folders()).toBe("");
+    await run(`insert into source_refs (tenant_id, source, external_id, object_id, path)
+      values ('${t.tenantId}', 'b', 'x', '${t.objectId}', '{Shared Documents,HR_2026,Report.docx}')`);
+    expect(await folders()).toBe("'2026':4B 'documents':2B 'hr':3B 'shared':1B");
+    // The seed's own reference has no path, and sorts after these (by source, then external id).
+    // A second reference sorting first is the one kept.
+    await run(`insert into source_refs (tenant_id, source, external_id, object_id, path)
+      values ('${t.tenantId}', 'a', 'x', '${t.objectId}', '{Finance,Report.docx}')`);
+    expect(await folders()).toBe("'finance':1B");
+    await run(`update source_refs set path = '{Legal,Old,Report.docx}'
+      where source = 'a'`);
+    expect(await folders()).toBe("'legal':1B 'old':2B");
+    // At the top of its source (its own name only), or with no path, a file is in no folder.
+    await run(`update source_refs set path = '{Report.docx}' where source = 'a'`);
+    expect(await folders()).toBe("");
+    await run(`delete from source_refs where source = 'a'`);
+    expect(await folders()).toBe("'2026':4B 'documents':2B 'hr':3B 'shared':1B");
+    await run(`update source_refs set path = null where source = 'b'`);
+    expect(await folders()).toBe("");
+    await run(`delete from source_refs where source = 'b'`);
+  });
+
   it("have the GIN and per-size HNSW indexes search's queries are written for", async () => {
     const rows = await driver.query(
       `select indexname, indexdef from pg_indexes
@@ -74,7 +104,7 @@ describe("search documents", () => {
     );
     const defs = new Map(rows.map((r) => [String(r.indexname), String(r.indexdef)]));
     expect(defs.get("search_documents_reader_gin")).toMatch(
-      /gin \(\(\(\(\(title_tsv \|\| tags_tsv\) \|\| summary_tsv\) \|\| body_tsv\)\)/,
+      /gin \(\(\(\(\(\(title_tsv \|\| tags_tsv\) \|\| path_tsv\) \|\| summary_tsv\) \|\| body_tsv\)\)/,
     );
     expect(defs.get("search_documents_other_gin")).toMatch(/other_title_tsv \|\| public_tags_tsv/);
     for (const n of INDEXED_DIMENSIONS) {
