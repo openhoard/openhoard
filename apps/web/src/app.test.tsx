@@ -65,6 +65,7 @@ function fakeApi(over: Partial<Api> = {}): Api {
     verifyAudit: vi.fn(async () => ({ ok: true as const, count: 0, head: "" })),
     health: vi.fn(async () => Promise.reject(new ApiError(0))),
     exportHealth: vi.fn(async () => ({ ended: "failed" as const })),
+    sourceSkips: vi.fn(async () => ({ total: 0, byReason: {}, skips: [] })),
     ...over,
   };
 }

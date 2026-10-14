@@ -728,7 +728,8 @@ read into memory when the server starts and served as they are.
 - **Its policy** allows this origin's own script, styles and images and requests to this origin,
   and nothing else: no inline script or style, no other site, no framing.
 - **Without a build** (a checkout nobody built) the server says so once and runs without it.
-- Today: an overview of the sources (`GET /api/admin/sources`); tags to review and the
+- Today: an overview of the sources (`GET /api/admin/sources`, and on opening a source's
+  "What was left out", `GET /api/admin/sources/:source/skips`); tags to review and the
   vocabulary (T-903, over the review API above); and AI clients (T-904: approve with a trust
   label, refuse, relabel, revoke, and each client's use, over the admin API); and the audit log
   (T-905: find events, check the chain, download what was found); and the File Health Report

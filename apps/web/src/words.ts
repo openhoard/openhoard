@@ -374,3 +374,47 @@ export function valueEffects(v: { visibility: string | null; exposure: string | 
   if (v.exposure !== null) out.push(EXPOSURE_WORDS[v.exposure] ?? `AI access: ${v.exposure}.`);
   return out;
 }
+
+/*
+ * What a source's syncs left out (core/jobs skips.ts): why, in an admin's words. A code this
+ * doesn't know is said as it is.
+ */
+const LEFT_OUT: ReadonlyMap<string, string> = new Map([
+  // The sync's own (core/jobs sync.ts).
+  ["too-large", "Too large to read"],
+  ["invalid-acl", "Its sharing couldn't be read"],
+  ["invalid", "The source described it in a way OpenHoard can't take"],
+  // Recording it (core/catalog ingest).
+  ["ingest-invalid", "The source described it in a way OpenHoard can't take"],
+  ["ingest-unknown-zone", "Its place isn't set up in OpenHoard"],
+  [
+    "ingest-zone-mismatch",
+    "Already recorded in another place (moved to a folder mapped elsewhere)",
+  ],
+  ["ingest-needs-location", "Its content couldn't be stored"],
+  ["ingest-blob-mismatch", "Its content couldn't be stored"],
+  // Reading it (the connector's errors).
+  ["changed", "It changed while being read; the next sync tries again"],
+  ["not-found", "Gone by the time it was read"],
+  ["permanent", "The source refused to serve it"],
+  ["resync", "The source asked for a fresh sync first"],
+  // The connector's warnings.
+  ["unreadable", "The source wouldn't let OpenHoard read it"],
+  ["invalid-item", "Its name or depth isn't one OpenHoard can take"],
+  ["unplaced-item", "Its folder couldn't be placed"],
+  ["unsupported-item", "A kind of item OpenHoard doesn't read"],
+  [
+    "unlisted-folder",
+    "A folder OpenHoard wasn't allowed to list (what was already found in it stays)",
+  ],
+  // A code the server couldn't keep as it was.
+  ["other", "Another reason"],
+]);
+
+/** The codes {@link leftOutText} has words for. */
+export const LEFT_OUT_CODES: readonly string[] = [...LEFT_OUT.keys()];
+
+/** Why a source's sync left something out, in plain words. */
+export function leftOutText(reason: string): string {
+  return LEFT_OUT.get(reason) ?? `Another reason (${reason})`;
+}

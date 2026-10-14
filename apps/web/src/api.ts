@@ -238,8 +238,28 @@ export type HealthSheet =
   | { ended: "done"; file: Blob; name: string; cut: number }
   | { ended: "sign-in-again" | "refused" | "invalid" | "failed" };
 
+/** A file a source's syncs left out, and why (GET /api/admin/sources/:source/skips). */
+export interface SourceSkip {
+  externalId: string;
+  /** A code: `too-large`, `invalid-acl`, `ingest-…`, a connector warning's. */
+  reason: string;
+  /** Where it is in its source, its own name last; null when the sync didn't know. */
+  path: string[] | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+export interface SourceSkips {
+  /** How many are left out, of every reason. */
+  total: number;
+  byReason: Record<string, number>;
+  /** The most recently met first; a page of them. */
+  skips: SourceSkip[];
+}
+
 export interface Api {
   me(): Promise<Me>;
+  sourceSkips(source: string, reason?: string): Promise<SourceSkips>;
   health(query: HealthQuery): Promise<HealthReportPage>;
   exportHealth(query: HealthQuery): Promise<HealthSheet>;
   audit(query: AuditQuery, before?: number): Promise<AuditPage>;
@@ -437,6 +457,52 @@ export function createApi(fetcher: typeof fetch): Api {
         };
       }
       throw new ApiError(200);
+    },
+    async sourceSkips(source, reason) {
+      const params = new URLSearchParams({ limit: "100" });
+      if (reason !== undefined) params.set("reason", reason);
+      const body = (await get(
+        `/api/admin/sources/${encodeURIComponent(source)}/skips?${params.toString()}`,
+      )) as Record<string, unknown> | null;
+      const byReason = body?.byReason;
+      if (
+        typeof body?.total !== "number" ||
+        typeof byReason !== "object" ||
+        byReason === null ||
+        !Array.isArray(body.skips)
+      ) {
+        throw new ApiError(200);
+      }
+      return {
+        total: body.total,
+        byReason: Object.fromEntries(
+          Object.entries(byReason as Record<string, unknown>).filter(
+            (kv): kv is [string, number] => typeof kv[1] === "number" && Number.isFinite(kv[1]),
+          ),
+        ),
+        skips: body.skips.map((x: unknown) => {
+          const k = (typeof x === "object" && x !== null ? x : {}) as Record<string, unknown>;
+          if (
+            typeof k.externalId !== "string" ||
+            typeof k.reason !== "string" ||
+            typeof k.firstSeenAt !== "string" ||
+            typeof k.lastSeenAt !== "string"
+          ) {
+            throw new ApiError(200);
+          }
+          const path =
+            Array.isArray(k.path) && k.path.every((n) => typeof n === "string")
+              ? (k.path as string[])
+              : null;
+          return {
+            externalId: k.externalId,
+            reason: k.reason,
+            path,
+            firstSeenAt: k.firstSeenAt,
+            lastSeenAt: k.lastSeenAt,
+          };
+        }),
+      };
     },
     async health(query) {
       // A POST: reading it is recorded (the server's Origin check keeps other sites out).
