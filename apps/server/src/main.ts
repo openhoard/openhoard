@@ -193,9 +193,13 @@ const mailIn =
       )
     : null;
 
+// Set when shutdown starts: /healthz says unavailable from then on.
+let stopping = false;
 // The MCP `find` tool embeds queries with the same providers (local ones only, by default).
 const app = createApp(config, log, {
   db,
+  unavailableSources: sources.unavailable,
+  stopping: () => stopping,
   ...(config.uploads
     ? {
         uploads: {
@@ -232,7 +236,6 @@ const server = serve(
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 const JOBS_STOP_TIMEOUT_MS = 5_000;
 const JOBS_GRACE_MS = 2_000;
-let stopping = false;
 const shutdown = (signal: string) => {
   if (stopping) return;
   stopping = true;

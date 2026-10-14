@@ -61,6 +61,20 @@ export interface ServerSources {
   content: ContentSource | null;
   /** Wires `onStale` to the job queue once it runs (a changed item syncs its source soon). */
   onStale(handler: (tenantId: string, source: string) => void): void;
+  /**
+   * Configured sources this server couldn't start, and why (core/jobs syncStanding()'s
+   * `unavailable`): `no-credential` for a SharePoint source with neither secret nor
+   * certificate. They aren't synced; what they read before stays, and goes stale.
+   */
+  unavailable: UnavailableSource[];
+}
+
+/** A configured source the server couldn't start. */
+export interface UnavailableSource {
+  tenantId: string;
+  source: string;
+  connector: string;
+  code: "no-credential";
 }
 
 /** Who configured it, in the audit log. */
@@ -82,6 +96,7 @@ export async function prepareSources(
   },
 ): Promise<ServerSources> {
   const scheduled: ScheduledSource[] = [];
+  const unavailable: UnavailableSource[] = [];
   const reading = new Map<string, Connector>();
   for (const s of config.sources) {
     const fail = (why: string): never => {
@@ -104,6 +119,13 @@ export async function prepareSources(
             { source: s.id, tenantId: s.tenantId, variable: sourceSecretEnv(s.id) },
             `source ${s.id} has no client secret (${sourceSecretEnv(s.id)} isn't set) and no certificate: it isn't synced until one is given and the server restarted`,
           );
+          unavailable.push({
+            tenantId: s.tenantId,
+            source: s.id,
+            // As the connector names itself once it runs (its describe().id).
+            connector: `connector-${s.connector}`,
+            code: "no-credential",
+          });
           continue;
         }
         ({ connector, credential } = built);
@@ -218,6 +240,7 @@ export async function prepareSources(
     onStale(handler) {
       stale = handler;
     },
+    unavailable,
   };
 }
 

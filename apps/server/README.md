@@ -53,16 +53,17 @@ To try it on your own machine, follow [docs/dogfood.md](../../docs/dogfood.md).
 }
 ```
 
-| Field            | What                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `id`             | the connection's name, a lower-case slug: the `source` of its items, and what `admin source …` takes                                                                                                                                                                                                                                                                     |
-| `connector`      | `fs`, or `sharepoint` ([below](#sharepoint-sites-on-a-schedule-t-303))                                                                                                                                                                                                                                                                                                   |
-| `root`           | (`fs`) an absolute path on this machine: a local disk or a mapped drive. A network share or device path (`\\server\share`, `\\?\…`) is refused, and so is a root and data directory inside one another (links and junctions resolved)                                                                                                                                    |
-| `zone`           | the zone's name: an indexed zone, made at start (audited `zone.create`) if the tenant has none of that name; a zone of that name of another kind is refused                                                                                                                                                                                                              |
-| `owner`          | an email or a user id: the person who owns, and so reads, its files (the fs connector imports no permissions: owner-only). Until that person exists, runs wait (`unknown-owner`). The person it names on the first run is pinned: an email reused later by someone else never takes the source over, and a config naming someone else for the source is refused at start |
-| `schedule`       | standard cron, in UTC; default every 15 minutes. The fs connector's delta compares the whole folder with its last snapshot, so deletions are seen too: no separate full crawl is needed                                                                                                                                                                                  |
-| `extract`        | default false: names and metadata only. True: the server reads the files' content for text extraction, then summaries and embeddings as far as each file's exposure allows. Turning it off later isn't retroactive: text, summaries and vectors already stored stay, and `open`, search, `resummarize` and `reembed` still use them; only new versions are left unread   |
-| `reconcileGuard` | `maxFraction`, `minItems`: when a reconcile is held for an admin (core/jobs)                                                                                                                                                                                                                                                                                             |
+| Field             | What                                                                                                                                                                                                                                                                                                                                                                     |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`              | the connection's name, a lower-case slug: the `source` of its items, and what `admin source …` takes                                                                                                                                                                                                                                                                     |
+| `connector`       | `fs`, or `sharepoint` ([below](#sharepoint-sites-on-a-schedule-t-303))                                                                                                                                                                                                                                                                                                   |
+| `root`            | (`fs`) an absolute path on this machine: a local disk or a mapped drive. A network share or device path (`\\server\share`, `\\?\…`) is refused, and so is a root and data directory inside one another (links and junctions resolved)                                                                                                                                    |
+| `zone`            | the zone's name: an indexed zone, made at start (audited `zone.create`) if the tenant has none of that name; a zone of that name of another kind is refused                                                                                                                                                                                                              |
+| `owner`           | an email or a user id: the person who owns, and so reads, its files (the fs connector imports no permissions: owner-only). Until that person exists, runs wait (`unknown-owner`). The person it names on the first run is pinned: an email reused later by someone else never takes the source over, and a config naming someone else for the source is refused at start |
+| `schedule`        | standard cron, in UTC; default every 15 minutes. The fs connector's delta compares the whole folder with its last snapshot, so deletions are seen too: no separate full crawl is needed                                                                                                                                                                                  |
+| `extract`         | default false: names and metadata only. True: the server reads the files' content for text extraction, then summaries and embeddings as far as each file's exposure allows. Turning it off later isn't retroactive: text, summaries and vectors already stored stay, and `open`, search, `resummarize` and `reembed` still use them; only new versions are left unread   |
+| `reconcileGuard`  | `maxFraction`, `minItems`: when a reconcile is held for an admin (core/jobs)                                                                                                                                                                                                                                                                                             |
+| `staleAfterHours` | how long the catalog may go without being brought up to date with the source before the source shows as stale. Default 24                                                                                                                                                                                                                                                |
 
 At start the server checks each source's tenant, finds or makes its zone, binds the source to it
 (a source later pointed at another zone is refused: give it a new id), builds its connector (its
@@ -75,6 +76,28 @@ credentials, a held reconcile, another folder at the root) stops that source's r
 (`source.sync-stopped`), until an admin acts (`admin source resume`, or the reconcile and
 identity commands). `admin source status` and `GET /api/admin/sources` show how each source's
 last run ended.
+
+Two things are said even when nothing failed for good (core/jobs `syncStanding()`):
+
+- **Stale.** When the catalog last matched the source (a run that ended `done`) more than
+  `staleAfterHours` ago, and nothing waits on an admin, the source's standing is `stale`: the
+  server was off, the schedule isn't running, or every run since ended early (its code is
+  given). `admin source status` says `up to date: STALE: …`.
+- **Unavailable.** A configured source the server couldn't start (a SharePoint source with
+  neither secret nor certificate: `no-credential`) is listed as `unavailable` at
+  `GET /api/admin/sources`, never with the last state it had, even if it never ran. The admin
+  CLI doesn't share the server's environment, so it can't tell: the server's log says it at
+  start.
+
+## Health check
+
+`GET /healthz` answers 200 `{"status":"ok"}` while the server can serve: the database answers
+within 5 seconds and the server isn't shutting down. Otherwise 503 `{"status":"unavailable"}`.
+It says nothing more (no tenant, source or error): it needs no sign-in. One check runs at a
+time and its answer stands for two seconds, so polling it doesn't load the database. On PGlite
+(in the server's own process, one transaction at a time) a slow answer is a long transaction
+ahead of the check, not a database down: only an error fails it. A source that is stale or
+stopped doesn't make it fail: that is for an admin (above), not for restarting the server.
 
 ### SharePoint sites on a schedule (T-303)
 
@@ -111,7 +134,8 @@ each library a folder at the top.
 | `importPermissions`   | whether SharePoint's permissions become grants here (below). Default true                                                                                                 |
 | `graphUnitsPerMinute` | Graph's resource units a minute the app may spend (below). Default 800, 250 at least                                                                                      |
 
-`id`, `tenantId`, `zone`, `owner`, `extract` and `reconcileGuard` are as for a folder.
+`id`, `tenantId`, `zone`, `owner`, `extract`, `reconcileGuard` and `staleAfterHours` are as for a
+folder.
 `schedule` defaults to every fifteen minutes. The first sync crawls the site; those after ask
 Graph what changed since (T-304: its list of libraries and one request per library when
 nothing did) and record only that.

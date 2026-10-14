@@ -141,6 +141,8 @@ describe("the sync queue", { timeout: QUEUE_TIMEOUT }, () => {
     expect(state).toMatchObject({ phase: "delta", lastError: null, stoppedAt: null });
     expect(state.lastCounts).toMatchObject({ files: 2, ingested: 2 });
     expect(state.lastRunAt).toBeInstanceOf(Date);
+    // A run that ended done brought the catalog up to date: the staleness mark goes by it.
+    expect(state.lastCurrentAt).toEqual(state.lastRunAt);
     // Enrichment was enqueued for both, and ran (the owner sees them processed).
     await waitFor(async () => {
       const rows = await db.withTenant(t.tenantId, (tx) =>
@@ -271,7 +273,11 @@ describe("one scheduled run", () => {
     const d = deps([source("mem", slow)], 1_000);
     expect(await run(d, "mem")).toEqual({ outcome: "ran", status: "partial", next: "now" });
     expect(nexts).toEqual([[{ tenantId: t.tenantId, source: "mem" }, 0]]);
-    expect(await stateOf("mem")).toMatchObject({ lastStatus: "partial", stoppedAt: null });
+    expect(await stateOf("mem")).toMatchObject({
+      lastStatus: "partial",
+      stoppedAt: null,
+      lastCurrentAt: null,
+    });
 
     memory.fault("throttled");
     const again = await run(d, "mem");

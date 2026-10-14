@@ -35,6 +35,8 @@ export interface SourceSyncState {
   lastStatus: SyncRunStatus | null;
   lastError: string | null;
   lastCounts: Record<string, number> | null;
+  /** When a run last brought the catalog up to date with the source (ended `done`), if ever. */
+  lastCurrentAt: Date | null;
   /**
    * When a failure stopped the source's schedule, and its code: scheduled runs skip it until an
    * admin resumes it. Null while it is scheduled.
@@ -52,6 +54,12 @@ export interface SourceSyncState {
  * state it is, and so which command lifts it, is decided here.
  */
 export type SyncStanding =
+  /**
+   * The server couldn't start the source (`code`: `no-credential`, its secret and certificate
+   * both missing): nothing is read until the configuration is fixed and the server restarted.
+   * What it read before stays, and goes stale.
+   */
+  | { is: "unavailable"; code: string }
   /** The guard holds removals for an admin: `confirm-reconcile` or `discard-reconcile`. */
   | { is: "held"; count: number }
   /** An admin confirmed the removals; the next sync makes them. */
@@ -78,9 +86,69 @@ export type SyncStanding =
   /** The last run was cancelled (the server stopping); the next runs on schedule. */
   | { is: "cancelled" }
   /** The last delta finished: the catalog has what the source had then. */
-  | { is: "current" };
+  | { is: "current" }
+  /**
+   * Syncs are meant to be running (nothing has stopped them), yet the catalog last matched the
+   * source longer ago than the source's limit (`staleAfterMs`): the server off, the schedule
+   * not running, every run ending early. `since`: when it last did. `code`: why the last run
+   * ended early, if it did.
+   */
+  | { is: "stale"; since: Date; code: string | null };
+
+/** How long a source may go without being brought up to date before it is stale: a day. */
+export const STALE_AFTER_MS = 24 * 60 * 60_000;
+
+/** What syncStanding() needs beyond the stored state. */
+export interface StandingOptions {
+  /** Now; the database's clock or the caller's. Default the caller's. */
+  now?: Date;
+  /** The source's staleness limit. Default {@link STALE_AFTER_MS}. */
+  staleAfterMs?: number;
+  /** The server couldn't start the source, for this reason: see the `unavailable` standing. */
+  unavailable?: string;
+}
+
+/**
+ * Standings where syncs keep running by themselves (nothing stops them until an admin acts):
+ * staleness shows here, over what they would say. A deferred reconcile or confirmed removals
+ * don't stop the schedule, so a source in either can fall behind too.
+ */
+const RUNS_BY_ITSELF = new Set<SyncStanding["is"]>([
+  "confirmed",
+  "deferred",
+  "reading",
+  "catching-up",
+  "retrying",
+  "cancelled",
+  "current",
+]);
 
 export function syncStanding(
+  s: Pick<
+    SourceSyncState,
+    | "lastCurrentAt"
+    | "phase"
+    | "reconcileHeld"
+    | "reconcileConfirmed"
+    | "reconcileDeferred"
+    | "stoppedAt"
+    | "stoppedError"
+    | "lastStatus"
+    | "lastError"
+  >,
+  options: StandingOptions = {},
+): SyncStanding {
+  if (options.unavailable !== undefined) return { is: "unavailable", code: options.unavailable };
+  const standing = storedStanding(s);
+  const since = s.lastCurrentAt;
+  if (since === null || !RUNS_BY_ITSELF.has(standing.is)) return standing;
+  const now = (options.now ?? new Date()).getTime();
+  if (now - since.getTime() <= (options.staleAfterMs ?? STALE_AFTER_MS)) return standing;
+  return { is: "stale", since, code: standing.is === "retrying" ? standing.code : null };
+}
+
+/** The standing from the stored state alone: see syncStanding(). */
+function storedStanding(
   s: Pick<
     SourceSyncState,
     | "phase"
@@ -155,6 +223,7 @@ export async function listSourceSyncs(tx: Tx, tenantId: string): Promise<SourceS
     lastStatus: r.lastStatus,
     lastError: r.lastError,
     lastCounts: r.lastCounts,
+    lastCurrentAt: r.lastCurrentAt,
     stoppedAt: r.stoppedAt,
     stoppedError: r.stoppedError,
     ownerId: r.ownerId,
@@ -270,6 +339,7 @@ export async function recordSyncRun(
       lastStatus: run.status,
       lastError: run.status === "done" ? null : error,
       lastCounts: run.counts ?? null,
+      ...(run.status === "done" ? { lastCurrentAt: sql`now()` } : {}),
       ...(stopping ? { stoppedAt: sql`now()`, stoppedError: error ?? "failed" } : {}),
     })
     .where(where);

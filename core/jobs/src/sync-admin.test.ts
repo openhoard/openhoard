@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { syncStanding } from "./sync-admin.js";
+import { STALE_AFTER_MS, syncStanding } from "./sync-admin.js";
 
 type State = Parameters<typeof syncStanding>[0];
 const state = (over: Partial<State> = {}): State => ({
@@ -11,6 +11,7 @@ const state = (over: Partial<State> = {}): State => ({
   stoppedError: null,
   lastStatus: "done",
   lastError: null,
+  lastCurrentAt: null,
   ...over,
 });
 const STOPPED = new Date("2026-10-04T00:00:00Z");
@@ -132,5 +133,76 @@ describe("where a source's sync stands", () => {
       is: "retrying",
       code: "auth",
     });
+  });
+
+  it("is stale when the catalog last matched the source too long ago, and nothing waits", () => {
+    const now = new Date("2026-10-14T12:00:00Z");
+    const ago = (ms: number) => new Date(now.getTime() - ms);
+    const at = { now };
+    // Within the day: as before.
+    expect(syncStanding(state({ lastCurrentAt: ago(STALE_AFTER_MS) }), at)).toEqual({
+      is: "current",
+    });
+    // Past it: stale, whether the last run finished (the schedule since stopped running) or
+    // every run since ended early, with why.
+    const since = ago(STALE_AFTER_MS + 1);
+    expect(syncStanding(state({ lastCurrentAt: since }), at)).toEqual({
+      is: "stale",
+      since,
+      code: null,
+    });
+    expect(
+      syncStanding(
+        state({ lastCurrentAt: since, lastStatus: "retry", lastError: "throttled" }),
+        at,
+      ),
+    ).toEqual({ is: "stale", since, code: "throttled" });
+    for (const lastStatus of ["partial", "cancelled"] as const) {
+      expect(syncStanding(state({ lastCurrentAt: since, lastStatus }), at).is).toBe("stale");
+    }
+    // The source's own limit.
+    expect(
+      syncStanding(state({ lastCurrentAt: ago(2 * 3_600_000) }), {
+        now,
+        staleAfterMs: 3_600_000,
+      }).is,
+    ).toBe("stale");
+    // What waits on an admin, or on the owner, comes first; never up to date isn't stale.
+    expect(
+      syncStanding(state({ lastCurrentAt: since, stoppedAt: STOPPED, stoppedError: "auth" }), at),
+    ).toEqual({ is: "stopped", code: "auth" });
+    expect(
+      syncStanding(
+        state({ lastCurrentAt: since, lastStatus: "retry", lastError: "unknown-owner" }),
+        at,
+      ),
+    ).toEqual({ is: "waiting-for-owner" });
+    expect(syncStanding(state({ lastCurrentAt: since, reconcileHeld: 3 }), at)).toEqual({
+      is: "held",
+      count: 3,
+    });
+    expect(syncStanding(state({ phase: "crawl" }), at)).toEqual({ is: "reading" });
+    // A deferred reconcile or confirmed removals don't stop the schedule: they can fall behind.
+    expect(syncStanding(state({ lastCurrentAt: since, reconcileDeferred: true }), at).is).toBe(
+      "stale",
+    );
+    expect(
+      syncStanding(state({ lastCurrentAt: since, reconcileHeld: 3, reconcileConfirmed: 3 }), at).is,
+    ).toBe("stale");
+    expect(syncStanding(state({ lastCurrentAt: now, reconcileDeferred: true }), at).is).toBe(
+      "deferred",
+    );
+  });
+
+  it("is unavailable when the server couldn't start the source, whatever was stored", () => {
+    expect(syncStanding(state(), { unavailable: "no-credential" })).toEqual({
+      is: "unavailable",
+      code: "no-credential",
+    });
+    expect(
+      syncStanding(state({ stoppedAt: STOPPED, stoppedError: "auth" }), {
+        unavailable: "no-credential",
+      }),
+    ).toEqual({ is: "unavailable", code: "no-credential" });
   });
 });

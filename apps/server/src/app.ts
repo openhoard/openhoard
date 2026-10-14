@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { secureHeaders } from "hono/secure-headers";
 import type { Database } from "@openhoard/core-db";
 import type { Logger } from "pino";
@@ -7,6 +7,7 @@ import { mountAdminApi } from "./admin-api.js";
 import { builtAdminUi, mountAdminUi } from "./admin-ui.js";
 import { mountAuth, type AuthEnv } from "./auth.js";
 import { adminGroupOf, type Config } from "./config.js";
+import type { UnavailableSource } from "./sources.js";
 import { loginKey } from "./login-state.js";
 import { mountMcp, type EmbedDeps, type McpTool } from "./mcp.js";
 import type { MetadataFetcher } from "./oauth/clients.js";
@@ -29,6 +30,10 @@ export interface AppDeps {
   mcpTools?: readonly McpTool[];
   /** Query embeddings for the MCP `find` tool, when an embeddings model is configured. */
   embed?: EmbedDeps;
+  /** Configured sources this server couldn't start (sources.ts prepareSources()). */
+  unavailableSources?: readonly UnavailableSource[];
+  /** True once the server is shutting down: /healthz then says unavailable. */
+  stopping?: () => boolean;
   /** Where uploads go (T-1206); needed when `uploads` is configured. */
   uploads?: Pick<UploadDeps, "store" | "tenantKey" | "enqueue">;
   /** SCIM limits (tests lower or raise them). */
@@ -105,7 +110,13 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
     });
     mountAuth(app, shared);
     // Tenant administration (T-106), behind the session and its CSRF check.
-    mountAdminApi(app, { auth: config.auth, db: deps.db, ...(log ? { log } : {}) });
+    mountAdminApi(app, {
+      auth: config.auth,
+      db: deps.db,
+      sources: config.sources,
+      ...(deps.unavailableSources ? { unavailable: deps.unavailableSources } : {}),
+      ...(log ? { log } : {}),
+    });
     // The tag review inbox, for whoever is signed in (T-903).
     mountReviewApi(app, { auth: config.auth, db: deps.db, ...(log ? { log } : {}) });
     // OpenHoard's OAuth authorization server for MCP clients (T-105), and the resource they reach.
@@ -140,7 +151,7 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
     });
   }
 
-  app.get("/healthz", (c) => c.json({ status: "ok" }));
+  app.get("/healthz", healthz(deps));
   // Deliberately minimal (security review #11): no Node/OS/database details for fingerprinting.
   app.get("/version", (c) => c.json({ name: "openhoard", version: pkg.version }));
   app.get("/", (c) =>
@@ -157,4 +168,57 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
     return c.json({ error: "internal error" }, 500);
   });
   return app;
+}
+
+/** How long /healthz waits for the database before it says unavailable. */
+export const HEALTH_TIMEOUT_MS = 5_000;
+/** How long one answer of /healthz stands: a load balancer polling it doesn't load the database. */
+const HEALTH_CACHE_MS = 2_000;
+
+/**
+ * GET /healthz: 200 `{ status: "ok" }` while this process can serve (the database answers within
+ * {@link HEALTH_TIMEOUT_MS}, and it isn't shutting down), else 503 `{ status: "unavailable" }`.
+ * Nothing else: it is unauthenticated, so no tenant, source or error detail (admins see sources
+ * at /api/admin/sources). Without a database (sign-in not configured), only the shutdown counts.
+ *
+ * One check at a time: requests while one runs wait for it, so polling a slow database doesn't
+ * pile transactions onto it. On PGlite (in this process, one transaction at a time) a check that
+ * doesn't finish in time is a long transaction ahead of it, not a database down: only an error
+ * fails it there.
+ */
+function healthz(deps: AppDeps) {
+  let last: { at: number; ok: boolean } | null = null;
+  let running: Promise<boolean> | null = null;
+  const ask = async (db: Database): Promise<boolean> => {
+    let timer: NodeJS.Timeout | undefined;
+    const slow = db.kind === "pglite";
+    const timeout = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(slow), HEALTH_TIMEOUT_MS);
+    });
+    try {
+      const ok = await Promise.race([
+        db.tenantIds({ limit: 1 }).then(
+          () => true,
+          () => false,
+        ),
+        timeout,
+      ]);
+      last = { at: Date.now(), ok };
+      return ok;
+    } finally {
+      clearTimeout(timer);
+      running = null;
+    }
+  };
+  const check = async (): Promise<boolean> => {
+    if (deps.stopping?.() === true) return false;
+    if (!deps.db) return true;
+    if (last !== null && Date.now() - last.at < HEALTH_CACHE_MS) return last.ok;
+    running ??= ask(deps.db);
+    return running;
+  };
+  return async (c: Context) =>
+    (await check())
+      ? c.json({ status: "ok" }, 200, { "cache-control": "no-store" })
+      : c.json({ status: "unavailable" }, 503, { "cache-control": "no-store" });
 }

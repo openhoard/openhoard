@@ -83,6 +83,7 @@ import {
   listSourceSyncs,
   resumeSource,
   startJobs,
+  STALE_AFTER_MS,
   syncStanding,
   type SourceSyncState,
 } from "@openhoard/core-jobs";
@@ -514,6 +515,7 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
       case "source status":
         return await sourceStatus(
           db,
+          config,
           tenantArg(values.tenant),
           values.source === undefined ? undefined : sourceArg(values.source),
           io,
@@ -1227,6 +1229,23 @@ function stopAdvice(s: SourceSyncState): string {
       : "fix the cause, then source resume";
 }
 
+/** When the catalog last matched the source, and whether that is too long ago (stale). */
+function upToDateText(
+  s: SourceSyncState,
+  tenantId: string,
+  config: Pick<Config, "sources">,
+): string {
+  if (s.lastCurrentAt === null) return "never";
+  const hours = config.sources.find(
+    (c) => c.tenantId === tenantId && c.id === s.source,
+  )?.staleAfterHours;
+  const standing = syncStanding(s, hours === undefined ? {} : { staleAfterMs: hours * 3_600_000 });
+  const at = s.lastCurrentAt.toISOString();
+  return standing.is === "stale"
+    ? `STALE: last ${at}, more than ${hours ?? STALE_AFTER_MS / 3_600_000} hours ago`
+    : at;
+}
+
 function reconcileText(s: SourceSyncState): string {
   return s.reconcileHeld !== null
     ? `reconcile held: ${s.reconcileHeld} to remove` +
@@ -1361,6 +1380,7 @@ async function packCommand(
 /** `source status`: each source (or one), a block of `key: value` lines. */
 async function sourceStatus(
   db: Database,
+  config: Pick<Config, "sources">,
   tenantId: string,
   source: string | undefined,
   io: AdminIo,
@@ -1404,6 +1424,7 @@ async function sourceStatus(
         s.lastStatus === null ? "" : s.lastStatus + (s.lastError ? ` (${s.lastError})` : ""),
       ],
       ["last counts", counts],
+      ["up to date", upToDateText(s, tenantId, config)],
       ["reconcile", reconcileText(s)],
     ];
     io.out(

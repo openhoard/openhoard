@@ -35,6 +35,26 @@ export function sourceStatus(s: Source, tenantId: string): SourceStatus {
     `openhoard admin source ${name} --tenant ${tenantId} --source ${s.source}`;
   const st = s.standing;
   switch (st.is) {
+    case "unavailable":
+      return {
+        tone: "attention",
+        text:
+          (st.code === "no-credential"
+            ? "OpenHoard can't sign in to this source: the server has neither a client secret nor a certificate for it."
+            : `OpenHoard couldn't start reading this source (${st.code}).`) +
+          " Nothing new is read from it. What was read before stays here and goes out of date. Whoever runs the server can fix this: its log names the setting, and the server is restarted after.",
+      };
+    case "stale":
+      return {
+        tone: "attention",
+        text: `Out of date: OpenHoard last caught up with this source on ${when(st.since)}${st.code ? `, and the syncs since have ended early (${st.code})` : ""}. Files changed, added or removed there since may not show here yet.`,
+        steps: [
+          {
+            does: "Check that the server is running its syncs, and see how the last one ended:",
+            command: command("status"),
+          },
+        ],
+      };
     case "held":
       return {
         tone: "attention",

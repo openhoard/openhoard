@@ -371,6 +371,15 @@ const sourceBase = {
    * metadata only.
    */
   extract: z.boolean().default(false),
+  /**
+   * How long the catalog may go without being brought up to date with the source before the
+   * source shows as stale (core/jobs syncStanding()), in hours. Default 24.
+   */
+  staleAfterHours: z
+    .number()
+    .min(1)
+    .max(24 * 90)
+    .default(24),
   /** When a reconcile is held for an admin (core/jobs runSync()); the defaults suit most. */
   reconcileGuard: z
     .object({

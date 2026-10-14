@@ -21,13 +21,19 @@ import {
   type User,
 } from "@openhoard/core-identity";
 import { tenantVocabulary, VIEW_TRANSACTION, VocabularyError } from "@openhoard/core-catalog";
-import { listSourceSyncs, syncStanding } from "@openhoard/core-jobs";
+import {
+  listSourceSyncs,
+  syncStanding,
+  type SourceSyncState,
+  type SyncStanding,
+} from "@openhoard/core-jobs";
 import { mayAdminister, type AuthzClient, type ClientTrust } from "@openhoard/core-policy";
 import type { Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { Logger } from "pino";
 import type { AuthEnv, SignedIn } from "./auth.js";
-import { adminGroupOf, type AuthConfig } from "./config.js";
+import { adminGroupOf, type AuthConfig, type SourceConfig } from "./config.js";
+import type { UnavailableSource } from "./sources.js";
 import { configuredTrust, listedIn } from "./oauth/allowlist.js";
 import { retrying } from "./retry.js";
 
@@ -67,6 +73,10 @@ export interface AdminApiDeps {
   auth: AuthConfig;
   db: Database;
   log?: Logger;
+  /** The configured sources: each one's staleness limit. */
+  sources?: readonly Pick<SourceConfig, "tenantId" | "id" | "staleAfterHours">[];
+  /** Configured sources this server couldn't start (sources.ts prepareSources()). */
+  unavailable?: readonly UnavailableSource[];
 }
 
 /** The request's client: the admin API is OpenHoard's own. */
@@ -417,27 +427,71 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
       isolationLevel: "repeatable read",
       accessMode: "read only",
     });
+    const now = new Date();
+    const configured = new Map(
+      (deps.sources ?? []).filter((s) => s.tenantId === tenantId).map((s) => [s.id, s]),
+    );
+    const unavailable = new Map(
+      (deps.unavailable ?? []).filter((u) => u.tenantId === tenantId).map((u) => [u.source, u]),
+    );
+    const standingOf = (source: string, s: SourceSyncState) => {
+      const hours = configured.get(source)?.staleAfterHours;
+      const down = unavailable.get(source)?.code;
+      return syncStanding(s, {
+        now,
+        ...(hours === undefined ? {} : { staleAfterMs: hours * 3_600_000 }),
+        ...(down === undefined ? {} : { unavailable: down }),
+      });
+    };
+    // A source the server couldn't start that never ran has no sync yet: listed all the same,
+    // so it isn't missing from the page.
+    const unstarted = [...unavailable.values()]
+      .filter((u) => !syncs.some((s) => s.source === u.source))
+      .map((u) => ({
+        source: u.source,
+        connector: u.connector,
+        zoneId: null,
+        phase: null,
+        standing: { is: "unavailable", code: u.code } satisfies SyncStanding,
+        scheduled: false,
+        stoppedAt: null,
+        stoppedError: null,
+        lastRunAt: null,
+        lastStatus: null,
+        lastError: null,
+        lastCounts: null,
+        lastCurrentAt: null,
+        reconciling: false,
+        reconcileHeld: null,
+        reconcileConfirmed: null,
+        reconcileDeferred: false,
+        updatedAt: null,
+      }));
     return c.json({
-      sources: syncs.map((s) => ({
-        source: s.source,
-        connector: s.connector,
-        zoneId: s.zoneId,
-        phase: s.phase,
-        // The one thing to tell an admin: what waits on them, else how it is going (core/jobs).
-        standing: syncStanding(s),
-        scheduled: s.stoppedAt === null,
-        stoppedAt: s.stoppedAt?.toISOString() ?? null,
-        stoppedError: s.stoppedError,
-        lastRunAt: s.lastRunAt?.toISOString() ?? null,
-        lastStatus: s.lastStatus,
-        lastError: s.lastError,
-        lastCounts: s.lastCounts,
-        reconciling: s.reconciling,
-        reconcileHeld: s.reconcileHeld,
-        reconcileConfirmed: s.reconcileConfirmed,
-        reconcileDeferred: s.reconcileDeferred,
-        updatedAt: s.updatedAt.toISOString(),
-      })),
+      sources: [
+        ...syncs.map((s) => ({
+          source: s.source,
+          connector: s.connector,
+          zoneId: s.zoneId,
+          phase: s.phase,
+          // The one thing to tell an admin: what waits on them, else how it is going (core/jobs).
+          standing: standingOf(s.source, s),
+          scheduled: s.stoppedAt === null && !unavailable.has(s.source),
+          stoppedAt: s.stoppedAt?.toISOString() ?? null,
+          stoppedError: s.stoppedError,
+          lastRunAt: s.lastRunAt?.toISOString() ?? null,
+          lastStatus: s.lastStatus,
+          lastError: s.lastError,
+          lastCounts: s.lastCounts,
+          lastCurrentAt: s.lastCurrentAt?.toISOString() ?? null,
+          reconciling: s.reconciling,
+          reconcileHeld: s.reconcileHeld,
+          reconcileConfirmed: s.reconcileConfirmed,
+          reconcileDeferred: s.reconcileDeferred,
+          updatedAt: s.updatedAt.toISOString(),
+        })),
+        ...unstarted,
+      ],
     });
   });
 

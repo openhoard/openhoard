@@ -25,6 +25,9 @@ export type Standing =
   | { is: "held" | "confirmed"; count: number }
   | { is: "stopped"; code: string }
   | { is: "retrying"; code: string | null }
+  | { is: "unavailable"; code: string }
+  /** `since`: when the catalog last matched the source (ISO 8601). */
+  | { is: "stale"; since: string; code: string | null }
   | {
       is:
         | "identity-changed"

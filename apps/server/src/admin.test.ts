@@ -489,6 +489,41 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
     expect(status.out).toContain("(auth): fix the cause, then source resume\n");
     expect(status.out).toContain("last status: failed (auth)\n");
     expect(status.out).toContain("last counts: files 3, ingested 0\n");
+    expect(status.out).toContain("up to date: never\n");
+    // When the catalog last matched the source, flagged once it is more than a day ago.
+    for (const [hoursAgo, stale] of [
+      [2, false],
+      [30, true],
+    ] as const) {
+      const at = new Date(Date.now() - hoursAgo * 3_600_000);
+      await inspect((db) =>
+        db.withTenant(tenantId, (tx) =>
+          tx
+            .update(sourceSyncs)
+            .set({ lastCurrentAt: at, stoppedAt: null, stoppedError: null, lastStatus: "done" })
+            .where(eq(sourceSyncs.source, "fs-docs")),
+        ),
+      );
+      const shown = await admin("source", "status", "--tenant", tenantId, "--source", "fs-docs");
+      expect(shown.out).toContain(
+        stale
+          ? `up to date: STALE: last ${at.toISOString()}, more than 24 hours ago\n`
+          : `up to date: ${at.toISOString()}\n`,
+      );
+    }
+    await inspect((db) =>
+      db.withTenant(tenantId, (tx) =>
+        tx
+          .update(sourceSyncs)
+          .set({
+            lastCurrentAt: null,
+            stoppedAt: new Date(),
+            stoppedError: "auth",
+            lastStatus: "failed",
+          })
+          .where(eq(sourceSyncs.source, "fs-docs")),
+      ),
+    );
     // A stop names the command that lifts it: resuming a held clean-up would only hold it again.
     for (const [stoppedError, reconcileHeld, advice] of [
       ["reconcile-guard", 60, "source confirm-reconcile removes what is held"],

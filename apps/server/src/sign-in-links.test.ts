@@ -231,4 +231,73 @@ describe("GET /api/admin/sources", () => {
       ],
     });
   });
+
+  it("says when a source has gone stale, and lists one the server couldn't start", async () => {
+    const DAY = 24 * 3_600_000;
+    await db.withTenant(t.tenantId, async (tx) => {
+      const zoneId = newId("zone");
+      await tx
+        .insert(zones)
+        .values({ tenantId: t.tenantId, id: zoneId, kind: "indexed", name: "D" });
+      const sync = (source: string, lastCurrentAt: Date) => ({
+        tenantId: t.tenantId,
+        source,
+        zoneId,
+        connector: "connector-fs",
+        phase: "delta" as const,
+        token: "fs1.x",
+        lastRunAt: lastCurrentAt,
+        lastStatus: "done" as const,
+        lastCurrentAt,
+      });
+      await tx
+        .insert(sourceSyncs)
+        .values([
+          sync("fs-fresh", new Date(Date.now() - DAY / 2)),
+          sync("fs-old", new Date(Date.now() - 3 * DAY)),
+          sync("sp-down", new Date()),
+        ]);
+      await grantAdmin(tx, t.tenantId, steve.id, "system:admin-cli");
+    });
+    const config = ConfigSchema.parse({
+      dataDir: "/tmp/unused",
+      auth: { publicUrl: PUBLIC, cookieKey: "k".repeat(43), signInLinks: true },
+    });
+    const down = (source: string) =>
+      ({
+        tenantId: t.tenantId,
+        source,
+        connector: "connector-sharepoint",
+        code: "no-credential",
+      }) as const;
+    app = createApp(config, undefined, {
+      db,
+      unavailableSources: [
+        down("sp-down"),
+        down("sp-never"),
+        { ...down("sp-elsewhere"), tenantId: "ten_00000000000000000000000000" },
+      ],
+    });
+    const cookie = cookieOf(await post(await link()));
+    const res = await app.request("/api/admin/sources", { headers: { cookie } });
+    const { sources } = (await res.json()) as {
+      sources: { source: string; standing: { is: string }; scheduled: boolean }[];
+    };
+    const by = new Map(sources.map((x) => [x.source, x]));
+    expect(by.get("fs-fresh")?.standing).toEqual({ is: "current" });
+    expect(by.get("fs-old")?.standing).toMatchObject({ is: "stale", code: null });
+    // Up to date when last read, but the server can't read it now: said, not "current".
+    expect(by.get("sp-down")).toMatchObject({
+      standing: { is: "unavailable", code: "no-credential" },
+      scheduled: false,
+    });
+    // Never ran: listed all the same.
+    expect(by.get("sp-never")).toMatchObject({
+      standing: { is: "unavailable", code: "no-credential" },
+      scheduled: false,
+      lastRunAt: null,
+    });
+    // Another tenant's unavailable source isn't listed here.
+    expect(sources).toHaveLength(4);
+  });
 });

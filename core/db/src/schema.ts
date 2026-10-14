@@ -1882,6 +1882,12 @@ export const sourceSyncs = pgTable(
     lastError: text("last_error"),
     lastCounts: jsonb("last_counts").$type<Record<string, number>>(),
     /**
+     * When a run last brought the catalog up to date with the source (a run that ended `done`),
+     * for the staleness mark: a source nobody stopped can still fall behind (the server off,
+     * the schedule not running, every run ending early). Null until one has.
+     */
+    lastCurrentAt: timestamp("last_current_at", { withTimezone: true }),
+    /**
      * A run failed in a way a retry won't fix (credentials, a held reconcile, another folder at
      * the root): the schedule skips the source from then on, until an admin resumes it (`admin
      * source resume`). When, and the error code.

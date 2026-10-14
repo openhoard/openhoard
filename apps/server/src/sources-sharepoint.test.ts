@@ -241,6 +241,15 @@ describe("a SharePoint site in the configuration", { timeout: 120_000 }, () => {
         variable: "OPENHOARD_SOURCE_SP_FINANCE_CLIENT_SECRET",
       });
       expect(said?.msg).toContain("isn't synced until");
+      // And told to the admin pages, which say so instead of its last known state.
+      expect(prepared.unavailable).toEqual([
+        {
+          tenantId: t.tenantId,
+          source: "sp-finance",
+          connector: "connector-sharepoint",
+          code: "no-credential",
+        },
+      ]);
     }
     // Nothing was bound for it: given its secret later, it starts clean.
     const syncs = await db.withTenant(t.tenantId, (tx) => listSourceSyncs(tx, t.tenantId));

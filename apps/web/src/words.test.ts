@@ -72,6 +72,28 @@ describe("a source's sync in an admin's words", () => {
     expect(waiting.text).toContain("has signed in to OpenHoard once");
   });
 
+  it("says a source out of date or not started is not fine, and what to check", () => {
+    const stale = said({ is: "stale", since: "2026-10-01T09:00:00.000Z", code: "throttled" });
+    expect(stale.tone).toBe("attention");
+    expect(stale.text).toContain(
+      `last caught up with this source on ${when("2026-10-01T09:00:00.000Z")}`,
+    );
+    expect(stale.text).toContain("ended early (throttled)");
+    expect(stale.steps?.map((s) => s.command)).toEqual([
+      `openhoard admin source status --tenant ${TENANT} --source finance`,
+    ]);
+    expect(said({ is: "stale", since: "2026-10-01T09:00:00.000Z", code: null }).text).not.toContain(
+      "ended early",
+    );
+
+    const down = said({ is: "unavailable", code: "no-credential" });
+    expect(down.tone).toBe("attention");
+    expect(down.text).toContain("neither a client secret nor a certificate");
+    expect(down.text).toContain("goes out of date");
+    expect(down.steps).toBeUndefined();
+    expect(said({ is: "unavailable", code: "other" }).text).toContain("(other)");
+  });
+
   it("never calls a state it doesn't know fine", () => {
     const unknown = said({ is: "quarantined" } as unknown as Standing);
     expect(unknown).toEqual({ tone: "busy", text: "State: quarantined." });

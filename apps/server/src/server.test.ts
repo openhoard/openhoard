@@ -1,7 +1,9 @@
 import { mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { Database } from "@openhoard/core-db";
+import { HEALTH_TIMEOUT_MS } from "./app.js";
 import { createApp, createLogger, ensureDataDir, loadConfig } from "./index.js";
 
 const tmp = () => mkdtempSync(join(tmpdir(), "oh-server-"));
@@ -94,6 +96,73 @@ describe("HTTP app", () => {
     const root = await json(app.request("/"));
     expect(root).not.toHaveProperty("database");
     expect(root.name).toBe("OpenHoard");
+  });
+
+  it("says unavailable on /healthz when the database doesn't answer, or while shutting down", async () => {
+    const withDb = (tenantIds: () => Promise<string[]>, stopping = () => false) =>
+      createApp(loadConfig({}, tmp()), undefined, {
+        db: { tenantIds } as unknown as Database,
+        stopping,
+      });
+    const up = await withDb(async () => []).request("/healthz");
+    expect(up.status).toBe(200);
+    expect(await up.json()).toEqual({ status: "ok" });
+    expect(up.headers.get("cache-control")).toBe("no-store");
+    // The database refuses: 503, and nothing of why.
+    const down = await withDb(async () => {
+      throw new Error("connection refused to db.internal:5432");
+    }).request("/healthz");
+    expect(down.status).toBe(503);
+    expect(await down.text()).toBe('{"status":"unavailable"}');
+    // The database hangs: 503 after the limit, not a hung probe.
+    vi.useFakeTimers();
+    try {
+      const hung = withDb(() => new Promise<string[]>(() => {})).request("/healthz");
+      await vi.advanceTimersByTimeAsync(HEALTH_TIMEOUT_MS + 1);
+      expect((await hung).status).toBe(503);
+    } finally {
+      vi.useRealTimers();
+    }
+    // One check at a time: requests while one runs share it.
+    let calls = 0;
+    let answer: (ids: string[]) => void = () => {};
+    const shared = withDb(() => {
+      calls++;
+      return new Promise<string[]>((resolve) => {
+        answer = resolve;
+      });
+    });
+    const both = [shared.request("/healthz"), shared.request("/healthz")];
+    await new Promise((r) => setTimeout(r, 10));
+    answer([]);
+    expect((await Promise.all(both)).map((r) => r.status)).toEqual([200, 200]);
+    expect(calls).toBe(1);
+    // PGlite runs in this process, one transaction at a time: a check stuck behind a long one is
+    // busy, not down. Only an error fails it there.
+    vi.useFakeTimers();
+    try {
+      const busy = createApp(loadConfig({}, tmp()), undefined, {
+        db: {
+          kind: "pglite",
+          tenantIds: () => new Promise<string[]>(() => {}),
+        } as unknown as Database,
+      }).request("/healthz");
+      await vi.advanceTimersByTimeAsync(HEALTH_TIMEOUT_MS + 1);
+      expect((await busy).status).toBe(200);
+    } finally {
+      vi.useRealTimers();
+    }
+    // Shutting down: 503 without asking the database.
+    let asked = 0;
+    const stopping = await withDb(
+      async () => {
+        asked++;
+        return [];
+      },
+      () => true,
+    ).request("/healthz");
+    expect(stopping.status).toBe(503);
+    expect(asked).toBe(0);
   });
 
   it("sends baseline security headers", async () => {
