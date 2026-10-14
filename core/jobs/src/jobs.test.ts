@@ -3,6 +3,7 @@ import {
   applyPack,
   ingest,
   planPack,
+  saveCard,
   viewObjects,
   VIEW_TRANSACTION,
   writeActivity,
@@ -31,12 +32,15 @@ import {
   TEST_POSTGRES_ENV,
   type SeededTenant,
 } from "@openhoard/core-db/testing";
+import { createModelRouter } from "@openhoard/core-models";
 import { Authorizer, createCedarEngine, type AuthzPrincipal } from "@openhoard/core-policy";
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { JobWithMetadata } from "pg-boss";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ruleTagStep, type EnrichStep, type ModelProvider } from "./enrich.js";
 import {
+  BUDGET_RETRY_CRON,
+  BUDGET_RETRY_PRIORITY,
   deadLetteredVersions,
   DEFAULT_MAINTENANCE_CRON,
   enrichKey,
@@ -1134,6 +1138,64 @@ describe("maintenance", () => {
     expect(await enrichJobs(jobs, lost.versionId)).toHaveLength(1);
     expect(await enrichJobs(jobs, waiting.versionId)).toHaveLength(1);
     for (const v of failed) expect(await enrichJobs(jobs, v.versionId)).toEqual([]);
+  });
+
+  it("enqueues again, once a day, the summaries the budget had no room for", async () => {
+    const item = await ingestItem("Report.docx");
+    const other = await ingestItem("Notes.docx");
+    await db.withTenant(t.tenantId, async (tx) => {
+      await saveCard(tx, t.tenantId, {
+        objectId: item.objectId,
+        versionId: item.versionId,
+        status: "skipped",
+        reason: "budget",
+        promptVersion: "openhoard-summary/1",
+      });
+      // Skipped for a reason another try won't cure today: left alone.
+      await saveCard(tx, t.tenantId, {
+        objectId: other.objectId,
+        versionId: other.versionId,
+        status: "skipped",
+        reason: "refused",
+        promptVersion: "openhoard-summary/1",
+      });
+    });
+    const jobs = await start({
+      steps: [],
+      maintenance: {},
+      summarize: { router: createModelRouter([]) },
+    });
+    // After the budget renews at midnight UTC.
+    expect((await jobs.boss.getSchedules(QUEUES.budgetRetry)).map((x) => x.cron)).toEqual([
+      BUDGET_RETRY_CRON,
+    ]);
+    const before = (await enrichJobs(jobs, item.versionId)).length;
+    const run = await settled(
+      jobs,
+      QUEUES.budgetRetry,
+      await jobs.boss.send(QUEUES.budgetRetry, {}),
+    );
+    expect(run.output).toEqual({ tenants: 1, enqueued: 1, failed: 0 });
+    const retried = await enrichJobs(jobs, item.versionId);
+    expect(retried.length).toBeGreaterThan(before);
+    // Behind every new version: what is ingested today is seen first.
+    expect(retried.at(-1)?.priority).toBe(BUDGET_RETRY_PRIORITY);
+    await jobs.stop({ timeoutMs: 1_000 });
+    // Every maintenance node keeps it alike, whatever its models: it can't flap between them.
+    const plain = await start({ maintenance: {} });
+    expect((await plain.boss.getSchedules(QUEUES.budgetRetry)).map((x) => x.cron)).toEqual([
+      BUDGET_RETRY_CRON,
+    ]);
+    await plain.stop({ timeoutMs: 1_000 });
+    // Off only where the retry is turned off.
+    const off = await start({
+      maintenance: { budgetRetryLimit: 0 },
+      summarize: { router: createModelRouter([]) },
+    });
+    expect(await off.boss.getSchedules(QUEUES.budgetRetry)).toEqual([]);
+    await expect(startJobs(db, { maintenance: { budgetRetryLimit: -1 } })).rejects.toThrow(
+      RangeError,
+    );
   });
 
   it("leaves the cluster's schedule alone where maintenance is off", async () => {

@@ -173,8 +173,11 @@ is clamped (whole, not negative, at most the call's share of the reservation) an
 reservation is always settled, with the HTTP requests that went out counted in `calls`.
 
 `resummarize(db, jobs, tenant, reasons)` re-enqueues the tenant's current versions skipped as
-`refused`, `unavailable` or `budget` (after an admin fixed a key or raised the budget; the API
-authorizes and audits it); core/catalog `cardSkipCounts()` gives the counts per reason.
+`refused`, `unavailable` or `budget` (after an admin fixed a key or raised the budget; the
+server's `admin resummarize` audits it); core/catalog `cardSkipCounts()` gives the counts per
+reason. Versions skipped for `budget` are also enqueued again by themselves once a day, after
+the budget renews (`budget-retry`, below), so a first crawl of more files than a day's budget
+covers catches up over the following days.
 
 **Embeddings** (`embed`, T-407). After the summary, the step embeds the version's summary and
 chunks of its extracted text (1,200 characters overlapping by 200, cut at a space, at most 16
@@ -547,9 +550,20 @@ each (`stately`, keyed by tenant). Per tenant, each batch in a short transaction
 | the sweep: lost enrichment jobs       | `sweepAfterMinutes` (60), `sweepLimit` (100)        |
 | how far the sweep looks per run       | `sweepScanLimit` (1,000), skipped versions included |
 | rows per transaction, batches per run | `batchSize` (1,000), `maxBatches` (10)              |
+| summaries over yesterday's budget     | `budgetRetryLimit` (2,000 a tenant a day; 0 never)  |
 
 What doesn't fit in one run waits for the next, so one tenant's backlog never holds a
 transaction open for long or starves the others.
+
+**The budget retry.** Its own daily schedule, `budget-retry` at 00:15 UTC, a quarter of an hour
+after the daily budget renews: for every tenant, up to `budgetRetryLimit` current versions whose
+summary was skipped for `budget` are enqueued again (oldest version ids first). Only the summary
+is redone: extraction and the other steps keep what they have. What doesn't fit in the new day's
+budget is skipped again, quickly and without a model call, and tried the next day. Its jobs go
+in at a lower priority (`BUDGET_RETRY_PRIORITY`, -1) than new versions, so what is ingested in
+the morning isn't held behind yesterday's backlog. Every node that keeps maintenance keeps the
+schedule alike, whatever its own models (it only enqueues); `budgetRetryLimit: 0` removes it. A
+tenant whose retry fails is logged and the others go on.
 
 Every one of those decisions is in the audit log; the rows only matter while they can still be
 used, and a while after. OAuth rows are kept 30 days after they end so a replayed code or refresh

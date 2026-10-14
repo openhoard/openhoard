@@ -27,6 +27,7 @@ import {
   TagError,
   tenantPolicies,
   VIEW_TRANSACTION,
+  type CardSkipReason,
   type HealthOptions,
   type HealthReport,
   type PackChange,
@@ -85,6 +86,8 @@ import {
   startJobs,
   listSourceSkips,
   MAX_SKIP_PAGE,
+  RESUMMARIZABLE,
+  resummarize,
   STALE_AFTER_MS,
   syncStanding,
   type SourceSyncState,
@@ -139,6 +142,8 @@ import { retrying } from "./retry.js";
  *   admin health report --tenant ten_… --user <admin: usr_… | email | userName>
  *                       [--format text|csv] [--out <new file>] [--limit <n>]
  *                       [--stale-days <n>] [--large-mb <n>]
+ *   admin resummarize   --tenant ten_… [--reason budget,refused,unavailable] [--limit 10000]
+ *                       [--dry-run]
  *
  * It reads the server's configuration (and `--data-dir`, as the server does) and opens the same
  * database. The embedded database (PGlite) belongs to one process at a time, so while the
@@ -338,6 +343,9 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
                 [--limit <files listed per finding>] [--stale-days <n>] [--large-mb <n>]
                                                    the File Health Report: what to look at
                                                    among the tenant's files, and why
+  resummarize --tenant <ten_…> [--reason budget,refused,unavailable] [--limit <n>] [--dry-run]
+                                                   summarize again what a provider refused or
+                                                   failed, or the budget had no room for
 `;
 
 class UsageError extends Error {}
@@ -366,6 +374,7 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         into: { type: "string" },
         limit: { type: "string" },
         reason: { type: "string" },
+        "dry-run": { type: "boolean" },
         replace: { type: "boolean" },
         format: { type: "string" },
         out: { type: "string" },
@@ -432,6 +441,7 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "audit verify",
     "audit export",
     "health report",
+    "resummarize",
   ];
   if (!known.includes(command)) {
     io.err(`unknown command: ${command}\n\n${USAGE}`);
@@ -616,6 +626,15 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
           tenantArg(values.tenant),
           need(values.user, "--user"),
           healthArgs(values),
+          io,
+        );
+      case "resummarize":
+        return await resummarizeCommand(
+          db,
+          tenantArg(values.tenant),
+          values.reason,
+          values.limit,
+          values["dry-run"] === true,
           io,
         );
       default:
@@ -1507,6 +1526,86 @@ async function sourceSkipsList(
   if (shown > found.items.length) {
     io.err(`${found.items.length} of ${shown} shown: raise --limit, or pick a --reason\n`);
   }
+  return 0;
+}
+
+/**
+ * `resummarize`: enqueues the tenant's current versions skipped for a reason another try can
+ * cure (core/jobs RESUMMARIZABLE: a provider that refused or failed, a spent budget), after a key
+ * is fixed or the budget raised; the summarize step runs again for them. `--dry-run` counts
+ * them. Audited (`summary.resummarize`) with the reasons and how many.
+ */
+async function resummarizeCommand(
+  db: Database,
+  tenantId: string,
+  reasonArg: string | undefined,
+  limitArg: string | undefined,
+  dryRun: boolean,
+  io: AdminIo,
+): Promise<number> {
+  const reasons = (reasonArg ?? RESUMMARIZABLE.join(",")).split(",").map((r) => r.trim());
+  for (const r of reasons) {
+    if (!(RESUMMARIZABLE as readonly string[]).includes(r)) {
+      throw new UsageError(`--reason is one or more of ${RESUMMARIZABLE.join(", ")}, not ${r}`);
+    }
+  }
+  const limit = limitArg === undefined ? 10_000 : /^\d{1,6}$/.test(limitArg) ? Number(limitArg) : 0;
+  if (limit < 1 || limit > 100_000) throw new UsageError("--limit is 1 to 100000");
+  const chosen = [...new Set(reasons)] as CardSkipReason[];
+  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  let count: number;
+  if (dryRun) {
+    // Counted as resummarize() would find them: none enqueued.
+    count = await resummarize(db, { enqueueVersion: async () => null }, tenantId, chosen, {
+      limit,
+    });
+  } else {
+    // This process only sends: it works no queue and keeps no schedule.
+    const jobs = await (io.startJobs ?? startJobs)(db, { worker: false, maintenance: false });
+    // Counted as each goes in: a failure part way is audited with what it queued.
+    let queued = 0;
+    let failed = true;
+    try {
+      count = await resummarize(
+        db,
+        {
+          enqueueVersion: async (t, v) => {
+            const id = await jobs.enqueueVersion(t, v);
+            queued++;
+            return id;
+          },
+        },
+        tenantId,
+        chosen,
+        { limit },
+      );
+      failed = false;
+    } finally {
+      await jobs.stop({ timeoutMs: 1_000 });
+      await db.withTenant(tenantId, (tx) =>
+        appendAudit(tx, tenantId, {
+          actor: ADMIN_ACTOR,
+          action: "summary.resummarize",
+          decision: "allow",
+          detail: {
+            reasons: chosen.join(","),
+            enqueued: queued,
+            limit,
+            ...(failed ? { failed: true } : {}),
+          },
+        }),
+      );
+    }
+  }
+  io.out(`${count}\n`);
+  io.err(
+    dryRun
+      ? `${count} version${count === 1 ? "" : "s"} skipped for ${chosen.join(", ")} would be summarized again${count === limit ? " (the limit: there may be more)" : ""}\n`
+      : `Queued ${count} version${count === 1 ? "" : "s"} to be summarized again${count === limit ? " (the limit: run it again for more)" : ""}. A worker runs them, within the day's budget.\n`,
+  );
   return 0;
 }
 

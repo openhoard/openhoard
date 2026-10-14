@@ -266,6 +266,13 @@ Any other problem with a provider still stops the server. Summaries run only whe
 versions' bytes (a source with `extract: true`); local-only content only ever reaches a `local`
 provider.
 
+A summary the day's budget (`dailyTokenBudget`) has no room for is skipped: the file is still
+processed and found by its name. Each night at 00:15 UTC, after the budget renews, a worker
+enqueues up to 2,000 of each tenant's such versions again (core/jobs `budget-retry`), so a large
+first crawl catches up over the following days by itself. After fixing a provider's key or
+raising the budget, `admin resummarize` enqueues those skipped for `refused`, `unavailable` or
+`budget` at once (`--dry-run` counts them; audited `summary.resummarize`).
+
 ## Signing in (T-102)
 
 People sign in with OpenID Connect, using the authorization code flow with PKCE, through the
@@ -974,6 +981,7 @@ node apps/server/dist/main.js admin pack apply --tenant ten_… --file packs/gen
 node apps/server/dist/main.js admin source list --tenant ten_…
 node apps/server/dist/main.js admin source status --tenant ten_… [--source <name>]
 node apps/server/dist/main.js admin source skips --tenant ten_… --source <name> [--reason <code>] [--limit 100]
+node apps/server/dist/main.js admin resummarize --tenant ten_… [--reason budget,refused,unavailable] [--limit 10000] [--dry-run]
 node apps/server/dist/main.js admin source run-now --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source resume --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source confirm-reconcile --tenant ten_… --source <name>

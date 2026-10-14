@@ -2,7 +2,13 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAudit } from "@openhoard/core-audit";
-import { markProcessed, proposeTag, VIEW_TRANSACTION, viewObjects } from "@openhoard/core-catalog";
+import {
+  markProcessed,
+  proposeTag,
+  saveCard,
+  VIEW_TRANSACTION,
+  viewObjects,
+} from "@openhoard/core-catalog";
 import {
   addGrant,
   facetValues,
@@ -1710,5 +1716,70 @@ describe("openhoard admin health report (T-1002)", { timeout: 180_000 }, () => {
     ]);
     expect(events[0]?.detail).toMatchObject({ files: 1, duplicates: 0 });
     expect(String(events[0]?.detail.reader)).toMatch(/^user:usr_/);
+  });
+});
+
+describe("openhoard admin resummarize", { timeout: 180_000 }, () => {
+  it("counts and queues what can be summarized again, audited", async () => {
+    // The seeded file's summary was skipped: the day's budget had no room for it.
+    const made = await inspect(async (db) => {
+      const t = await seedTenant(db, 10);
+      await db.withTenant(t.tenantId, (tx) =>
+        saveCard(tx, t.tenantId, {
+          objectId: t.objectId,
+          versionId: t.versionId,
+          status: "skipped",
+          reason: "budget",
+          promptVersion: "openhoard-summary/1",
+        }),
+      );
+      return t;
+    });
+    const { tenantId } = made;
+    const dry = await admin("resummarize", "--tenant", tenantId, "--dry-run");
+    expect([dry.code, dry.out], dry.err).toEqual([0, "1\n"]);
+    expect(dry.err).toContain("would be summarized again");
+    // Only the reasons asked for.
+    expect((await admin("resummarize", "--tenant", tenantId, "--reason", "refused")).out).toBe(
+      "0\n",
+    );
+    const queued = await admin("resummarize", "--tenant", tenantId, "--reason", "budget");
+    expect([queued.code, queued.out], queued.err).toEqual([0, "1\n"]);
+    expect(queued.err).toContain("Queued 1 version to be summarized again");
+    // The version waits in the enrichment queue.
+    const waiting = await inspect(async (db) => {
+      const j = await startJobs(db, { worker: false, maintenance: false });
+      try {
+        return await j.boss.findJobs("enrich", { queued: true });
+      } finally {
+        await j.stop({ timeoutMs: 1_000 });
+      }
+    });
+    expect(waiting.map((j) => j.data)).toContainEqual({ tenantId, versionId: made.versionId });
+    const events = await inspect(async (db) => {
+      const lines: string[] = [];
+      await exportAudit(db, tenantId, {}, "ndjson", (x: string) => void lines.push(x));
+      return lines
+        .join("")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { action: string; detail?: object })
+        .filter((e) => e.action === "summary.resummarize");
+    });
+    // Two runs that enqueue (the refused one found none), none for the dry run.
+    expect(events.map((e) => e.detail)).toEqual([
+      { reasons: "refused", enqueued: 0, limit: 10_000 },
+      { reasons: "budget", enqueued: 1, limit: 10_000 },
+    ]);
+    // A reason another try can't cure, or a limit out of range: misuse.
+    for (const bad of [
+      ["--reason", "no-text"],
+      ["--limit", "0"],
+      ["--limit", "1e3"],
+    ]) {
+      expect((await admin("resummarize", "--tenant", tenantId, ...bad)).code, bad.join(" ")).toBe(
+        2,
+      );
+    }
   });
 });

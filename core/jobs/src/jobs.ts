@@ -28,6 +28,7 @@ import {
   type MaintenanceOptions,
   type TenantMaintenance,
 } from "./maintenance.js";
+import { resummarize } from "./resummarize.js";
 
 /*
  * Background jobs on pg-boss (ADR-0008, T-401). pg-boss keeps its queues in the `pgboss` schema
@@ -57,6 +58,10 @@ import {
  *                       operator to look at (`boss.retry()` on the failed dead letter).
  *   maintenance         the cron job (hourly by default): fans out one job per tenant.
  *   maintenance-tenant  one tenant's maintenance (maintenance.ts); `stately`, keyed by tenant.
+ *   budget-retry        once a day, after the budget renews (00:15 UTC): every tenant's versions
+ *                       skipped for `budget`, enqueued again (maintenance `budgetRetryLimit`)
+ *                       at a lower priority than new versions. Kept by every maintenance node;
+ *                       `budgetRetryLimit: 0` removes it.
  *   sync                one connector run over one source (sync-schedule.ts, T-303); `stately`,
  *                       keyed by tenant and source, sent by each source's own schedule and by
  *                       requestSync().
@@ -75,8 +80,14 @@ export const QUEUES = {
   enrichFailed: "enrich-failed",
   maintenance: "maintenance",
   maintenanceTenant: "maintenance-tenant",
+  budgetRetry: "budget-retry",
   sync: "sync",
 } as const;
+
+/** When the budget retry runs: a quarter past midnight UTC, after the daily budget renews. */
+export const BUDGET_RETRY_CRON = "15 0 * * *";
+/** The budget retry's jobs' priority: below new versions' (pg-boss's default, 0). */
+export const BUDGET_RETRY_PRIORITY = -1;
 
 /** A pino-shaped logger (the server passes its own); every method is optional. */
 export interface JobsLogger {
@@ -316,6 +327,12 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
       ...enrich.queue,
     });
     await ensureQueue(boss, QUEUES.maintenance, { policy: "stately", retryLimit: 1 });
+    // Many tenants at up to budgetRetryLimit enqueues each: an hour, not pg-boss's 15 minutes.
+    await ensureQueue(boss, QUEUES.budgetRetry, {
+      policy: "stately",
+      retryLimit: 1,
+      expireInSeconds: 3600,
+    });
     await ensureQueue(boss, QUEUES.maintenanceTenant, {
       policy: "stately",
       retryLimit: 2,
@@ -351,7 +368,13 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
      * new version or a rename, which may have changed what failed, and wrong for the sweep,
      * which would otherwise cut every backoff short and spend a retry each run.
      */
-    const enqueue = async (tenantId: string, versionId: string, pullForward: boolean) => {
+    const enqueue = async (
+      tenantId: string,
+      versionId: string,
+      pullForward: boolean,
+      /** Below the default (0): behind every new version (the budget retry). */
+      priority?: number,
+    ) => {
       const payload = { tenantId, versionId };
       if (!isId("tenant", tenantId) || !isId("version", versionId)) {
         throw new TypeError("enqueueVersion: expects a tenant id and a version id");
@@ -361,6 +384,7 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
         singletonKey: enrichKey(payload),
         // Without startAfter, pg-boss's update keeps the waiting job's start_after.
         ...(pullForward ? { startAfter: 0 } : {}),
+        ...(priority === undefined ? {} : { priority }),
       });
       return done.inserted > 0 ? (done.jobs[0] ?? null) : null;
     };
@@ -448,6 +472,43 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
         await boss.schedule(QUEUES.maintenance, cron ?? DEFAULT_MAINTENANCE_CRON, null, {
           tz: "UTC",
         });
+        // Only enqueues: any worker may run it; enrichment workers summarize.
+        await boss.work<unknown>(
+          QUEUES.budgetRetry,
+          { pollingIntervalSeconds: polling },
+          tracked(async () => {
+            let enqueued = 0;
+            let failed = 0;
+            const tenants = await fanOut(db, async (tenantId) => {
+              try {
+                enqueued += await resummarize(
+                  db,
+                  // Behind what is ingested today: new files are seen before old summaries.
+                  { enqueueVersion: (t, v) => enqueue(t, v, false, BUDGET_RETRY_PRIORITY) },
+                  tenantId,
+                  ["budget"],
+                  { limit: maintenance.budgetRetryLimit },
+                );
+              } catch (err) {
+                // One tenant's failure doesn't keep the others waiting another day.
+                failed++;
+                log.warn?.({ err, tenantId }, "budget retry failed for a tenant");
+              }
+            });
+            log.info?.(
+              { tenants, enqueued, failed },
+              "summaries over yesterday's budget enqueued again",
+            );
+            return { tenants, enqueued, failed };
+          }),
+        );
+        // Every maintenance node keeps it the same way, whatever its own models: it only
+        // enqueues, and finds nothing where no summary was ever skipped for the budget.
+        if (maintenance.budgetRetryLimit > 0) {
+          await boss.schedule(QUEUES.budgetRetry, BUDGET_RETRY_CRON, null, { tz: "UTC" });
+        } else {
+          await boss.unschedule(QUEUES.budgetRetry);
+        }
       }
       // With maintenance off here, the schedule is left as it is: it is the cluster's, and
       // another node may keep it.

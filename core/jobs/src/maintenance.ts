@@ -28,6 +28,11 @@ import type { EnrichPayload } from "./enrich.js";
  *   by default), and then tries once more. It pages past the ones it skips, oldest first, until
  *   it has enqueued `sweepLimit` or looked at `sweepScanLimit`, so a pile of dead letters can't
  *   hide the lost versions behind them.
+ * - Summaries the daily budget had no room for (skipped for `budget`) are enqueued again once a
+ *   day, after the budget renews at midnight UTC, at most `budgetRetryLimit` per tenant (jobs.ts
+ *   `budget-retry`, its own schedule): a first crawl of more files than a day's budget covers
+ *   catches up over the following days by itself. Re-running a version redoes only its summary
+ *   (extraction and the rest keep what they have).
  */
 
 export interface MaintenanceOptions {
@@ -55,6 +60,11 @@ export interface MaintenanceOptions {
   sweepLimit?: number;
   /** Versions one run of the sweep looks at per tenant, skipped ones included. Default 1,000. */
   sweepScanLimit?: number;
+  /**
+   * Versions skipped for the budget enqueued again each day per tenant, once it renews. Default
+   * 2,000 (about what the default budget summarizes in a day); 0 never.
+   */
+  budgetRetryLimit?: number;
 }
 
 export const MAINTENANCE_DEFAULTS: Readonly<Required<MaintenanceOptions>> = {
@@ -67,6 +77,7 @@ export const MAINTENANCE_DEFAULTS: Readonly<Required<MaintenanceOptions>> = {
   sweepAfterMinutes: 60,
   sweepLimit: 100,
   sweepScanLimit: 1_000,
+  budgetRetryLimit: 2_000,
 };
 
 const LIMITS: Record<keyof MaintenanceOptions, [number, number]> = {
@@ -79,6 +90,7 @@ const LIMITS: Record<keyof MaintenanceOptions, [number, number]> = {
   sweepAfterMinutes: [1, 7 * 24 * 60],
   sweepLimit: [0, 10_000],
   sweepScanLimit: [0, 100_000],
+  budgetRetryLimit: [0, 100_000],
 };
 
 /** The settings for `options`: the defaults, overridden by what it sets, each checked. */
