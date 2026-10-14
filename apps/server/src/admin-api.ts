@@ -1,4 +1,15 @@
-import { appendAudit, type AuditRecord } from "@openhoard/core-audit";
+import {
+  appendAudit,
+  auditedExport,
+  AuditFilterError,
+  ExportFailed,
+  listAudit,
+  MAX_AUDIT_PAGE,
+  parseAuditFilter,
+  verifyAudit,
+  type AuditFilterText,
+  type AuditRecord,
+} from "@openhoard/core-audit";
 import { AI_CLIENT_TRUSTS, isId, lockPrincipals, type Database, type Tx } from "@openhoard/core-db";
 import {
   approvedTrust,
@@ -52,6 +63,9 @@ import { retrying } from "./retry.js";
  *   DELETE /api/admin/admins/:userId
  *   GET    /api/admin/sources                 each connector sync and its last scheduled run
  *   GET    /api/admin/sources/:source/skips   what a source's syncs left out, and why
+ *   GET    /api/admin/audit                   the audit log, newest first, filtered, a page
+ *   POST   /api/admin/audit/export            the same filter as NDJSON or CSV (recent sign-in)
+ *   POST   /api/admin/audit/verify            checks the tenant's whole chain
  *   GET    /api/admin/vocabulary              every facet and value, and what waits in review
  *
  * - Signed in with the session cookie (T-102), as an admin (core/policy mayAdminister(): an
@@ -546,6 +560,177 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
       200,
       NO_STORE,
     );
+  });
+
+  // --- The audit log (T-905) ------------------------------------------------------------------
+
+  const FILTER_FIELDS = [
+    "actor",
+    "action",
+    "actionPrefix",
+    "decision",
+    "client",
+    "object",
+    "from",
+    "to",
+  ] as const;
+  /** A filter, checked as the CLI checks its flags (core/audit): from the query, or a body. */
+  const auditFilterOf = (read: (field: (typeof FILTER_FIELDS)[number]) => unknown) => {
+    const text: AuditFilterText = {};
+    for (const field of FILTER_FIELDS) {
+      const value = read(field);
+      if (value === undefined) continue;
+      if (typeof value !== "string") throw new AuditFilterError(field, `${field} is text`);
+      text[field] = value;
+    }
+    return parseAuditFilter(text);
+  };
+  const filterRefused = (c: Context<AuthEnv>, e: unknown) => {
+    if (e instanceof AuditFilterError) return c.json({ error: e.message, field: e.field }, 400);
+    throw e;
+  };
+  /** The admin, checked again in the database: the session's word is as old as the sign-in. */
+  const stillAdmin = (signedIn: SignedIn) =>
+    db.withTenant(signedIn.tenantId, (tx) =>
+      isAdmin(tx, signedIn.tenantId, signedIn.principal.userId, groupOf(signedIn.tenantId)),
+    );
+
+  // A page of events, newest first; `before` (a seq) for the next, older page. Read-only, and
+  // not itself audited: an admin reading the log is what the log is for. Paging shows what an
+  // export does, a page at a time; the export is the door for taking it away whole.
+  app.get("/api/admin/audit", async (c) => {
+    const signedIn = c.get("auth") as SignedIn;
+    const limitArg = c.req.query("limit");
+    const beforeArg = c.req.query("before");
+    const whole = (v: string | undefined, max: number) =>
+      v === undefined
+        ? undefined
+        : /^\d{1,15}$/.test(v) && Number(v) >= 1 && Number(v) <= max
+          ? Number(v)
+          : null;
+    const limit = whole(limitArg, MAX_AUDIT_PAGE);
+    const before = whole(beforeArg, Number.MAX_SAFE_INTEGER);
+    if (limit === null || before === null) {
+      return c.json({ error: `limit is 1 to ${MAX_AUDIT_PAGE}, before a sequence number` }, 400);
+    }
+    let filter;
+    try {
+      ({ filter } = auditFilterOf((field) => c.req.query(field)));
+    } catch (e) {
+      return filterRefused(c, e);
+    }
+    if (!(await stillAdmin(signedIn))) return c.json({ error: "forbidden" }, 403, NO_STORE);
+    const page = await listAudit(db, signedIn.tenantId, filter, {
+      ...(limit === undefined ? {} : { limit }),
+      ...(before === undefined ? {} : { before }),
+    });
+    return c.json(page, 200, NO_STORE);
+  });
+
+  // The filtered log as a file, recorded (`audit.export`) after it, with who took it and what
+  // they asked: the whole tenant's history, so it takes a recent sign-in, and the admin is
+  // checked again in the database first. A POST with a JSON body (`format` and the filter), so
+  // another site can't make an admin's browser take one (the Origin check) and put it in the log.
+  app.post("/api/admin/audit/export", async (c) => {
+    const signedIn = c.get("auth") as SignedIn;
+    const { tenantId } = signedIn;
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return c.json({ error: "a JSON object" }, 400);
+    }
+    const format = body.format ?? "ndjson";
+    if (format !== "ndjson" && format !== "csv") {
+      return c.json({ error: "format is ndjson or csv", field: "format" }, 400);
+    }
+    let parsed;
+    try {
+      parsed = auditFilterOf((field) => body[field]);
+    } catch (e) {
+      return filterRefused(c, e);
+    }
+    // Refused as a change is (`change()`), and audited so: who tried to take the log.
+    const refused = async (reason: "sign-in-again" | "not-admin") => {
+      await auditDenial(signedIn, {
+        action: "audit.export",
+        client: FIRST_PARTY.id,
+        detail: { format, reason, ...parsed.asked },
+      });
+      return c.json(
+        reason === "sign-in-again"
+          ? { error: "sign in again to do this", signIn: "/auth/sign-in" }
+          : { error: "forbidden" },
+        403,
+        NO_STORE,
+      );
+    };
+    if (!recent(signedIn)) return refused("sign-in-again");
+    if (!(await stillAdmin(signedIn))) return refused("not-admin");
+
+    // Written through a pipe the reader pulls from (so a slow reader slows the export). Any
+    // failure errors the body rather than ending it, so a cut file never looks whole: the
+    // response ends without its last chunk and the reader's download fails. The last bytes go
+    // out only after the export is recorded, so a file that can't be recorded isn't handed over
+    // whole either.
+    const pipe = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = pipe.writable.getWriter();
+    const bytes = new TextEncoder();
+    let pending = "";
+    const run = async () => {
+      try {
+        await auditedExport(
+          db,
+          tenantId,
+          {
+            actor: userPrincipal(signedIn.principal.userId),
+            client: FIRST_PARTY.id,
+            asked: parsed.asked,
+          },
+          parsed.filter,
+          format,
+          async (chunk) => {
+            pending += chunk;
+            if (pending.length < 64 * 1024) return;
+            const text = pending;
+            pending = "";
+            await writer.ready;
+            await writer.write(bytes.encode(text));
+          },
+          // Before the record: a reader gone already is an incomplete export.
+          () => writer.ready,
+        );
+        if (pending !== "") await writer.write(bytes.encode(pending));
+        await writer.close();
+      } catch (e) {
+        await writer.abort(e).catch(() => undefined);
+        log?.warn(
+          {
+            tenantId,
+            events: e instanceof ExportFailed ? e.events : undefined,
+            recorded: e instanceof ExportFailed ? e.recorded : undefined,
+            err: e instanceof Error ? e.message : String(e),
+          },
+          "audit export ended early",
+        );
+      }
+    };
+    void run();
+    const day = new Date().toISOString().slice(0, 10);
+    return new Response(pipe.readable, {
+      headers: {
+        "content-type": format === "csv" ? "text/csv; charset=utf-8" : "application/x-ndjson",
+        "content-disposition": `attachment; filename="audit-${day}.${format}"`,
+        "x-content-type-options": "nosniff",
+        "cache-control": "no-store",
+      },
+    });
+  });
+
+  // Checks the tenant's whole chain (core/audit verifyAudit()): every hash, link and sequence
+  // number. Read-only; a POST, as it is work on demand, not a page to prefetch.
+  app.post("/api/admin/audit/verify", async (c) => {
+    const { tenantId } = c.get("auth") as SignedIn;
+    const result = await verifyAudit(db, tenantId);
+    return c.json(result, 200, NO_STORE);
   });
 
   // The tag vocabulary (T-903): every facet and value, the proposed too, with how many open

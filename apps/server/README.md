@@ -650,6 +650,9 @@ The **admin API** is JSON under `/api/admin`, for the admin web app (below) and 
 | `GET /api/admin/sources`               | Each connector sync: its `standing`, phase, reconcile, last run, stop                        |
 | `GET /api/admin/sources/:source/skips` | What the source's syncs left out: counts by reason, items (`?reason=`, `?limit=` 1 to 1,000) |
 | `GET /api/admin/vocabulary`            | Every facet and value, the proposed too, and how many review items wait                      |
+| `GET /api/admin/audit`                 | The audit log newest first (`?limit=` 1 to 200, `?before=<seq>`; filters as below), `next`   |
+| `POST /api/admin/audit/export`         | The log as a download (`{"format": "csv"}` or `ndjson`, filters); recorded (`audit.export`)  |
+| `POST /api/admin/audit/verify`         | Checks the whole chain: `{"ok": true, "count", "head"}` or where it breaks                   |
 
 - **Who.** A person signed in with the session cookie (above), who is an admin, through
   OpenHoard's own app (an AI client's token never administers). Anyone else gets 401 or 403, and
@@ -670,6 +673,17 @@ The **admin API** is JSON under `/api/admin`, for the admin web app (below) and 
   `oauth-client.revoke` (with the label, the previous one, and the status it was in), and
   `admin.grant`, `admin.revoke`; refusals say why (`sign-in-again`, `config-managed`,
   `status-changed`, `last-admin`, `admin-group`, …).
+- **The audit log** (T-905). Filters are `actor`, `action`, `actionPrefix` (an action's start,
+  taken literally), `decision` (`allow`, `deny`), `client`, `object`, and `from` / `to` (a date,
+  UTC, or a time with its zone; `from` before `to`); a value that isn't one is 400 with `field`.
+  Both ask the database again whether the person is an admin. An export is a POST (so the
+  Origin check stops another site making an admin's browser take one), streams every page as an
+  attachment, takes a recent sign-in as approving a client does, and is recorded after it
+  (`audit.export`: format, how many events, what was asked, `incomplete` when it failed part
+  way), so the next export shows it; `admin audit export` records itself the same way. A failed
+  export ends the response without its last chunk, so a cut file never reads as whole. Paging
+  the list shows what an export does, a page at a time, without a recent sign-in, and reading
+  isn't recorded: an admin reading the log is what it is for.
 
 ## The review inbox over HTTP (T-903)
 
@@ -712,8 +726,9 @@ read into memory when the server starts and served as they are.
 - **Without a build** (a checkout nobody built) the server says so once and runs without it.
 - Today: an overview of the sources (`GET /api/admin/sources`); tags to review and the
   vocabulary (T-903, over the review API above); and AI clients (T-904: approve with a trust
-  label, refuse, relabel, revoke, and each client's use, over the admin API). The audit and
-  File Health pages come next (T-905, T-1002).
+  label, refuse, relabel, revoke, and each client's use, over the admin API); and the audit log
+  (T-905: find events, check the chain, download what was found). The File Health page comes
+  next (T-1002).
 
 ## The MCP server (T-801)
 

@@ -1,5 +1,5 @@
 import { auditEvents, type Database } from "@openhoard/core-db";
-import { and, asc, eq, gt, gte, lt, lte, type SQL } from "drizzle-orm";
+import { and, asc, eq, gt, gte, like, lt, lte, type SQL } from "drizzle-orm";
 import { canonicalJson, type AuditEvent } from "./chain.js";
 import { chainEnd, chainPages } from "./pages.js";
 
@@ -15,6 +15,8 @@ import { chainEnd, chainPages } from "./pages.js";
 export interface AuditFilter {
   actor?: string;
   action?: string;
+  /** Actions starting with this (`source.`: every source action); taken literally. */
+  actionPrefix?: string;
   decision?: "allow" | "deny";
   client?: string;
   object?: string;
@@ -106,6 +108,11 @@ export function filterConditions(filter: AuditFilter): SQL[] {
   const c: SQL[] = [];
   if (filter.actor !== undefined) c.push(eq(auditEvents.actor, filter.actor));
   if (filter.action !== undefined) c.push(eq(auditEvents.action, filter.action));
+  if (filter.actionPrefix !== undefined) {
+    // LIKE's own characters, escaped: the prefix is text, not a pattern.
+    const escaped = filter.actionPrefix.replace(/[\\%_]/g, "\\$&");
+    c.push(like(auditEvents.action, `${escaped}%`));
+  }
   if (filter.decision !== undefined) c.push(eq(auditEvents.decision, filter.decision));
   if (filter.client !== undefined) c.push(eq(auditEvents.client, filter.client));
   if (filter.object !== undefined) c.push(eq(auditEvents.object, filter.object));

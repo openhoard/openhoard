@@ -60,6 +60,9 @@ function fakeApi(over: Partial<Api> = {}): Api {
     vocabulary: vi.fn(async () => ({ facets: [], cut: false })),
     decideClient: vi.fn(async () => "done" as const),
     signOut: vi.fn(async () => undefined),
+    audit: vi.fn(async () => ({ events: [], next: null })),
+    exportAudit: vi.fn(async () => ({ ended: "failed" as const })),
+    verifyAudit: vi.fn(async () => ({ ok: true as const, count: 0, head: "" })),
     ...over,
   };
 }

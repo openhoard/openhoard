@@ -3,7 +3,10 @@ import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
   appendAudit,
-  exportAudit,
+  auditedExport,
+  AuditFilterError,
+  ExportFailed,
+  parseAuditFilter,
   verifyAudit,
   type AuditFilter,
   type ExportFormat,
@@ -2273,30 +2276,6 @@ interface ExportArgs {
   asked: Record<string, string>;
 }
 
-/** A time for `--from` / `--to`: a date (UTC) or a full ISO 8601 time with its zone. */
-function timeArg(value: string, flag: string): Date {
-  const iso =
-    /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2}))?$/;
-  const m = iso.exec(value);
-  const at = m ? new Date(value) : new Date(Number.NaN);
-  // A day the month doesn't have, or hour 24, is read as a later one: refused, not shifted.
-  const [, y, mo, d, h = "00"] = m ?? [];
-  const day = m ? new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d))) : at;
-  const real =
-    Number.isFinite(at.getTime()) &&
-    day.getUTCMonth() === Number(mo) - 1 &&
-    day.getUTCDate() === Number(d) &&
-    Number(h) < 24 &&
-    at.getUTCFullYear() >= 1970 &&
-    at.getUTCFullYear() <= 9999;
-  if (!real) {
-    throw new UsageError(
-      `${flag} is a date (2026-10-01, UTC) or a time with its zone (2026-10-01T09:30:00Z)`,
-    );
-  }
-  return at;
-}
-
 /** `audit export`'s options, checked. */
 function exportArgs(values: {
   format?: string | undefined;
@@ -2311,37 +2290,18 @@ function exportArgs(values: {
 }): ExportArgs {
   const format = values.format ?? "ndjson";
   if (format !== "ndjson" && format !== "csv") throw new UsageError("--format is ndjson or csv");
-  const { decision } = values;
-  if (decision !== undefined && decision !== "allow" && decision !== "deny") {
-    throw new UsageError("--decision is allow or deny");
-  }
   if (values.out === "") throw new UsageError("--out is a file's path");
-  const filter: AuditFilter = {};
-  const asked: Record<string, string> = {};
-  for (const key of ["actor", "action", "client", "object"] as const) {
-    const value = values[key];
-    if (value === undefined) continue;
-    // What the log can hold (core/audit store.ts): anything else matches nothing.
-    const whole = wellFormed(value).join("") === value;
-    if (value === "" || value.length > 1024 || !whole || value.includes("\0")) {
-      throw new UsageError(`--${key} is not a value the audit log holds`);
-    }
-    filter[key] = value;
-    asked[key] = value;
+  let parsed;
+  try {
+    parsed = parseAuditFilter(values);
+  } catch (e) {
+    if (!(e instanceof AuditFilterError)) throw e;
+    // Said with the flags' names: `from` is `--from` here.
+    throw new UsageError(
+      e.message.replace(/\b(actor|action|decision|client|object|from|to)\b/g, "--$1"),
+    );
   }
-  if (decision !== undefined) {
-    filter.decision = decision;
-    asked.decision = decision;
-  }
-  for (const key of ["from", "to"] as const) {
-    const value = values[key];
-    if (value === undefined) continue;
-    filter[key] = timeArg(value, `--${key}`);
-    asked[key] = (filter[key] as Date).toISOString();
-  }
-  if (filter.from && filter.to && filter.from >= filter.to) {
-    throw new UsageError("--from must be before --to");
-  }
+  const { filter, asked } = parsed;
   return { format, out: values.out, filter, asked };
 }
 
@@ -2379,44 +2339,40 @@ async function auditExport(
       ? // (Until every byte is written: one write may take only part.)
         (text: string) => writeFileSync(file, text)
       : (io.write ?? ((text: string) => Promise.resolve(io.out(text))));
-  let sunk = 0;
-  let header = args.format === "csv";
   let pending = "";
-  const record = (incomplete: boolean) =>
-    db.withTenant(tenantId, (tx) =>
-      appendAudit(tx, tenantId, {
-        actor: ADMIN_ACTOR,
-        action: "audit.export",
-        decision: "allow",
-        detail: {
-          format: args.format,
-          events: sunk,
-          ...(incomplete ? { incomplete: true } : {}),
-          ...args.asked,
-        },
-      }),
-    );
   let failure: unknown;
+  let written = 0;
   try {
-    await exportAudit(db, tenantId, args.filter, args.format, async (chunk) => {
-      pending += chunk;
-      // (A CSV's first line is its header, not an event.)
-      if (header) header = false;
-      else sunk++;
-      if (pending.length < EXPORT_CHUNK) return;
-      const text = pending;
-      pending = "";
-      await deliver(text);
-    });
-    if (pending !== "") await deliver(pending);
+    written = await auditedExport(
+      db,
+      tenantId,
+      { actor: ADMIN_ACTOR, asked: args.asked },
+      args.filter,
+      args.format,
+      async (chunk) => {
+        pending += chunk;
+        if (pending.length < EXPORT_CHUNK) return;
+        const text = pending;
+        pending = "";
+        await deliver(text);
+      },
+      async () => {
+        if (pending !== "") await deliver(pending);
+        if (fd !== undefined) {
+          const closing = fd;
+          fd = undefined;
+          closeSync(closing);
+        }
+      },
+    );
   } catch (e) {
     failure = e ?? new Error("the export failed");
   } finally {
     if (fd !== undefined) {
       try {
         closeSync(fd);
-      } catch (e) {
-        failure ??= e;
+      } catch {
+        // Failing already: the message says what happened.
       }
     }
   }
@@ -2429,37 +2385,32 @@ async function auditExport(
     }
   };
   const said = (e: unknown) => oneLine(e instanceof Error ? e.message : String(e));
-  if (failure !== undefined) {
+  if (failure instanceof ExportFailed) {
     // No file left that looks like an export; what got out is recorded as taken.
     remove();
-    const code = (failure as NodeJS.ErrnoException).code;
+    const sunk = failure.events;
+    const cause = failure.cause;
+    const code = (cause as NodeJS.ErrnoException | undefined)?.code;
     io.err(
       code === "EPIPE" || code === "ERR_STREAM_DESTROYED"
         ? `The reader stopped: the export of ${tenantId} is incomplete (up to ${sunk} events).\n`
-        : `The export of ${tenantId} failed, incomplete (up to ${sunk} events): ${said(failure)}\n`,
+        : `The export of ${tenantId} failed, incomplete (up to ${sunk} events): ${said(cause)}\n`,
     );
-    try {
-      await record(true);
-    } catch (e) {
-      io.err(`And it could not be recorded in the audit log: ${said(e)}\n`);
-    }
+    if (!failure.recorded) io.err(`And it could not be recorded in the audit log.\n`);
     return 1;
   }
-  // After the export, so the record isn't in it: the next one shows this one was taken.
-  try {
-    await record(false);
-  } catch (e) {
-    // An export nobody can see was taken is not left lying about.
+  if (failure !== undefined) {
+    // The export went out whole, and its record couldn't be written: an export nobody can see
+    // was taken is not left lying about.
     remove();
     io.err(
-      `The export of ${tenantId} could not be recorded in the audit log: ${said(e)}\n` +
+      `The export of ${tenantId} could not be recorded in the audit log: ${said(failure)}\n` +
         (path === undefined
           ? `What was written to standard output is an export the log doesn't show.\n`
           : `${path} was removed.\n`),
     );
     return 1;
   }
-  const written = sunk;
   io.err(
     `Exported ${written} audit event${written === 1 ? "" : "s"} of ${tenantId} as ${args.format}` +
       `${path === undefined ? "" : ` to ${path}`}.\n`,

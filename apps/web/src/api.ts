@@ -156,8 +156,52 @@ export interface Vocabulary {
   cut: boolean;
 }
 
+/** An audit event, as GET /api/admin/audit gives it: as hashed, with its hash. */
+export interface AuditEvent {
+  seq: number;
+  at: string;
+  /** `user:usr_…`, `system:…`, `source:…`: who, as the log names them. */
+  actor: string;
+  action: string;
+  decision: "allow" | "deny";
+  client: string | null;
+  object: string | null;
+  detail: Record<string, string | number | boolean> | null;
+  hash: string;
+}
+
+/** What to look for in the log; dates are days (`2026-10-01`), `until` included. */
+export interface AuditQuery {
+  actor?: string;
+  /** Actions starting with this. */
+  action?: string;
+  decision?: "allow" | "deny";
+  object?: string;
+  from?: string;
+  until?: string;
+}
+
+export interface AuditPage {
+  events: AuditEvent[];
+  /** Pass as `before` for older events; null when there are none. */
+  next: number | null;
+}
+
+/** How a download ended; `invalid`: the server refused the filter (`field` says which). */
+export type Exported =
+  | { ended: "done"; file: Blob; name: string }
+  | { ended: "sign-in-again" | "refused" | "failed" }
+  | { ended: "invalid"; field: string | null };
+
+export type Verified =
+  | { ok: true; count: number; head: string }
+  | { ok: false; count: number; seq: number; problem: string };
+
 export interface Api {
   me(): Promise<Me>;
+  audit(query: AuditQuery, before?: number): Promise<AuditPage>;
+  exportAudit(query: AuditQuery, format: "csv" | "ndjson"): Promise<Exported>;
+  verifyAudit(): Promise<Verified>;
   sources(): Promise<Source[]>;
   review(): Promise<ReviewInbox>;
   decideReview(id: string, decision: ReviewDecision): Promise<Reviewed>;
@@ -290,6 +334,67 @@ export function createApi(fetcher: typeof fetch): Api {
       }
       return { ended: res.status === 400 ? "invalid" : "failed" };
     },
+    async audit(query, before) {
+      const params = auditParams(query);
+      if (before !== undefined) params.set("before", String(before));
+      const body = (await get(`/api/admin/audit?${params.toString()}`)) as {
+        events?: unknown;
+        next?: unknown;
+      } | null;
+      if (!Array.isArray(body?.events)) throw new ApiError(200);
+      return {
+        events: body.events.map(asAuditEvent),
+        next: typeof body.next === "number" ? body.next : null,
+      };
+    },
+    async exportAudit(query, format) {
+      const body = { ...Object.fromEntries(auditParams(query)), format };
+      let res: Response;
+      try {
+        res = await send("/api/admin/audit/export", "POST", body);
+      } catch (err) {
+        if (err instanceof SignedOut) throw err;
+        return { ended: "failed" };
+      }
+      if (res.ok) {
+        // The name the server gave it, kept to what a file name may hold.
+        const named = /filename="([\w.-]{1,64})"/.exec(
+          res.headers.get("content-disposition") ?? "",
+        );
+        try {
+          return { ended: "done", file: await res.blob(), name: named?.[1] ?? `audit.${format}` };
+        } catch {
+          return { ended: "failed" };
+        }
+      }
+      const why = (await res.json().catch(() => null)) as {
+        signIn?: unknown;
+        field?: unknown;
+      } | null;
+      if (res.status === 400) {
+        return { ended: "invalid", field: typeof why?.field === "string" ? why.field : null };
+      }
+      if (res.status !== 403) return { ended: "failed" };
+      return { ended: typeof why?.signIn === "string" ? "sign-in-again" : "refused" };
+    },
+    async verifyAudit() {
+      const res = await send("/api/admin/audit/verify", "POST", {});
+      if (!res.ok) throw new ApiError(res.status);
+      const body = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+      const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+      if (body?.ok === true && n(body.count) !== null && typeof body.head === "string") {
+        return { ok: true, count: n(body.count) as number, head: body.head };
+      }
+      if (body?.ok === false && n(body.count) !== null && n(body.seq) !== null) {
+        return {
+          ok: false,
+          count: n(body.count) as number,
+          seq: n(body.seq) as number,
+          problem: typeof body.problem === "string" ? body.problem : "",
+        };
+      }
+      throw new ApiError(200);
+    },
     async vocabulary() {
       const body = (await get("/api/admin/vocabulary")) as Partial<Vocabulary> | null;
       if (!Array.isArray(body?.facets)) throw new ApiError(200);
@@ -413,5 +518,67 @@ function asFacet(x: unknown): VocabularyFacet {
         },
       ];
     }),
+  };
+}
+
+/**
+ * The query as the server reads it. Days are the browser's own: `from` is the start of that day
+ * where the admin is, and `until` includes its day, so `to` is the start of the next one. The
+ * server takes times with their zone (sent as UTC).
+ */
+export function auditParams(q: AuditQuery): URLSearchParams {
+  const p = new URLSearchParams();
+  if (q.actor) p.set("actor", q.actor);
+  if (q.action) p.set("actionPrefix", q.action);
+  if (q.decision) p.set("decision", q.decision);
+  if (q.object) p.set("object", q.object);
+  if (q.from) p.set("from", startOfDay(q.from, 0) ?? q.from);
+  // Not a day: sent as it is, and the server says so.
+  if (q.until) p.set("to", startOfDay(q.until, 1) ?? q.until);
+  return p;
+}
+
+/** The start of `day` (`2026-10-01`) plus `add` days, where the browser is; null if not a day. */
+function startOfDay(day: string, add: number): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]) - 1, Number(m[3])];
+  const at = new Date(y, mo, d);
+  if (at.getFullYear() !== y || at.getMonth() !== mo || at.getDate() !== d) return null;
+  at.setDate(at.getDate() + add);
+  return at.toISOString();
+}
+
+function asAuditEvent(x: unknown): AuditEvent {
+  if (typeof x !== "object" || x === null) throw new ApiError(200);
+  const e = x as Record<string, unknown>;
+  if (
+    typeof e.seq !== "number" ||
+    typeof e.at !== "string" ||
+    typeof e.actor !== "string" ||
+    typeof e.action !== "string" ||
+    (e.decision !== "allow" && e.decision !== "deny")
+  ) {
+    throw new ApiError(200);
+  }
+  const detail =
+    typeof e.detail === "object" && e.detail !== null && !Array.isArray(e.detail)
+      ? Object.fromEntries(
+          Object.entries(e.detail as Record<string, unknown>).filter(
+            (kv): kv is [string, string | number | boolean] =>
+              ["string", "number", "boolean"].includes(typeof kv[1]),
+          ),
+        )
+      : null;
+  return {
+    seq: e.seq,
+    at: e.at,
+    actor: e.actor,
+    action: e.action,
+    decision: e.decision,
+    client: text(e.client),
+    object: text(e.object),
+    detail,
+    hash: text(e.hash) ?? "",
   };
 }

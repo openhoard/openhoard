@@ -1,9 +1,10 @@
 import { exportAudit } from "@openhoard/core-audit";
-import { newId, sourceSyncs, zones, type Database } from "@openhoard/core-db";
+import { newId, sourceSyncs, users, zones, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { createUser, grantAdmin, issueSignInLink, type User } from "@openhoard/core-identity";
+import { eq } from "drizzle-orm";
 import type { Hono } from "hono";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { keepSkips } from "@openhoard/core-jobs";
 import { createApp } from "./app.js";
 import type { AuthEnv } from "./auth.js";
@@ -355,5 +356,135 @@ describe("GET /api/admin/sources", () => {
     expect(
       (await app.request("/api/admin/sources/nope/skips", { headers: { cookie } })).status,
     ).toBe(404);
+  });
+});
+
+describe("the audit log over the admin API (T-905)", () => {
+  async function adminCookie() {
+    await db.withTenant(t.tenantId, (tx) =>
+      grantAdmin(tx, t.tenantId, steve.id, "system:admin-cli"),
+    );
+    return cookieOf(await post(await link()));
+  }
+  const takeExport = (cookie: string, body: object = {}, origin = PUBLIC) =>
+    app.request("/api/admin/audit/export", {
+      method: "POST",
+      headers: { cookie, origin, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  it("pages the log newest first, filtered, for admins only", async () => {
+    const member = cookieOf(await post(await link()));
+    expect((await app.request("/api/admin/audit", { headers: { cookie: member } })).status).toBe(
+      403,
+    );
+    const cookie = await adminCookie();
+    const get = (q = "") => app.request(`/api/admin/audit${q}`, { headers: { cookie } });
+    const all = (await (await get()).json()) as {
+      events: { seq: number; action: string; actor: string }[];
+      next: number | null;
+    };
+    expect(all.events.length).toBeGreaterThan(2);
+    const seqs = all.events.map((e) => e.seq);
+    expect(seqs).toEqual([...seqs].sort((a, b) => b - a));
+    // One at a time, following `next`.
+    const one = (await (await get("?limit=1")).json()) as typeof all;
+    expect(one.events).toHaveLength(1);
+    const two = (await (await get(`?limit=1&before=${one.next}`)).json()) as typeof all;
+    expect(two.events[0]?.seq).toBe(all.events[1]?.seq);
+    // Filters, as the CLI's.
+    const granted = (await (await get("?actionPrefix=admin.")).json()) as typeof all;
+    expect(granted.events.length).toBeGreaterThan(0);
+    expect(granted.events.every((e) => e.action.startsWith("admin."))).toBe(true);
+    for (const bad of [
+      "?limit=0",
+      "?limit=201",
+      "?before=x",
+      "?decision=maybe",
+      "?from=2026-02-30",
+      "?from=2026-10-02&to=2026-10-01",
+    ]) {
+      expect((await get(bad)).status, bad).toBe(400);
+    }
+  });
+
+  it("exports what was asked as a file and records it, after a recent sign-in", async () => {
+    const cookie = await adminCookie();
+    const res = await takeExport(cookie, { format: "csv", from: "2000-01-01" });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/csv");
+    expect(res.headers.get("content-disposition")).toMatch(
+      /^attachment; filename="audit-\d{4}-\d{2}-\d{2}\.csv"$/,
+    );
+    const lines = (await res.text()).trimEnd().split("\r\n");
+    expect(lines[0]).toBe(
+      "seq,at,actor,action,decision,client,object,version,detail,prev_hash,hash",
+    );
+    expect(lines.length).toBeGreaterThan(1);
+    // Recorded after it, with who, through which app, and what was asked.
+    const listed = (await (
+      await app.request("/api/admin/audit?action=audit.export", { headers: { cookie } })
+    ).json()) as { events: { actor: string; client: string; detail: object }[] };
+    expect(listed.events).toMatchObject([
+      {
+        actor: `user:${steve.id}`,
+        client: "openhoard",
+        detail: { format: "csv", events: lines.length - 1, from: "2000-01-01T00:00:00.000Z" },
+      },
+    ]);
+    for (const bad of [{ format: "xml" }, { actor: 7 }, { to: "soon" }]) {
+      expect((await takeExport(cookie, bad)).status, JSON.stringify(bad)).toBe(400);
+    }
+    // Not from another site (the session cookie goes with a cross-site form), and not as a GET.
+    expect((await takeExport(cookie, {}, "https://evil.example")).status).toBe(403);
+    expect((await app.request("/api/admin/audit/export", { headers: { cookie } })).status).not.toBe(
+      200,
+    );
+  });
+
+  it("asks the database, not the session, whether the reader is still an admin", async () => {
+    const cookie = await adminCookie();
+    // The role taken away behind the session's back (no new principal epoch).
+    await db.withTenant(t.tenantId, (tx) =>
+      tx.update(users).set({ adminAt: null, adminBy: null }).where(eq(users.id, steve.id)),
+    );
+    expect((await app.request("/api/admin/audit", { headers: { cookie } })).status).toBe(403);
+    const res = await takeExport(cookie);
+    expect([res.status, await res.json()]).toEqual([403, { error: "forbidden" }]);
+  });
+
+  it("refuses an export to a sign-in that isn't recent", async () => {
+    const cookie = await adminCookie();
+    const later = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60 * 60_000);
+    try {
+      const res = await takeExport(cookie);
+      expect([res.status, await res.json()]).toEqual([
+        403,
+        { error: "sign in again to do this", signIn: "/auth/sign-in" },
+      ]);
+    } finally {
+      later.mockRestore();
+    }
+    // And recorded: who tried to take the log.
+    const denied = (await (
+      await app.request("/api/admin/audit?action=audit.export&decision=deny", {
+        headers: { cookie: await adminCookie() },
+      })
+    ).json()) as { events: { detail: object }[] };
+    expect(denied.events[0]?.detail).toMatchObject({ reason: "sign-in-again" });
+  });
+
+  it("checks the whole chain on demand", async () => {
+    const cookie = await adminCookie();
+    const res = await app.request("/api/admin/audit/verify", {
+      method: "POST",
+      headers: { cookie, origin: PUBLIC, "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      head: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
   });
 });

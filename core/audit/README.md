@@ -39,6 +39,12 @@ Every access decision and every AI read leaves an event in its tenant's **hash c
   - CSV follows RFC 4180. Text a spreadsheet would run as a formula gets a leading
     apostrophe (CSV injection), so use NDJSON when the bytes must match the log.
 
+- [`view.ts`](src/view.ts) (T-905): `listAudit(db, tenantId, filter, {before, limit})`, a page
+  of events newest first with the seq of the next; `auditedExport()`, an export that records
+  itself (`audit.export`) after it, `incomplete` if it failed part way; and
+  `parseAuditFilter()`, the filter as a person typed it, checked, which the CLI and the admin
+  API both read. `filter.actionPrefix` matches an action's start, taken literally.
+
 An operator runs both as `openhoard admin audit verify` and `admin audit export`
 ([apps/server](../../apps/server/README.md), T-1404).
 
