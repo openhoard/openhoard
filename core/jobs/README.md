@@ -422,6 +422,16 @@ accept-identity`, audited), which starts a crawl from the beginning.
   skipped and reported, a bad token fails the run. Its failures go by their code; anything else
   it throws counts as retryable. A read that says it returned another version, or sends more or
   fewer bytes than it reported, is `changed`.
+- **What is left out is kept** (`skips.ts`, core/db `source_skips`, migration 0070). A run's
+  report lists only that run's skips, and a file skipped once (too large) isn't mentioned again
+  until it changes. So the runner gathers what it skips (`too-large`, `invalid-acl`,
+  `ingest-<code>`, `invalid`, and items a connector warning names, by the warning's code) and
+  what it records or removes, and writes both with each checkpoint, in its transaction
+  (`keepSkips()`). A crawl from the beginning that reconciles forgets what it didn't meet again
+  (`sweepSkips()`). `listSourceSkips()` counts them by reason and lists them, the most recently
+  met first, with the item's path as the source said it (`admin source skips`,
+  `GET /api/admin/sources/:source/skips`). One checkpoint keeps at most 5,000; the report still
+  counts them all.
 
 It returns a `SyncReport`, codes only (no messages): `status` and what to do next.
 

@@ -46,6 +46,7 @@ import {
 import { and, asc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import { aclResolver, applySourceAcl, withdrawSourceGrants, type AclOutcome } from "./acl.js";
 import type { JobsLogger } from "./jobs.js";
+import { keepSkips, MAX_SKIPS_PER_CHECKPOINT, sweepSkips } from "./skips.js";
 
 /*
  * The sync runner (T-301): drives one connector over one source into the catalog, and keeps
@@ -248,6 +249,18 @@ export const SYNC_MAX_FILE_BYTES = 2 * 1024 ** 3;
 /** No permissions of the source's: nobody but the object's owner. */
 const NO_ACL: ItemAcl = Object.freeze({ basis: "owner-only", entries: [] });
 
+/**
+ * Connector warnings that mean an item wasn't served (and so isn't in the catalog): kept as left
+ * out. Others (`hard-link`: recorded all the same) aren't.
+ */
+const NOT_SERVED = new Set([
+  "unreadable",
+  "invalid-item",
+  "unplaced-item",
+  "unsupported-item",
+  "unlisted-folder",
+]);
+
 /** The connector's answer to aclImport() wasn't an ACL. */
 class InvalidAcl extends Error {}
 
@@ -328,11 +341,38 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
   let key: Promise<Uint8Array> | undefined;
   const tenantKey = () => (key ??= Promise.resolve(options.tenantKey(tenantId)));
 
-  const skip = (reason: string, externalId?: string) => {
+  /**
+   * What is left out and what no longer is, since the last checkpoint: kept with the next one
+   * (skips.ts keepSkips()), so a file skipped once is still said after runs that never mention it.
+   */
+  let gathered = {
+    skipped: new Map<string, { reason: string; path?: readonly string[] }>(),
+    cleared: new Set<string>(),
+  };
+  /**
+   * Past the cap, a checkpoint keeps no more: still-skipped items it didn't note would look unmet
+   * to the reconcile's sweep, so a crawl that reached it doesn't sweep.
+   */
+  let capped = false;
+  const leftOut = (externalId: string, reason: string, path?: readonly string[]) => {
+    if (gathered.skipped.size >= MAX_SKIPS_PER_CHECKPOINT && !gathered.skipped.has(externalId)) {
+      capped = true;
+      return;
+    }
+    gathered.cleared.delete(externalId);
+    gathered.skipped.set(externalId, path === undefined ? { reason } : { reason, path });
+  };
+  /** The item is recorded or removed: no longer left out. */
+  const cleared = (externalId: string) => {
+    gathered.skipped.delete(externalId);
+    gathered.cleared.add(externalId);
+  };
+  const skip = (reason: string, externalId?: string, path?: readonly string[]) => {
     report.counts.skipped++;
     if (report.skipped.length < MAX_REPORTED_SKIPS) {
       report.skipped.push(externalId === undefined ? { reason } : { externalId, reason });
     }
+    if (externalId !== undefined) leftOut(externalId, reason, path);
   };
   const warn = (code: string, externalId?: string) => {
     if (report.warnings.length < MAX_REPORTED_SKIPS) {
@@ -374,10 +414,15 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     }
   };
   const where = () => and(eq(sourceSyncs.tenantId, tenantId), eq(sourceSyncs.source, source));
-  /** Saves a checkpoint or cursor, and how many items the delta has removed so far. */
-  const save = (phase: Phase, token: string, ended = false) =>
-    transaction((tx) =>
-      tx
+  /**
+   * Saves a checkpoint or cursor, how many items the delta has removed so far, and what was
+   * left out since the last one (in the same transaction: what comes after a checkpoint comes
+   * again after a crash).
+   */
+  const save = async (phase: Phase, token: string, ended = false) => {
+    const changes = gathered;
+    await transaction(async (tx) => {
+      await tx
         .update(sourceSyncs)
         .set({
           phase,
@@ -387,8 +432,13 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
           ...(ended && phase === "delta" ? { reconcileHeld: null, reconcileConfirmed: null } : {}),
           updatedAt: sql`now()`,
         })
-        .where(where()),
-    );
+        .where(where());
+      if (changes.skipped.size + changes.cleared.size > 0) {
+        await keepSkips(tx, tenantId, source, changes);
+      }
+    });
+    gathered = { skipped: new Map(), cleared: new Set() };
+  };
   /** Starts a crawl from the beginning, noting when, for the reconcile after it. */
   const restart = async () => {
     await transaction((tx) =>
@@ -405,6 +455,9 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
     );
     reconciling = true;
     deltaDeletes = 0;
+    // What a delta gathered before it gave way is the crawl's to find again (or not).
+    gathered = { skipped: new Map(), cleared: new Set() };
+    capped = false;
   };
 
   try {
@@ -617,6 +670,16 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
           }
           case "warning":
             warn(event.code, event.externalId);
+            // An item the connector couldn't serve isn't in the catalog either: kept as left out.
+            // Not for a warning about an item it did serve (`hard-link`: recorded all the same),
+            // nor one this run has recorded.
+            if (
+              event.externalId !== undefined &&
+              NOT_SERVED.has(event.code) &&
+              !gathered.cleared.has(event.externalId)
+            ) {
+              leftOut(event.externalId, event.code);
+            }
             // An item a warning names is there (the connector couldn't serve it this time):
             // mentioned, so a reconcile doesn't take it for gone.
             if (event.externalId !== undefined) await seen(event.externalId);
@@ -654,14 +717,18 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
   async function applyEvent(event: SyncEvent): Promise<void> {
     if (event.type === "item") {
       applied++;
-      if (event.item.kind === "folder") report.counts.folders++;
-      else await apply(event.item);
+      if (event.item.kind === "folder") {
+        report.counts.folders++;
+        // A folder met is one the connector could read: a warning kept about it is past.
+        cleared(event.item.externalId);
+      } else await apply(event.item);
     } else if (event.type === "deleted") {
       applied++;
       const removed = await transaction((tx) =>
         removeFromSource(tx, tenantId, source, event.externalId),
       );
       if (removed !== null) report.counts.deleted++;
+      cleared(event.externalId);
     }
   }
 
@@ -744,7 +811,7 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
         const objectId = known.objectId;
         tally(await transaction((tx) => grant(tx, objectId, acl ?? NO_ACL)));
       }
-      skip(reason, item.externalId);
+      skip(reason, item.externalId, item.path);
       await seen(item.externalId);
     };
     for (let attempt = 1; ; attempt++) {
@@ -783,6 +850,7 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
             if (outcome) tally(outcome);
           }
           report.counts.unchanged++;
+          cleared(item.externalId);
           return;
         }
         /** The item recorded and its grants made equal to the source's, in one transaction. */
@@ -815,6 +883,7 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
         }
         result ??= await record(await readContent(item));
         report.counts.ingested++;
+        cleared(item.externalId);
         committed = result;
         await enqueue(result);
         return;
@@ -1057,8 +1126,10 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
         if (removed !== null) report.counts.reconciled++;
       }
     }
-    await transaction((tx) =>
-      tx
+    await transaction(async (tx) => {
+      // What the crawl didn't meet again is no longer left out (gone, or recorded since).
+      if (!capped) await sweepSkips(tx, tenantId, source);
+      await tx
         .update(sourceSyncs)
         .set({
           reconcileFrom: null,
@@ -1067,8 +1138,8 @@ export async function runSync(db: Database, options: SyncOptions): Promise<SyncR
           reconcileDeferred: false,
           updatedAt: sql`now()`,
         })
-        .where(where()),
-    );
+        .where(where());
+    });
     reconciling = false;
   }
 

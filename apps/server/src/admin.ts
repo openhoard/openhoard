@@ -83,6 +83,8 @@ import {
   listSourceSyncs,
   resumeSource,
   startJobs,
+  listSourceSkips,
+  MAX_SKIP_PAGE,
   STALE_AFTER_MS,
   syncStanding,
   type SourceSyncState,
@@ -116,6 +118,7 @@ import { retrying } from "./retry.js";
  *   admin pack apply              --tenant ten_… --file <pack.json> --plan-hash <hash>
  *   admin source list             --tenant ten_…
  *   admin source status           --tenant ten_… [--source <name>]
+ *   admin source skips            --tenant ten_… --source <name> [--reason <code>] [--limit 100]
  *   admin source run-now          --tenant ten_… --source <name>
  *   admin source resume           --tenant ten_… --source <name>
  *   admin source confirm-reconcile --tenant ten_… --source <name>
@@ -298,6 +301,8 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
                                                    apply exactly the plan shown
   source list --tenant <ten_…>                     list the tenant's connector syncs
   source status --tenant <ten_…> [--source <name>] how each source's last scheduled sync ended
+  source skips --tenant <ten_…> --source <name> [--reason <code>] [--limit <1-${MAX_SKIP_PAGE}>]
+                                                   what the source's syncs left out, and why
   source run-now --tenant <ten_…> --source <name>  queue a sync of the source now
   source resume --tenant <ten_…> --source <name>   schedule a source a failure stopped again
   source confirm-reconcile --tenant <ten_…> --source <name>
@@ -360,6 +365,7 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
         "plan-hash": { type: "string" },
         into: { type: "string" },
         limit: { type: "string" },
+        reason: { type: "string" },
         replace: { type: "boolean" },
         format: { type: "string" },
         out: { type: "string" },
@@ -410,6 +416,7 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "pack apply",
     "source list",
     "source status",
+    "source skips",
     "source run-now",
     "source resume",
     "source confirm-reconcile",
@@ -518,6 +525,15 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
           config,
           tenantArg(values.tenant),
           values.source === undefined ? undefined : sourceArg(values.source),
+          io,
+        );
+      case "source skips":
+        return await sourceSkipsList(
+          db,
+          tenantArg(values.tenant),
+          sourceArg(values.source),
+          values.reason,
+          values.limit,
           io,
         );
       case "source run-now":
@@ -1433,6 +1449,63 @@ async function sourceStatus(
         .map(([k, v]) => `${k}: ${v}`)
         .join("\n") + "\n\n",
     );
+  }
+  return 0;
+}
+
+/**
+ * `source skips`: what the source's syncs left out and why (core/jobs skips.ts), counted by
+ * reason, then each item: reason, when last and first met, and where it is at the source (its
+ * path as the source said it; its id there when the run didn't know it). Names are the source's
+ * text: shown on one line each, never interpreted.
+ */
+async function sourceSkipsList(
+  db: Database,
+  tenantId: string,
+  source: string,
+  reason: string | undefined,
+  limitArg: string | undefined,
+  io: AdminIo,
+): Promise<number> {
+  const limit = limitArg === undefined ? 100 : Number(limitArg);
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_SKIP_PAGE) {
+    throw new UsageError(`--limit is 1 to ${MAX_SKIP_PAGE}`);
+  }
+  if (reason !== undefined && !/^[a-z0-9][a-z0-9:-]{0,63}$/.test(reason)) {
+    throw new UsageError(`not a reason code: ${reason}`);
+  }
+  const found = await db.withTenant(tenantId, async (tx) => {
+    if (!(await getTenant(tx, tenantId))) return "no-tenant" as const;
+    if (!(await listSourceSyncs(tx, tenantId)).some((s) => s.source === source)) {
+      return "no-source" as const;
+    }
+    return listSourceSkips(tx, tenantId, source, {
+      limit,
+      ...(reason === undefined ? {} : { reason }),
+    });
+  });
+  if (found === "no-tenant") {
+    io.err(`no tenant ${tenantId}\n`);
+    return 1;
+  }
+  if (found === "no-source") {
+    io.err(`tenant ${tenantId} has no source ${source}\n`);
+    return 1;
+  }
+  const reasons = Object.entries(found.byReason)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([r, n]) => `${r} ${n}`)
+    .join(", ");
+  io.out(`left out: ${found.total}${reasons === "" ? "" : ` (${reasons})`}\n`);
+  for (const i of found.items) {
+    const where = i.path === null ? `id ${i.externalId}` : i.path.join(" / ");
+    io.out(
+      `${i.reason}\t${i.lastSeenAt.toISOString()}\t${i.firstSeenAt.toISOString()}\t${oneLine(where)}\n`,
+    );
+  }
+  const shown = reason === undefined ? found.total : (found.byReason[reason] ?? 0);
+  if (shown > found.items.length) {
+    io.err(`${found.items.length} of ${shown} shown: raise --limit, or pick a --reason\n`);
   }
   return 0;
 }

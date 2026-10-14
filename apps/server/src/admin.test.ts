@@ -20,7 +20,7 @@ import { openTestDatabase, seedTenant, TEST_POSTGRES_ENV } from "@openhoard/core
 import { addMember, createGroup, createUser, resolvePrincipal } from "@openhoard/core-identity";
 import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
 import { SoftAuthenticator } from "@openhoard/core-identity/testing";
-import { startJobs } from "@openhoard/core-jobs";
+import { keepSkips, startJobs } from "@openhoard/core-jobs";
 import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ADMIN_ACTOR, adminArgument, runAdmin } from "./admin.js";
@@ -545,6 +545,46 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
     expect((await admin("source", "status", "--tenant", tenantId, "--source", "nope")).code).toBe(
       1,
     );
+
+    // What the source's syncs left out, and why: names as one line each, never interpreted.
+    await inspect((db) =>
+      db.withTenant(tenantId, (tx) =>
+        keepSkips(tx, tenantId, "fs-docs", {
+          skipped: new Map([
+            ["a", { reason: "too-large", path: ["Shared", "Video.mp4"] }],
+            ["b", { reason: "too-large", path: ["Bad\nname.bin"] }],
+            ["c", { reason: "invalid-item" }],
+          ]),
+          cleared: new Set(),
+        }),
+      ),
+    );
+    const skips = await admin("source", "skips", "--tenant", tenantId, "--source", "fs-docs");
+    expect(skips.code, skips.err).toBe(0);
+    expect(skips.out).toContain("left out: 3 (invalid-item 1, too-large 2)\n");
+    expect(skips.out).toMatch(/^too-large\t\d{4}-/m);
+    expect(skips.out).toContain("\tShared / Video.mp4\n");
+    expect(skips.out).toContain("\tBad name.bin\n");
+    expect(skips.out).toContain("\tid c\n");
+    const one = await admin(
+      "source",
+      "skips",
+      "--tenant",
+      tenantId,
+      "--source",
+      "fs-docs",
+      "--reason",
+      "too-large",
+      "--limit",
+      "1",
+    );
+    expect(one.out.trim().split("\n")).toHaveLength(2);
+    expect(one.err).toBe("1 of 2 shown: raise --limit, or pick a --reason\n");
+    expect((await admin("source", "skips", "--tenant", tenantId, "--source", "nope")).code).toBe(1);
+    expect(
+      (await admin("source", "skips", "--tenant", tenantId, "--source", "fs-docs", "--limit", "0"))
+        .code,
+    ).toBe(2);
 
     const refused = await admin("source", "run-now", "--tenant", tenantId, "--source", "fs-docs");
     expect([refused.code, refused.err]).toEqual([

@@ -631,17 +631,18 @@ server on the next request (the principal epoch).
 
 The **admin API** is JSON under `/api/admin`, for the admin web app (below) and for scripts:
 
-| Route                                  | What it does                                                                  |
-| -------------------------------------- | ----------------------------------------------------------------------------- |
-| `GET /api/admin/clients`               | Every client the tenant's people tried, with its use (`people`, `lastUsedAt`) |
-| `POST /api/admin/clients/:key/approve` | `{"trust": "local"}` (or `commercial`, `consumer`); relabels an approved one  |
-| `POST /api/admin/clients/:key/refuse`  | A pending client                                                              |
-| `POST /api/admin/clients/:key/revoke`  | An approved client: its grants and tokens end                                 |
-| `GET /api/admin/admins`                | The tenant's admins, how (`role`, `group`), and if they count now             |
-| `POST /api/admin/admins`               | `{"userId": "usr_…"}`, or `{"email": …}`, or `{"userName": …}`                |
-| `DELETE /api/admin/admins/:userId`     | Takes the role away                                                           |
-| `GET /api/admin/sources`               | Each connector sync: its `standing`, phase, reconcile, last run, stop         |
-| `GET /api/admin/vocabulary`            | Every facet and value, the proposed too, and how many review items wait       |
+| Route                                  | What it does                                                                                 |
+| -------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `GET /api/admin/clients`               | Every client the tenant's people tried, with its use (`people`, `lastUsedAt`)                |
+| `POST /api/admin/clients/:key/approve` | `{"trust": "local"}` (or `commercial`, `consumer`); relabels an approved one                 |
+| `POST /api/admin/clients/:key/refuse`  | A pending client                                                                             |
+| `POST /api/admin/clients/:key/revoke`  | An approved client: its grants and tokens end                                                |
+| `GET /api/admin/admins`                | The tenant's admins, how (`role`, `group`), and if they count now                            |
+| `POST /api/admin/admins`               | `{"userId": "usr_…"}`, or `{"email": …}`, or `{"userName": …}`                               |
+| `DELETE /api/admin/admins/:userId`     | Takes the role away                                                                          |
+| `GET /api/admin/sources`               | Each connector sync: its `standing`, phase, reconcile, last run, stop                        |
+| `GET /api/admin/sources/:source/skips` | What the source's syncs left out: counts by reason, items (`?reason=`, `?limit=` 1 to 1,000) |
+| `GET /api/admin/vocabulary`            | Every facet and value, the proposed too, and how many review items wait                      |
 
 - **Who.** A person signed in with the session cookie (above), who is an admin, through
   OpenHoard's own app (an AI client's token never administers). Anyone else gets 401 or 403, and
@@ -972,6 +973,7 @@ node apps/server/dist/main.js admin pack plan --tenant ten_… --file packs/gene
 node apps/server/dist/main.js admin pack apply --tenant ten_… --file packs/general-business/pack.json --plan-hash <hash>
 node apps/server/dist/main.js admin source list --tenant ten_…
 node apps/server/dist/main.js admin source status --tenant ten_… [--source <name>]
+node apps/server/dist/main.js admin source skips --tenant ten_… --source <name> [--reason <code>] [--limit 100]
 node apps/server/dist/main.js admin source run-now --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source resume --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source confirm-reconcile --tenant ten_… --source <name>

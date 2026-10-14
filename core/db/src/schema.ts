@@ -1946,6 +1946,41 @@ export const sourceSyncs = pgTable(
   ],
 );
 
+/**
+ * What a source's syncs left out and why (core/jobs skips.ts): an item a run skipped (too large,
+ * permissions that weren't any, a content error) or a connector warned of (one it couldn't
+ * place or read). Kept until the item is recorded, removed at the source, or a crawl from the
+ * beginning no longer meets it, so a file skipped once is still said after later runs that never
+ * mention it. Admins read it (`admin source skips`); the item isn't in the catalog, so its path,
+ * as the source said it, is the only name it has here.
+ */
+export const sourceSkips = pgTable(
+  "source_skips",
+  {
+    tenantId: text("tenant_id").notNull(),
+    source: text("source").notNull(),
+    externalId: text("external_id").notNull(),
+    /** A code: `too-large`, `invalid-acl`, `ingest-<code>`, `invalid`, a warning's code. */
+    reason: text("reason").notNull(),
+    /** Where the item is in its source, its own name last, when the run knew it. */
+    path: text("path").array(),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.source, t.externalId] }),
+    foreignKey({
+      name: "source_skips_sync_fk",
+      columns: [t.tenantId, t.source],
+      foreignColumns: [sourceSyncs.tenantId, sourceSyncs.source],
+    }).onDelete("cascade"),
+    index("source_skips_reason_idx").on(t.tenantId, t.source, t.reason),
+    check("source_skips_reason_format", sql`reason ~ '^[a-z0-9][a-z0-9:-]{0,63}$'`),
+    check("source_skips_external_id_length", sql`char_length(external_id) between 1 and 1024`),
+    check("source_skips_path_length", sql`path is null or cardinality(path) between 1 and 1024`),
+  ],
+);
+
 /** OAuth scopes an MCP client may ask for (T-105), and the policy actions each allows. */
 export const OAUTH_SCOPES = ["files:read", "files:tag", "files:add"] as const;
 /** The trust an admin gives an approved AI client: every client trust but first-party. */
@@ -2240,6 +2275,7 @@ export const tables = {
   modelUsage,
   injectionReviews,
   sourceSyncs,
+  sourceSkips,
   sessions,
   oauthClients,
   oauthCodes,

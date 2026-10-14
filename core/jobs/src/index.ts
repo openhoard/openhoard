@@ -62,6 +62,15 @@ export {
   type ConnectorContentOptions,
 } from "./connector-content.js";
 export {
+  keepSkips,
+  listSourceSkips,
+  MAX_SKIP_PAGE,
+  MAX_SKIPS_PER_CHECKPOINT,
+  sweepSkips,
+  type SkipChanges,
+  type SourceSkip,
+} from "./skips.js";
+export {
   acceptSourceIdentity,
   confirmReconcile,
   discardReconcile,

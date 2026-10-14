@@ -22,7 +22,9 @@ import {
 } from "@openhoard/core-identity";
 import { tenantVocabulary, VIEW_TRANSACTION, VocabularyError } from "@openhoard/core-catalog";
 import {
+  listSourceSkips,
   listSourceSyncs,
+  MAX_SKIP_PAGE,
   syncStanding,
   type SourceSyncState,
   type SyncStanding,
@@ -49,6 +51,7 @@ import { retrying } from "./retry.js";
  *   POST   /api/admin/admins                  {"userId": "usr_…"} or {"email": …} or {"userName": …}
  *   DELETE /api/admin/admins/:userId
  *   GET    /api/admin/sources                 each connector sync and its last scheduled run
+ *   GET    /api/admin/sources/:source/skips   what a source's syncs left out, and why
  *   GET    /api/admin/vocabulary              every facet and value, and what waits in review
  *
  * - Signed in with the session cookie (T-102), as an admin (core/policy mayAdminister(): an
@@ -83,6 +86,10 @@ export interface AdminApiDeps {
 const FIRST_PARTY: AuthzClient = { id: "openhoard", trust: "first-party" };
 const NO_STORE = { "cache-control": "no-store" } as const;
 const CLIENT_KEY = /^[0-9a-f]{64}$/;
+/** A source's id, as the config takes it. */
+const SOURCE_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+/** A skip's reason (core/db source_skips). */
+const REASON_CODE = /^[a-z0-9][a-z0-9:-]{0,63}$/;
 
 type Action = "approve" | "refuse" | "revoke";
 /** The statuses each action starts from: a refusal of an approved client is a revocation. */
@@ -493,6 +500,52 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
         ...unstarted,
       ],
     });
+  });
+
+  // What a source's syncs left out, and why (core/jobs skips.ts): counts by reason and the
+  // items, most recently met first. Paths are the source's text: the page shows them as text.
+  app.get("/api/admin/sources/:source/skips", async (c) => {
+    const { tenantId } = c.get("auth") as SignedIn;
+    const source = c.req.param("source");
+    const reason = c.req.query("reason");
+    const limitArg = c.req.query("limit");
+    const limit = limitArg === undefined ? 100 : Number(limitArg);
+    if (
+      !SOURCE_ID.test(source) ||
+      (reason !== undefined && !REASON_CODE.test(reason)) ||
+      !Number.isInteger(limit) ||
+      limit < 1 ||
+      limit > MAX_SKIP_PAGE
+    ) {
+      return c.json({ error: "invalid" }, 400);
+    }
+    const found = await db.withTenant(
+      tenantId,
+      async (tx) =>
+        (await listSourceSyncs(tx, tenantId)).some((s) => s.source === source)
+          ? listSourceSkips(tx, tenantId, source, {
+              limit,
+              ...(reason === undefined ? {} : { reason }),
+            })
+          : null,
+      { isolationLevel: "repeatable read", accessMode: "read only" },
+    );
+    if (found === null) return c.json({ error: "not found" }, 404);
+    return c.json(
+      {
+        total: found.total,
+        byReason: found.byReason,
+        skips: found.items.map((i) => ({
+          externalId: i.externalId,
+          reason: i.reason,
+          path: i.path,
+          firstSeenAt: i.firstSeenAt.toISOString(),
+          lastSeenAt: i.lastSeenAt.toISOString(),
+        })),
+      },
+      200,
+      NO_STORE,
+    );
   });
 
   // The tag vocabulary (T-903): every facet and value, the proposed too, with how many open

@@ -4,6 +4,7 @@ import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core
 import { createUser, grantAdmin, issueSignInLink, type User } from "@openhoard/core-identity";
 import type { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { keepSkips } from "@openhoard/core-jobs";
 import { createApp } from "./app.js";
 import type { AuthEnv } from "./auth.js";
 import { ConfigSchema } from "./config.js";
@@ -299,5 +300,60 @@ describe("GET /api/admin/sources", () => {
     });
     // Another tenant's unavailable source isn't listed here.
     expect(sources).toHaveLength(4);
+  });
+
+  it("lists what a source's syncs left out, for admins only", async () => {
+    await db.withTenant(t.tenantId, async (tx) => {
+      const zoneId = newId("zone");
+      await tx
+        .insert(zones)
+        .values({ tenantId: t.tenantId, id: zoneId, kind: "indexed", name: "D" });
+      await tx.insert(sourceSyncs).values({
+        tenantId: t.tenantId,
+        source: "fs-docs",
+        zoneId,
+        connector: "connector-fs",
+        phase: "delta",
+        token: "fs1.x",
+      });
+      await keepSkips(tx, t.tenantId, "fs-docs", {
+        skipped: new Map([
+          ["a", { reason: "too-large", path: ["Video.mp4"] }],
+          ["b", { reason: "invalid-acl" }],
+        ]),
+        cleared: new Set(),
+      });
+    });
+    const url = "/api/admin/sources/fs-docs/skips";
+    const member = cookieOf(await post(await link()));
+    expect((await app.request(url, { headers: { cookie: member } })).status).toBe(403);
+    await db.withTenant(t.tenantId, (tx) =>
+      grantAdmin(tx, t.tenantId, steve.id, "system:admin-cli"),
+    );
+    const cookie = cookieOf(await post(await link()));
+    const res = await app.request(url, { headers: { cookie } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const body = (await res.json()) as {
+      total: number;
+      byReason: Record<string, number>;
+      skips: { externalId: string; reason: string; path: string[] | null }[];
+    };
+    expect(body.total).toBe(2);
+    expect(body.byReason).toEqual({ "too-large": 1, "invalid-acl": 1 });
+    expect(body.skips.map((x) => [x.externalId, x.reason, x.path]).sort()).toEqual([
+      ["a", "too-large", ["Video.mp4"]],
+      ["b", "invalid-acl", null],
+    ]);
+    const one = (await (
+      await app.request(`${url}?reason=too-large`, { headers: { cookie } })
+    ).json()) as { skips: unknown[] };
+    expect(one.skips).toHaveLength(1);
+    for (const bad of ["?limit=0", "?limit=x", "?reason=Bad%20Code"]) {
+      expect((await app.request(url + bad, { headers: { cookie } })).status, bad).toBe(400);
+    }
+    expect(
+      (await app.request("/api/admin/sources/nope/skips", { headers: { cookie } })).status,
+    ).toBe(404);
   });
 });

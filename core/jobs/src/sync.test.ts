@@ -39,6 +39,7 @@ import {
   discardReconcile,
   listSourceSyncs,
 } from "./sync-admin.js";
+import { keepSkips, listSourceSkips } from "./skips.js";
 import { runSync, type SyncOptions } from "./sync.js";
 
 /*
@@ -136,6 +137,16 @@ async function catalog(source = SOURCE) {
   });
 }
 
+/** What the source leaves out now, as kept across runs: reason and path, by path. */
+async function leftOut(source = SOURCE) {
+  const { items } = await db.withTenant(t.tenantId, (tx) =>
+    listSourceSkips(tx, t.tenantId, source),
+  );
+  return items
+    .map((i) => ({ reason: i.reason, path: i.path?.join("/") ?? null }))
+    .sort((a, b) => String(a.path).localeCompare(String(b.path)));
+}
+
 async function syncState(source = SOURCE) {
   const [row] = await db.withTenant(t.tenantId, (tx) =>
     tx.select().from(sourceSyncs).where(eq(sourceSyncs.source, source)),
@@ -211,6 +222,8 @@ describe("runSync with the fs connector", () => {
     });
     expect((await catalog()).map((r) => r.title)).toEqual(["Small.md", "Zed.md"]);
     expect(reads).toHaveLength(2);
+    // Kept past the run: why it isn't in the catalog, and where it is.
+    expect(await leftOut()).toEqual([{ reason: "too-large", path: "Huge.bin" }]);
     // A file recorded while it was small enough stays, at the version read; its growth past
     // the limit is left out the same way.
     await put(["Small.md"], "y".repeat(4096));
@@ -221,6 +234,17 @@ describe("runSync with the fs connector", () => {
       versions: 1,
     });
     expect(reads).toHaveLength(2);
+    // Said after a run that doesn't mention it (nothing changed): not forgotten.
+    expect(await sync(connector, { maxFileBytes: 1024 })).toMatchObject({ skipped: [] });
+    expect(await leftOut()).toEqual([
+      { reason: "too-large", path: "Huge.bin" },
+      { reason: "too-large", path: "Small.md" },
+    ]);
+    // Recorded once it can be, and gone once the source removes it: no longer left out.
+    await put(["Small.md"], "small again\n");
+    await rm(join(root, "Huge.bin"));
+    await sync(connector, { maxFileBytes: 1024 });
+    expect(await leftOut()).toEqual([]);
   });
 
   it("records edits as versions, renames and moves without reading again, deletes softly", async () => {
@@ -587,6 +611,16 @@ describe("runSync with a source that misbehaves", () => {
       phase: "crawl",
       counts: { reconciled: 1, ingested: 2 },
     });
+    // What was left out before and the crawl doesn't meet again is forgotten by its reconcile.
+    await db.withTenant(t.tenantId, (tx) =>
+      keepSkips(tx, t.tenantId, "mem", {
+        skipped: new Map([["gone-item", { reason: "too-large", path: ["Old.bin"] }]]),
+        cleared: new Set(),
+      }),
+    );
+    expect(await leftOut("mem")).toEqual([{ reason: "too-large", path: "Old.bin" }]);
+    await memSync(noDelta);
+    expect(await leftOut("mem")).toEqual([]);
   });
 
   it("skips what the connector gets wrong, and reports it", async () => {
@@ -1029,6 +1063,55 @@ describe("runSync's safeguards", () => {
     expect(report).toMatchObject({ status: "done", counts: { reconciled: 1 } });
     expect(report.warnings).toEqual([{ code: "invalid-item", externalId: ids.get("f1.txt") }]);
     expect((await live("mem")).map((o) => o.title).sort()).toEqual(["f1.txt", "f2.txt", "f3.txt"]);
+    // The connector couldn't serve it: kept as left out, by the warning's code.
+    const kept = await db.withTenant(t.tenantId, (tx) => listSourceSkips(tx, t.tenantId, "mem"));
+    expect(kept).toMatchObject({ total: 1, byReason: { "invalid-item": 1 } });
+    expect(kept.items[0]?.externalId).toBe(ids.get("f1.txt"));
+    // The next crawl serves it: recorded, so no longer left out.
+    await sync({ ...warning, crawl: mem.connector.crawl }, { source: "mem" });
+    expect(
+      await db.withTenant(t.tenantId, (tx) => listSourceSkips(tx, t.tenantId, "mem")),
+    ).toMatchObject({ total: 0 });
+  });
+
+  it("keeps as left out only what a connector didn't serve, and clears a folder it reads again", async () => {
+    const mem = memorySource();
+    await mem.write(["dir", "a.txt"], enc.encode("a"));
+    await mem.write(["b.txt"], enc.encode("b"));
+    const ids = new Map<string, string>();
+    for await (const e of mem.connector.crawl(null, new AbortController().signal)) {
+      if (e.type === "item") ids.set(e.item.path.join("/"), e.item.externalId);
+    }
+    const folderId = ids.get("dir") as string;
+    const fileId = ids.get("b.txt") as string;
+    const { delta: _delta, ...crawling } = mem.connector;
+    const noDelta = (change: (e: SyncEvent) => SyncEvent[]): Connector => ({
+      ...crawling,
+      crawl: async function* (checkpoint, signal) {
+        for await (const e of mem.connector.crawl(checkpoint, signal)) yield* change(e);
+      },
+      describe: () => ({
+        ...mem.connector.describe(),
+        capabilities: { ...mem.connector.describe().capabilities, delta: false },
+      }),
+    });
+    // A file recorded, then warned of (a hard link: recorded all the same); a folder unread.
+    const first = noDelta((e) =>
+      e.type === "item" && e.item.externalId === fileId
+        ? [e, { type: "warning", code: "hard-link", externalId: fileId }]
+        : e.type === "item" && e.item.externalId === folderId
+          ? [{ type: "warning", code: "unreadable", externalId: folderId }]
+          : [e],
+    );
+    await sync(first, { source: "mem" });
+    expect((await live("mem")).map((o) => o.title).sort()).toEqual(["a.txt", "b.txt"]);
+    expect(await leftOut("mem")).toEqual([{ reason: "unreadable", path: null }]);
+    // Read again: the folder is met, and no longer said to be left out.
+    await sync(
+      noDelta((e) => [e]),
+      { source: "mem" },
+    );
+    expect(await leftOut("mem")).toEqual([]);
   });
 
   it("discards a held reconcile without removing anything, and guards the fresh crawl again", async () => {
