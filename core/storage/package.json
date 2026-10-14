@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@openhoard/core-catalog": "workspace:^",
-    "opendal": "^0.49.11"
+    "opendal": "^0.49.12"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*"
