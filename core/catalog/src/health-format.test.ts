@@ -4,6 +4,7 @@ import {
   HEALTH_PAGE_ORDER,
   healthCsv,
   healthCsvCut,
+  healthPage,
   healthText,
   healthWording,
   plainLine,
@@ -367,6 +368,46 @@ describe("the report as text", () => {
       );
     }
     expect(headings.size).toBe(HEALTH_SECTIONS.length);
+  });
+});
+
+describe("the report as a page (the admin web app)", () => {
+  it("has every word the text has, in parts, each file's title and address made plain", () => {
+    const report = reportOf({ formerStaffInGroups: 2 });
+    report.sections.large = {
+      count: 3,
+      bytes: 3 * 1024 ** 3,
+      items: [item(1, { title: "Big\u202e.mp4", url: "https://sp.example/1\n", reasons: [] })],
+    };
+    const page = healthPage(report, 5);
+    expect(page.looked).toBe("OpenHoard looked at 1,204 files (5 GB in all).");
+    expect(page.oneThing).toMatch(/^2 people who have left are still members of groups\./);
+    expect(page.findings).toEqual([
+      {
+        section: "large",
+        heading: "Larger than 1 GB",
+        advice: healthWording("large", THRESHOLDS).advice,
+        count: 3,
+        size: "3 GB in all",
+        also: null,
+        items: [
+          {
+            objectId: "obj_1",
+            title: "Big.mp4",
+            url: "https://sp.example/1",
+            size: "2 KB",
+            why: "",
+          },
+        ],
+        more: 2,
+      },
+    ]);
+    expect(page.clean).toHaveLength(HEALTH_PAGE_ORDER.length - 1);
+    // The text is the page, written out.
+    const text = healthText(report, { tenant: "Acme", show: 5 });
+    for (const line of [page.looked, page.summary, ...page.clean, ...page.gaps]) {
+      expect(text).toContain(line);
+    }
   });
 });
 

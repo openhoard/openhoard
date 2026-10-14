@@ -554,3 +554,12 @@ select {
 .audit-detail {
   font-size: 0.925rem;
 }
+
+/* File health. */
+.health-finding {
+  margin-top: 1.5rem;
+}
+
+.health-finding .notice {
+  margin: 0.5rem 0;
+}

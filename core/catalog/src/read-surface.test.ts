@@ -150,6 +150,7 @@ const SURFACE = {
     "globMatch",
     "healthCsv",
     "healthCsvCut",
+    "healthPage",
     "healthText",
     "healthWording",
     "isEmbeddingModel",

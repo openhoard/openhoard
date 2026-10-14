@@ -31,7 +31,19 @@ import {
   type OAuthClient,
   type User,
 } from "@openhoard/core-identity";
-import { tenantVocabulary, VIEW_TRANSACTION, VocabularyError } from "@openhoard/core-catalog";
+import {
+  HEALTH_SECTIONS,
+  healthCsv,
+  healthCsvCut,
+  HealthError,
+  healthPage,
+  healthReport,
+  tenantVocabulary,
+  VIEW_TRANSACTION,
+  VocabularyError,
+  type HealthOptions,
+  type HealthReport,
+} from "@openhoard/core-catalog";
 import {
   listSourceSkips,
   listSourceSyncs,
@@ -66,6 +78,8 @@ import { retrying } from "./retry.js";
  *   GET    /api/admin/audit                   the audit log, newest first, filtered, a page
  *   POST   /api/admin/audit/export            the same filter as NDJSON or CSV (recent sign-in)
  *   POST   /api/admin/audit/verify            checks the tenant's whole chain
+ *   POST   /api/admin/health                  the File Health Report as a page says it
+ *   POST   /api/admin/health/export           the same as CSV, every file listed (recent sign-in)
  *   GET    /api/admin/vocabulary              every facet and value, and what waits in review
  *
  * - Signed in with the session cookie (T-102), as an admin (core/policy mayAdminister(): an
@@ -731,6 +745,147 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
     const { tenantId } = c.get("auth") as SignedIn;
     const result = await verifyAudit(db, tenantId);
     return c.json(result, 200, NO_STORE);
+  });
+
+  // --- The File Health Report (T-1002) -------------------------------------------------------
+
+  /** `staleDays` and `largeMb`, from the query or a body, checked as the CLI's flags are. */
+  const healthOptionsOf = (
+    read: (field: "staleDays" | "largeMb") => unknown,
+  ): Omit<HealthOptions, "limit"> | { invalid: string } => {
+    const whole = (field: "staleDays" | "largeMb", max: number) => {
+      const v = read(field);
+      if (v === undefined) return undefined;
+      const n =
+        typeof v === "number" ? v : typeof v === "string" && /^\d{1,9}$/.test(v) ? Number(v) : NaN;
+      return Number.isSafeInteger(n) && n >= 1 && n <= max ? n : null;
+    };
+    const staleAfterDays = whole("staleDays", 36_500);
+    const largeMb = whole("largeMb", 1_000_000);
+    if (staleAfterDays === null) return { invalid: "staleDays is a whole number, 1 to 36500" };
+    if (largeMb === null) return { invalid: "largeMb is a whole number, 1 to 1000000" };
+    return {
+      ...(staleAfterDays === undefined ? {} : { staleAfterDays }),
+      ...(largeMb === undefined ? {} : { largeBytes: largeMb * 1024 * 1024 }),
+    };
+  };
+
+  /**
+   * The report for the signed-in admin (core checks again that they are one), recorded as the
+   * CLI records it (`health.report`): it names every file by its title. Refusals are recorded
+   * too. Returns the report, or the response that refuses it.
+   */
+  async function healthFor(
+    c: Context<AuthEnv>,
+    format: "page" | "csv",
+    options: HealthOptions,
+  ): Promise<HealthReport | Response> {
+    const signedIn = c.get("auth") as SignedIn;
+    const { tenantId } = signedIn;
+    const actor = userPrincipal(signedIn.principal.userId);
+    let report: HealthReport;
+    try {
+      report = await db.withTenant(
+        tenantId,
+        (tx) =>
+          healthReport(
+            tx,
+            tenantId,
+            { userId: signedIn.principal.userId, ...groupOf(tenantId) },
+            options,
+          ),
+        VIEW_TRANSACTION,
+      );
+    } catch (e) {
+      if (!(e instanceof HealthError)) throw e;
+      if (e.code === "invalid") return c.json({ error: e.message }, 400, NO_STORE);
+      await auditDenial(signedIn, {
+        action: "health.report",
+        client: FIRST_PARTY.id,
+        detail: { format, reader: actor, refusal: e.code },
+      });
+      return c.json({ error: "forbidden" }, 403, NO_STORE);
+    }
+    // Recorded before it is handed over, as the CLI does.
+    const counts = Object.fromEntries(HEALTH_SECTIONS.map((s) => [s, report.sections[s].count]));
+    await db.withTenant(tenantId, (tx) =>
+      audit(tx, tenantId, {
+        actor,
+        action: "health.report",
+        decision: "allow",
+        client: FIRST_PARTY.id,
+        // `reader` as the CLI records it (whose report it was): here, the actor's own.
+        detail: { format, reader: actor, files: report.files, ...counts },
+      }),
+    );
+    return report;
+  }
+
+  // The report as a page says it (core/catalog healthPage()): every word from core, so the web
+  // app and `admin health report` say the same. `show` files a finding (1 to 100, default 10).
+  // A POST with a JSON body, though it changes nothing but the log: reading it is recorded, so
+  // another site mustn't be able to make an admin's browser read it (the Origin check).
+  app.post("/api/admin/health", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return c.json({ error: "a JSON object" }, 400);
+    }
+    const show = body.show ?? 10;
+    if (typeof show !== "number" || !Number.isInteger(show) || show < 1 || show > 100) {
+      return c.json({ error: "show is 1 to 100" }, 400);
+    }
+    const options = healthOptionsOf((field) => body[field]);
+    if ("invalid" in options) return c.json({ error: options.invalid }, 400);
+    const report = await healthFor(c, "page", { ...options, limit: show });
+    if (report instanceof Response) return report;
+    return c.json(
+      {
+        generatedAt: report.generatedAt.toISOString(),
+        files: report.files,
+        thresholds: report.thresholds,
+        ...healthPage(report, show),
+      },
+      200,
+      NO_STORE,
+    );
+  });
+
+  // The report as CSV, every file listed (up to 10,000 a finding), as `admin health report
+  // --format csv` writes it. A POST, so another site can't make an admin's browser take one; a
+  // recent sign-in, as the audit log's export: it is the tenant's files and who can open them.
+  app.post("/api/admin/health/export", async (c) => {
+    const signedIn = c.get("auth") as SignedIn;
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return c.json({ error: "a JSON object" }, 400);
+    }
+    const options = healthOptionsOf((field) => body[field]);
+    if ("invalid" in options) return c.json({ error: options.invalid }, 400);
+    if (!recent(signedIn)) {
+      await auditDenial(signedIn, {
+        action: "health.report",
+        client: FIRST_PARTY.id,
+        detail: {
+          format: "csv",
+          reader: userPrincipal(signedIn.principal.userId),
+          refusal: "sign-in-again",
+        },
+      });
+      return c.json({ error: "sign in again to do this", signIn: "/auth/sign-in" }, 403, NO_STORE);
+    }
+    const report = await healthFor(c, "csv", { ...options, limit: 10_000 });
+    if (report instanceof Response) return report;
+    const cut = healthCsvCut(report).reduce((n, s) => n + s.missing, 0);
+    const day = report.generatedAt.toISOString().slice(0, 10);
+    // (A sheet opened by a double click is read as UTF-8 only when it says so.)
+    return c.body(`\ufeff${healthCsv(report)}`, 200, {
+      "content-type": "text/csv; charset=utf-8",
+      "content-disposition": `attachment; filename="file-health-${day}.csv"`,
+      "x-content-type-options": "nosniff",
+      // Files the sheet leaves out, past 10,000 in a finding.
+      "x-report-cut": String(cut),
+      ...NO_STORE,
+    });
   });
 
   // The tag vocabulary (T-903): every facet and value, the proposed too, with how many open

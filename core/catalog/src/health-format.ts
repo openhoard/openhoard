@@ -258,74 +258,87 @@ export function reasonsText(item: Pick<HealthItem, "reasons">): string {
   return said.join("; ");
 }
 
-export interface HealthTextOptions {
-  /** What the tenant is called, for the heading. */
-  tenant: string;
-  /** Files shown per finding, at most. Default 10. */
-  show?: number;
+/** A finding as its reader gets it: what it is, what to do, and its first files, in words. */
+export interface HealthPageFinding {
+  section: HealthSection;
+  heading: string;
+  advice: string;
+  count: number;
+  /** For housekeeping findings, their size in words: `1.5 GB in all`, `the extra copies take …`. */
+  size: string | null;
+  /** More to do that goes with this finding (people who left, still in groups). */
+  also: string | null;
+  items: {
+    objectId: string;
+    title: string;
+    url: string | null;
+    /** The file's size in words, for housekeeping findings; null otherwise. */
+    size: string | null;
+    /** Why it is listed, in plain words; may be empty. */
+    why: string;
+  }[];
+  /** How many more files the finding has than it shows. */
+  more: number;
 }
 
 /**
- * The report as a page of plain text: what was found, most pressing first, each with what it
- * means, what to do and its first few files; then what is clean, and what couldn't be checked.
+ * The report as a page says it (the admin web app, and the text below): what was found, most
+ * pressing first, each with what it means, what to do and its first `show` files; what is
+ * clean; and what couldn't be checked. Every word is here, so the two say the same.
  */
-export function healthText(report: HealthReport, options: HealthTextOptions): string {
-  const asked = options.show ?? 10;
-  const show = Number.isFinite(asked) ? Math.max(0, Math.floor(asked)) : 10;
+export interface HealthPage {
+  /** `OpenHoard looked at 1,204 files (3.1 GB in all).` */
+  looked: string;
+  /** How many things to look at, and how many checks found nothing. */
+  summary: string;
+  /** The one thing to do when nothing else lists it (people who left, still in groups). */
+  oneThing: string | null;
+  findings: HealthPageFinding[];
+  /** The headings of the checks that found nothing. */
+  clean: string[];
+  /** What this report can't tell. */
+  gaps: string[];
+}
+
+/** The report as a page, with at most `show` files a finding (default 10). */
+export function healthPage(report: HealthReport, show = 10): HealthPage {
+  const most = Number.isFinite(show) ? Math.max(0, Math.floor(show)) : 10;
   const wording = (section: HealthSection) => healthWording(section, report.thresholds);
-  const out: string[] = [];
-  out.push(
-    `File health report for ${name(options.tenant)}, ${day(report.generatedAt.toISOString())}`,
-  );
-  out.push(`OpenHoard looked at ${files(report.files)} (${readableBytes(report.bytes)} in all).`);
   const found = HEALTH_PAGE_ORDER.filter((s) => report.sections[s].count > 0);
   const clean = HEALTH_PAGE_ORDER.filter((s) => report.sections[s].count === 0);
   const checks = (n: number) => `${n} ${n === 1 ? "check" : "checks"}`;
-  out.push(
-    found.length === 0
-      ? "None of the checks below found anything."
-      : `${found.length} ${found.length === 1 ? "thing" : "things"} to look at, most pressing first` +
-          (clean.length === 0 ? "." : `; ${checks(clean.length)} found nothing.`),
-  );
   const leavers = report.formerStaffInGroups;
   const stillInGroups =
     `${count(leavers)} ${leavers === 1 ? "person who has left is still a member of a group" : "people who have left are still members of groups"}. ` +
     "Ask whoever manages your user accounts to remove them from every group. This report does not list, file by file, what those groups can open.";
-  if (leavers > 0 && report.sections.formerStaff.count === 0) {
-    out.push("", "One thing to do:", `  ${stillInGroups}`);
-  }
 
-  for (const section of found) {
+  const findings = found.map((section): HealthPageFinding => {
     const finding = report.sections[section];
     const { heading, advice } = wording(section);
     const sized = SIZED.has(section);
-    const size = !sized
-      ? ""
-      : section === "duplicates"
-        ? ` (the extra copies take ${readableBytes(finding.bytes)})`
-        : ` (${readableBytes(finding.bytes)} in all)`;
-    out.push("", `${heading}: ${files(finding.count)}${size}`);
-    out.push(`  ${advice}`);
-    if (section === "formerStaff" && leavers > 0) out.push(`  Also: ${stillInGroups}`);
-    for (const item of finding.items.slice(0, show)) {
-      const why = reasonsText(item);
-      out.push(
-        `  - ${name(item.title)}${sized ? ` (${readableBytes(item.bytes)})` : ""}${why === "" ? "" : `: ${why}`}`,
-      );
-      if (item.url !== null) out.push(`    ${plainLine(item.url)}`);
-    }
-    const rest = finding.count - Math.min(show, finding.items.length);
-    if (rest > 0) {
-      out.push(`  … and ${count(rest)} more (the spreadsheet version of this report lists them).`);
-    }
-  }
+    const items = finding.items.slice(0, most);
+    return {
+      section,
+      heading,
+      advice,
+      count: finding.count,
+      size: !sized
+        ? null
+        : section === "duplicates"
+          ? `the extra copies take ${readableBytes(finding.bytes)}`
+          : `${readableBytes(finding.bytes)} in all`,
+      also: section === "formerStaff" && leavers > 0 ? stillInGroups : null,
+      items: items.map((item) => ({
+        objectId: item.objectId,
+        title: name(item.title),
+        url: item.url === null ? null : plainLine(item.url),
+        size: sized ? readableBytes(item.bytes) : null,
+        why: reasonsText(item),
+      })),
+      more: finding.count - items.length,
+    };
+  });
 
-  if (clean.length > 0) {
-    out.push("", found.length === 0 ? "What was checked:" : "Nothing found:");
-    for (const section of clean) out.push(`  - ${wording(section).heading}`);
-  }
-
-  out.push("", "What this report can't tell you:");
   const gaps: string[] = [
     'The sharing checks only cover SharePoint, and only files OpenHoard has read since it began recording sharing (complete after its next full scan). Counts may be low until then; for files kept anywhere else, "nothing found" means "not checked".',
     "Files that everyone can find or open because of OpenHoard's own settings and rules, rather than how they are shared, are not listed. Ask whoever set up OpenHoard to show you those.",
@@ -347,7 +360,63 @@ export function healthText(report: HealthReport, options: HealthTextOptions): st
       `${files(report.unknownPeople)} ${one(report.unknownPeople) ? "was" : "were"} created or changed by someone OpenHoard can't match to a person. That can mean they left before OpenHoard was connected, or that your accounts aren't linked to your organization's directory yet.`,
     );
   }
-  for (const gap of gaps) out.push(`  - ${gap}`);
+
+  return {
+    looked: `OpenHoard looked at ${files(report.files)} (${readableBytes(report.bytes)} in all).`,
+    summary:
+      found.length === 0
+        ? "None of the checks below found anything."
+        : `${found.length} ${found.length === 1 ? "thing" : "things"} to look at, most pressing first` +
+          (clean.length === 0 ? "." : `; ${checks(clean.length)} found nothing.`),
+    oneThing: leavers > 0 && report.sections.formerStaff.count === 0 ? stillInGroups : null,
+    findings,
+    clean: clean.map((section) => wording(section).heading),
+    gaps,
+  };
+}
+
+export interface HealthTextOptions {
+  /** What the tenant is called, for the heading. */
+  tenant: string;
+  /** Files shown per finding, at most. Default 10. */
+  show?: number;
+}
+
+/**
+ * The report as a page of plain text (healthPage(), written out): what was found, most
+ * pressing first, each with what it means, what to do and its first few files; then what is
+ * clean, and what couldn't be checked.
+ */
+export function healthText(report: HealthReport, options: HealthTextOptions): string {
+  const page = healthPage(report, options.show ?? 10);
+  const out: string[] = [];
+  out.push(
+    `File health report for ${name(options.tenant)}, ${day(report.generatedAt.toISOString())}`,
+  );
+  out.push(page.looked, page.summary);
+  if (page.oneThing !== null) out.push("", "One thing to do:", `  ${page.oneThing}`);
+  for (const f of page.findings) {
+    out.push("", `${f.heading}: ${files(f.count)}${f.size === null ? "" : ` (${f.size})`}`);
+    out.push(`  ${f.advice}`);
+    if (f.also !== null) out.push(`  Also: ${f.also}`);
+    for (const item of f.items) {
+      out.push(
+        `  - ${item.title}${item.size === null ? "" : ` (${item.size})`}${item.why === "" ? "" : `: ${item.why}`}`,
+      );
+      if (item.url !== null) out.push(`    ${item.url}`);
+    }
+    if (f.more > 0) {
+      out.push(
+        `  … and ${count(f.more)} more (the spreadsheet version of this report lists them).`,
+      );
+    }
+  }
+  if (page.clean.length > 0) {
+    out.push("", page.findings.length === 0 ? "What was checked:" : "Nothing found:");
+    for (const heading of page.clean) out.push(`  - ${heading}`);
+  }
+  out.push("", "What this report can't tell you:");
+  for (const gap of page.gaps) out.push(`  - ${gap}`);
   return `${out.join("\n")}\n`;
 }
 

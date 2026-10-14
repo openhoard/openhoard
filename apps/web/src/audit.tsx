@@ -54,7 +54,7 @@ function queryOf(d: Draft): AuditQuery {
 }
 
 /** Saves a file the browser was handed, as a download. */
-function saveFile(file: Blob, name: string) {
+export function saveFile(file: Blob, name: string) {
   const url = URL.createObjectURL(file);
   const a = document.createElement("a");
   a.href = url;

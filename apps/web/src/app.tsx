@@ -2,6 +2,7 @@ import { Component, useCallback, useEffect, useRef, useState, type ReactNode } f
 import { SignedOut, type Api, type Me } from "./api.js";
 import { Audit } from "./audit.js";
 import { Clients } from "./clients.js";
+import { Health } from "./health.js";
 import { Overview } from "./overview.js";
 import { Review } from "./review.js";
 import { BASE, Link, usePath } from "./router.js";
@@ -50,6 +51,7 @@ const PAGES: readonly { path: string; label: string }[] = [
   { path: "/review", label: "Tags to review" },
   { path: "/clients", label: "AI clients" },
   { path: "/vocabulary", label: "Vocabulary" },
+  { path: "/health", label: "File health" },
   { path: "/audit", label: "Audit log" },
 ];
 
@@ -250,6 +252,8 @@ export function App({ api, browser }: { api: Api; browser: Browser }) {
               <Review api={api} onSignedOut={toSignIn} />
             ) : page.path === "/vocabulary" ? (
               <Vocabulary api={api} onSignedOut={toSignIn} />
+            ) : page.path === "/health" ? (
+              <Health api={api} onSignedOut={toSignIn} onSignInAgain={signInAgain} />
             ) : page.path === "/audit" ? (
               <Audit api={api} onSignedOut={toSignIn} onSignInAgain={signInAgain} />
             ) : (

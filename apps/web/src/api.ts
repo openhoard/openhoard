@@ -197,8 +197,51 @@ export type Verified =
   | { ok: true; count: number; head: string }
   | { ok: false; count: number; seq: number; problem: string };
 
+/** A File Health Report finding, worded by the server (core/catalog healthPage()). */
+export interface HealthFinding {
+  section: string;
+  heading: string;
+  advice: string;
+  count: number;
+  size: string | null;
+  also: string | null;
+  items: {
+    objectId: string;
+    title: string;
+    url: string | null;
+    size: string | null;
+    why: string;
+  }[];
+  more: number;
+}
+
+export interface HealthReportPage {
+  generatedAt: string;
+  files: number;
+  looked: string;
+  summary: string;
+  oneThing: string | null;
+  findings: HealthFinding[];
+  clean: string[];
+  gaps: string[];
+  thresholds: { staleAfterDays: number; largeBytes: number };
+}
+
+/** What the report is judged by; unset, the server's defaults (3 years, 1 GB). */
+export interface HealthQuery {
+  staleDays?: number;
+  largeMb?: number;
+}
+
+/** How the sheet's download ended; `cut`: files past 10,000 in a finding, left out. */
+export type HealthSheet =
+  | { ended: "done"; file: Blob; name: string; cut: number }
+  | { ended: "sign-in-again" | "refused" | "invalid" | "failed" };
+
 export interface Api {
   me(): Promise<Me>;
+  health(query: HealthQuery): Promise<HealthReportPage>;
+  exportHealth(query: HealthQuery): Promise<HealthSheet>;
   audit(query: AuditQuery, before?: number): Promise<AuditPage>;
   exportAudit(query: AuditQuery, format: "csv" | "ndjson"): Promise<Exported>;
   verifyAudit(): Promise<Verified>;
@@ -395,6 +438,47 @@ export function createApi(fetcher: typeof fetch): Api {
       }
       throw new ApiError(200);
     },
+    async health(query) {
+      // A POST: reading it is recorded (the server's Origin check keeps other sites out).
+      const res = await send("/api/admin/health", "POST", query);
+      if (!res.ok) throw new ApiError(res.status);
+      let body: unknown;
+      try {
+        body = await res.json();
+      } catch {
+        throw new ApiError(res.status);
+      }
+      return asHealthPage(body);
+    },
+    async exportHealth(query) {
+      let res: Response;
+      try {
+        res = await send("/api/admin/health/export", "POST", query);
+      } catch (err) {
+        if (err instanceof SignedOut) throw err;
+        return { ended: "failed" };
+      }
+      if (res.ok) {
+        const named = /filename="([\w.-]{1,64})"/.exec(
+          res.headers.get("content-disposition") ?? "",
+        );
+        const cut = Number(res.headers.get("x-report-cut") ?? "0");
+        try {
+          return {
+            ended: "done",
+            file: await res.blob(),
+            name: named?.[1] ?? "file-health.csv",
+            cut: Number.isSafeInteger(cut) && cut > 0 ? cut : 0,
+          };
+        } catch {
+          return { ended: "failed" };
+        }
+      }
+      if (res.status === 400) return { ended: "invalid" };
+      if (res.status !== 403) return { ended: "failed" };
+      const why = (await res.json().catch(() => null)) as { signIn?: unknown } | null;
+      return { ended: typeof why?.signIn === "string" ? "sign-in-again" : "refused" };
+    },
     async vocabulary() {
       const body = (await get("/api/admin/vocabulary")) as Partial<Vocabulary> | null;
       if (!Array.isArray(body?.facets)) throw new ApiError(200);
@@ -580,5 +664,80 @@ function asAuditEvent(x: unknown): AuditEvent {
     object: text(e.object),
     detail,
     hash: text(e.hash) ?? "",
+  };
+}
+
+function asHealthPage(x: unknown): HealthReportPage {
+  if (typeof x !== "object" || x === null) throw new ApiError(200);
+  const b = x as Record<string, unknown>;
+  const strings = (v: unknown) =>
+    Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : null;
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const clean = strings(b.clean);
+  const gaps = strings(b.gaps);
+  const t = b.thresholds as Record<string, unknown> | null | undefined;
+  if (
+    typeof b.looked !== "string" ||
+    typeof b.summary !== "string" ||
+    typeof b.generatedAt !== "string" ||
+    num(b.files) === null ||
+    !Array.isArray(b.findings) ||
+    clean === null ||
+    gaps === null ||
+    num(t?.staleAfterDays) === null ||
+    num(t?.largeBytes) === null
+  ) {
+    throw new ApiError(200);
+  }
+  return {
+    generatedAt: b.generatedAt,
+    files: b.files as number,
+    looked: b.looked,
+    summary: b.summary,
+    oneThing: text(b.oneThing),
+    findings: b.findings.map(asHealthFinding),
+    clean,
+    gaps,
+    thresholds: {
+      staleAfterDays: t?.staleAfterDays as number,
+      largeBytes: t?.largeBytes as number,
+    },
+  };
+}
+
+function asHealthFinding(x: unknown): HealthFinding {
+  if (typeof x !== "object" || x === null) throw new ApiError(200);
+  const f = x as Record<string, unknown>;
+  if (
+    typeof f.section !== "string" ||
+    typeof f.heading !== "string" ||
+    typeof f.advice !== "string" ||
+    typeof f.count !== "number" ||
+    typeof f.more !== "number" ||
+    !Array.isArray(f.items)
+  ) {
+    throw new ApiError(200);
+  }
+  return {
+    section: f.section,
+    heading: f.heading,
+    advice: f.advice,
+    count: f.count,
+    size: text(f.size),
+    also: text(f.also),
+    more: f.more,
+    items: f.items.map((i: unknown) => {
+      const it = (typeof i === "object" && i !== null ? i : {}) as Record<string, unknown>;
+      if (typeof it.objectId !== "string" || typeof it.title !== "string") {
+        throw new ApiError(200);
+      }
+      return {
+        objectId: it.objectId,
+        title: it.title,
+        url: text(it.url),
+        size: text(it.size),
+        why: typeof it.why === "string" ? it.why : "",
+      };
+    }),
   };
 }

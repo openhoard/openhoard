@@ -653,6 +653,8 @@ The **admin API** is JSON under `/api/admin`, for the admin web app (below) and 
 | `GET /api/admin/audit`                 | The audit log newest first (`?limit=` 1 to 200, `?before=<seq>`; filters as below), `next`   |
 | `POST /api/admin/audit/export`         | The log as a download (`{"format": "csv"}` or `ndjson`, filters); recorded (`audit.export`)  |
 | `POST /api/admin/audit/verify`         | Checks the whole chain: `{"ok": true, "count", "head"}` or where it breaks                   |
+| `POST /api/admin/health`               | The File Health Report in core's words (`{"show": 1 to 100, "staleDays", "largeMb"}`)        |
+| `POST /api/admin/health/export`        | The same as CSV, every file listed (`{"staleDays", "largeMb"}`); `x-report-cut`              |
 
 - **Who.** A person signed in with the session cookie (above), who is an admin, through
   OpenHoard's own app (an AI client's token never administers). Anyone else gets 401 or 403, and
@@ -727,8 +729,8 @@ read into memory when the server starts and served as they are.
 - Today: an overview of the sources (`GET /api/admin/sources`); tags to review and the
   vocabulary (T-903, over the review API above); and AI clients (T-904: approve with a trust
   label, refuse, relabel, revoke, and each client's use, over the admin API); and the audit log
-  (T-905: find events, check the chain, download what was found). The File Health page comes
-  next (T-1002).
+  (T-905: find events, check the chain, download what was found); and the File Health Report
+  (T-1002: the findings as `admin health report` words them, and the spreadsheet).
 
 ## The MCP server (T-801)
 
@@ -1031,6 +1033,12 @@ node apps/server/dist/main.js admin audit export --tenant ten_… [--format ndjs
   finding's count), a refusal too. `--stale-days` (1095) and `--large-mb` (1024) move two
   thresholds, and the page says what it was judged by. `--out` writes a new file, never over
   an existing one.
+  The admin web app shows the same page (`POST /api/admin/health`: core's `healthPage()`, so
+  both say the same; a POST so another site can't make an admin's browser read it into the
+  log) and hands over the same sheet (`POST /api/admin/health/export`, which takes a recent
+  sign-in). Each read is audited as `health.report` with the same detail (`reader`, each
+  finding's count, a refusal's reason), but the admin is the actor, the client is `openhoard`,
+  and `format` is `page` or `csv`.
 - **The audit log (T-702, T-703, T-1404).** `audit verify` checks a tenant's whole chain: every
   hash and link, and that the columns queries read say what the hashed events say. It prints
   `ok`, the number of events and the head hash (exit 0), or `failed`, how many events check

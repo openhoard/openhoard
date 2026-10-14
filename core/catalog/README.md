@@ -494,7 +494,8 @@ report into what its reader gets, in words that need no knowledge of OpenHoard (
 "your own labels", "people outside your organization"): `healthText()`, a page for the tenant's
 owner (each finding, most pressing first, with why it matters, what to do and its first files;
 then what is clean and what couldn't be checked), and `healthCsv()`, a line for every file
-listed. `reasonText()` words one reason; `healthWording()` a finding, for the thresholds it was
+listed. `healthPage()` is that page in parts (each finding's heading, advice, files and why),
+for the admin web app; `healthText()` writes it out, so both say the same. `reasonText()` words one reason; `healthWording()` a finding, for the thresholds it was
 judged by. An operator runs both as `openhoard admin health report`
 ([apps/server](../../apps/server/README.md)).
 

@@ -488,3 +488,117 @@ describe("the audit log over the admin API (T-905)", () => {
     });
   });
 });
+
+describe("the File Health Report over the admin API (T-1002)", () => {
+  async function adminCookie() {
+    await db.withTenant(t.tenantId, (tx) =>
+      grantAdmin(tx, t.tenantId, steve.id, "system:admin-cli"),
+    );
+    return cookieOf(await post(await link()));
+  }
+  const read = (cookie: string, body: object = {}, origin = PUBLIC) =>
+    app.request("/api/admin/health", {
+      method: "POST",
+      headers: { cookie, origin, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const takeSheet = (cookie: string, body: object = {}) =>
+    app.request("/api/admin/health/export", {
+      method: "POST",
+      headers: { cookie, origin: PUBLIC, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const recorded = async (cookie: string) =>
+    (
+      (await (
+        await app.request("/api/admin/audit?action=health.report", { headers: { cookie } })
+      ).json()) as { events: { actor: string; decision: string; detail: object }[] }
+    ).events;
+
+  it("says the report in core's words, for admins, and records who read it", async () => {
+    const member = cookieOf(await post(await link()));
+    expect((await read(member)).status).toBe(403);
+    const cookie = await adminCookie();
+    const res = await read(cookie, { staleDays: 365, largeMb: 5 });
+    expect(res.status).toBe(200);
+    const page = (await res.json()) as Record<string, unknown>;
+    expect(page).toMatchObject({
+      looked: expect.stringMatching(/^OpenHoard looked at /),
+      summary: expect.any(String),
+      findings: expect.any(Array),
+      clean: expect.arrayContaining(["Not changed in a year or more", "Larger than 5 MB"]),
+      gaps: expect.any(Array),
+      thresholds: { staleAfterDays: 365, largeBytes: 5 * 1024 * 1024 },
+    });
+    expect(await recorded(cookie)).toMatchObject([
+      {
+        actor: `user:${steve.id}`,
+        decision: "allow",
+        detail: { format: "page", reader: `user:${steve.id}` },
+      },
+    ]);
+    for (const bad of [
+      { show: 0 },
+      { show: 101 },
+      { show: "10" },
+      { staleDays: 0 },
+      { largeMb: "x" },
+      { largeMb: 1_000_001 },
+    ]) {
+      expect((await read(cookie, bad)).status, JSON.stringify(bad)).toBe(400);
+    }
+    // Not from another site (reading it is recorded), and not as a GET a link could make.
+    expect((await read(cookie, {}, "https://evil.example")).status).toBe(403);
+    expect((await app.request("/api/admin/health", { headers: { cookie } })).status).not.toBe(200);
+  });
+
+  it("refuses someone who is no longer an admin, and records it", async () => {
+    const cookie = await adminCookie();
+    await db.withTenant(t.tenantId, (tx) =>
+      tx.update(users).set({ adminAt: null, adminBy: null }).where(eq(users.id, steve.id)),
+    );
+    expect((await read(cookie)).status).toBe(403);
+    expect((await takeSheet(cookie)).status).toBe(403);
+    // Both refusals recorded (by whichever check caught it first).
+    await db.withTenant(t.tenantId, (tx) =>
+      grantAdmin(tx, t.tenantId, steve.id, "system:admin-cli"),
+    );
+    const denied = (
+      (await (
+        await app.request("/api/admin/audit?decision=deny", { headers: { cookie } })
+      ).json()) as { events: { actor: string }[] }
+    ).events;
+    expect(denied.filter((e) => e.actor === `user:${steve.id}`).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("hands over the sheet after a recent sign-in, and records it", async () => {
+    const cookie = await adminCookie();
+    const res = await takeSheet(cookie);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-disposition")).toMatch(
+      /^attachment; filename="file-health-\d{4}-\d{2}-\d{2}\.csv"$/,
+    );
+    expect(res.headers.get("x-report-cut")).toBe("0");
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    // The mark that tells a spreadsheet it is UTF-8 (EF BB BF), then the header.
+    expect([...bytes.slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+    expect(new TextDecoder().decode(bytes).startsWith("finding,title,")).toBe(true);
+    expect((await recorded(cookie))[0]).toMatchObject({ detail: { format: "csv" } });
+    expect((await takeSheet(cookie, { staleDays: -1 })).status).toBe(400);
+
+    const later = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 60 * 60_000);
+    try {
+      const stale = await takeSheet(cookie);
+      expect([stale.status, await stale.json()]).toEqual([
+        403,
+        { error: "sign in again to do this", signIn: "/auth/sign-in" },
+      ]);
+    } finally {
+      later.mockRestore();
+    }
+    expect((await recorded(await adminCookie()))[0]).toMatchObject({
+      decision: "deny",
+      detail: { format: "csv", refusal: "sign-in-again" },
+    });
+  });
+});
