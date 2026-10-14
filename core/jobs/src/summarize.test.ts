@@ -514,6 +514,7 @@ describe("routing by exposure, up to the send", () => {
     const { commercial } = both();
     const f = await file("Report.txt", "A report.");
     const base = createModelRouter([commercial.client]);
+    let tightened = false;
     // The router picks claude; the file becomes local-only before the call goes out.
     const racing: ModelRouter = {
       ...base,
@@ -521,6 +522,9 @@ describe("routing by exposure, up to the send", () => {
       pick: base.pick,
       async pickAllowed(task, allowed) {
         const picked = await base.pickAllowed(task, allowed);
+        // (Once: the step asks again after a withheld send, which finds nothing allowed.)
+        if (tightened) return picked;
+        tightened = true;
         await inTenant((tx) =>
           tx.insert(objectTags).values({
             tenantId: t.tenantId,
@@ -540,6 +544,143 @@ describe("routing by exposure, up to the send", () => {
     expect(await card(f.versionId)).toBe(null);
     // Nothing was sent: the reservation went back.
     expect(await inTenant((tx) => tokensToday(tx, t.tenantId))).toBe(0);
+  });
+
+  describe("a card waiting for another try, on a file since kept from every provider", () => {
+    const skipped = (f: { objectId: string; versionId: string }, reason: "budget" | "flagged") =>
+      inTenant((tx) =>
+        saveCard(tx, t.tenantId, {
+          objectId: f.objectId,
+          versionId: f.versionId,
+          status: "skipped",
+          reason,
+          promptVersion: "test",
+        }),
+      );
+    const tighten = (objectId: string, value: Exposure) =>
+      inTenant((tx) =>
+        tx.insert(objectTags).values({
+          tenantId: t.tenantId,
+          objectId,
+          facet: "level",
+          value,
+          // (A pack's: the pipeline's rule tagger would take a rule's off again.)
+          source: "pack",
+          appliedBy: "pack:test",
+          confidence: 1,
+        }),
+      );
+    const again = (versionId: string) =>
+      inTenant((tx) =>
+        tx.update(versions).set({ processedAt: null }).where(eq(versions.id, versionId)),
+      );
+
+    it("says no provider may have it, so the nightly retry stops taking it up", async () => {
+      const { commercial } = both();
+      const f = await file("Budget.txt", "Budget 2027.");
+      await skipped(f, "budget");
+      await tighten(f.objectId, "local-only");
+      await again(f.versionId);
+      // The pipeline withholds the step: only a commercial provider is configured.
+      await run(pipeline(createModelRouter([commercial.client])), f.versionId);
+      expect(commercial.calls).toHaveLength(0);
+      expect(await card(f.versionId)).toMatchObject({ status: "skipped", reason: "no-provider" });
+      expect(await inTenant((tx) => skippedVersions(tx, t.tenantId, ["budget"]))).toEqual([]);
+    });
+
+    it("leaves a skip no retry would cure, and a summary, as they are", async () => {
+      const { commercial } = both();
+      const flagged = await file("Flagged.txt", "Text.");
+      await skipped(flagged, "flagged");
+      await tighten(flagged.objectId, "metadata-only");
+      await run(
+        [summarizeStep({ router: createModelRouter([commercial.client]) })],
+        flagged.versionId,
+      );
+      expect(await card(flagged.versionId)).toMatchObject({ reason: "flagged" });
+
+      const done = await file("Done.txt", "Done.");
+      await run(pipeline(createModelRouter([commercial.client])), done.versionId);
+      expect(await card(done.versionId)).toMatchObject({ status: "summarized" });
+      await tighten(done.objectId, "local-only");
+      await again(done.versionId);
+      await run(pipeline(createModelRouter([commercial.client])), done.versionId);
+      expect(await card(done.versionId)).toMatchObject({ status: "summarized" });
+    });
+
+    it.each(["refused", "unavailable"] as const)(
+      "does the same for a card skipped as %s",
+      async (reason) => {
+        const { commercial } = both();
+        const f = await file("Budget.txt", "Budget 2027.");
+        await inTenant((tx) =>
+          saveCard(tx, t.tenantId, {
+            objectId: f.objectId,
+            versionId: f.versionId,
+            status: "skipped",
+            reason,
+            promptVersion: "test",
+          }),
+        );
+        await tighten(f.objectId, "metadata-only");
+        await again(f.versionId);
+        await run(pipeline(createModelRouter([commercial.client])), f.versionId);
+        expect(await card(f.versionId)).toMatchObject({ reason: "no-provider" });
+      },
+    );
+
+    it("keeps a version with no card without one", async () => {
+      const { commercial } = both();
+      const f = await file("Budget.txt", "Budget 2027.", "local-only");
+      await run(pipeline(createModelRouter([commercial.client])), f.versionId);
+      expect(await card(f.versionId)).toBe(null);
+    });
+
+    it("leaves the card for the next try when another provider may still have it", async () => {
+      const { local, commercial } = both();
+      const f = await file("Report.txt", "A report.");
+      await skipped(f, "budget");
+      // The admin prefers the commercial one; the local one stays allowed.
+      const base = createModelRouter([commercial.client, local.client], {
+        summarize: ["claude", "ollama"],
+      });
+      let first = true;
+      const racing: ModelRouter = {
+        ...base,
+        async pickAllowed(task, allowed) {
+          const picked = await base.pickAllowed(task, allowed);
+          if (first) {
+            first = false;
+            await tighten(f.objectId, "local-only");
+          }
+          return picked;
+        },
+      };
+      await again(f.versionId);
+      await run([summarizeStep({ router: racing })], f.versionId);
+      expect(commercial.calls).toHaveLength(0);
+      expect(await card(f.versionId)).toMatchObject({ status: "skipped", reason: "budget" });
+    });
+
+    it("says so too when the file is tightened between the pick and the send", async () => {
+      const { commercial } = both();
+      const f = await file("Report.txt", "A report.");
+      await skipped(f, "budget");
+      const base = createModelRouter([commercial.client]);
+      const racing: ModelRouter = {
+        ...base,
+        async pickAllowed(task, allowed) {
+          const picked = await base.pickAllowed(task, allowed);
+          if (picked !== null) await tighten(f.objectId, "local-only");
+          return picked;
+        },
+      };
+      await again(f.versionId);
+      await run([summarizeStep({ router: racing })], f.versionId);
+      expect(commercial.calls).toHaveLength(0);
+      expect(await card(f.versionId)).toMatchObject({ status: "skipped", reason: "no-provider" });
+      expect(await inTenant((tx) => tokensToday(tx, t.tenantId))).toBe(0);
+    });
   });
 
   it("never shows a summary on a metadata-only card", async () => {

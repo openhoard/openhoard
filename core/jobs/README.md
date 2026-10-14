@@ -291,6 +291,11 @@ trusted tags decide, the rest only tighten, else the tenant default; not the unp
 - a step the exposure doesn't let through is skipped (the job still finishes and marks the
   version processed), and the job's output (`withheld: [{ step, provider, exposure }]`) and the
   log say so;
+  a skipped step's `withheld()` hook runs then: the summarize step turns a card skipped for a
+  reason another try would cure (`budget`, `refused`, `unavailable`) into `no-provider`, so the
+  budget retry doesn't take up a file no provider may have any more, night after night. A file
+  with no card keeps none, and a summary is left as it is. The same happens when the exposure
+  tightens between the pick and the send and no other provider may have it now;
 - `context.mayProcess(provider)` asks the same question at any time: a step that takes long
   before it sends, or sends to more than one provider, asks again right before each send;
 - the rule tagger runs first, so its tags count before any model sees the file, and so does a
@@ -563,7 +568,10 @@ budget is skipped again, quickly and without a model call, and tried the next da
 in at a lower priority (`BUDGET_RETRY_PRIORITY`, -1) than new versions, so what is ingested in
 the morning isn't held behind yesterday's backlog. Every node that keeps maintenance keeps the
 schedule alike, whatever its own models (it only enqueues); `budgetRetryLimit: 0` removes it. A
-tenant whose retry fails is logged and the others go on.
+tenant whose retry fails is logged and the others go on. A version whose file has since been kept from every
+provider is marked `no-provider` by the run (above), and isn't taken up again, not even if its
+exposure loosens later: nothing re-enqueues a version when its tags change. `admin resummarize
+--reason no-provider` takes those up on request.
 
 Every one of those decisions is in the audit log; the rows only matter while they can still be
 used, and a while after. OAuth rows are kept 30 days after they end so a replayed code or refresh

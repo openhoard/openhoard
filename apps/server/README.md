@@ -271,7 +271,9 @@ processed and found by its name. Each night at 00:15 UTC, after the budget renew
 enqueues up to 2,000 of each tenant's such versions again (core/jobs `budget-retry`), so a large
 first crawl catches up over the following days by itself. After fixing a provider's key or
 raising the budget, `admin resummarize` enqueues those skipped for `refused`, `unavailable` or
-`budget` at once (`--dry-run` counts them; audited `summary.resummarize`).
+`budget` at once (`--dry-run` counts them; audited `summary.resummarize`). `--reason
+no-provider` takes, on request only, those no provider could have: after adding a provider, or
+loosening their exposure (nothing re-enqueues a file when its labels change).
 
 ## Signing in (T-102)
 
@@ -998,7 +1000,7 @@ node apps/server/dist/main.js admin pack apply --tenant ten_… --file packs/gen
 node apps/server/dist/main.js admin source list --tenant ten_…
 node apps/server/dist/main.js admin source status --tenant ten_… [--source <name>]
 node apps/server/dist/main.js admin source skips --tenant ten_… --source <name> [--reason <code>] [--limit 100]
-node apps/server/dist/main.js admin resummarize --tenant ten_… [--reason budget,refused,unavailable] [--limit 10000] [--dry-run]
+node apps/server/dist/main.js admin resummarize --tenant ten_… [--reason budget,refused,unavailable,no-provider] [--limit 10000] [--dry-run]
 node apps/server/dist/main.js admin source run-now --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source resume --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source confirm-reconcile --tenant ten_… --source <name>

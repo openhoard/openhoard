@@ -155,6 +155,14 @@ export interface EnrichStep {
    * `resummarize()` finds it.
    */
   giveUp?(context: EnrichContext): Promise<void>;
+  /**
+   * For a step with a provider: called when the pipeline skips it because the file's exposure
+   * keeps its content from every provider the step names. Keyed like `run`. The summarize step
+   * turns a card skipped for a reason another try would cure (a spent budget, say) into
+   * `no-provider`, so the nightly retry doesn't take it up forever; a file with no card keeps
+   * none.
+   */
+  withheld?(context: EnrichContext): Promise<void>;
 }
 
 /**
@@ -372,6 +380,12 @@ export async function enrichVersion(
           provider: providers[0] as ModelProvider,
           exposure: level,
         });
+        try {
+          await step.withheld?.(context);
+        } catch (e) {
+          if (!stale) throw new EnrichStepError(step.name, e);
+        }
+        if (stale) return finish(db, payload, stale, options.requeue);
         continue;
       }
     }

@@ -1771,6 +1771,16 @@ describe("openhoard admin resummarize", { timeout: 180_000 }, () => {
       { reasons: "refused", enqueued: 0, limit: 10_000 },
       { reasons: "budget", enqueued: 1, limit: 10_000 },
     ]);
+    // Those no provider could have, on request (after adding one): none here.
+    const none = await admin(
+      "resummarize",
+      "--tenant",
+      tenantId,
+      "--reason",
+      "no-provider",
+      "--dry-run",
+    );
+    expect([none.code, none.out], none.err).toEqual([0, "0\n"]);
     // A reason another try can't cure, or a limit out of range: misuse.
     for (const bad of [
       ["--reason", "no-text"],

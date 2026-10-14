@@ -89,6 +89,7 @@ import {
   startJobs,
   listSourceSkips,
   MAX_SKIP_PAGE,
+  ADMIN_RESUMMARIZABLE,
   RESUMMARIZABLE,
   resummarize,
   STALE_AFTER_MS,
@@ -346,7 +347,7 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
                 [--limit <files listed per finding>] [--stale-days <n>] [--large-mb <n>]
                                                    the File Health Report: what to look at
                                                    among the tenant's files, and why
-  resummarize --tenant <ten_…> [--reason budget,refused,unavailable] [--limit <n>] [--dry-run]
+  resummarize --tenant <ten_…> [--reason budget,refused,unavailable,no-provider] [--limit <n>] [--dry-run]
                                                    summarize again what a provider refused or
                                                    failed, or the budget had no room for
 `;
@@ -1535,7 +1536,8 @@ async function sourceSkipsList(
 /**
  * `resummarize`: enqueues the tenant's current versions skipped for a reason another try can
  * cure (core/jobs RESUMMARIZABLE: a provider that refused or failed, a spent budget), after a key
- * is fixed or the budget raised; the summarize step runs again for them. `--dry-run` counts
+ * is fixed or the budget raised; the summarize step runs again for them. `--reason no-provider`
+ * takes those no provider could have, after adding one or loosening their exposure. `--dry-run` counts
  * them. Audited (`summary.resummarize`) with the reasons and how many.
  */
 async function resummarizeCommand(
@@ -1548,8 +1550,10 @@ async function resummarizeCommand(
 ): Promise<number> {
   const reasons = (reasonArg ?? RESUMMARIZABLE.join(",")).split(",").map((r) => r.trim());
   for (const r of reasons) {
-    if (!(RESUMMARIZABLE as readonly string[]).includes(r)) {
-      throw new UsageError(`--reason is one or more of ${RESUMMARIZABLE.join(", ")}, not ${r}`);
+    if (!(ADMIN_RESUMMARIZABLE as readonly string[]).includes(r)) {
+      throw new UsageError(
+        `--reason is one or more of ${ADMIN_RESUMMARIZABLE.join(", ")}, not ${r}`,
+      );
     }
   }
   const limit = limitArg === undefined ? 10_000 : /^\d{1,6}$/.test(limitArg) ? Number(limitArg) : 0;

@@ -14,8 +14,15 @@ import type { Jobs } from "./jobs.js";
 export const RESUMMARIZABLE: readonly CardSkipReason[] = ["refused", "unavailable", "budget"];
 
 /**
+ * What an admin may ask to summarize again: those, and `no-provider`, after adding a provider
+ * or loosening files' exposure (nothing re-enqueues a version when its tags change). Never in
+ * a nightly retry: until something changes, it skips again, without a model call.
+ */
+export const ADMIN_RESUMMARIZABLE: readonly CardSkipReason[] = [...RESUMMARIZABLE, "no-provider"];
+
+/**
  * Enqueues the tenant's current versions skipped for `reasons` (a subset of
- * {@link RESUMMARIZABLE}; others are refused with a TypeError), a page at a time, at most
+ * {@link ADMIN_RESUMMARIZABLE}; others are refused with a TypeError), a page at a time, at most
  * `limit` in all (default 10,000). Returns how many were enqueued. Never inside withTenant().
  */
 export async function resummarize(
@@ -27,7 +34,7 @@ export async function resummarize(
 ): Promise<number> {
   if (insideWithTenant()) throw new NestedWorkError("resummarize()");
   for (const r of reasons) {
-    if (!RESUMMARIZABLE.includes(r)) {
+    if (!ADMIN_RESUMMARIZABLE.includes(r)) {
       throw new TypeError(`resummarize: ${r} is not a reason another try can cure`);
     }
   }

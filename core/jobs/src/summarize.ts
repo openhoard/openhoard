@@ -32,6 +32,7 @@ import {
 import type { Tx } from "@openhoard/core-db";
 import type { EnrichContext, EnrichStep } from "./enrich.js";
 import type { JobsLogger } from "./jobs.js";
+import { RESUMMARIZABLE } from "./resummarize.js";
 
 /*
  * Summaries and model tags as an enrichment step, `summarize` (T-405). Last in the pipeline:
@@ -95,6 +96,9 @@ export function summarizeStep(options: SummarizeStepOptions): EnrichStep {
   return {
     name: "summarize",
     providers: candidates,
+    // The file's exposure keeps its content from every provider now (a label added since the
+    // budget ran out, say): a card waiting for another try won't get one, so it says why.
+    withheld: (context) => noProviderNow(context),
     // The salvage run of a dead-lettered job: `unavailable`, which resummarize() takes again.
     async giveUp({ target, write }) {
       const { tenantId, objectId, versionId } = target;
@@ -177,8 +181,18 @@ export function summarizeStep(options: SummarizeStepOptions): EnrichStep {
         try {
           answered = await ask(context, client, prompt, budgetMs, perCall * 2, tally);
         } catch (e) {
-          // The file's exposure no longer allows this provider: nothing was sent; nothing to do.
-          if (e instanceof ModelError && e.code === "withheld") return;
+          // The file's exposure no longer allows this provider: nothing more was sent. If it
+          // allows none of them now, a card waiting for another try says why it won't get one;
+          // if another provider may still have it, the card waits for the next try as it was.
+          if (e instanceof ModelError && e.code === "withheld") {
+            const other = await router.pickAllowed("summarize", (c) => context.mayProcess(c));
+            await write(async (tx) => {
+              await settle(tx);
+              if (other === null) await markNoProvider(tx, target);
+            });
+            settled = true;
+            return;
+          }
           const reason = skipReasonFor(e, context);
           if (reason === null) throw e;
           // The model gave nothing usable, and trying again won't help (or no retry is left):
@@ -346,4 +360,34 @@ async function ask(
     // A second miss throws ModelOutputError: the step records `model-output`.
     return { raw: validateCardOutput(second.text), usage };
   }
+}
+
+/**
+ * A card skipped for a reason another try would cure (RESUMMARIZABLE: a spent budget, a
+ * provider that failed) becomes `no-provider`: the file's exposure keeps its content from the
+ * providers now, so the nightly retry (budget-retry) would take it up for nothing, every night.
+ * A summary, or a skip for any other reason, is left as it is; so is a version with no card.
+ */
+async function markNoProvider(
+  tx: Tx,
+  target: { tenantId: string; objectId: string; versionId: string },
+): Promise<void> {
+  const { tenantId, objectId, versionId } = target;
+  const card = await readCard(tx, tenantId, versionId);
+  if (card?.status !== "skipped" || !RESUMMARIZABLE.includes(card.reason)) return;
+  await saveCard(tx, tenantId, {
+    objectId,
+    versionId,
+    status: "skipped",
+    reason: "no-provider",
+    promptVersion: PROMPT_VERSION,
+  });
+}
+
+/** The `withheld()` hook: a look first, so a version with nothing to mark takes no lock. */
+async function noProviderNow({ target, read, write }: EnrichContext): Promise<void> {
+  const card = await read((tx) => readCard(tx, target.tenantId, target.versionId));
+  if (card?.status !== "skipped" || !RESUMMARIZABLE.includes(card.reason)) return;
+  // Checked again under the lock (markNoProvider()).
+  await write((tx) => markNoProvider(tx, target));
 }

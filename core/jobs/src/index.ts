@@ -26,7 +26,7 @@ export {
   type EmbedStepOptions,
 } from "./embed.js";
 export { reembed } from "./reembed.js";
-export { RESUMMARIZABLE, resummarize } from "./resummarize.js";
+export { ADMIN_RESUMMARIZABLE, RESUMMARIZABLE, resummarize } from "./resummarize.js";
 export { injectionFlagStep, scoreVersion, type FlagStepOptions } from "./flag.js";
 export { SUMMARIZE_BUDGET_MS, summarizeStep, type SummarizeStepOptions } from "./summarize.js";
 export {
