@@ -2,7 +2,7 @@ import { constants, generateKeyPairSync, verify, X509Certificate } from "node:cr
 import { errorCode, isConnectorError } from "@openhoard/sdk";
 import { selfSignedCertificate } from "@openhoard/testkit";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { expiryOf, graphAuth, GraphAuthError, type GraphAuthOptions } from "./auth.js";
+import { graphAuth, GraphAuthError, type GraphAuthOptions } from "./auth.js";
 import { retryAfterMs } from "./http.js";
 import {
   AUTHORITY,
@@ -34,7 +34,6 @@ beforeEach(() => {
     secret: SECRET,
     certificate: cert.certificate,
     appRoles: ["Sites.Selected"],
-    delegatedScopes: ["Sites.Selected", "User.Read"],
   });
 });
 
@@ -218,7 +217,6 @@ describe("a refusal by Entra", () => {
     expect(e).toBeInstanceOf(GraphAuthError);
     expect(errorCode(e)).toBe("auth");
     expect(isConnectorError(e)).toBe(true);
-    expect(e.subject).toBe("app");
     expect(e.entraError).toBe("invalid_client");
     expect(e.entraCodes).toEqual([7000215]);
     expect(e.message).toContain("AADSTS7000215");
@@ -239,7 +237,6 @@ describe("a refusal by Entra", () => {
       graphAuth(options({ credential: { kind: "certificate", ...stranger } })).appToken(never),
     );
     expect(e.entraCodes).toEqual([700027]);
-    expect(e.subject).toBe("app");
   });
 
   it("is not kept: the next call asks again", async () => {
@@ -388,227 +385,6 @@ describe("a busy or broken Entra", () => {
   });
 });
 
-describe("a token on behalf of a user", () => {
-  const member = () =>
-    f.tenant.users.find((u) => u.active && !u.guest) as { id: string; upn: string };
-
-  it("is the person's: Graph knows them, and gives the scopes consented", async () => {
-    const auth = graphAuth(options());
-    const assertion = await f.entra.userToken(member().id, CLIENT_ID);
-    const bearer = await auth.onBehalfOf(assertion, never);
-    expect(await f.entra.verify(bearer)).toEqual({
-      appId: CLIENT_ID,
-      roles: [],
-      scopes: ["Sites.Selected", "User.Read"],
-      userId: member().id,
-    });
-    const me = await f.fetch(`${GRAPH}/v1.0/me`, {
-      headers: { authorization: `Bearer ${bearer}` },
-    });
-    expect(((await me.json()) as { userPrincipalName: string }).userPrincipalName).toBe(
-      member().upn,
-    );
-    const body = new URLSearchParams(String(tokenRequests()[0]?.init?.body));
-    expect(Object.fromEntries(body)).toMatchObject({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      requested_token_use: "on_behalf_of",
-      assertion,
-      scope: `${GRAPH}/.default`,
-    });
-  });
-
-  it("works with a certificate, and with scopes named one by one", async () => {
-    const auth = graphAuth(
-      options({
-        credential: { kind: "certificate", ...cert },
-        delegatedScopes: [`${GRAPH}/User.Read`],
-      }),
-    );
-    const bearer = await auth.onBehalfOf(await f.entra.userToken(member().id, CLIENT_ID), never);
-    expect((await f.entra.verify(bearer))?.scopes).toEqual(["User.Read"]);
-    expect(f.entra.requests[0]?.auth).toBe("certificate");
-  });
-
-  it("is kept for that person only, and no longer than their own token lasts", async () => {
-    const auth = graphAuth(options());
-    const active = f.tenant.users.filter((u) => u.active);
-    const one = active[0] as { id: string };
-    const two = active[1] as { id: string };
-    const mine = await f.entra.userToken(one.id, CLIENT_ID, { expiresInSeconds: 120 });
-    const theirs = await f.entra.userToken(two.id, CLIENT_ID);
-    const first = await auth.onBehalfOf(mine, never);
-    expect(await auth.onBehalfOf(mine, never)).toBe(first);
-    expect(await auth.onBehalfOf(theirs, never)).not.toBe(first);
-    expect(tokenRequests()).toHaveLength(2);
-    // The Graph token would last an hour; the person's own token lapses in two minutes, and
-    // from then on nothing is handed out for it, and Entra isn't asked.
-    f.clock.now += 119_000;
-    expect(await auth.onBehalfOf(mine, never)).toBe(first);
-    f.clock.now += 2_000;
-    const e = await refusal(auth.onBehalfOf(mine, never));
-    expect(e.subject).toBe("user");
-    expect(e.message).toBe("the person's token has expired");
-    expect(tokenRequests()).toHaveLength(2);
-  });
-
-  it("is asked for once when the same person's requests arrive together", async () => {
-    const auth = graphAuth(options());
-    const assertion = await f.entra.userToken(member().id, CLIENT_ID);
-    const [a, b] = await Promise.all([
-      auth.onBehalfOf(assertion, never),
-      auth.onBehalfOf(assertion, never),
-    ]);
-    expect(a).toBe(b);
-    expect(tokenRequests()).toHaveLength(1);
-    auth.forget(a);
-    f.clock.now += 1000;
-    expect(await auth.onBehalfOf(assertion, never)).not.toBe(a);
-  });
-
-  it("is refused here, unasked, for what isn't a token that says when it lapses", async () => {
-    let n = 0;
-    const auth = graphAuth(options({ fetch: answering(() => token(`t${++n}`)) }));
-    const jwt = (claims: unknown) =>
-      `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
-    for (const not of [
-      "",
-      "opaque-token",
-      "two words",
-      "a.b",
-      "a.b.c.d",
-      jwt({ sub: "no exp" }),
-      jwt({ exp: f.clock.now / 1000 + 60, pad: "x".repeat(20_000) }), // far longer than a token
-    ]) {
-      const e = await refusal(auth.onBehalfOf(not, never));
-      expect([e.subject, e.entraError], not.slice(0, 20)).toEqual(["user", "invalid_grant"]);
-    }
-    expect(n).toBe(0);
-    expect(await auth.onBehalfOf(jwt({ exp: f.clock.now / 1000 + 60 }), never)).toBe("t1");
-  });
-
-  it("refused for good by Entra is refused here too for a minute, then asked again", async () => {
-    const auth = graphAuth(options());
-    const gone = f.tenant.users.find((u) => !u.active) as { id: string };
-    const assertion = await f.entra.userToken(gone.id, CLIENT_ID);
-    const first = await refusal(auth.onBehalfOf(assertion, never));
-    expect(first.entraCodes).toEqual([50057]);
-    f.clock.now += 59_000;
-    expect(await refusal(auth.onBehalfOf(assertion, never))).toBe(first);
-    expect(tokenRequests()).toHaveLength(1);
-    f.clock.now += 2_000;
-    expect(await refusal(auth.onBehalfOf(assertion, never))).not.toBe(first);
-    expect(tokenRequests()).toHaveLength(2);
-    // A clock set back an hour doesn't make that minute an hour.
-    f.clock.now -= 3_600_000;
-    await refusal(auth.onBehalfOf(assertion, never));
-    expect(tokenRequests()).toHaveLength(3);
-  });
-
-  it("asks again at once after 'sign in again', a busy Entra, or the app's own refusal", async () => {
-    const auth = graphAuth(options());
-    const user = member();
-    // The person may complete the sign-in and come back with the same token.
-    f.entra.requireInteraction(user.id);
-    const assertion = await f.entra.userToken(user.id, CLIENT_ID);
-    await refusal(auth.onBehalfOf(assertion, never));
-    f.entra.requireInteraction(user.id, false);
-    expect(await auth.onBehalfOf(assertion, never)).toEqual(expect.any(String));
-    const other = await f.entra.userToken(user.id, CLIENT_ID, { expiresInSeconds: 1800 });
-    f.entra.failNext(503);
-    expect(errorCode(await refusal(auth.onBehalfOf(other, never)))).toBe("retryable");
-    expect(await auth.onBehalfOf(other, never)).toEqual(expect.any(String));
-    // Consent missing is the app's: fixed by an admin, it works without a minute's wait.
-    const third = await f.entra.userToken(user.id, CLIENT_ID, { expiresInSeconds: 900 });
-    f.entra.registerApp({ clientId: CLIENT_ID, secret: SECRET });
-    expect((await refusal(auth.onBehalfOf(third, never))).subject).toBe("app");
-    f.entra.registerApp({ clientId: CLIENT_ID, secret: SECRET, delegatedScopes: ["User.Read"] });
-    expect(await auth.onBehalfOf(third, never)).toEqual(expect.any(String));
-  });
-
-  it("takes a bounded number of exchanges at once", async () => {
-    const waiting: ((r: Response) => void)[] = [];
-    const auth = graphAuth(
-      options({ fetch: () => new Promise<Response>((resolve) => waiting.push(resolve)) }),
-    );
-    const jwt = (i: number) =>
-      `h.${Buffer.from(JSON.stringify({ exp: f.clock.now / 1000 + 600, i })).toString("base64url")}.s`;
-    const asked = Array.from({ length: 64 }, (_, i) => auth.onBehalfOf(jwt(i), never));
-    const e = await refusal(auth.onBehalfOf(jwt(64), never));
-    expect([errorCode(e), (e as unknown as { retryAfterMs: number }).retryAfterMs]).toEqual([
-      "throttled",
-      1000,
-    ]);
-    expect(waiting).toHaveLength(64);
-    waiting.forEach((answer, i) => answer(token(`t${i}`)));
-    expect(await Promise.all(asked)).toHaveLength(64);
-    waiting.length = 0;
-    const late = auth.onBehalfOf(jwt(64), never);
-    waiting[0]?.(token("late"));
-    expect(await late).toBe("late");
-  });
-
-  it("keeps a bounded number of people", async () => {
-    let n = 0;
-    const auth = graphAuth(options({ fetch: answering(() => token(`t${++n}`)) }));
-    const lasting = (i: number) =>
-      `h.${Buffer.from(JSON.stringify({ exp: f.clock.now / 1000 + 3600, i })).toString("base64url")}.s`;
-    for (let i = 0; i < 1001; i++) await auth.onBehalfOf(lasting(i), never);
-    expect(n).toBe(1001);
-    await auth.onBehalfOf(lasting(1000), never); // the newest is kept
-    expect(n).toBe(1001);
-    await auth.onBehalfOf(lasting(0), never); // the oldest made room
-    expect(n).toBe(1002);
-  });
-
-  it("refused for the person is theirs to fix; refused for consent is the app's", async () => {
-    const auth = graphAuth(options());
-    const user = member();
-
-    f.entra.requireInteraction(user.id);
-    const theirs = await f.entra.userToken(user.id, CLIENT_ID);
-    const mfa = await refusal(auth.onBehalfOf(theirs, never));
-    // Neither the person's token nor the app's secret is in what is reported.
-    const told = JSON.stringify([mfa.message, String(mfa.stack), mfa.claims, mfa.entraError]);
-    expect(told).not.toContain(theirs);
-    expect(told).not.toContain(theirs.split(".")[2]);
-    expect(told).not.toContain(SECRET);
-    expect(mfa.subject).toBe("user");
-    expect(mfa.entraError).toBe("interaction_required");
-    expect(mfa.claims).toContain("polids");
-    expect(mfa.message).toContain("multifactor");
-    f.entra.requireInteraction(user.id, false);
-
-    const gone = f.tenant.users.find((u) => !u.active) as { id: string };
-    const left = await refusal(auth.onBehalfOf(await f.entra.userToken(gone.id, CLIENT_ID), never));
-    expect([left.subject, left.entraCodes]).toEqual(["user", [50057]]);
-
-    // A token meant for another app can't be redeemed by this one.
-    const misdirected = await f.entra.userToken(user.id, "66666666-2222-4333-8444-555555555555");
-    const wrong = await refusal(auth.onBehalfOf(misdirected, never));
-    expect([wrong.subject, wrong.entraCodes]).toEqual(["user", [500131]]);
-    expect(wrong.message).toContain("its audience must be this app");
-
-    // The app's own Graph token is for Graph, and names nobody to act for.
-    const own = await auth.appToken(never);
-    expect((await refusal(auth.onBehalfOf(own, never))).entraCodes).toEqual([500131]);
-
-    const unconsented = graphAuth(options({ delegatedScopes: [`${GRAPH}/Files.ReadWrite.All`] }));
-    const consent = await refusal(
-      unconsented.onBehalfOf(await f.entra.userToken(user.id, CLIENT_ID), never),
-    );
-    expect([consent.subject, consent.entraError, consent.entraCodes]).toEqual([
-      "app",
-      "invalid_grant",
-      [65001],
-    ]);
-    expect(consent.message).toContain("consented");
-
-    await expect(auth.onBehalfOf("x", AbortSignal.abort(new Error("early")))).rejects.toThrow(
-      "early",
-    );
-  });
-});
-
 describe("its configuration", () => {
   it("names a tenant and an app, and sends credentials to an origin only", () => {
     const bad = (over: Partial<GraphAuthOptions>, why: string | RegExp) =>
@@ -631,8 +407,6 @@ describe("its configuration", () => {
     }
     bad({ graph: "ftp://graph.example.com" }, /graph must be https/);
     bad({ credential: { kind: "secret", secret: "" } }, /secret is empty/);
-    bad({ delegatedScopes: [] }, /at least one scope/);
-    bad({ delegatedScopes: ["a b"] }, /without spaces/);
     // A tenant's id works as its domain does, and this machine may be plain http (tests).
     expect(
       graphAuth(
@@ -686,7 +460,6 @@ describe("its configuration", () => {
       graphAuth(options({ credential: { kind: "certificate", ...old } })).appToken(never),
     );
     expect(e).toBeInstanceOf(GraphAuthError);
-    expect(e.subject).toBe("app");
     expect(e.message).toMatch(/the certificate expired on/);
     expect(tokenRequests()).toHaveLength(0);
   });
@@ -702,15 +475,5 @@ describe("its helpers", () => {
     expect(retryAfterMs(null, now)).toBeUndefined();
     expect(retryAfterMs(" ", now)).toBeUndefined();
     expect(retryAfterMs("soon", now)).toBeUndefined();
-  });
-
-  it("read when a token lapses without trusting it", () => {
-    const jwt = (claims: unknown) =>
-      `h.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.s`;
-    expect(expiryOf(jwt({ exp: 1_800_000_000 }))).toBe(1_800_000_000_000);
-    expect(expiryOf(jwt({ exp: "later" }))).toBeUndefined();
-    expect(expiryOf(jwt(null))).toBeUndefined();
-    expect(expiryOf("h.not-json.s")).toBeUndefined();
-    expect(expiryOf("opaque")).toBeUndefined();
   });
 });

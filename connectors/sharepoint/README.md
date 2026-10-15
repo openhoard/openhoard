@@ -90,53 +90,46 @@ yields that.
   file's name, no content) in `stateDir`, sees the folder isn't where or what it kept, and
   lists everything under it (`/items/{id}/children`, folder by folder) to yield each at its
   new path. The bytes aren't read again as long as the listing gives the same content version
-  as the feed did. A folder it may not list (403) is warned of (`unlisted-folder`), what is in
-  it stays where the catalog has it, and the next round tries again.
+  as the feed did. A folder it may not list (403) is warned of (`unlisted-folder`), and what is
+  in it stays where the catalog has it until the next crawl.
 - **A round is bounded.** At most `roundRequests` requests (default 1000: pages of the feed,
-  folder listings, folders asked for by id) and 100,000 entries or events. One that would take
-  more (a folder with thousands of folders in it renamed) is `resync`: a crawl does the same
-  work a page at a time, with checkpoints. A round is all or nothing: cut short, it starts
-  again at the next sync. A throttle doesn't cut it short unless Graph asks for more waiting
-  than a request may do in place (below).
-- **Deletions** are yielded as `deleted`; the runner counts them against its guard before
-  applying any. Graph is taken to say every item in a deleted folder. If it says a folder went
-  and not the folders kept under it, it can't have said the files either: `resync`.
-- **What a crawl leaves for the deltas after it.** A crawl says no deletion (the runner would
-  make it uncounted): ids the feed said were deleted are kept and said by the deltas that
-  follow, 200 a round, each only if Graph still has no such item (and one Graph won't answer
-  for waits). A folder the crawl met under two names or in two places (renamed while the crawl
-  was under way) is listed again by the first delta, and a crawl that was stopped places what
-  follows as it placed what came before, so a folder renamed meanwhile is seen to differ when
-  Graph reports it: either way what the crawl yielded under the old name is put right.
+  folder listings, folders asked for by id) and 100,000 entries or events (500 items when
+  permissions are imported: each is a request more before the round's checkpoint). One that
+  would take more is `resync`: a crawl does the same work a page at a time, with checkpoints.
+  A round is all or nothing: cut short, it starts again at the next sync.
+- **Deletions** are yielded as `deleted`. Graph is taken to say every item in a deleted
+  folder. If it says a folder went and not the folders kept under it, it can't have said the
+  files either: `resync`. A crawl says no deletion: its reconcile removes what it didn't see.
 - **What is kept** (`src/state.ts`): `folders.<generation>.json`, named by the cursor it goes
   with, written whole before that cursor exists and never changed after, so whichever cursor
   the runner saved, its folders are the ones written for it; and `crawl.<id>.jsonl`, what a
-  crawl under way has met, which a checkpoint names with its length so a resumed crawl cuts it
-  back to there (and places what follows as it placed what came before). Old generations go
-  as later deltas run. Files are the server user's alone (0600, and the directory 0700 where it can be made so), read and
-  written whole and synchronously: some tens of bytes a folder, at each sync that has changes.
-  Nothing removes the directory when its source is taken out of the configuration.
+  crawl under way has met, appended a page at a time (a page met again after a resume is
+  appended again; the last line for a folder wins). Old generations go as later deltas run.
+  Files are the server user's alone (0600, and the directory 0700 where it can be made so),
+  read and written whole and synchronously: some tens of bytes a folder, at each sync that has
+  changes. Nothing removes the directory when its source is taken out of the configuration.
 - **When it crawls again** (`resync`): Graph no longer takes the link (410, or refuses it), a
   library was added, removed or renamed, the generation the cursor names is missing or
   unreadable, the cursor has none (one from before T-304, or from a crawl that lost its log),
   a round is over its bounds, a folder went without the folders in it, or the crawl is older
-  than `recrawlAfterDays` (default 7, fractions allowed; 0 never) or stamped more than a day
-  ahead of the clock. The periodic crawl's reconcile mends whatever a delta missed.
+  than `recrawlAfterDays` (default 7, fractions allowed; 0 never). The periodic crawl's
+  reconcile mends whatever a delta missed.
 - **Several nodes need the same `stateDir`.** A crawl resumed where its log isn't (another
   node's disk, or lost) goes on and ends, with a cursor changes can't be followed from: the
   next sync crawls again. Per-node directories therefore mean every sync is a crawl, as before
   T-304, never a wrong catalog.
-- **Not covered, until the next crawl.** A folder that couldn't be placed at the crawl (its
-  name, its depth, refused) and can be now: Graph says the folder, not what is in it, and the
-  connector never kept it. Files in a deleted folder if Graph doesn't say each (see below). A
-  file the crawl yielded and was then told is deleted, when it was told of more than 5,000
-  deletions in that library (a feed listing the recycle bin): none are kept. So
-  `recrawlAfterDays: 0` is for a site where none of these can happen.
+- **Not covered, until the next crawl** (the rule: a rare case gets the simple answer, and the
+  crawl's reconcile is the answer). A folder renamed while a crawl was under way, or while it
+  was stopped: what the crawl yielded under the old name stays there. A folder Graph refused to
+  list once. A folder that couldn't be placed at the crawl (its name, its depth, refused) and
+  can be now. A file the crawl yielded and was then told is deleted. Files in a deleted folder
+  if Graph doesn't say each. So `recrawlAfterDays: 0` is for a site where none of these can
+  happen.
 
 Tested in `src/delta.test.ts` by one measure: a catalog after a crawl and the deltas that
 followed equals a fresh crawl of the site as it is now (files and folders added, changed,
 renamed, moved, deleted; items given twice; two libraries, resumed between them; a delta run
-again from a kept cursor; a crawl killed and resumed, with a folder renamed meanwhile), in
+again from a kept cursor; a crawl killed and resumed), in
 `src/state.test.ts` for what is kept, and through the sync runner in `src/e2e.test.ts`.
 
 ## Permissions (T-305)
@@ -220,10 +213,10 @@ the mapping's own tests only.
 
 Graph limits an app in a tenant by resource units a minute and a day (a permissions list costs
 five, a list of children or a delta from its beginning two, an item or a delta with its token
-one), answers 429 past the limit, and throttles longer an app that keeps asking. The costs, the
-limits and the `RateLimit` headers below are Microsoft's as documented when this was written,
-not measured: its page on avoiding throttling in SharePoint Online has the current ones. So the
-connector (`src/pace.ts`, `src/graph.ts`):
+one), answers 429 past the limit, and throttles longer an app that keeps asking. The costs and
+limits below are Microsoft's as documented when this was written, not measured: its page on
+avoiding throttling in SharePoint Online has the current ones. So the connector (`src/pace.ts`,
+`src/graph.ts`):
 
 - **Keeps a budget.** `unitsPerMinute` (default 800, under the smallest tenant's limits a
   minute and a day) is spent before a request is sent: a request waits its turn rather than
@@ -239,32 +232,25 @@ connector (`src/pace.ts`, `src/graph.ts`):
   asked again at most eight times: past that it is `throttled`, with how long is left, and the
   runner comes back after that from the last checkpoint. (Waits of up to a second for the
   budget to fill are always taken.) A throttled download tells the pacer too.
-- **Adapts.** Each pause halves the rate it allows itself, down to a tenth of the budget; every
-  fifty answers without one, and every minute without one, give a tenth back. Graph's own
-  warning that most of the limit is used (`RateLimit-Remaining` under a fifth) halves what is
-  left again until the reset it names (five minutes at most; a minute when it names none).
 - **Tries again** twice, one and two seconds later, when Graph gives no answer or a 5xx without
   a wait, before reporting `retryable`.
-- **Sizes its work to one run.** Everything between two checkpoints is asked in one run, so it
-  is sized to take about four minutes of budget at some eight units a file. A crawl's page
-  (`pageSize`) is sized for a pacer slowed to a tenth: 40 files at the default budget, 12 at the
-  least the server takes (250), 50 at most. A delta round with permissions imported may mention
-  what the full budget allows (400 items at the default, 500 at most): more is a crawl's work
-  (`resync`). A round that fits the budget but not the rate the pacer allows itself just now
-  waits (`throttled`, five minutes) for the rate to come back, rather than crawl the site at
-  the moment Graph asked for less. Lists of a folder's children are asked 200 at a time: a
-  list costs the same whatever its size.
+- **Sizes its work to one run.** Everything between two checkpoints is asked in one run. A
+  crawl's page (`pageSize`) is sized to take about four minutes at a tenth of the budget, at
+  some eight units a file: 40 files at the default budget, 12 at the least the server takes
+  (250), 50 at most. A delta round with permissions imported may mention 500 items: more is a
+  crawl's work (`resync`). Lists of a folder's children are asked 200 at a time: a list costs
+  the same whatever its size.
 
 What this is not: the budget, not concurrency, bounds a sync (a sync asks one request at a
-time, and a file read for someone meanwhile takes its turn in the same budget; the task's
-"adaptive concurrency" is an adaptive rate). File downloads go to SharePoint's
+time, and a file read for someone meanwhile takes its turn in the same budget). Nothing adapts
+the rate: Graph says how long to wait, and that is waited. File downloads go to SharePoint's
 own hosts and are not counted in the budget. A first crawl costs some eight units a file (its
 permissions, and three requests to read it): 20,000 files at 800 a minute are over three hours
 of budget, and a later crawl (permissions only) about two. A larger tenant's limit is worth
 setting.
 
 Tested in `src/pace.test.ts` (the budget, on a clock the test moves), `src/graph.test.ts`
-(waiting in place and its limits, two sources on one pacer, Graph's warning), and
+(waiting in place and its limits, two sources on one pacer), and
 `src/e2e.test.ts` against a fake Graph that throttles: **a site is indexed whole in one run,
 with nothing lost, through a fake Graph that allows ten requests a minute; and a connector kept
 to a budget under the fake's limit is never throttled by it.** (The fake counts requests in a
@@ -272,12 +258,10 @@ fixed window: it has no daily or tenant-wide limit.)
 
 ## Signing in to Graph (T-302)
 
-Two kinds of token, both from Entra ID's v2 token endpoint (`src/auth.ts`):
-
-| Token               | Grant              | For                                                              |
-| ------------------- | ------------------ | ---------------------------------------------------------------- |
-| App-only            | client credentials | the connector as itself: crawling, delta, reading                |
-| On behalf of a user | on-behalf-of       | acting as one signed-in person, with no more than they can reach |
+One kind of token, from Entra ID's v2 token endpoint (`src/auth.ts`): app-only, by the client
+credentials grant, for the connector as itself (crawling, delta, reading, permissions). The
+on-behalf-of exchange (acting as one signed-in person) was built and removed on 2026-10-15:
+nothing in M1 acts for a person through the app.
 
 ```ts
 import { graphAuth, probeSites } from "@openhoard/connector-sharepoint";
@@ -288,7 +272,6 @@ const auth = graphAuth({
   credential: { kind: "certificate", certificate: pem, privateKey: keyPem }, // or { kind: "secret", secret }
 });
 const token = await auth.appToken(signal);
-const asUser = await auth.onBehalfOf(usersAccessTokenForThisApp, signal);
 await probeSites(auth, ["contoso.sharepoint.com:/sites/finance"], signal);
 ```
 
@@ -305,18 +288,9 @@ await probeSites(auth, ["contoso.sharepoint.com:/sites/finance"], signal);
   `authority` and `graph`, and its hosts must then be added to the manifest's `network`.
 - **Tokens** are kept in memory until five minutes before they lapse (halfway, for a shorter
   life), asked for once when callers arrive together, and never written or logged.
-- **On behalf of a user.** The person's token must be a JWT that says when it lapses; anything
-  else, or one already lapsed, is refused without asking Entra (each request to Entra carries
-  the app's credential). The Graph token is kept no longer than the person's own token lasts:
-  someone signed out of OpenHoard isn't acted for from a cache. A token Entra refused for good
-  (`invalid_grant`) is refused again for a minute without asking; "sign in again" is asked
-  anew each time. At most 64 exchanges run at once, and a slot is held until Entra answers or
-  the request times out: what calls `onBehalfOf` must have authenticated its caller first, or
-  forged tokens can hold the slots.
-- **Failures** are `ConnectorError`s. Entra refusing is `auth`, as a `GraphAuthError` that says
-  whether the **app** was refused (nothing works until an admin fixes the registration, the
-  credential or consent) or the **user** (that person signs in again; a claims challenge is
-  passed on), with Entra's error and AADSTS codes and a plain reason for the common ones. A busy
+- **Failures** are `ConnectorError`s. Entra refusing is `auth`, as a `GraphAuthError` (nothing
+  works until an admin fixes the registration, the credential or consent), with Entra's error
+  and AADSTS codes and a plain reason for the common ones. A busy
   Entra is `throttled` (waiting as long as `Retry-After` says) or `retryable`, and so is a
   refusal that doesn't say why as Entra does (a proxy on the way): it never stops a sync as a
   wrong credential would.
@@ -326,19 +300,18 @@ await probeSites(auth, ["contoso.sharepoint.com:/sites/finance"], signal);
   characters a SharePoint name can't hold) is refused before a request is made.
 
 Nothing here verifies a token's signature: Graph does, when the token is used. What the check
-command prints from a token ("permissions", "scopes") is what the token says, shown for setup.
+command prints from a token ("permissions") is what the token says, shown for setup.
 
 ## Checking a tenant
 
-The done-when of T-302 is both tokens working against the fake **and a dev tenant**. The fake
+The done-when of T-302 is the token working against the fake **and a dev tenant**. The fake
 is covered by the tests. For a real tenant (a Microsoft 365 developer or test tenant, never
 production):
 
 1. **Register an app** (Entra admin center → App registrations → New registration; single
    tenant; no redirect URI).
 2. **Permissions** (API permissions → Microsoft Graph): application permission
-   `Sites.Selected`, then "Grant admin consent". For the on-behalf-of exchange also the
-   delegated permissions `Sites.Selected` and `User.Read`, consented.
+   `Sites.Selected`, then "Grant admin consent".
 3. **A credential** (Certificates & secrets): upload a certificate's `.cer`/`.pem` and keep its
    private key, or create a client secret and copy its **value**.
 4. **Grant the app a site.** `Sites.Selected` reaches nothing until this is done, by someone
@@ -368,16 +341,9 @@ production):
    second (2 is a mistake in the arguments, the variables or the files). It prints no token
    and no secret.
 
-6. **On behalf of a user** (optional). The exchange takes an access token issued to a person
-   **for this app** (its audience is the app, not Graph). To make one by hand: under "Expose an
-   API" set the Application ID URI (`api://<client id>`) and add a scope (`access_as_user`);
-   get a token for `api://<client id>/access_as_user` as a test user (any OAuth client you have
-   authorized for that scope); save it in a file and set `OPENHOARD_GRAPH_USER_TOKEN_FILE`.
-   Expected: "on behalf of a user: issued", with that person's name and the delegated scopes.
-
 Not yet tried against a real tenant. What that run should also settle, since the fake only
 follows the documentation: the status Graph gives an ungranted site and `GET /sites` under
-`Sites.Selected` (the fake answers 403), and the error for a missing delegated consent.
+`Sites.Selected` (the fake answers 403).
 
 ## Tests
 

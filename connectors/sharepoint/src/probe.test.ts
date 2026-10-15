@@ -92,41 +92,6 @@ describe("probing the configured sites", () => {
     expect((await probe([f.tenant.sites[0]?.id as string]))[0]?.status).toBe("denied");
   });
 
-  it("on behalf of a user reaches a granted site only when the user does", async () => {
-    f.entra.registerApp({
-      clientId: CLIENT_ID,
-      secret: SECRET,
-      delegatedScopes: ["Sites.Selected"],
-    });
-    const site = f.tenant.sites.find(
-      (s) => s.readerGroups.length > 0,
-    ) as (typeof f.tenant.sites)[0];
-    const groups = new Set([...site.readerGroups, ...site.writerGroups]);
-    const members = new Set(
-      f.tenant.groups.filter((g) => groups.has(g.id)).flatMap((g) => g.members),
-    );
-    const inside = f.tenant.users.find((u) => u.active && members.has(u.id)) as { id: string };
-    const outside = f.tenant.users.find((u) => u.active && !members.has(u.id)) as { id: string };
-    const get = async (userId: string) => {
-      const bearer = await auth.onBehalfOf(await f.entra.userToken(userId, CLIENT_ID), never);
-      const headers = { authorization: `Bearer ${bearer}` };
-      return [
-        (await f.fetch(`${GRAPH}/v1.0/sites/${site.id}`, { headers })).status,
-        (await f.fetch(`${GRAPH}/v1.0/drives/${site.driveId}/root/children`, { headers })).status,
-      ];
-    };
-    // Not granted to the app: nobody reaches it through the app.
-    expect(await get(inside.id)).toEqual([403, 403]);
-    f.entra.grantSite(CLIENT_ID, site.id);
-    expect(await get(inside.id)).toEqual([200, 200]);
-    expect(await get(outside.id)).toEqual([403, 403]);
-    // The app's own token has no "me".
-    const own = await auth.appToken(never);
-    expect(
-      (await f.fetch(`${GRAPH}/v1.0/me`, { headers: { authorization: `Bearer ${own}` } })).status,
-    ).toBe(400);
-  });
-
   it("asks for a new token once when Graph refuses the one it has", async () => {
     const site = f.tenant.sites[0] as { id: string };
     f.entra.grantSite(CLIENT_ID, site.id);

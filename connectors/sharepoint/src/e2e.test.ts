@@ -269,7 +269,8 @@ describe("a fake tenant through the sync runner", () => {
     ]);
     expect(await recorded(site.id)).toBe(files - 1);
 
-    // An entry that can't even be named: unknown, not gone. Nothing is removed that time.
+    // An entry that can't even be named is Graph misbehaving: the run stops to be tried again,
+    // and nothing is removed that time.
     const third = f.tenant.items.filter((i) => i.siteId === site.id && i.kind === "file")[2] as {
       id: string;
     };
@@ -282,8 +283,11 @@ describe("a fake tenant through the sync runner", () => {
       return new Response(JSON.stringify(page));
     };
     const unsure = await sync(site.id, { fetch: nameless });
-    expect(unsure.counts.reconciled).toBe(0);
-    expect(unsure.warnings.map((w) => w.code)).toEqual(["unreadable", "reconcile-deferred"]);
+    expect(unsure).toMatchObject({
+      status: "retry",
+      error: "retryable",
+      counts: { reconciled: 0 },
+    });
     expect(await recorded(site.id)).toBe(files - 1);
     // The next clean crawl removes it.
     expect((await sync(site.id)).counts.reconciled).toBe(1);

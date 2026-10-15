@@ -274,11 +274,10 @@ describe("following changes", () => {
     // The feed gives the item twice, an older state first.
     const twice = feed((page) => {
       const again = page.value.find((v) => v.id === file.id);
-      if (again) page.value.unshift({ ...again, name: "older name.txt" }, { name: "no id" });
+      if (again) page.value.unshift({ ...again, name: "older name.txt" });
     });
     const events = await delta(cursor, connector({ fetch: twice }));
     expect(events.filter((e) => e.type === "item")).toHaveLength(1);
-    expect(events).toContainEqual({ type: "warning", code: "unreadable" });
     apply(model, events);
     expect(model.get(`${site.driveId}:${file.id}`)?.path.at(-1)).toBe("final name.txt");
 
@@ -353,8 +352,9 @@ describe("a round of changes", () => {
     expect(model.get(`${site.driveId}:${folder.id}`)?.path.at(-1)).toBe("Renamed and closed");
     const child = model.get(`${site.driveId}:${(inside[0] as { id: string }).id}`) as SourceItem;
     expect(child.path).not.toContain("Renamed and closed");
-    // It is tried again at the next round, though Graph has nothing new to say of the folder.
-    apply(model, await delta(cursorOf(events)));
+    // Nothing is carried over: the next round has nothing new from Graph, the next crawl mends it.
+    expect((await delta(cursorOf(events))).map((e) => e.type)).toEqual(["done"]);
+    apply(model, await crawl());
     expect(sorted(model)).toEqual(sorted(await fresh()));
   });
 
@@ -415,29 +415,14 @@ describe("a round of changes", () => {
     expect(new Headers(unasked?.init?.headers).get("prefer")).toBeNull();
   });
 
-  it("is sized to what the budget lets one run ask: slowed, it waits; too much at any rate is a crawl's", async () => {
-    const budget = pacer({ now: () => f.clock.now, sleep: f.sleep, unitsPerMinute: 800 });
-    const paced = () => connector({ pacer: budget });
-    const cursor = cursorOf(await crawl(paced()));
+  it("is a crawl's work when it mentions more than one run can ask the permissions of", async () => {
+    const cursor = cursorOf(await crawl());
     const folder = folderWith((c) => c.length > 1);
     for (let n = 0; n < 250; n++) store().addFile(site.driveId, folder.id, `new ${n}.txt`, 1);
-    // 250 files fit a run at 800 units a minute (400 do)...
-    const whole = await delta(cursor, paced());
+    const whole = await delta(cursor);
     expect(whole.filter((e) => e.type === "item").length).toBeGreaterThanOrEqual(250);
-    // ...but not at half that, after a throttle: the round waits for the rate to come back,
-    // rather than crawl the site at the moment Graph asked for less.
-    budget.throttled(1000);
-    f.clock.now += 1000;
-    const slowed = await failure(delta(cursor, paced()));
-    expect([errorCode(slowed), (slowed as { retryAfterMs?: number }).retryAfterMs]).toEqual([
-      "throttled",
-      300_000,
-    ]);
-    f.clock.now += 10 * 60_000;
-    expect((await delta(cursor, paced())).at(-1)?.type).toBe("done");
-    // More than a run could ask at the full budget is a crawl's work.
-    for (let n = 0; n < 200; n++) store().addFile(site.driveId, folder.id, `more ${n}.txt`, 1);
-    expect(errorCode(await failure(delta(cursor, paced())))).toBe("resync");
+    for (let n = 0; n < 300; n++) store().addFile(site.driveId, folder.id, `more ${n}.txt`, 1);
+    expect(errorCode(await failure(delta(cursor)))).toBe("resync");
   });
 
   it("asks for pages a run can record at a tenth of its budget, unless told a size", async () => {
@@ -528,9 +513,22 @@ describe("a round of changes", () => {
   });
 });
 
-describe("what a crawl leaves for the first delta", () => {
-  it("is a folder renamed while the crawl was stopped: what was yielded under it is said again", async () => {
-    // Killed after its second checkpoint, with a folder and some of what is in it yielded.
+describe("a crawl resumed from a checkpoint", () => {
+  it("asks Graph for nothing again: it places items as it did before", async () => {
+    const tokens: string[] = [];
+    for await (const e of connector().crawl(null, never)) {
+      if (e.type === "checkpoint" && tokens.push(e.token) === 2) break;
+    }
+    const before = f.sent.length;
+    const rest = await crawl(connector(), tokens[1] as string);
+    const byId = f.sent.slice(before).filter((r) => /\/items\/[^/?]+\?/.test(r.url));
+    expect(byId).toEqual([]);
+    // Every parent it needed was one it had logged: none is yielded twice.
+    const again = rest.flatMap((e) => (e.type === "item" && e.item.kind === "folder" ? [e] : []));
+    expect(again.length).toBeLessThan(items().filter((i) => i.kind === "folder").length);
+  });
+
+  it("leaves a folder renamed while it was stopped to the next crawl, which mends it", async () => {
     const first: SyncEvent[] = [];
     const tokens: string[] = [];
     for await (const e of connector().crawl(null, never)) {
@@ -552,106 +550,13 @@ describe("what a crawl leaves for the first delta", () => {
     const model = apply(new Map(), first);
     const rest = await crawl(connector(), tokens[1] as string);
     apply(model, rest);
-    // The crawl alone leaves what it yielded before the kill at the old path...
+    // What was yielded before the kill is at the old path: nothing is carried over for the
+    // delta to mend it with. What follows (the delta where Graph says the rename again, else
+    // the next crawl) puts it right.
     expect(sorted(model)).not.toEqual(sorted(await fresh()));
-    // ...and the first delta puts it right.
     apply(model, await delta(cursorOf(rest)));
+    apply(model, await crawl());
     expect(sorted(model)).toEqual(sorted(await fresh()));
-  });
-
-  it("is a folder the feed gave twice, under two names", async () => {
-    const folder = folderWith((c) => c.length > 1);
-    // The crawl's feed gives the folder once more at its end, renamed since.
-    let pages = 0;
-    const renamedLater = feed((page, url) => {
-      if (url.includes("token=") && ++pages === 3) store().update(folder.id, { name: "Twice" });
-      const last = (page as Record<string, unknown>)["@odata.deltaLink"] !== undefined;
-      const mine = url.includes(`/drives/${site.driveId}/`);
-      if (last && mine && pages >= 3 && !page.value.some((v) => v.id === folder.id)) {
-        page.value.push({
-          id: folder.id,
-          name: "Twice",
-          folder: {},
-          parentReference: { id: folder.parentId ?? `${site.driveId}-root` },
-        });
-      }
-    });
-    const events = await crawl(connector({ fetch: renamedLater }));
-    expect(pages).toBeGreaterThanOrEqual(3);
-    const model = apply(new Map(), events);
-    const gen = (JSON.parse(cursorOf(events)) as { gen: string }).gen;
-    const kept = JSON.parse(readFileSync(join(stateDir, `folders.${gen}.json`), "utf8")) as {
-      relist: Record<string, string[]>;
-    };
-    expect(kept.relist[site.driveId]).toEqual([folder.id]);
-    const after = await delta(cursorOf(events));
-    apply(model, after);
-    expect(sorted(model)).toEqual(sorted(await fresh()));
-    // Done once: the generation that follows has nothing left to do.
-    const next = (JSON.parse(cursorOf(after)) as { gen: string }).gen;
-    expect(next).not.toBe(gen);
-    expect(readFileSync(join(stateDir, `folders.${next}.json`), "utf8")).toContain('"relist":{}');
-  });
-
-  it("is nothing it asks Graph for again: a resumed crawl places items as it did before", async () => {
-    const tokens: string[] = [];
-    for await (const e of connector().crawl(null, never)) {
-      if (e.type === "checkpoint" && tokens.push(e.token) === 2) break;
-    }
-    const before = f.sent.length;
-    const rest = await crawl(connector(), tokens[1] as string);
-    const byId = f.sent.slice(before).filter((r) => /\/items\/[^/?]+\?/.test(r.url));
-    expect(byId).toEqual([]);
-    // Every parent it needed was one it had logged: none is yielded twice.
-    const again = rest.flatMap((e) => (e.type === "item" && e.item.kind === "folder" ? [e] : []));
-    expect(again.length).toBeLessThan(items().filter((i) => i.kind === "folder").length);
-  });
-
-  it("is said a part at a time when it is much, each id once", async () => {
-    const gone = Array.from({ length: 230 }, (_, i) => `i-gone-${i}`);
-    const told = feed((page, url) => {
-      if (!url.includes("token=")) page.value.push(...gone.map((id) => ({ id, deleted: {} })));
-    });
-    const events = await crawl(connector({ fetch: told }));
-    const deletedIn = (list: SyncEvent[]) =>
-      list.flatMap((e) => (e.type === "deleted" ? [e.externalId] : []));
-    const first = await delta(cursorOf(events));
-    expect(deletedIn(first)).toHaveLength(200);
-    const second = await delta(cursorOf(first));
-    expect(deletedIn(second)).toHaveLength(30);
-    expect(new Set([...deletedIn(first), ...deletedIn(second)]).size).toBe(230);
-    expect((await delta(cursorOf(second))).map((e) => e.type)).toEqual(["done"]);
-  });
-
-  it("waits when Graph won't say whether an item is there", async () => {
-    const told = feed((page, url) => {
-      if (!url.includes("token=")) page.value.push({ id: "i-gone", deleted: {} });
-    });
-    const events = await crawl(connector({ fetch: told }));
-    const refusing: typeof fetch = (input, init) =>
-      String(input).includes("/items/i-gone?")
-        ? Promise.resolve(new Response("{}", { status: 403 }))
-        : f.fetch(input, init);
-    const first = await delta(cursorOf(events), connector({ fetch: refusing }));
-    expect(first.some((e) => e.type === "deleted")).toBe(false);
-    expect((await delta(cursorOf(first))).filter((e) => e.type === "deleted")).toHaveLength(1);
-  });
-
-  it("is what it was told is deleted: never said by the crawl, said by the delta if still gone", async () => {
-    const live = items().find((i) => i.kind === "file") as ReturnType<typeof items>[0];
-    const told = feed((page, url) => {
-      if (url.includes("token=")) return;
-      page.value.push({ id: "i-gone", deleted: {} }, { id: live.id, deleted: {} });
-      // The live one comes after its deletion elsewhere in the feed: it is there.
-    });
-    const events = await crawl(connector({ fetch: told }));
-    expect(events.some((e) => e.type === "deleted")).toBe(false);
-    const after = await delta(cursorOf(events));
-    expect(after.filter((e) => e.type === "deleted")).toEqual([
-      { type: "deleted", externalId: `${site.driveId}:i-gone` },
-    ]);
-    // Once.
-    expect((await delta(cursorOf(after))).map((e) => e.type)).toEqual(["done"]);
   });
 });
 
@@ -722,7 +627,8 @@ describe("what is kept between runs", () => {
     for await (const e of connector().crawl(null, never)) {
       if (e.type === "checkpoint" && tokens.push(e.token) === 4) break;
     }
-    // ...and resumed from the second, which the runner had saved: the log is cut back to it.
+    // ...and resumed from the second, which the runner had saved: the pages after it are met
+    // again, and logged again, to the same end.
     const resumed = await crawl(connector(), tokens[1] as string);
     const cursor = JSON.parse(cursorOf(resumed)) as { gen: string };
     expect(keptOf(readFileSync(join(stateDir, `folders.${cursor.gen}.json`), "utf8"))).toEqual(
@@ -752,7 +658,7 @@ describe("a delta that can't go on means a crawl", () => {
     );
     await resync(delta(JSON.stringify({ ...position, gen: "../../etc" })), "not a generation");
     await resync(delta(JSON.stringify({ ...position, crawled: "then" })), "not a time");
-    await resync(delta(JSON.stringify({ ...position, log: { id: "x", at: -1 } })), "not a log");
+    await resync(delta(JSON.stringify({ ...position, log: "../x" })), "not a log");
     const mid = (events.find((e) => e.type === "checkpoint") as { token: string }).token;
     await resync(delta(mid), "a crawl's checkpoint, not a cursor");
     await resync(delta("not json"), "not a token");
@@ -762,10 +668,6 @@ describe("a delta that can't go on means a crawl", () => {
     await resync(delta(cursor), "too old");
     expect((await delta(cursor, connector({ recrawlAfterDays: 0 }))).at(-1)?.type).toBe("done");
     f.clock.now -= 8 * 86_400_000;
-    // A crawl stamped days ahead of the clock: its age is anyone's guess.
-    f.clock.now -= 2 * 86_400_000;
-    await resync(delta(cursor), "from the future");
-    f.clock.now += 2 * 86_400_000;
 
     // A link Graph says isn't one (400), where a lapsed one is 410.
     const done = position.done as Record<string, string>;
@@ -808,11 +710,12 @@ describe("a delta that can't go on means a crawl", () => {
       if (e.type === "checkpoint" && tokens.push(e.token) === 2) break;
     }
     const token = tokens[1] as string;
-    const log = (JSON.parse(token) as { log: { id: string; at: number } }).log;
+    const log = (JSON.parse(token) as { log: string }).log;
     const genOf = (events: SyncEvent[]) => (JSON.parse(cursorOf(events)) as { gen?: string }).gen;
-    // A longer log than the token knew is cut back, and the crawl ends as an unbroken one.
+    // A log longer than the token knew (pages after it) is harmless: the crawl ends as an
+    // unbroken one.
     expect(genOf(await crawl(connector(), token))).toEqual(expect.any(String));
-    // A shorter or missing one (another node's, or lost) can't be trusted. The crawl goes on
+    // A missing or damaged one (another node's, or lost) can't be trusted. The crawl goes on
     // all the same, to the same items, and the sync after it crawls again.
     const filesIn = (events: SyncEvent[]) =>
       events
@@ -822,7 +725,7 @@ describe("a delta that can't go on means a crawl", () => {
     const whole = filesIn(await crawl(connector(), token));
     expect(whole.length).toBeGreaterThan(20);
     for (const lose of [
-      () => writeFileSync(join(stateDir, `crawl.${log.id}.jsonl`), ""),
+      () => writeFileSync(join(stateDir, `crawl.${log}.jsonl`), "{"),
       () => rmSync(stateDir, { recursive: true, force: true }),
     ]) {
       lose();

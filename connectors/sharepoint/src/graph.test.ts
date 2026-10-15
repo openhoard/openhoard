@@ -207,40 +207,6 @@ describe("a request to Graph", () => {
     expect(asked).toBe(1);
   });
 
-  it("slows while Graph warns that most of the limit is used", async () => {
-    const mine = pacer({ now: () => f.clock.now, sleep: f.sleep, unitsPerMinute: 600 });
-    const warned = graphClient({
-      auth: graphAuth({
-        tenant: f.tenant.domain,
-        clientId: CLIENT_ID,
-        credential: { kind: "secret", secret: SECRET },
-        authority: AUTHORITY,
-        graph: GRAPH,
-        fetch: f.fetch,
-        now: () => f.clock.now,
-      }),
-      fetch: (input, init) =>
-        String(input).startsWith(GRAPH)
-          ? Promise.resolve(
-              new Response("{}", {
-                headers: {
-                  "ratelimit-limit": "1000",
-                  "ratelimit-remaining": "50",
-                  "ratelimit-reset": "40",
-                },
-              }),
-            )
-          : f.fetch(input, init),
-      now: () => f.clock.now,
-      pacer: mine,
-    });
-    const start = f.clock.now;
-    // 100 at once, then five a second (half of ten) while the warning lasts.
-    for (let i = 0; i < 200; i++) await warned.json("/v1.0/x", never);
-    expect((f.clock.now - start) / 1000).toBeGreaterThan(18);
-    expect((f.clock.now - start) / 1000).toBeLessThan(32);
-  });
-
   it("asks for a new token once when Graph refuses the one it has", async () => {
     let n = 0;
     f.clock.now += 1000;

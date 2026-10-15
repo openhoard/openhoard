@@ -108,20 +108,6 @@ export function graphClient(options: GraphClientOptions): GraphClient {
   const maxWaitMs = options.maxWaitMs ?? 60_000;
   if (!(maxWaitMs >= 0)) throw new RangeError("maxWaitMs must be 0 or more");
 
-  /** Graph's warning that most of the limit is used, when its answer carries one. */
-  function remainingOf(headers: Headers): { share: number; resetMs: number } | undefined {
-    const limit = Number(headers.get("ratelimit-limit"));
-    const remaining = Number(headers.get("ratelimit-remaining"));
-    const reset = Number(headers.get("ratelimit-reset"));
-    if (!(limit > 0) || !(remaining >= 0) || headers.get("ratelimit-remaining") === null) {
-      return undefined;
-    }
-    return {
-      share: remaining / limit,
-      resetMs: Number.isFinite(reset) && reset > 0 ? Math.min(reset, 300) * 1000 : 60_000,
-    };
-  }
-
   function owns(link: string): boolean {
     try {
       const url = new URL(link);
@@ -217,7 +203,6 @@ export function graphClient(options: GraphClientOptions): GraphClient {
       }
       const { status } = response;
       if ((status >= 200 && status < 300) || pass.includes(status)) {
-        pace.answered(remainingOf(response.headers));
         return response;
       }
       await response.body?.cancel().catch(() => undefined);
@@ -238,7 +223,6 @@ export function graphClient(options: GraphClientOptions): GraphClient {
         await pace.sleep(RETRY_MS * 2 ** failures++, signal);
         continue;
       }
-      pace.answered();
       if (status === 401) throw new GraphError("auth", status, "Graph refused the app's token");
       if (status === 403) {
         throw new GraphError(

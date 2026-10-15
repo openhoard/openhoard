@@ -280,11 +280,7 @@ describe("a crawl", () => {
             }
             if (raw.id === sized.id) raw.size = -1;
           }
-          page.value.push(
-            { id: "i-gone", deleted: { state: "deleted" } },
-            { name: "no id" },
-            7 as never,
-          );
+          page.value.push({ id: "i-gone", deleted: { state: "deleted" } });
         }),
       }),
     );
@@ -299,11 +295,9 @@ describe("a crawl", () => {
     );
     // A file Graph says nonsense of.
     expect(coded("invalid-item")).toContain(`${site.driveId}:${sized.id}`);
-    // Two entries that can't even be named: unknown, not gone, so nothing is reconciled.
-    expect(coded("unreadable")).toEqual([undefined, undefined]);
     // What is neither a file nor a folder was never one of ours.
     expect(coded("unsupported-item")).toEqual([`${site.driveId}:${file.id}`]);
-    expect(warnings).toHaveLength(inside.length + 5);
+    expect(warnings).toHaveLength(inside.length + 3);
     // A deletion in the feed is not said as one: the crawl's reconcile removes what it missed.
     expect(strange.some((e) => e.type === "deleted")).toBe(false);
     const served = new Set(itemsOf(strange).map((i) => i.externalId));
@@ -312,6 +306,11 @@ describe("a crawl", () => {
     }
     expect(served.size).toBe(inSite().length + 1 - 3 - inside.length);
     for (const e of strange) expect(checkEvent(e, connector().describe())).toBeNull();
+    // An entry that can't even be named is Graph misbehaving: the crawl stops, to be tried again.
+    const unnamed = connector({
+      fetch: rewriting((page) => page.value.push({ name: "no id" })),
+    });
+    expect(errorCode(await failure(collect(unnamed)))).toBe("retryable");
   });
 
   it("can't place what is under a folder that is gone, refused or misnamed when asked for", async () => {

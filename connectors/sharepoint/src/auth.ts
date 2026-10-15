@@ -11,21 +11,16 @@ import { ConnectorError, isAbortError } from "@openhoard/sdk";
 import { nameOf, objectOf, retryAfterMs } from "./http.js";
 
 /*
- * Signing in to Microsoft Graph (T-302). Two kinds of token, both from Entra ID's v2 token
- * endpoint:
- *
- * - **App-only** (the client credentials grant): the connector as itself, for crawling. With
- *   the application permission `Sites.Selected` it reaches only the sites an admin granted it,
- *   one by one; it holds nothing tenant-wide.
- * - **On behalf of a user** (the on-behalf-of grant): a token a signed-in person's client sent
- *   to OpenHoard, exchanged for a Graph token that can do no more than that person can.
+ * Signing in to Microsoft Graph (T-302): an app-only token (the client credentials grant) from
+ * Entra ID's v2 token endpoint. With the application permission `Sites.Selected` the app
+ * reaches only the sites an admin granted it, one by one; it holds nothing tenant-wide.
  *
  * The app proves itself with a certificate (an assertion signed with its private key, which
- * never leaves this process) or a client secret. Tokens are kept in memory only, until shortly
- * before they lapse; nothing here writes one anywhere, and no message holds one.
+ * never leaves this process) or a client secret. The token is kept in memory only, until
+ * shortly before it lapses; nothing here writes it anywhere, and no message holds it.
  *
- * Failures are ConnectorErrors: `auth` when Entra refuses (a {@link GraphAuthError}, which says
- * whether the app or the person was refused), `throttled` or `retryable` when it is busy.
+ * Failures are ConnectorErrors: `auth` when Entra refuses (a {@link GraphAuthError}, with what
+ * it said), `throttled` or `retryable` when it is busy.
  */
 
 export type ClientCredential =
@@ -48,11 +43,6 @@ export interface GraphAuthOptions {
   authority?: string;
   /** Where Graph is. Default `https://graph.microsoft.com`. */
   graph?: string;
-  /**
-   * The scopes asked for on behalf of a user. Default `<graph>/.default`: every delegated
-   * permission consented for the app.
-   */
-  delegatedScopes?: readonly string[];
   /** Default: the global `fetch`. */
   fetch?: typeof fetch;
   /** Milliseconds. Default `Date.now`. */
@@ -71,49 +61,29 @@ export interface GraphAuth {
   readonly account?: string;
   /** An app-only token for Graph. */
   appToken(signal: AbortSignal): Promise<string>;
-  /**
-   * A Graph token for the person `assertion` was issued to: an access token (a JWT) their
-   * client got for this app (its audience is this app). It is kept no longer than the
-   * assertion lasts.
-   */
-  onBehalfOf(assertion: string, signal: AbortSignal): Promise<string>;
   /** Drops a token Graph refused, so the next call asks Entra for a new one. */
   forget(token: string): void;
 }
 
-/** Who Entra refused: the app (its registration, credentials, consent) or the person. */
-export type GraphAuthSubject = "app" | "user";
-
-/** An `auth` ConnectorError from Entra, with what it said. */
+/**
+ * An `auth` ConnectorError from Entra, with what it said. Nothing works until an admin fixes
+ * the registration, the credential or consent.
+ */
 export class GraphAuthError extends ConnectorError {
-  /**
-   * `app`: nothing works until an admin fixes the registration, the credential or consent.
-   * `user`: this person must sign in again (or can't be acted for); others are unaffected.
-   */
-  readonly subject: GraphAuthSubject;
-  /** Entra's `error` (`invalid_client`, `interaction_required`). */
+  /** Entra's `error` (`invalid_client`, `invalid_grant`). */
   readonly entraError: string;
   /** Its AADSTS codes. */
   readonly entraCodes: readonly number[];
-  /** A claims challenge to pass back to the person's client, when Entra sent one. */
-  readonly claims: string | undefined;
 
-  constructor(
-    subject: GraphAuthSubject,
-    message: string,
-    details: { error: string; codes?: readonly number[]; claims?: string },
-  ) {
+  constructor(message: string, details: { error: string; codes?: readonly number[] }) {
     super("auth", message);
-    this.subject = subject;
     this.entraError = details.error;
     this.entraCodes = details.codes ?? [];
-    this.claims = details.claims;
   }
 }
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DOMAIN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
-const JWT_BEARER = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 const ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 /** A client assertion is used once, at once: five minutes covers a slow request and no more. */
 const ASSERTION_SECONDS = 300;
@@ -123,15 +93,6 @@ const EARLY_MS = 300_000;
 const MAX_LIFE_MS = 86_400_000;
 /** A token response is small; one that isn't is not read. */
 const MAX_RESPONSE_BYTES = 64 * 1024;
-/** People acted for at once; the oldest entry goes first. */
-const MAX_USER_TOKENS = 1000;
-/** A person's token is a JWT of a few kilobytes; anything far longer isn't one. */
-const MAX_ASSERTION_CHARS = 16 * 1024;
-/** Exchanges under way at once; more wait their turn by being told to come back. */
-const MAX_EXCHANGES = 64;
-/** A person's token Entra refused is refused here too for this long, without asking again. */
-const REFUSED_MS = 60_000;
-const JWT_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 /** When Entra says 429 without saying how long. */
 const DEFAULT_THROTTLE_MS = 30_000;
 
@@ -143,17 +104,7 @@ const HINTS: Record<number, string> = {
   90002: "no such tenant",
   700027: "the certificate isn't registered for the app, or the key doesn't match it",
   65001: "an admin hasn't consented to the permissions the app asks for",
-  50013: "the person's token was refused",
-  500131: "the person's token is for another app: its audience must be this app",
-  500133: "the person's token has expired",
-  50057: "the person's account is disabled",
-  50076: "the person must sign in again with multifactor authentication",
-  50079: "the person must sign in again with multifactor authentication",
 };
-/** Entra errors that are about the person, in an on-behalf-of exchange. */
-const USER_ERRORS = new Set(["invalid_grant", "interaction_required", "login_required"]);
-/** ...except these, which are about the app though they arrive as `invalid_grant`. */
-const APP_CODES = new Set([65001, 700016, 7000215, 7000222, 700027, 90002]);
 
 /**
  * An origin an admin configured: https, or http on this machine (tests). No credentials, path,
@@ -219,7 +170,7 @@ function signerOf(
   return {
     assertion(audience, nowMs) {
       if (Number.isFinite(notAfter) && nowMs > notAfter) {
-        throw new GraphAuthError("app", `the certificate expired on ${cert.validTo}`, {
+        throw new GraphAuthError(`the certificate expired on ${cert.validTo}`, {
           error: "certificate_expired",
         });
       }
@@ -251,19 +202,6 @@ interface Held {
   until: number;
 }
 
-/** When a JWT says it lapses, in milliseconds, read without verifying it; else undefined. */
-export function expiryOf(jwt: string): number | undefined {
-  const parts = jwt.split(".");
-  if (parts.length !== 3) return undefined;
-  try {
-    const claims: unknown = JSON.parse(Buffer.from(parts[1] as string, "base64url").toString());
-    const exp = (claims as { exp?: unknown } | null)?.exp;
-    return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 /** Rejects with the signal's reason once it aborts; otherwise settles as `work` does. */
 function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason as Error);
@@ -283,10 +221,6 @@ export function graphAuth(options: GraphAuthOptions): GraphAuth {
   const authority = originOf("authority", options.authority ?? "https://login.microsoftonline.com");
   const graph = originOf("graph", options.graph ?? "https://graph.microsoft.com");
   const endpoint = `${authority}/${encodeURIComponent(tenant)}/oauth2/v2.0/token`;
-  const delegated = options.delegatedScopes ?? [`${graph}/.default`];
-  if (delegated.length === 0 || delegated.some((s) => s.trim() === "" || /\s/.test(s))) {
-    throw new Error("delegatedScopes must name at least one scope, each without spaces");
-  }
   if (credential.kind === "secret" && credential.secret === "") {
     throw new Error("the client secret is empty");
   }
@@ -296,7 +230,7 @@ export function graphAuth(options: GraphAuthOptions): GraphAuth {
   const timeoutMs = options.timeoutMs ?? 30_000;
 
   /** One token request. Its own clock, so one caller leaving doesn't end it for the others. */
-  async function request(subject: GraphAuthSubject, grant: Record<string, string>): Promise<Held> {
+  async function request(grant: Record<string, string>): Promise<Held> {
     const body = new URLSearchParams({ client_id: clientId, ...grant });
     if (signer) {
       body.set("client_assertion_type", ASSERTION_TYPE);
@@ -384,29 +318,16 @@ export function graphAuth(options: GraphAuthOptions): GraphAuth {
     // Entra's word for it, kept to what such a word is made of: it goes into a message.
     const error = json.error.replace(/[^\w.-]/g, "?").slice(0, 64);
 
-    const about: GraphAuthSubject =
-      subject === "user" && USER_ERRORS.has(error) && !codes.some((c) => APP_CODES.has(c))
-        ? "user"
-        : "app";
     const hint = codes.map((c) => HINTS[c]).find((h) => h !== undefined);
     const named = [error, ...codes.map((c) => `AADSTS${c}`)].join(", ");
     throw new GraphAuthError(
-      about,
-      `Entra refused ${about === "user" ? "the person's token" : "the app"} (${named})` +
-        (hint === undefined ? "" : `: ${hint}`),
-      {
-        error,
-        codes,
-        ...(typeof json.claims === "string" ? { claims: json.claims } : {}),
-      },
+      `Entra refused the app (${named})` + (hint === undefined ? "" : `: ${hint}`),
+      { error, codes },
     );
   }
 
   let app: Held | undefined;
   let appAsking: Promise<Held> | undefined;
-  const users = new Map<string, Held>();
-  const usersAsking = new Map<string, Promise<Held>>();
-  const refused = new Map<string, { error: GraphAuthError; until: number }>();
 
   return {
     graph,
@@ -416,10 +337,7 @@ export function graphAuth(options: GraphAuthOptions): GraphAuth {
       signal.throwIfAborted();
       if (app && now() < app.until) return app.token;
       // Callers arriving together share one request.
-      appAsking ??= request("app", {
-        grant_type: "client_credentials",
-        scope: `${graph}/.default`,
-      })
+      appAsking ??= request({ grant_type: "client_credentials", scope: `${graph}/.default` })
         .then((held) => (app = held))
         .finally(() => (appAsking = undefined));
       // A failure is each caller's to hear; one nobody waits for any more isn't unhandled.
@@ -427,80 +345,8 @@ export function graphAuth(options: GraphAuthOptions): GraphAuth {
       return (await untilAborted(appAsking, signal)).token;
     },
 
-    async onBehalfOf(assertion, signal) {
-      signal.throwIfAborted();
-      // Checked here before Entra is asked: what isn't a token, or says it has lapsed, costs
-      // no request (each one carries the app's credential) and holds no memory.
-      const lapses =
-        assertion.length <= MAX_ASSERTION_CHARS && JWT_SHAPE.test(assertion)
-          ? expiryOf(assertion)
-          : undefined;
-      if (lapses === undefined) {
-        throw new GraphAuthError("user", "there is no usable token to act on behalf of", {
-          error: "invalid_grant",
-        });
-      }
-      if (lapses <= now()) {
-        throw new GraphAuthError("user", "the person's token has expired", {
-          error: "invalid_grant",
-        });
-      }
-      // Known by its hash: the maps never hold the person's own token.
-      const id = createHash("sha256").update(assertion).digest("base64url");
-      const held = users.get(id);
-      if (held && now() < held.until) return held.token;
-      users.delete(id);
-      // (A clock set back doesn't make a refusal last: it is dropped when its end is too far.)
-      const no = refused.get(id);
-      if (no && now() < no.until && no.until - now() <= REFUSED_MS) throw no.error;
-      refused.delete(id);
-      let asking = usersAsking.get(id);
-      if (!asking) {
-        if (usersAsking.size >= MAX_EXCHANGES) {
-          throw new ConnectorError("throttled", "too many sign-ins at once", {
-            retryAfterMs: 1000,
-          });
-        }
-        asking = request("user", {
-          grant_type: JWT_BEARER,
-          requested_token_use: "on_behalf_of",
-          assertion,
-          scope: delegated.join(" "),
-        })
-          .then(
-            (got) => {
-              // Kept no longer than the token it came from lasts: a person signed out of
-              // OpenHoard is not acted for from a cache.
-              if (users.size >= MAX_USER_TOKENS) users.delete(users.keys().next().value as string);
-              users.set(id, { token: got.token, until: Math.min(got.until, lapses) });
-              return got;
-            },
-            (e: unknown) => {
-              // Refused for good (not "sign in again", which the person may do at once with
-              // the same token): this token gets the same answer for a while.
-              if (
-                e instanceof GraphAuthError &&
-                e.subject === "user" &&
-                e.entraError === "invalid_grant"
-              ) {
-                if (refused.size >= MAX_USER_TOKENS) {
-                  refused.delete(refused.keys().next().value as string);
-                }
-                refused.set(id, { error: e, until: now() + REFUSED_MS });
-              }
-              throw e;
-            },
-          )
-          .finally(() => usersAsking.delete(id));
-        asking.catch(() => undefined);
-        usersAsking.set(id, asking);
-      }
-      return (await untilAborted(asking, signal)).token;
-    },
-
     forget(token) {
       if (app?.token === token) app = undefined;
-      for (const [id, held] of users) if (held.token === token) users.delete(id);
     },
   };
 }

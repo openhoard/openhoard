@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
 import { isConnectorError } from "@openhoard/sdk";
-import { graphAuth, GraphAuthError, type ClientCredential } from "./auth.js";
+import { graphAuth, type ClientCredential } from "./auth.js";
 import { probeSites, sitePath } from "./probe.js";
 
 /*
@@ -16,13 +16,11 @@ import { probeSites, sitePath } from "./probe.js";
  *   OPENHOARD_GRAPH_CLIENT_SECRET      a client secret's value, or the two below
  *   OPENHOARD_GRAPH_CERTIFICATE_FILE   the certificate, PEM
  *   OPENHOARD_GRAPH_PRIVATE_KEY_FILE   its private key, PEM
- *   OPENHOARD_GRAPH_USER_TOKEN_FILE    optional: a file holding a user's access token for this
- *                                      app, to try the on-behalf-of exchange too
  *   OPENHOARD_GRAPH_AUTHORITY, OPENHOARD_GRAPH_URL   optional: a national cloud's addresses
  *
  * It gets an app-only token, asks Graph for each site, and says what came back. It prints no
- * token and no secret. Exit status: 0 when every site is reached (and the exchange worked, if
- * tried), 1 otherwise, 2 for a mistake in how it was run (an argument, a variable, a file).
+ * token and no secret. Exit status: 0 when every site is reached, 1 otherwise, 2 for a mistake
+ * in how it was run (an argument, a variable, a file).
  */
 
 const env = (name: string) => process.env[`OPENHOARD_GRAPH_${name}`]?.trim() ?? "";
@@ -103,7 +101,6 @@ async function main(): Promise<number> {
   } else {
     return usage("set OPENHOARD_GRAPH_CLIENT_SECRET, or the certificate and key files");
   }
-  const assertion = env("USER_TOKEN_FILE") === "" ? undefined : file("USER_TOKEN_FILE").trim();
 
   const auth = setup("the app's settings", () =>
     graphAuth({
@@ -139,20 +136,6 @@ async function main(): Promise<number> {
     }
   }
 
-  if (assertion !== undefined) {
-    try {
-      const user = claimsOf(await auth.onBehalfOf(assertion, signal));
-      console.log(`on behalf of a user: issued`);
-      console.log(`  for: ${shown(user.upn ?? user.unique_name ?? user.oid)}`);
-      console.log(`  scopes: ${shown(user.scp ?? "none in the token")}`);
-    } catch (e) {
-      if (!(e instanceof GraphAuthError)) throw e;
-      failed = true;
-      console.log(
-        `on behalf of a user: REFUSED (${e.subject === "user" ? "the person's token" : "the app"}). ${shown(e.message)}`,
-      );
-    }
-  }
   return failed ? 1 : 0;
 }
 

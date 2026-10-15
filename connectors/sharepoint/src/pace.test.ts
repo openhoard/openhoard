@@ -42,44 +42,16 @@ describe("a budget of requests", () => {
     expect(() => pacer({ unitsPerMinute: 0 })).toThrow(RangeError);
   });
 
-  it("stops for as long as Graph said, then goes at half the rate, and finds its way back", async () => {
+  it("stops for as long as Graph said, an hour at most, and goes on without a burst", async () => {
     const { p, clock } = paced(600);
     await spend(p, clock, 100);
     p.throttled(20_000);
-    expect(p.rate).toBe(0.5);
-    expect(p.allowance).toBe(300);
-    expect(p.waitFor(1)).toBeGreaterThanOrEqual(20_000);
-    // Nothing for the 20 s it was told, and what follows at 5 a second, not in a burst.
+    // Nothing for the 20 s it was told, and what follows at the budget's rate, not in a burst.
     expect(await spend(p, clock, 1)).toBeCloseTo(20, 0);
-    expect(await spend(p, clock, 100)).toBeCloseTo(20, 0);
-    // Requests already on their way meet the same throttle: one pause halves once.
-    p.throttled(10_000);
-    p.throttled(10_000);
-    p.throttled(0);
-    expect(p.rate).toBe(0.25);
-    clock.now += 10_000;
-    // Throttled again and again, pause after pause: never less than a tenth.
-    for (let i = 0; i < 10; i++) {
-      p.throttled(1000);
-      clock.now += 1000;
-    }
-    expect(p.rate).toBe(0.1);
+    expect(await spend(p, clock, 100)).toBeCloseTo(10, 0);
     // A wait of days (a clock gone wrong, something in between) stops it an hour, no more.
     p.throttled(30 * 86_400_000);
-    expect(p.waitFor(1)).toBeLessThanOrEqual(3_600_000);
-    clock.now += 3_600_000;
-    expect(p.rate).toBe(0.1);
-    // Every 50 answers without a throttle give a tenth back...
-    for (let i = 0; i < 49; i++) p.answered();
-    expect(p.rate).toBe(0.1);
-    p.answered();
-    expect(p.rate).toBeCloseTo(0.2);
-    // ...and so does every minute without one, asked or not.
-    clock.now += 3 * 60_000;
-    expect(p.rate).toBeCloseTo(0.5);
-    expect(p.allowance).toBeCloseTo(300);
-    clock.now += 3_600_000;
-    expect(p.rate).toBe(1);
+    expect(await spend(p, clock, 1)).toBeCloseTo(3600, 0);
   });
 
   it("gives up a turn that would take longer than its caller may wait, saying how long", async () => {
@@ -98,17 +70,6 @@ describe("a budget of requests", () => {
     const waiting = p.turn(50, never, 30_000).catch((e: unknown) => e);
     p.throttled(300_000);
     expect(await waiting).toMatchObject({ name: "PaceWait" });
-  });
-
-  it("halves its rate while Graph warns that most of the limit is used", async () => {
-    const { p, clock } = paced(600);
-    await spend(p, clock, 100);
-    p.answered({ share: 0.5, resetMs: 30_000 });
-    expect(await spend(p, clock, 100)).toBeCloseTo(10, 0);
-    p.answered({ share: 0.1, resetMs: 30_000 });
-    // Half as fast for the 30 s the warning lasts, then as before.
-    expect(await spend(p, clock, 150)).toBeCloseTo(30, 0);
-    expect(await spend(p, clock, 100)).toBeCloseTo(10, 0);
   });
 
   it("serves callers in the order they came, and lets go of one whose signal aborts", async () => {

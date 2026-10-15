@@ -2,7 +2,7 @@
   "name": "@openhoard/connector-sharepoint",
   "version": "0.1.0",
   "private": true,
-  "description": "SharePoint connector, through Microsoft Graph: signs in (app-only and on behalf of a user) and crawls a site's document libraries with checkpoints.",
+  "description": "SharePoint connector, through Microsoft Graph: signs in (app-only) and crawls a site's document libraries with checkpoints.",
   "type": "module",
   "exports": {
     ".": {
