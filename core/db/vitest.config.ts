@@ -1,7 +1,7 @@
 import { defineConfig } from "vitest/config";
 import { preset } from "@openhoard/config/vitest";
 
-const config = preset({ floor: 85 });
+const config = preset({ floor: 70 });
 // Starting PGlite (WASM) and migrating the snapshot every test file starts from takes seconds,
 // and well over the 10 s default on slow CI runners (macOS).
 Object.assign(config.test, { hookTimeout: 60_000, testTimeout: 30_000 });

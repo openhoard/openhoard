@@ -1,7 +1,7 @@
 import { defineConfig } from "vitest/config";
 import { preset } from "@openhoard/config/vitest";
 
-const base = preset({ floor: 85 });
+const base = preset({ floor: 70 });
 export default defineConfig({
   ...base,
   test: {

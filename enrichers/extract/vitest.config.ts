@@ -1,7 +1,7 @@
 import { defineConfig } from "vitest/config";
 import { preset } from "@openhoard/config/vitest";
 
-const config = preset({ floor: 85 });
+const config = preset({ floor: 70 });
 // Extraction tests start child processes (Node with type stripping in this package's tests);
 // Windows runners start them slowly.
 Object.assign(config.test, { hookTimeout: 60_000, testTimeout: 60_000 });

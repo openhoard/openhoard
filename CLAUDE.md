@@ -60,6 +60,35 @@ If a task you are handed is in this list, stop and say so instead of building it
   policy engine decides, and everything fails closed.
 - **A task's Done-when is the whole bar.** "Merged, real run left" is In progress, not Done.
 
+## Input handling and tests (decided 2026-10-15)
+
+What this does is simple: share files, with their permissions. Nobody's life depends on it. It
+must be stable and secure, and it must not buy either with complexity. The rule:
+
+- **At a boundary** (an HTTP route, an MCP tool, a CLI argument, the config file, a connector's
+  feed, a token or state file), check the shape once and refuse what doesn't fit: 400 or 404, a
+  `ConnectorError` (`permanent`, `resync`), exit 1. **Fail with enough information for the person
+  to fix their part** (which field, which file, which site) and nothing more: no helping along,
+  no auto-fix, no guessing what they meant. Nothing is written for what happens _after_ an
+  invalid input, so nothing is tested for it. A damaged state file means "start again", not a
+  repair.
+- **Inside `core/`**, assume valid input. No code or tests for a caller passing garbage.
+- **Rare and odd cases get the simple answer**, not a mechanism: a folder renamed mid-crawl is
+  mended by the next crawl; too many changes in one round means "crawl again"; a throttle means
+  "wait what Graph said". A mechanism that exists for a case that needs a comment to explain is
+  a candidate for deletion.
+- **Reviewers report bugs on valid input and security findings.** "Input X isn't handled" is
+  answered with "refuse X", never with handling. Hardening that needs a new branch per odd input
+  is not a finding.
+- **A PR's test lines don't exceed its source lines** without a sentence in the body saying why.
+  Tests exercise the real path and the security invariants (the read gate, RLS, the leak harness,
+  the injection corpus, lock order), not each refusal. Coverage is not a target: the floor in
+  `packages/config/vitest.preset.js` (70, branches 60) is a tripwire for a package whose tests
+  stopped running, and nobody writes a test to lift a number. Too many tests make a green run
+  mean less, not more.
+- **Heavy suites run in the slow lane** (`test:slow`), not on every push: anything over a minute,
+  property tests with large inputs, the frozen solo-track suites.
+
 ## Working here
 
 - `pnpm install && pnpm build && pnpm test`. Node 24, pnpm 12, no Docker anywhere. PGlite for dev

@@ -1,6 +1,6 @@
 import { defineConfig } from "vitest/config";
 
-const floor = 80;
+const floor = 70;
 
 export default defineConfig({
   esbuild: { jsx: "automatic" },
@@ -12,7 +12,7 @@ export default defineConfig({
       include: ["src/**/*.ts", "src/**/*.tsx"],
       // main.tsx only starts the app on the page.
       exclude: ["src/**/*.test.ts", "src/**/*.test.tsx", "src/main.tsx"],
-      thresholds: { lines: floor, functions: floor, branches: floor - 5, statements: floor },
+      thresholds: { lines: floor, functions: floor, branches: floor - 10, statements: floor },
     },
   },
 });

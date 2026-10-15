@@ -1,7 +1,7 @@
 import { defineConfig } from "vitest/config";
 import { preset } from "@openhoard/config/vitest";
 
-const config = preset({ floor: 85 });
+const config = preset({ floor: 70 });
 // The budget tests open a database (PGlite, or PostgreSQL in CI); the Windows runner is slow.
 Object.assign(config.test, {
   hookTimeout: 60_000,
