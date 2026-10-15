@@ -682,7 +682,9 @@ The **admin API** is JSON under `/api/admin`, for the admin web app (below) and 
 - **What identifies a client** is shown first: its metadata document URL (`clientId`), or for a
   dynamically registered client its `redirectUris` (where its codes go). The name it gives itself
   is `claimedName`: anyone can call themselves Claude. `managedBy` says whether the config
-  decides it, `approved` and `trust` what it gets now.
+  decides it, `approved` and `trust` what it gets now, and `standing` (core/identity
+  `clientStanding()`) which of `waiting`, `approved`, `approved-by-config`, `refused` or
+  `lapsed` it is: what the web app goes by.
 - **Audit.** Every decision, allowed or refused: `oauth-client.approve`, `oauth-client.refuse`,
   `oauth-client.revoke` (with the label, the previous one, and the status it was in), and
   `admin.grant`, `admin.revoke`; refusals say why (`sign-in-again`, `config-managed`,

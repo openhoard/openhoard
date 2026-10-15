@@ -14,6 +14,7 @@ import { AI_CLIENT_TRUSTS, isId, lockPrincipals, type Database, type Tx } from "
 import {
   approvedTrust,
   clientPeople,
+  clientStanding,
   decideClient,
   findUserByEmail,
   findUserByUserName,
@@ -970,6 +971,8 @@ function showClient(auth: AuthConfig, tenantId: string, client: OAuthClient) {
     approved: trust !== null,
     trust,
     status: client.status,
+    /** Where it stands, worded by the web app (core/identity clientStanding()). */
+    standing: clientStanding(client, trust, listed !== undefined),
     managedBy: listed ? "config" : "app",
     /** The label the config gives it, when it lists it: the only one an approval here may use. */
     configTrust: listed?.trust ?? null,

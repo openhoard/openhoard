@@ -364,6 +364,7 @@ describe("the admin shell (T-901)", () => {
       clientId: "https://client.example/x.json",
       redirectUris: [],
       status: "pending" as const,
+      standing: "waiting" as const,
       trust: null,
       managedBy: "app" as const,
       configTrust: null,

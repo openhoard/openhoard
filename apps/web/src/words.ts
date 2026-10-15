@@ -4,6 +4,7 @@ import type { Client, ReviewItem, Source, Trust } from "./api.js";
  * A source's sync in an admin's words. Which state it is in, and so which command lifts it, the
  * server says (`standing`, core/jobs syncStanding()); here are only the words. What an admin
  * can't do from this app yet names the command that does, whole, for whoever runs the server.
+ * An AI client's standing is the server's too (core/identity clientStanding()).
  */
 
 export type Tone = "ok" | "busy" | "attention";
@@ -280,24 +281,6 @@ export function clientUseText(c: Pick<Client, "people" | "lastUsedAt">, locale?:
       ? "No request made yet."
       : `Last request made ${when(c.lastUsedAt, locale)}.`;
   return `${connected} ${last}`;
-}
-
-/** Where a client stands for an admin: what it gets now, and who can change that. */
-export type ClientStanding =
-  /** Nobody decided, and it gets nothing. */
-  | "waiting"
-  /** It gets tokens, and admins here decide. */
-  | "approved"
-  /** It gets tokens because the server's config lists it: the config decides. */
-  | "approved-by-config"
-  /** An admin refused or revoked it. */
-  | "refused"
-  /** The config approved it and no longer lists it: it gets nothing until approved here. */
-  | "lapsed";
-
-export function clientStanding(c: Pick<Client, "status" | "trust" | "managedBy">): ClientStanding {
-  if (c.trust !== null) return c.managedBy === "config" ? "approved-by-config" : "approved";
-  return c.status === "pending" ? "waiting" : c.status === "refused" ? "refused" : "lapsed";
 }
 
 /*

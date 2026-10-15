@@ -79,6 +79,7 @@ describe("what the admin pages ask the server", () => {
       clientId: "https://client.example/x.json",
       redirectUris: ["https://client.example/cb", 7],
       status: "approved",
+      standing: "approved",
       trust: "commercial",
       managedBy: "app",
       configTrust: null,
@@ -92,7 +93,13 @@ describe("what the admin pages ask the server", () => {
       json({
         clients: [
           row,
-          { clientKey: "b".repeat(64), status: "pending", trust: "root", managedBy: "?" },
+          {
+            clientKey: "b".repeat(64),
+            status: "pending",
+            standing: "somewhere-new",
+            trust: "root",
+            managedBy: "?",
+          },
         ],
       })) as typeof fetch);
     expect(await api.clients()).toEqual([
@@ -101,6 +108,7 @@ describe("what the admin pages ask the server", () => {
         clientId: row.clientId,
         redirectUris: ["https://client.example/cb"],
         status: "approved",
+        standing: "approved",
         trust: "commercial",
         managedBy: "app",
         configTrust: null,
@@ -114,6 +122,8 @@ describe("what the admin pages ask the server", () => {
         clientId: null,
         redirectUris: [],
         status: "pending",
+        // A standing this app can't word is unknown: shown apart, never decided here.
+        standing: "unknown",
         // A label this app doesn't know is no label; who decides, if unclear, isn't this app.
         trust: null,
         managedBy: "config",

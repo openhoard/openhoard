@@ -44,6 +44,7 @@ import {
   revokeGrant,
   touchClient,
   revokeUserGrants,
+  clientStanding,
   type OAuthClient,
   type OAuthScope,
 } from "./oauth.js";
@@ -772,5 +773,17 @@ describe("revocation and pruning", () => {
         ),
       ).toEqual({ ok: false, error: "invalid_grant", reason: "unknown refresh token" });
     }
+  });
+});
+
+describe("clientStanding", () => {
+  it("stands by what a client gets now, and who decides", () => {
+    const of = (status: OAuthClient["status"], trust: "local" | null, listed: boolean) =>
+      clientStanding({ status }, trust, listed);
+    expect(of("pending", null, false)).toBe("waiting");
+    expect(of("pending", "local", true)).toBe("approved-by-config");
+    expect(of("approved", "local", false)).toBe("approved");
+    expect(of("approved", null, false)).toBe("lapsed");
+    expect(of("refused", null, true)).toBe("refused");
   });
 });

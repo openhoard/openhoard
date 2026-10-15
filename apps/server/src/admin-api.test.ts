@@ -307,6 +307,7 @@ describe("the AI-client allowlist (T-106)", () => {
         approved: false,
         trust: null,
         status: "pending",
+        standing: "waiting",
         managedBy: "app",
         requestedBy: `user:${member.id}`,
         claimedName: "Claude (really)",
@@ -429,6 +430,7 @@ describe("the AI-client allowlist (T-106)", () => {
       clients: Record<string, unknown>[];
     };
     expect(listed.clients[0]).toMatchObject({
+      standing: "approved-by-config",
       managedBy: "config",
       configTrust: "commercial",
       approved: true,
@@ -457,6 +459,7 @@ describe("the AI-client allowlist (T-106)", () => {
     };
     expect(lapsed.clients[0]).toMatchObject({
       status: "approved",
+      standing: "lapsed",
       managedBy: "app",
       configTrust: null,
       approved: false,

@@ -9,14 +9,7 @@ import {
   type ClientDecision,
   type Trust,
 } from "./api.js";
-import {
-  clientIdentity,
-  clientStanding,
-  clientUseText,
-  TRUST_WORDS,
-  when,
-  type ClientStanding,
-} from "./words.js";
+import { clientIdentity, clientUseText, TRUST_WORDS, when } from "./words.js";
 
 type Loaded =
   | { state: "loading" }
@@ -32,10 +25,16 @@ type Outcome = {
   did: ClientDecision["action"] | "relabel";
 };
 
-const SECTIONS: readonly { title: string; has: readonly ClientStanding[]; none?: string }[] = [
+const SECTIONS: readonly {
+  title: string;
+  has: readonly Client["standing"][];
+  none?: string;
+}[] = [
   { title: "Waiting for your decision", has: ["waiting"], none: "Nothing is waiting." },
   { title: "Approved", has: ["approved", "approved-by-config"] },
   { title: "Not approved", has: ["refused", "lapsed"] },
+  // A standing a newer server has and this page doesn't know: shown, never decided here.
+  { title: "Other", has: ["unknown"] },
 ];
 
 const DID = {
@@ -98,7 +97,7 @@ export function Clients(props: {
       clientKey: client.clientKey,
       title: clientIdentity(client).title,
       did:
-        decision.action === "approve" && clientStanding(client) === "approved"
+        decision.action === "approve" && client.standing === "approved"
           ? ("relabel" as const)
           : decision.action,
     };
@@ -180,7 +179,7 @@ export function Clients(props: {
       )}
       {shown.length > 0 &&
         SECTIONS.map((section) => {
-          const clients = shown.filter((c) => section.has.includes(clientStanding(c)));
+          const clients = shown.filter((c) => section.has.includes(c.standing));
           if (clients.length === 0 && section.none === undefined) return null;
           return (
             <section key={section.title} aria-label={section.title}>
@@ -193,7 +192,7 @@ export function Clients(props: {
                     <ClientCard
                       // A card starts over when the app's standing changes under it: no choice
                       // made for how it stood before is carried into how it stands now.
-                      key={`${c.clientKey}:${c.status}:${c.trust ?? ""}:${c.configTrust ?? ""}`}
+                      key={`${c.clientKey}:${c.standing}:${c.status}:${c.trust ?? ""}:${c.configTrust ?? ""}`}
                       client={c}
                       busy={busy}
                       outcome={
@@ -225,7 +224,7 @@ function ClientCard(props: {
 }) {
   const { client: c, busy, outcome, onSignInAgain, onDecide } = props;
   const who = clientIdentity(c);
-  const standing = clientStanding(c);
+  const { standing } = c;
   // The config's label is the only one an approval here may use for an app it lists.
   const [trust, setTrust] = useState<Trust | "">(c.configTrust ?? c.trust ?? "");
   const [revoking, setRevoking] = useState(false);
@@ -278,7 +277,12 @@ function ClientCard(props: {
         </p>
       )}
 
-      {standing === "approved-by-config" ? (
+      {standing === "unknown" ? (
+        <p className="next">
+          This app is in a state this page doesn't know yet: the server is newer than this page.
+          Reload the page to get the version that matches the server.
+        </p>
+      ) : standing === "approved-by-config" ? (
         <p className="next">
           Approved in the server's config file, which decides for this app. To change or remove it,
           change the file.

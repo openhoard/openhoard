@@ -444,6 +444,36 @@ export function approvedTrust(
   return client.status === "approved" ? client.trust : null;
 }
 
+/** Where a client stands for an admin: what it gets now, and who can change that. */
+export const CLIENT_STANDINGS = [
+  /** Nobody decided, and it gets nothing. */
+  "waiting",
+  /** It gets tokens, and the tenant's admins decide. */
+  "approved",
+  /** It gets tokens because the server's config lists it: the config decides. */
+  "approved-by-config",
+  /** An admin refused or revoked it. */
+  "refused",
+  /** The config approved it and no longer lists it: it gets nothing until approved here. */
+  "lapsed",
+] as const;
+export type ClientStanding = (typeof CLIENT_STANDINGS)[number];
+
+/**
+ * A client's standing (T-904), from its row, the trust it gets tokens with now
+ * (approvedTrust()), and whether the server's config lists it. The admin API gives it to the
+ * web app, which words it; nothing else decides it.
+ */
+export function clientStanding(
+  client: Pick<OAuthClient, "status">,
+  trust: ClientTrust | null,
+  listedInConfig: boolean,
+): ClientStanding {
+  if (trust !== null) return listedInConfig ? "approved-by-config" : "approved";
+  if (client.status === "pending") return "waiting";
+  return client.status === "refused" ? "refused" : "lapsed";
+}
+
 // ---------------------------------------------------------------------------------------------
 // Codes and tokens
 

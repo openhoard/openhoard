@@ -3,7 +3,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, SignedOut, type Api, type Changed, type Client } from "./api.js";
 import { Clients } from "./clients.js";
-import { clientIdentity, clientStanding, clientUseText, TRUST_WORDS } from "./words.js";
+import { clientIdentity, clientUseText, TRUST_WORDS } from "./words.js";
 
 /*
  * T-904: the AI clients page. ("Allowlist changes take effect immediately" is the server's:
@@ -13,20 +13,34 @@ import { clientIdentity, clientStanding, clientUseText, TRUST_WORDS } from "./wo
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const KEY = (c: string) => c.repeat(64);
-const client = (over: Partial<Client> = {}): Client => ({
-  clientKey: KEY("a"),
-  clientId: "https://claude.ai/oauth/mcp-client-metadata.json",
-  redirectUris: ["https://claude.ai/api/mcp/auth_callback"],
-  status: "pending",
-  trust: null,
-  managedBy: "app",
-  configTrust: null,
-  requestedAt: "2026-10-05T07:00:00.000Z",
-  claimedName: "Claude",
-  people: 0,
-  lastUsedAt: null,
-  ...over,
-});
+/** The standing the server gives such a client (core/identity clientStanding()). */
+const standingOf = (c: Omit<Client, "standing">): Client["standing"] =>
+  c.trust !== null
+    ? c.managedBy === "config"
+      ? "approved-by-config"
+      : "approved"
+    : c.status === "pending"
+      ? "waiting"
+      : c.status === "refused"
+        ? "refused"
+        : "lapsed";
+const client = (over: Partial<Client> = {}): Client => {
+  const c = {
+    clientKey: KEY("a"),
+    clientId: "https://claude.ai/oauth/mcp-client-metadata.json",
+    redirectUris: ["https://claude.ai/api/mcp/auth_callback"],
+    status: "pending" as const,
+    trust: null,
+    managedBy: "app" as const,
+    configTrust: null,
+    requestedAt: "2026-10-05T07:00:00.000Z",
+    claimedName: "Claude",
+    people: 0,
+    lastUsedAt: null,
+    ...over,
+  };
+  return { ...c, standing: over.standing ?? standingOf(c) };
+};
 
 let host: HTMLElement;
 let root: Root;
@@ -163,6 +177,17 @@ describe("the AI clients page (T-904)", () => {
     await choose(card(), "local");
     await click(button("Approve after all"));
     expect(decideClient).toHaveBeenCalledWith(KEY("a"), { action: "approve", trust: "local" });
+  });
+
+  it("shows an app whose standing it doesn't know apart, with nothing to decide", async () => {
+    const { show } = page([client({ standing: "unknown", status: "approved", trust: "local" })]);
+    await show();
+    expect([...host.querySelectorAll("h2")].map((h) => h.textContent)).toEqual([
+      "Waiting for your decision",
+      "Other",
+    ]);
+    expect(host.textContent).toContain("Reload the page");
+    expect(host.querySelectorAll(".cards button")).toHaveLength(0);
   });
 
   it("goes by what an app gets now, not by what was last decided here", async () => {
@@ -376,16 +401,6 @@ describe("an AI client in an admin's words", () => {
     expect(
       clientIdentity({ clientId: "https://claude.ai@evil.example/x", redirectUris: [] }).title,
     ).toBe("evil.example");
-  });
-
-  it("stands by what it gets now and who decides", () => {
-    const of = (status: Client["status"], trust: Client["trust"], managedBy: Client["managedBy"]) =>
-      clientStanding({ status, trust, managedBy });
-    expect(of("pending", null, "app")).toBe("waiting");
-    expect(of("pending", "local", "config")).toBe("approved-by-config");
-    expect(of("approved", "local", "app")).toBe("approved");
-    expect(of("approved", null, "app")).toBe("lapsed");
-    expect(of("refused", null, "config")).toBe("refused");
   });
 
   it("says how much it is used", () => {

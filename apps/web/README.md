@@ -19,6 +19,7 @@ Report (in the server's words, and its spreadsheet), and the audit log (find, ch
 - **Pages are paths** under `/admin/` (`src/router.tsx`), with the browser's own history, so a
   link can be copied or opened in a new tab.
 - **Words for an admin** live in `src/words.ts`, apart from the markup, and are tested as text.
+  Which state a source or an AI client is in is the server's (`standing`); the app only words it.
 - **Nothing inline, nothing from elsewhere.** The server's Content-Security-Policy allows this
   origin's own files only. So: styles in `src/theme.css` (no `style` attributes in markup the
   server sends), no web fonts, no images as `data:` URLs (`assetsInlineLimit: 0`), no analytics.

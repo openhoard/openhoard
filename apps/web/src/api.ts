@@ -53,6 +53,21 @@ export type Trust = "local" | "commercial" | "consumer";
 /** The kinds an admin chooses from, the one given least first. */
 export const TRUSTS: readonly Trust[] = ["consumer", "commercial", "local"];
 
+/** Where a client stands for an admin (core/identity CLIENT_STANDINGS). */
+export const CLIENT_STANDINGS = [
+  /** Nobody decided, and it gets nothing. */
+  "waiting",
+  /** It gets tokens, and admins here decide. */
+  "approved",
+  /** It gets tokens because the server's config lists it: the config decides. */
+  "approved-by-config",
+  /** An admin refused or revoked it. */
+  "refused",
+  /** The config approved it and no longer lists it: it gets nothing until approved here. */
+  "lapsed",
+] as const;
+export type ClientStanding = (typeof CLIENT_STANDINGS)[number];
+
 /** An AI client, as GET /api/admin/clients gives it (what the pages use of it). */
 export interface Client {
   clientKey: string;
@@ -61,6 +76,11 @@ export interface Client {
   /** Where a sign-in through it returns to. */
   redirectUris: string[];
   status: "pending" | "approved" | "refused";
+  /**
+   * Where it stands, as the server decides it (core/identity clientStanding()); `unknown` for a
+   * standing this app can't word (a newer server's).
+   */
+  standing: ClientStanding | "unknown";
   /** The label it gets tokens with now; null when it gets none. */
   trust: Trust | null;
   /** Who decides: this app's admins, or the server's config file. */
@@ -628,6 +648,9 @@ function asClient(x: unknown): Client {
       ? c.redirectUris.filter((u): u is string => typeof u === "string")
       : [],
     status,
+    standing: (CLIENT_STANDINGS as readonly unknown[]).includes(c.standing)
+      ? (c.standing as ClientStanding)
+      : "unknown",
     trust: (TRUSTS as readonly unknown[]).includes(c.trust) ? (c.trust as Trust) : null,
     // Anything but the app's own is someone else's to decide: no buttons offered.
     managedBy: c.managedBy === "app" ? "app" : "config",
