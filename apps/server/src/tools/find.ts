@@ -31,8 +31,8 @@ import { answer, readRequest, refuse, type McpTool, type ToolContext } from "./c
  * permissions (core/catalog searchObjects: keyword and, with an embeddings model, meaning),
  * answered as a top match and alternatives, as cards.
  *
- * The query is embedded by local providers only (core/models embedQuery's default: a query may
- * say something sensitive), outside any transaction; without an embeddings model, or when it
+ * The query is embedded by local providers only unless `models.queryKinds` says more
+ * (core/models embedQuery: a query may say something sensitive), outside any transaction; without an embeddings model, or when it
  * fails, search is keyword only. Kind, media type and modified-range filters apply to what the
  * gate returned (the catalog doesn't filter on them): a filtered search reads the first 100
  * hits, and says when there were more.
@@ -182,12 +182,16 @@ export const find: McpTool = {
   },
 };
 
-/** The query's embeddings, local providers only; none without a model, or when it fails. */
-async function queryVectors(ctx: ToolContext, text: string): Promise<QueryVector[]> {
+/**
+ * The query's embeddings, by providers of the kinds `models.queryKinds` allows (local only by
+ * default); none without a model, or when it fails.
+ */
+export async function queryVectors(ctx: ToolContext, text: string): Promise<QueryVector[]> {
   if (!ctx.embed || text.trim() === "") return [];
   try {
     return await embedQuery(ctx.embed.router, text, {
       signal: ctx.signal,
+      ...(ctx.embed.queryKinds ? { kinds: ctx.embed.queryKinds } : {}),
       budget: { db: ctx.db, tenantId: ctx.bearer.tenantId, budget: ctx.embed.budget },
       ...(ctx.log ? { log: ctx.log } : {}),
     });

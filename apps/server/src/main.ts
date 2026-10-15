@@ -10,7 +10,7 @@ import { runConnect } from "./connect.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { checkMailboxes, startMailIn } from "./mail-in.js";
-import { createServerModels, modelsStartupWarning } from "./models.js";
+import { createServerModels, modelsStartupWarnings } from "./models.js";
 import { runInit, soloArgument } from "./solo.js";
 import { prepareSources, type ServerSources } from "./sources.js";
 import { blobsIn, tenantKeyStore } from "./tenant-keys.js";
@@ -117,8 +117,7 @@ try {
   // Model providers (T-404) from `models`, keys from OPENHOARD_MODEL_<ID>_API_KEY; none, no model.
   models = createServerModels(config.models, process.env, log.child({ component: "models" }));
   // Content is read only from sources that opted in (`extract`): say so when models can't run.
-  const warning = modelsStartupWarning(models, content !== null);
-  if (warning !== null) log.warn(warning);
+  for (const warning of modelsStartupWarnings(models, content !== null)) log.warn(warning);
   jobs = await startJobs(db, {
     worker: config.jobs.worker,
     log: log.child({ component: "jobs" }),
@@ -209,7 +208,9 @@ const app = createApp(config, log, {
         },
       }
     : {}),
-  ...(models === null ? {} : { embed: { router: models.router, budget: models.budget } }),
+  ...(models === null
+    ? {}
+    : { embed: { router: models.router, budget: models.budget, queryKinds: models.queryKinds } }),
 });
 const server = serve(
   {

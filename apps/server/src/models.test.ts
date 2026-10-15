@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
-import { createServerModels, DEFAULT_ANTHROPIC_MODEL, modelsStartupWarning } from "./models.js";
+import { createServerModels, DEFAULT_ANTHROPIC_MODEL, modelsStartupWarnings } from "./models.js";
 
 /*
  * T-404 in the server: providers from `models`, keys only from the environment, and nothing
@@ -146,9 +146,65 @@ describe("models configuration", () => {
   it("warns at startup when providers are configured but no content can be read", () => {
     const c = config({ providers: [{ id: "ci", kind: "local", adapter: "stub" }] });
     const models = createServerModels(c.models, {});
-    expect(modelsStartupWarning(models, false)).toContain("no summaries will run");
-    expect(modelsStartupWarning(models, true)).toBe(null);
-    expect(modelsStartupWarning(null, false)).toBe(null);
+    expect(modelsStartupWarnings(models, false)).toEqual([
+      expect.stringContaining("no summaries will run"),
+    ]);
+    expect(modelsStartupWarnings(models, true)).toEqual([]);
+    expect(modelsStartupWarnings(null, false)).toEqual([]);
+  });
+
+  it("lets search queries go to the provider kinds models.queryKinds names, and warns when none embeds", () => {
+    const commercialOnly = {
+      providers: [{ id: "ci", kind: "commercial", adapter: "stub", embedModel: "words" }],
+    };
+    const local = config(commercialOnly);
+    const models = createServerModels(local.models, {});
+    // Local only by default: the commercial embedder's vectors would never be searched.
+    expect(models?.queryKinds).toEqual(["local"]);
+    expect(modelsStartupWarnings(models, true)).toEqual([
+      expect.stringContaining(
+        'files are embedded first by ci (commercial), but search queries go to local providers only (models.queryKinds): search finds by keywords only. Add "commercial"',
+      ),
+    ]);
+    const widened = createServerModels(
+      config({ ...commercialOnly, queryKinds: ["local", "commercial"] }).models,
+      {},
+    );
+    expect(widened?.queryKinds).toEqual(["local", "commercial"]);
+    expect(modelsStartupWarnings(widened, true)).toEqual([]);
+    // A provider with no embeddings model embeds nothing: nothing to warn about.
+    const chatOnly = createServerModels(
+      config({ providers: [{ id: "ci", kind: "commercial", adapter: "stub" }] }).models,
+      {},
+    );
+    expect(modelsStartupWarnings(chatOnly, true)).toEqual([]);
+    expect(() => config({ ...commercialOnly, queryKinds: [] })).toThrow();
+    expect(() => config({ ...commercialOnly, queryKinds: ["local", "local"] })).toThrow();
+    // Commercial first in the embed order: it embeds the files, local the rest only.
+    const mixed = createServerModels(
+      config({
+        providers: [
+          ...commercialOnly.providers,
+          { id: "ollama", kind: "local", adapter: "stub", embedModel: "words" },
+        ],
+        tasks: { embed: ["ci", "ollama"] },
+      }).models,
+      {},
+    );
+    expect(modelsStartupWarnings(mixed, true)).toEqual([
+      expect.stringContaining("they are embedded by ollama"),
+    ]);
+    // Local first (the default order): queries meet the vectors most files have.
+    const localFirst = createServerModels(
+      config({
+        providers: [
+          ...commercialOnly.providers,
+          { id: "ollama", kind: "local", adapter: "stub", embedModel: "words" },
+        ],
+      }).models,
+      {},
+    );
+    expect(modelsStartupWarnings(localFirst, true)).toEqual([]);
   });
 
   it("redacts keys and headers from logs", () => {

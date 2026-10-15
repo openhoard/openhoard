@@ -321,6 +321,19 @@ export const ModelsSchema = z
       })
       .strict()
       .prefault({}),
+    /**
+     * The kinds of embeddings provider a search query may go to (`find`'s meaning search). A
+     * query is the person's own words, not a file, so no file's exposure applies; it may still
+     * say something sensitive, so by default it goes to local providers only. A server whose
+     * only embeddings provider is commercial adds "commercial" here, or search uses no vectors
+     * (files are still embedded as their exposure allows).
+     */
+    queryKinds: z
+      .array(z.enum(["local", "commercial", "consumer"]))
+      .min(1)
+      .max(3)
+      .refine((kinds) => new Set(kinds).size === kinds.length, "each kind once")
+      .default(["local"]),
     /** Tokens a tenant may spend on models per UTC day, all providers together. */
     dailyTokenBudget: z.number().int().min(0).default(5_000_000),
     /** Budgets for particular tenants, by tenant id, over dailyTokenBudget. */

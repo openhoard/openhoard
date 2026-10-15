@@ -9,7 +9,7 @@ import {
 } from "@openhoard/core-catalog";
 import type { Database, Tx } from "@openhoard/core-db";
 import type { ModelRouter, TokenBudget } from "@openhoard/core-models";
-import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
+import { Authorizer, createCedarEngine, type ProviderKind } from "@openhoard/core-policy";
 import type { Logger } from "pino";
 import type { z } from "zod";
 import type { BearerAuth } from "../auth.js";
@@ -24,6 +24,8 @@ import type { BearerAuth } from "../auth.js";
 export interface EmbedDeps {
   router: ModelRouter;
   budget: TokenBudget;
+  /** The provider kinds a query may be embedded by (`models.queryKinds`). Default local only. */
+  queryKinds?: readonly ProviderKind[];
 }
 
 /** The tenant's Authorizer: the core rules plus its applied packs' policies. */

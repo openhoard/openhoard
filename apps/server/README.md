@@ -275,6 +275,13 @@ raising the budget, `admin resummarize` enqueues those skipped for `refused`, `u
 no-provider` takes, on request only, those no provider could have: after adding a provider, or
 loosening their exposure (nothing re-enqueues a file when its labels change).
 
+Search by meaning embeds each search query too, and a query is the person's own words, which may
+say something sensitive: it goes to `local` embeddings providers only, unless
+`models.queryKinds` (default `["local"]`) adds `"commercial"` or `"consumer"`. A file is
+embedded by the first embeddings provider its exposure allows (`models.tasks.embed`, local
+first by default), so when that first provider is of a kind no query may go to, search by
+meaning finds little or nothing; the server says so in its log at startup.
+
 ## Signing in (T-102)
 
 People sign in with OpenID Connect, using the authorization code flow with PKCE, through the
@@ -767,7 +774,8 @@ read into memory when the server starts and served as they are.
     never a text snippet). A folder's name finds a file for its readers only. Every word must
     match; when no file holds them all, files holding some of them come back with
     `anyWord: true`. Queries
-    are embedded by local providers only, when an embeddings model is configured.
+    are embedded by local providers only (or the kinds `models.queryKinds` names), when an
+    embeddings model is configured.
   - `recent` (period or from/to in an IANA `timeZone`, actions, kind, media type): the files the
     person themself viewed, opened or edited, from the activity log (T-506). Reads no content.
   - `describe` (id): one card and, for a reader, its versions and, for a file saved from the

@@ -4,11 +4,13 @@ import {
   createModelClient,
   createModelRouter,
   dailyTokenBudget,
+  embeddingModelId,
   type ModelRouter,
   type ModelsLogger,
   type ProviderConfig,
   type TokenBudget,
 } from "@openhoard/core-models";
+import type { ProviderKind } from "@openhoard/core-policy";
 import type { Config } from "./config.js";
 
 /*
@@ -34,6 +36,8 @@ export interface ServerModels {
   budget: TokenBudget;
   /** The summarize step's settings from `models.summarize`. */
   summarize: { budgetMs?: number; vocabularyLimit?: number };
+  /** The provider kinds a search query may be embedded by (`models.queryKinds`). */
+  queryKinds: readonly ProviderKind[];
 }
 
 /**
@@ -120,20 +124,46 @@ export function createServerModels(
     router,
     budget: dailyTokenBudget(models.dailyTokenBudget, models.tenantBudgets),
     summarize: stripUndefined(models.summarize),
+    queryKinds: models.queryKinds,
   };
 }
 
 /**
- * What to warn about at startup: model providers configured where no summary can run, because
- * this server reads no version's bytes (no source opted in with `extract`). Null when there is
- * nothing to say.
+ * What to warn about at startup, each a line for the log:
+ * - model providers configured where no summary can run, because this server reads no
+ *   version's bytes (no source opted in with `extract`);
+ * - files embedded by providers no search query may go to (`models.queryKinds`): their vectors
+ *   are stored, and search never uses them.
  */
-export function modelsStartupWarning(
+export function modelsStartupWarnings(
   models: ServerModels | null,
   hasContentSource: boolean,
-): string | null {
-  if (models === null || hasContentSource) return null;
-  return "model providers are configured, but this server reads no file content (no source has `extract: true`): no summaries will run";
+): string[] {
+  if (models === null) return [];
+  const out: string[] = [];
+  if (!hasContentSource) {
+    out.push(
+      "model providers are configured, but this server reads no file content (no source has `extract: true`): no summaries will run",
+    );
+  }
+  // A file gets vectors from the first embeddings provider its exposure allows (core/jobs
+  // embed.ts), so the first in the order embeds most files: if no query may go to it, search
+  // compares queries with vectors almost no file has.
+  const embedders = models.router
+    .candidates("embed")
+    .filter((c) => c.embed !== undefined && embeddingModelId(c) !== null);
+  const first = embedders[0];
+  if (first !== undefined && !models.queryKinds.includes(first.kind)) {
+    const asked = embedders.filter((c) => models.queryKinds.includes(c.kind));
+    out.push(
+      `files are embedded first by ${first.id} (${first.kind}), but search queries go to ${models.queryKinds.join(", ")} providers only (models.queryKinds)` +
+        (asked.length === 0
+          ? ": search finds by keywords only."
+          : `: they are embedded by ${asked.map((c) => c.id).join(", ")}, whose vectors only files ${first.id} may not have carry, so search by meaning finds little.`) +
+        ` Add "${first.kind}" to models.queryKinds to let search queries go to ${first.id} too, or put a ${models.queryKinds.join(" or ")} provider first in models.tasks.embed`,
+    );
+  }
+  return out;
 }
 
 /** `o` without its undefined properties, typed so (exactOptionalPropertyTypes). */
