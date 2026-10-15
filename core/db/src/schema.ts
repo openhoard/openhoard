@@ -1867,11 +1867,7 @@ export const sourceSyncs = pgTable(
      * crawl from the beginning must (0042). Cleared when one does.
      */
     reconcileDeferred: boolean("reconcile_deferred").notNull().default(false),
-    /**
-     * How many of the source's items the delta now running has removed so far (0043): the
-     * guard counts a delta's deletes across its checkpoints and runs, not one batch at a time.
-     * Back to 0 when the delta reaches its end.
-     */
+    /** Unused since 2026-10-15 (the delta delete guard went): dropped in the migration squash. */
     deltaDeletes: integer("delta_deletes").notNull().default(0),
     /**
      * How the last scheduled run ended (0055, T-303): when, its status, its error code and its

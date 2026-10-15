@@ -168,10 +168,7 @@ function storedStanding(
   // A hold nobody confirmed (or one grown past what was confirmed) comes before the stop its
   // guard made: resuming would only hold it again. A stop for anything else comes before the
   // hold: deciding the hold wouldn't lift it.
-  const byGuard =
-    s.stoppedAt === null ||
-    s.stoppedError === "reconcile-guard" ||
-    s.stoppedError === "delete-guard";
+  const byGuard = s.stoppedAt === null || s.stoppedError === "reconcile-guard";
   if (s.reconcileHeld !== null && !confirmed && byGuard) {
     return { is: "held", count: s.reconcileHeld };
   }
@@ -402,8 +399,7 @@ export async function confirmReconcile(
 }
 
 /**
- * Discards a reconcile or a delta the guard held (or a reconcile deferred for an unreadable
- * place) without removing anything: the source is crawled again from the beginning, from a clean state, and that crawl's
+ * Discards a reconcile the guard held (or one deferred for an unreadable place) without removing anything: the source is crawled again from the beginning, from a clean state, and that crawl's
  * reconcile is guarded like any other. For when the source is right after all (a drive mounted
  * again, a folder restored) or its administrator wants a fresh look before confirming. Returns
  * false when nothing is held or deferred (an unknown source included).
@@ -418,7 +414,6 @@ export async function discardReconcile(tx: Tx, tenantId: string, source: string)
       reconcileHeld: null,
       reconcileConfirmed: null,
       reconcileDeferred: false,
-      deltaDeletes: 0,
       ...UNSTOP,
       updatedAt: sql`now()`,
     })
@@ -454,7 +449,6 @@ export async function acceptSourceIdentity(
       reconcileHeld: null,
       reconcileConfirmed: null,
       reconcileDeferred: false,
-      deltaDeletes: 0,
       ...UNSTOP,
       updatedAt: sql`now()`,
     })

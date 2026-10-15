@@ -42,7 +42,7 @@ describe("where a source's sync stands", () => {
 
   it("names a stop by what lifts it", () => {
     // The guards stop the source as they hold: the hold is what an admin decides, not a resume.
-    for (const code of ["reconcile-guard", "delete-guard"]) {
+    for (const code of ["reconcile-guard"]) {
       expect(
         syncStanding(
           state({
@@ -77,7 +77,7 @@ describe("where a source's sync stands", () => {
   });
 
   it("is reading again after a discard or an accepted identity, not retrying what was settled", () => {
-    for (const lastError of ["reconcile-guard", "delete-guard", "source-identity"]) {
+    for (const lastError of ["reconcile-guard", "source-identity"]) {
       expect(syncStanding(state({ phase: "crawl", lastStatus: "failed", lastError }))).toEqual({
         is: "reading",
       });

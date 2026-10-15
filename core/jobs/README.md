@@ -404,16 +404,9 @@ crawl (from the start, or a checkpoint) ── done ──▶ delta, delta, delt
     also runs a deferred reconcile);
   - `openhoard admin source accept-identity`: for a source that is now another one (below).
     All three are audited.
-- **The delta delete guard.** A delta could empty a source too (a connector whose delta says
-  everything was deleted). So a delta's items and deletes wait for its next checkpoint (or
-  `done`); the deletes among them that remove a live item, with those the delta already made
-  (`delta_deletes`, kept across runs until the delta is done), are counted against the same
-  guard, over the source as it was when the delta began. Past it, nothing since the last
-  checkpoint is applied: the run fails with `delete-guard` and records the count
-  (`reconcile_held`, `reconcileHeld` in the report), every run, until an admin confirms it (the
-  next run applies up to that many) or discards it (a clean crawl from the beginning, as above).
-  What earlier checkpoints applied stays. A connector that never checkpoints a delta has it
-  counted whole before any of it is applied.
+- **A delta's deletes are applied as they come.** The source said each item is gone, item by
+  item; removals are soft, and a re-ingest restores. (A guard that counted a delta's deletes
+  against the same threshold was removed on 2026-10-15: a mechanism for a connector bug.)
 - **The source's identity.** A connector with `identity()` (fs: the root's inode, birth time and
   file system type; never a device number, which a remount changes) binds the source to its
   answer, recorded in `source_syncs` on the first sync, outside the connector's own state. The

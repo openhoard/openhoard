@@ -439,22 +439,6 @@ describe("a site's changes through the sync runner (T-304)", () => {
     expect(await cataloged(site.id)).toEqual(await crawled(site.id));
   }, 240_000);
 
-  it("are held when they would delete most of the source, as a reconcile is", async () => {
-    setUp(300);
-    const site = f.tenant.sites[0] as { id: string; driveId: string };
-    expect((await sync(site.id, { stateDir })).status).toBe("done");
-    const before = await recorded(site.id);
-    for (const top of f.graph.store.inDrive(site.driveId).filter((i) => i.parentId === undefined)) {
-      f.graph.store.delete(top.id);
-    }
-    expect(await sync(site.id, { stateDir })).toMatchObject({
-      status: "failed",
-      phase: "delta",
-      error: "delete-guard",
-    });
-    expect(await recorded(site.id)).toBe(before);
-  }, 120_000);
-
   it("are found by a crawl when what the connector kept is lost, or Graph can't say", async () => {
     setUp(300);
     const site = f.tenant.sites[0] as { id: string; driveId: string };
