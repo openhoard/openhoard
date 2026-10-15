@@ -9,6 +9,19 @@ export default defineConfig({
     // Suites migrate a fresh database in beforeAll; the Windows and macOS runners need longer.
     hookTimeout: 60_000,
     testTimeout: 30_000,
-    coverage: { ...base.test.coverage, exclude: [...base.test.coverage.exclude, "src/main.ts"] },
+    coverage: {
+      ...base.test.coverage,
+      // The frozen solo track's files (CLAUDE.md) are tested in the slow lane: not counted here.
+      exclude: [
+        ...base.test.coverage.exclude,
+        "src/main.ts",
+        "src/tunnel.ts",
+        "src/mail-in.ts",
+        "src/uploads.ts",
+        "src/passkeys.ts",
+        "src/pin.ts",
+        "src/web-app.ts",
+      ],
+    },
   },
 });

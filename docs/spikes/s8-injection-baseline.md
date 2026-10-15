@@ -40,7 +40,7 @@ The corpus harness scores each of these: the target is 0 `leaked` and every atta
 
 ## Results after T-404, T-405 and T-408 (2026-09-26)
 
-Measured by core/jobs `s8-corpus.test.ts`, on every push: the 50 corpus files and 20 benign
+Measured by core/jobs `s8-corpus.slow.test.ts`, in CI's slow lane on every push: the 50 corpus files and 20 benign
 files go through the real pipeline (`extract-text → injection-flag → rule-tags → summarize`) in a
 tenant with the starter pack, with an **obedient** stub model that copies the document into the
 summary and the display title and proposes every tag it is offered, loosening ones too.

@@ -50,14 +50,12 @@ import {
  * And T-305's: who can read each file here is exactly who SharePoint lets read it. And
  * T-1001's: the File Health Report finds every problem the fake tenant was seeded with.
  *
- * The 10,000-item tenant takes minutes, so it runs as a slow test:
- * `pnpm --filter @openhoard/connector-sharepoint test:slow` (or OPENHOARD_TEST_SLOW=1). The
- * same test runs on 600 items every time.
+ * This whole suite is the slow lane's (`pnpm test:slow`, CI's Linux PostgreSQL job): it opens
+ * a database per test and the 10,000-item tenant takes minutes.
  */
 
 const KEY = new Uint8Array(32).fill(7);
-const slow =
-  process.env.OPENHOARD_TEST_SLOW === "1" || process.env.npm_lifecycle_event === "test:slow";
+const slow = process.env.OPENHOARD_TEST_SLOW === "1";
 
 let db: Database;
 let t: SeededTenant;

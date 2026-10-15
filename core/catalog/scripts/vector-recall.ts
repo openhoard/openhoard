@@ -1,5 +1,5 @@
 // T-502's recall benchmark at scale, against native PostgreSQL (the CI-sized one is
-// src/vector-recall.test.ts):
+// src/vector-recall.slow.test.ts):
 //   pnpm --filter @openhoard/core-catalog bench:recall -- --url postgres://user:pw@host:5432/postgres \
 //     [--rows 100000] [--queries 30] [--dims 384] [--topics 200] [--noise 0.35]
 // `--url` is a server an ordinary role with CREATEDB reaches, with the test template (core/db

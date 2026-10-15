@@ -1,4 +1,5 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
+import { SLOW_LANE } from "@openhoard/config/vitest";
 
 const floor = 70;
 
@@ -6,13 +7,18 @@ export default defineConfig({
   esbuild: { jsx: "automatic" },
   test: {
     environment: "jsdom",
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    // No slow suites here: the slow lane (packages/config/vitest.preset.js) runs nothing.
+    include: SLOW_LANE ? ["src/**/*.slow.test.tsx"] : ["src/**/*.test.ts", "src/**/*.test.tsx"],
+    exclude: [...configDefaults.exclude],
+    passWithNoTests: true,
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts", "src/**/*.tsx"],
       // main.tsx only starts the app on the page.
       exclude: ["src/**/*.test.ts", "src/**/*.test.tsx", "src/main.tsx"],
-      thresholds: { lines: floor, functions: floor, branches: floor - 10, statements: floor },
+      thresholds: SLOW_LANE
+        ? {}
+        : { lines: floor, functions: floor, branches: floor - 10, statements: floor },
     },
   },
 });

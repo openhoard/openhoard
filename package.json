@@ -12,6 +12,7 @@
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "test:coverage": "turbo run test:coverage",
+    "test:slow": "node scripts/test-slow.mjs",
     "lint": "eslint . && node scripts/check-unicode.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

@@ -191,7 +191,7 @@ counter, so this, not the counter, is what stops a copied assertion.
 
 Lock order here: the person's row first (as the stops take it), always; a sign-in then takes
 its passkey's row and the challenge, a registration the challenge and then the invite's row; the
-audit last. `passkeys.test.ts` races a sign-in against a retirement, a
+audit last. `passkeys.slow.test.ts` races a sign-in against a retirement, a
 passkey's removal and the same person adding a passkey, and an invite's use against a lock and
 against itself, on PostgreSQL.
 

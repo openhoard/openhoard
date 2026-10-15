@@ -133,7 +133,7 @@ never waits on an admin and never leaves a file hidden. A person's "not an injec
 (core/catalog `markNotInjection()`) stops the detector flagging that object, across edits. Only
 pattern ids and a score reach logs.
 
-On the S8 corpus v0 through the real extractor ([s8-corpus.test.ts](src/s8-corpus.test.ts)),
+On the S8 corpus v0 through the real extractor ([s8-corpus.slow.test.ts](src/s8-corpus.slow.test.ts)),
 48 of 50 attack files are flagged (96%) and none of 20 benign files with the same kinds of
 hidden parts. The two misses: a hidden sheet (its text is left out of the extraction, so no
 model sees it either) and an HTML file (no extractor for HTML yet, so no text at all).

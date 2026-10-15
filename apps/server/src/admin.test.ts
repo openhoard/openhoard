@@ -772,7 +772,7 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
     const nobody = await admin("user", "invite", "--tenant", tenantId, "--user", "x@y.z");
     expect(nobody.code).toBe(1);
 
-    // The person opens the link: the server makes their passkey (passkeys.test.ts has the rest).
+    // The person opens the link: the server makes their passkey (passkeys.slow.test.ts has the rest).
     const device = new SoftAuthenticator();
     const use = (link: string) =>
       inspect(async (db) => {

@@ -92,7 +92,8 @@ must be stable and secure, and it must not buy either with complexity. The rule:
 ## Working here
 
 - `pnpm install && pnpm build && pnpm test`. Node 24, pnpm 12, no Docker anywhere. PGlite for dev
-  and tests; native Postgres 17+ with pgvector 0.8+ in production.
+  and tests; native Postgres 17+ with pgvector 0.8+ in production. `pnpm test:slow` runs the
+  slow lane (`*.slow.test.ts`; `packages/config/vitest.preset.js`), which CI runs once on Linux.
 - Conventional commits with a lower-case subject, DCO sign-off (`-s`). Every PR gets a separate
   reviewer pass before it goes up.
 - Claim a task in the Task List (set In progress) before working on it; `git fetch` and check open

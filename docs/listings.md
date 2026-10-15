@@ -81,7 +81,7 @@ What a submission needs
 | Asked for                                                      | OpenHoard                                                 |
 | -------------------------------------------------------------- | --------------------------------------------------------- |
 | A remote server over https, with OAuth                         | Yes (OAuth 2.1, `<your server>/mcp`)                      |
-| Every tool has a `title`, and `readOnlyHint`/`destructiveHint` | Yes: a test checks it (`listings.test.ts`)                |
+| Every tool has a `title`, and `readOnlyHint`/`destructiveHint` | Yes: a test checks it (`listings.slow.test.ts`)           |
 | Tested as a custom connector in Claude                         | By hand (skills/README.md); not repeated for this task    |
 | A server the reviewers can reach, with a test account          | **Missing**: an instance someone runs for the review      |
 | A privacy policy at a URL                                      | **Missing**                                               |

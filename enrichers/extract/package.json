@@ -18,8 +18,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "clean": "rimraf dist coverage",
-    "test:slow": "vitest run src/csv-scale.test.ts"
+    "clean": "rimraf dist coverage"
   },
   "dependencies": {
     "csv-parse": "7.0.2",

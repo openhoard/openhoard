@@ -62,13 +62,12 @@ const connector = sharepointConnector({
 - **Limits.** A token holds a delta link per finished library and may be 65,536 characters: a
   site with more libraries than fit (some hundred) fails as `permanent`. A folder renamed
   while a crawl is under way leaves items yielded before it at their old path, and a file
-  deleted after the crawl yielded it stays, until the next crawl; with a state directory the
-  deltas that follow say both.
+  deleted after the crawl yielded it stays, until the next crawl.
 
-Tested (`src/connector.test.ts`, `src/graph.test.ts`, `src/e2e.test.ts`) against the fake
+Tested (`src/connector.test.ts`, `src/graph.test.ts`, `src/e2e.slow.test.ts`) against the fake
 Graph, whose delta feed is shaped as Graph documents it, and through the sync runner into the
-catalog: a 10,000-item tenant fully indexed, and a killed sync resumed (`test:slow`, in CI on
-PostgreSQL; 600 items in the ordinary run).
+catalog: a 10,000-item tenant fully indexed, and a killed sync resumed (the slow lane, in CI on
+PostgreSQL).
 
 ## Following changes (T-304)
 
@@ -130,7 +129,7 @@ Tested in `src/delta.test.ts` by one measure: a catalog after a crawl and the de
 followed equals a fresh crawl of the site as it is now (files and folders added, changed,
 renamed, moved, deleted; items given twice; two libraries, resumed between them; a delta run
 again from a kept cursor; a crawl killed and resumed), in
-`src/state.test.ts` for what is kept, and through the sync runner in `src/e2e.test.ts`.
+`src/state.test.ts` for what is kept, and through the sync runner in `src/e2e.slow.test.ts`.
 
 ## Permissions (T-305)
 
@@ -185,7 +184,7 @@ who they are.
   file is skipped that way is an app that can't read permissions.
 
 Tested in `src/permissions.test.ts` (Graph's documented shapes), `src/connector.test.ts`
-(against the fake), and `src/e2e.test.ts`: with the fake tenant's directory provisioned, **who
+(against the fake), and `src/e2e.slow.test.ts`: with the fake tenant's directory provisioned, **who
 can read each file through OpenHoard's grants is exactly who the fake SharePoint lets read
 it**, before and after permissions change there. The fake has users, groups, guests and
 anyone-links; SharePoint groups, organization links and links for named people are covered by
@@ -251,7 +250,7 @@ setting.
 
 Tested in `src/pace.test.ts` (the budget, on a clock the test moves), `src/graph.test.ts`
 (waiting in place and its limits, two sources on one pacer), and
-`src/e2e.test.ts` against a fake Graph that throttles: **a site is indexed whole in one run,
+`src/e2e.slow.test.ts` against a fake Graph that throttles: **a site is indexed whole in one run,
 with nothing lost, through a fake Graph that allows ten requests a minute; and a connector kept
 to a budget under the fake's limit is never throttled by it.** (The fake counts requests in a
 fixed window: it has no daily or tenant-wide limit.)

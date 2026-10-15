@@ -163,7 +163,7 @@ Pure JavaScript, permissively licensed, pinned exactly, each more than a week ol
 
 ```sh
 pnpm --filter @openhoard/enricher-extract test        # everything but the 1 GiB CSV
-pnpm --filter @openhoard/enricher-extract test:slow   # the 1 GiB CSV (about a minute on Linux)
+pnpm test:slow   # the slow lane, with the 1 GiB CSV (about a minute on Linux)
 ```
 
 - **Golden files** (`golden/*.json`): one fixture per kind, made in the tests (no checked-in

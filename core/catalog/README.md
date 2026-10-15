@@ -382,7 +382,7 @@ still allows the kind of provider that made it: a file tightened to local-only s
 model embedded it isn't found by those vectors (its words still match). Re-embedding it with an
 allowed provider is `reembed()` after a model change; tightening doesn't enqueue it yet.
 
-**Recall (T-502).** `vector-recall.test.ts` builds 1,200 files of 384-dimension vectors and
+**Recall (T-502).** `vector-recall.slow.test.ts` (the slow lane) builds 1,200 files of 384-dimension vectors and
 checks filtered recall@10 on the HNSW path stays within 5 points of unfiltered, and that the
 production plan is exact for small visible sets; `pnpm --filter @openhoard/core-catalog
 bench:recall -- --url postgres://…` runs the same at scale on native PostgreSQL.

@@ -20,8 +20,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "clean": "rimraf dist coverage",
-    "check": "node dist/check.js",
-    "test:slow": "vitest run src/e2e.test.ts"
+    "check": "node dist/check.js"
   },
   "dependencies": {
     "@openhoard/sdk": "workspace:^"

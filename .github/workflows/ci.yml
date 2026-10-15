@@ -36,9 +36,9 @@ jobs:
       - run: pnpm format:check
       - run: pnpm build
       - run: pnpm typecheck
-      # macOS runners have three cores and Windows ones four, slow ones, and every database
-      # suite starts PGlite (WASM) per test: run fewer suites at once there, or setup hooks and
-      # the longer tests time out, a different one each run.
+      # The fast suites only (the slow lane runs in the postgres job). macOS runners have three
+      # cores and Windows ones four, slow ones, and every database suite starts PGlite (WASM):
+      # run fewer suites at once there.
       - run: pnpm test:coverage ${{ matrix.os == 'macos-latest' && '--concurrency=2' || matrix.os == 'windows-latest' && '--concurrency=3' || '' }}
       - name: Generated types are up to date
         run: |
@@ -91,12 +91,9 @@ jobs:
           sudo -u postgres psql -p 5499 -d openhoard_test_template -v ON_ERROR_STOP=1 \
             -c "create extension vector"
       - run: pnpm install --frozen-lockfile
-      # Workspace packages the suites import are used from their build output.
-      - run: >-
-          pnpm --filter "@openhoard/core-audit^..." --filter "@openhoard/core-catalog^..."
-          --filter "@openhoard/core-identity^..." --filter "@openhoard/core-jobs^..."
-          --filter "@openhoard/server^..." --filter "@openhoard/enricher-extract^..."
-          --filter "@openhoard/connector-sharepoint^..." run build
+      # Workspace packages the suites import are used from their build output (through turbo,
+      # so the slow lane below finds them built).
+      - run: pnpm build
       - run: pnpm --filter @openhoard/core-db run test:coverage
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
@@ -115,12 +112,10 @@ jobs:
       - run: pnpm --filter @openhoard/server run test:coverage
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
-      # T-402's done-when: a 1 GiB CSV streams through the extractor's child process with flat
-      # memory and an exact row count (about a minute; the node jobs run it at 32 MiB).
-      - run: pnpm --filter @openhoard/enricher-extract run test:slow
-      # T-303's done-when: a 10,000-item fake tenant is fully indexed through the sync runner,
-      # and a killed sync resumes (about a minute here; the node jobs run it on 600 items).
-      - run: pnpm --filter @openhoard/connector-sharepoint run test:slow
+      # The slow lane (packages/config/vitest.preset.js): every `*.slow.test.ts` suite, once,
+      # here. The heavy suites (the leak harness, the injection corpus, the 10,000-item
+      # SharePoint tenant, the 1 GiB CSV, vector recall) and the frozen solo track's.
+      - run: pnpm test:slow
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
 

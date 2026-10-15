@@ -30,7 +30,7 @@ import { VIEW_TRANSACTION } from "./visibility.js";
 
 /*
  * T-1001: the File Health Report's own rules, on rows written here. That it finds what a
- * synced SharePoint site holds is connectors/sharepoint's e2e test.
+ * synced SharePoint site holds is connectors/sharepoint's e2e test (slow lane).
  */
 
 let db: Database;

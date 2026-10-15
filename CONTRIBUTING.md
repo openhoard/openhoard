@@ -45,6 +45,7 @@ Requirements: **Node 24 LTS** and **pnpm** (`corepack enable`). No Docker, ever:
 pnpm install        # install the workspace
 pnpm dev            # run the server on http://127.0.0.1:7420 (data in ./.openhoard)
 pnpm check          # lint + format check + typecheck + tests with coverage
+pnpm test:slow      # the slow lane: the heavy suites (*.slow.test.ts), which CI runs once on Linux
 pnpm changeset      # describe changes to published packages
 ```
 
