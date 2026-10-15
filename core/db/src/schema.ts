@@ -1977,6 +1977,62 @@ export const sourceSkips = pgTable(
   ],
 );
 
+/** Where a tenant's blobs can live: the server's own disk, or the tenant's bucket. */
+export const STORAGE_KINDS = ["local", "s3", "azblob"] as const;
+/** How a change of storage stands: blobs being copied over, copied, or removing the old copies. */
+export const STORAGE_PHASES = ["moving", "active", "cleaning"] as const;
+
+/**
+ * Where a tenant's blobs live (core/storage tenant-storage.ts): one row a tenant, none meaning
+ * the server's own disk. Its admin sets it in the admin app.
+ *
+ * - `settings`: the non-secret part (bucket, region, endpoint, container, account), checked by
+ *   core/storage. `secret`: the key, sealed under the server's storage key (AES-256-GCM, the
+ *   tenant and kind as associated data); never shown again.
+ * - `previous`: where the blobs were before (kind, settings, sealed secret), read from while
+ *   `phase` is `moving` and until the old copies are removed; null after.
+ * - `version` goes up on each change, so a copy job for an older one stops.
+ */
+export const tenantStorage = pgTable(
+  "tenant_storage",
+  {
+    tenantId: text("tenant_id")
+      .primaryKey()
+      .references(() => tenants.id),
+    kind: text("kind", { enum: STORAGE_KINDS }).notNull(),
+    settings: jsonb("settings").$type<Record<string, string>>().notNull().default({}),
+    secret: text("secret"),
+    previous: jsonb("previous").$type<{
+      kind: (typeof STORAGE_KINDS)[number];
+      settings: Record<string, string>;
+      secret: string | null;
+    }>(),
+    phase: text("phase", { enum: STORAGE_PHASES }).notNull(),
+    version: integer("version").notNull().default(1),
+    /**
+     * Blobs to copy (or remove), done so far, those that failed (tried again on a new move), and
+     * those in neither place (lost before the move: restored from a backup, or let go).
+     */
+    total: integer("total").notNull().default(0),
+    done: integer("done").notNull().default(0),
+    failed: integer("failed").notNull().default(0),
+    lost: integer("lost").notNull().default(0),
+    lastError: text("last_error"),
+    changedAt: timestamp("changed_at", { withTimezone: true }).notNull().defaultNow(),
+    changedBy: text("changed_by").notNull(),
+  },
+  () => [
+    check("tenant_storage_kind", sql`kind in ('local', 's3', 'azblob')`),
+    check("tenant_storage_phase", sql`phase in ('moving', 'active', 'cleaning')`),
+    check("tenant_storage_counts", sql`total >= 0 and done >= 0 and failed >= 0 and lost >= 0`),
+    check("tenant_storage_version", sql`version >= 1`),
+    check(
+      "tenant_storage_error_length",
+      sql`last_error is null or char_length(last_error) <= 1024`,
+    ),
+  ],
+);
+
 /** OAuth scopes an MCP client may ask for (T-105), and the policy actions each allows. */
 export const OAUTH_SCOPES = ["files:read", "files:tag", "files:add"] as const;
 /** The trust an admin gives an approved AI client: every client trust but first-party. */
@@ -2272,6 +2328,7 @@ export const tables = {
   injectionReviews,
   sourceSyncs,
   sourceSkips,
+  tenantStorage,
   sessions,
   oauthClients,
   oauthCodes,

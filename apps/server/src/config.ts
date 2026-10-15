@@ -650,6 +650,16 @@ export const ConfigSchema = z
      * in `<dataDir>/blobs`. Off unless this is here; `{}` turns it on with the defaults. Needs
      * `auth`.
      */
+    /**
+     * Tenants' storage (where their files are kept, chosen by each tenant's admin in the admin
+     * app). `allowEndpoints`: whether a tenant may name an S3-compatible or Azure endpoint other
+     * than the clouds' own (MinIO, R2, Azurite): a server this one then connects to, on any
+     * network it can reach, so off by default.
+     */
+    storage: z
+      .object({ allowEndpoints: z.boolean().default(false) })
+      .strict()
+      .prefault({}),
     uploads: z
       .object({
         /** The managed zone uploads go to, by name: made in a tenant on its first upload. */

@@ -5,6 +5,7 @@ import { Clients } from "./clients.js";
 import { Health } from "./health.js";
 import { Overview } from "./overview.js";
 import { Review } from "./review.js";
+import { Storage } from "./storage.js";
 import { BASE, Link, usePath } from "./router.js";
 import { Vocabulary } from "./vocabulary.js";
 
@@ -52,6 +53,7 @@ const PAGES: readonly { path: string; label: string }[] = [
   { path: "/clients", label: "AI clients" },
   { path: "/vocabulary", label: "Vocabulary" },
   { path: "/health", label: "File health" },
+  { path: "/storage", label: "Storage" },
   { path: "/audit", label: "Audit log" },
 ];
 
@@ -252,6 +254,8 @@ export function App({ api, browser }: { api: Api; browser: Browser }) {
               <Review api={api} onSignedOut={toSignIn} />
             ) : page.path === "/vocabulary" ? (
               <Vocabulary api={api} onSignedOut={toSignIn} />
+            ) : page.path === "/storage" ? (
+              <Storage api={api} onSignedOut={toSignIn} onSignInAgain={signInAgain} />
             ) : page.path === "/health" ? (
               <Health api={api} onSignedOut={toSignIn} onSignInAgain={signInAgain} />
             ) : page.path === "/audit" ? (

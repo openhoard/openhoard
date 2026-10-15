@@ -48,6 +48,7 @@ import {
   startJobs,
   type Jobs,
   type JobsOptions,
+  type StorageJob,
 } from "./jobs.js";
 import { maintainTenant, maintenanceSettings, type MaintenanceOptions } from "./maintenance.js";
 
@@ -232,6 +233,45 @@ function flakyStep(failures: number, effect?: () => Promise<void>) {
   };
   return { step, calls };
 }
+
+describe("storage jobs", () => {
+  it("runs a tenant's move on a worker that has storage, and refuses inside a transaction", async () => {
+    const ran: StorageJob[] = [];
+    const jobs = await start({
+      storage: {
+        async run(job) {
+          ran.push(job);
+          return { moved: 3 };
+        },
+      },
+    });
+    const id = await jobs.requestStorageJob({ tenantId: t.tenantId, version: 2, task: "move" });
+    const job = await settled(jobs, QUEUES.storage, id);
+    expect(job.state).toBe("completed");
+    expect(job.output).toEqual({ moved: 3 });
+    expect(ran).toEqual([{ tenantId: t.tenantId, version: 2, task: "move" }]);
+    await expect(
+      db.withTenant(t.tenantId, () =>
+        jobs.requestStorageJob({ tenantId: t.tenantId, version: 3, task: "clean" }),
+      ),
+    ).rejects.toThrow(NestedWorkError);
+  });
+
+  it("skips a job that names no tenant", async () => {
+    let calls = 0;
+    const jobs = await start({
+      storage: {
+        async run() {
+          calls++;
+          return {};
+        },
+      },
+    });
+    const id = await jobs.boss.send(QUEUES.storage, { tenantId: "nope", version: 1, task: "move" });
+    expect((await settled(jobs, QUEUES.storage, id)).output).toEqual({ skipped: true });
+    expect(calls).toBe(0);
+  });
+});
 
 describe("enqueueing", () => {
   it("makes one job per version and collapses duplicates", async () => {

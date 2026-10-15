@@ -37,10 +37,15 @@ T-1409) are done in passing when touching that code, never as separate projects.
   they block dogfooding. `init --solo`, the fs connector and `connect claude-desktop` stay as the
   dogfood path.
 - The public website, demo video, Show HN, registry listings (E13, T-1211). The README is
-  corrected first (T-1410): S3, Azure Blob, guest file exchange and "30-day undo" are planned, not
-  shipped, and must read that way.
+  corrected first (T-1410): guest file exchange and "30-day undo" are planned, not shipped, and must
+  read that way.
 - RFC-0001 app hosting; any M2 or M3 feature; new connectors; new MCP client surfaces; new
   credential paths.
+
+Unfrozen by Steve on 2026-10-15: **a tenant's own S3 or Azure Blob bucket** for the files
+OpenHoard keeps (uploads, mail-in), set up and tested from the admin Storage page, its key sealed
+in the database under `<dataDir>/keys/storage.key`. This is where kept files live, not a new
+connector: indexing files in place in S3 or Azure stays frozen.
 
 If a task you are handed is in this list, stop and say so instead of building it.
 

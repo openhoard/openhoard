@@ -61,6 +61,40 @@ the size. When the signal it is given aborts, the store's stream is destroyed. A
 catalog says is stored but the store doesn't have throws, so the job retries and then
 dead-letters for an operator instead of treating the content as absent.
 
+## A tenant's own bucket
+
+[`tenant-storage.ts`](src/tenant-storage.ts): where each tenant's blobs live, chosen by its admin
+(the admin app's Storage page, over the server's admin API); the server's disk (`local`) until
+then. One row a tenant in `tenant_storage` (migration 0071, forced RLS).
+
+- **Choosing.** [`settings.ts`](src/settings.ts) `checkChoice()` takes `local`, `s3` (bucket,
+  region, access key ID and secret, a folder) or `azblob` (account, container, key, a folder),
+  with the clouds' own naming rules. An `endpoint` (an S3-compatible service, Azurite) is refused
+  unless the server allows it: it is a host the server connects to. `probeStorage()` looks
+  for a file that isn't there (a 403 means the key can't list: `cant-list`, which would hide a
+  missing file as refused), then writes, reads back and removes `<tenant>/.probe/<uuid>`, and
+  says how each step went, in an admin's terms (`not-found`, `denied`, `cant-list`,
+  `wrong-region`, `unreachable`, `busy`, `timeout`…) with the
+  service's error code; `changeTenantStorage()` keeps the choice.
+- **Keys.** [`secrets.ts`](src/secrets.ts) seals a bucket's key (AES-256-GCM) with the server's
+  storage key, the tenant and kind as associated data. A tenant's store is opened with its key
+  only: S3's environment and EC2 metadata credentials are turned off for it
+  (`ambientCredentials: false`).
+- **Reading and writing.** `TenantBlobStores` routes each tenant's `put()` to its place, and
+  `open()` there, then to the old place while its copies are kept; it reads a tenant's choice
+  again after `ttlMs` (10 s). Uploads, mail-in and enrichment take it as a `BlobStorage`.
+- **Moving.** A change of place records the old one (`previous`) and `phase: moving`;
+  `moveTenantBlobs()` (a core/jobs `storage` job) copies every blob OpenHoard holds, each
+  checked against its id with the tenant's key, skipping those already there, recording
+  progress (`failed`, and `lost` for a blob in neither place, which doesn't block removal);
+  then `active`, the old copies kept. `cleanTenantBlobs()` removes them, checking or copying
+  over first each blob in the new place, then once more for blobs put since it began. Both
+  first check, with a marker file, that the two places aren't one (`BlobStore.sameStorageAs()`):
+  if they are, nothing is copied or removed. A job for an older `version` stops. One move at a
+  time: `StorageBusyError` until the old copies are gone.
+- **Tests.** Against a fake S3 (`@openhoard/testkit` `startFakeS3()`, S3's own protocol in
+  memory) and memory stores; checked by hand against s3rver and Azurite.
+
 ## Limits
 
 - S3's CopyObject handles up to 5 GiB, so on S3 a single upload larger than that fails at

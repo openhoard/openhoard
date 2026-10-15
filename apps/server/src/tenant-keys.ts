@@ -97,3 +97,65 @@ export function tenantKeyStore(
     return key;
   };
 }
+
+/**
+ * The server's storage key (`<dataDir>/keys/storage.key`): seals the keys tenants give for their
+ * own buckets (core/storage secrets.ts), so the database alone doesn't hold them. Made when a
+ * key is first sealed, in the same way as a tenant key, and never replaced. Back it up with the
+ * database, and give every server sharing the database the same file: a server without it
+ * can't open the kept keys (`open()` throws, naming the file), and makes none of its own until
+ * something is sealed on it.
+ */
+export function storageKeyStore(dataDir: string): { seal(): Uint8Array; open(): Uint8Array } {
+  let cached: Uint8Array | undefined;
+  const dir = join(dataDir, "keys");
+  const file = join(dir, "storage.key");
+  const read = (): string | null => {
+    try {
+      return readFileSync(file, "utf8").trim();
+    } catch (e) {
+      if ((e as { code?: string }).code === "ENOENT") return null;
+      throw e;
+    }
+  };
+  const checked = (text: string | null): Uint8Array => {
+    if (text === null || !KEY_TEXT.test(text)) {
+      throw new Error(`${file} is not a storage key (32 bytes, base64url): restore it from backup`);
+    }
+    cached = new Uint8Array(Buffer.from(text, "base64url"));
+    return cached;
+  };
+  return {
+    open() {
+      if (cached) return cached;
+      const text = read();
+      if (text === null) {
+        throw new Error(
+          `${file} is missing: the keys kept for tenants' storage can't be read. Restore it from the backup, or copy it from the server that made it`,
+        );
+      }
+      return checked(text);
+    },
+    seal() {
+      if (cached) return cached;
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      if (process.platform !== "win32") chmodSync(dir, 0o700);
+      if (read() === null) {
+        const temp = `${file}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+        writeFileSync(temp, `${randomBytes(32).toString("base64url")}\n`, {
+          flag: "wx",
+          mode: 0o600,
+        });
+        try {
+          linkSync(temp, file);
+        } catch (e) {
+          // Another process made it first: that one stands.
+          if ((e as { code?: string }).code !== "EEXIST") throw e;
+        } finally {
+          unlinkSync(temp);
+        }
+      }
+      return checked(read());
+    },
+  };
+}

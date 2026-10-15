@@ -41,6 +41,7 @@ export {
   type Jobs,
   type JobsLogger,
   type JobsOptions,
+  type StorageJob,
 } from "./jobs.js";
 export {
   MAINTENANCE_DEFAULTS,

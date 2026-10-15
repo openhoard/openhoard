@@ -5,7 +5,7 @@ import { getUser, grantIsLive, userPrincipal, type OAuthScope } from "@openhoard
 import {
   blobPath,
   BlobTooLargeError,
-  type BlobStore,
+  type BlobStorage,
   type PutResult,
 } from "@openhoard/core-storage";
 import { and, desc, eq, isNull } from "drizzle-orm";
@@ -58,7 +58,7 @@ import { retrying } from "./retry.js";
 export interface UploadDeps {
   db: Database;
   uploads: UploadsConfig;
-  store: BlobStore;
+  store: BlobStorage;
   /** Each tenant's blob key (tenant-keys.ts). */
   tenantKey: (tenantId: string) => Promise<Uint8Array>;
   /** Queues enrichment once an upload committed (core/jobs enqueueAfterIngest). */

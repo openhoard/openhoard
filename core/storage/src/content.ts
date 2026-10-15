@@ -5,7 +5,7 @@ import {
   type ContentRef,
   type ContentSource,
 } from "@openhoard/core-catalog";
-import type { BlobStore } from "./store.js";
+import type { BlobStorage } from "./tenant-storage.js";
 
 export interface BlobContentOptions {
   /**
@@ -40,7 +40,7 @@ export class ContentMismatchError extends Error {
  * leaving the file unprocessed (hidden), rather than treating the content as absent.
  */
 export function blobContentSource(
-  store: BlobStore,
+  store: BlobStorage,
   options: BlobContentOptions = {},
 ): ContentSource {
   return {

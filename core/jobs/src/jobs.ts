@@ -82,7 +82,18 @@ export const QUEUES = {
   maintenanceTenant: "maintenance-tenant",
   budgetRetry: "budget-retry",
   sync: "sync",
+  storage: "storage",
 } as const;
+
+/**
+ * A tenant's blobs moving to the place its admin chose, or the old copies being removed
+ * (core/storage moveTenantBlobs() and cleanTenantBlobs() for `version`).
+ */
+export interface StorageJob {
+  tenantId: string;
+  version: number;
+  task: "move" | "clean";
+}
 
 /** When the budget retry runs: a quarter past midnight UTC, after the daily budget renews. */
 export const BUDGET_RETRY_CRON = "15 0 * * *";
@@ -161,6 +172,11 @@ export interface JobsOptions {
    * the queue; every process can requestSync().
    */
   sync?: SyncQueueOptions;
+  /**
+   * Runs storage jobs (requestStorageJob()) on this worker: the server gives core/storage's move
+   * and removal. Without it, this process sends storage jobs and doesn't run them.
+   */
+  storage?: { run(job: StorageJob, signal: AbortSignal): Promise<object> };
   /** How often an idle worker looks for jobs, in seconds (at least 0.5). Default 2. */
   pollingIntervalSeconds?: number;
   /**
@@ -203,6 +219,13 @@ export interface Jobs {
    * job does nothing. Never inside withTenant().
    */
   requestSync(tenantId: string, source: string): Promise<string | null>;
+  /**
+   * Queues a tenant's storage move or removal, one job per tenant and version: a job for an
+   * older version stops at once when it runs (it checks), so a newer one is never held up
+   * behind it or dropped. Returns null when that version's job is queued already. Never inside
+   * withTenant().
+   */
+  requestStorageJob(job: StorageJob): Promise<string | null>;
   /**
    * Stops working and closes pg-boss's connections. Running jobs get up to `timeoutMs` (default
    * 20 s) to finish; any still running then fail, to run again later, and are told to stop
@@ -333,6 +356,15 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
       retryLimit: 1,
       expireInSeconds: 3600,
     });
+    // A tenant's move copies every blob it has: hours, for a big one. Created on every node:
+    // any may send; a worker with `storage` runs them.
+    await ensureQueue(boss, QUEUES.storage, {
+      policy: "stately",
+      retryLimit: 3,
+      retryDelay: 60,
+      retryBackoff: true,
+      expireInSeconds: 6 * 3600,
+    });
     await ensureQueue(boss, QUEUES.maintenanceTenant, {
       policy: "stately",
       retryLimit: 2,
@@ -439,6 +471,34 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
       }
       // Always, sources or none: a source taken out of the configuration loses its schedule.
       await keepSyncSchedules(boss, sync?.sources.values() ?? [], log);
+      if (options.storage) {
+        const storage = options.storage;
+        await boss.work<unknown>(
+          QUEUES.storage,
+          { pollingIntervalSeconds: polling },
+          tracked(async ([job]) => {
+            const data = job?.data as Partial<StorageJob> | undefined;
+            if (
+              typeof data?.tenantId !== "string" ||
+              !isId("tenant", data.tenantId) ||
+              !Number.isSafeInteger(data.version) ||
+              (data.task !== "move" && data.task !== "clean")
+            ) {
+              log.warn?.(
+                { job: job?.id },
+                "storage job without a tenant, version or task: skipped",
+              );
+              return { skipped: true };
+            }
+            const done = await storage.run(
+              { tenantId: data.tenantId, version: data.version as number, task: data.task },
+              job?.signal ?? new AbortController().signal,
+            );
+            log.info?.({ tenantId: data.tenantId, task: data.task, ...done }, "storage job done");
+            return done;
+          }),
+        );
+      }
       if (maintenance) {
         await boss.work<unknown>(
           QUEUES.maintenance,
@@ -528,6 +588,10 @@ export async function startJobs(db: Database, options: JobsOptions = {}): Promis
       },
       requestSync(tenantId, source) {
         return sendSync({ tenantId, source }, 0);
+      },
+      requestStorageJob(job) {
+        if (insideWithTenant()) throw new NestedWorkError("requestStorageJob()");
+        return boss.send(QUEUES.storage, job, { singletonKey: `${job.tenantId}:${job.version}` });
       },
       async stop({ timeoutMs = 20_000, graceMs = 2_000 } = {}) {
         await boss.stop({ graceful: true, timeout: timeoutMs, close: true });
