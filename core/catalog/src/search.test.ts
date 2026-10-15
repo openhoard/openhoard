@@ -609,9 +609,12 @@ describe("searchObjects", () => {
           expect(found).toEqual(shown.map((v) => v.id));
         },
       ),
-      { numRuns: 60 },
+      // A failing case shrinks without a bound on runs: stop in time to report it.
+      { numRuns: 60, interruptAfterTimeLimit: 90_000, markInterruptAsFailure: true },
     );
-  });
+    // 60 runs, each a database round trip or several: well under 30 s alone, but not on a
+    // shared CI runner under coverage (it timed out there once at 30 s).
+  }, 120_000);
 });
 
 describe("facet counts and suggestions (T-505)", () => {
