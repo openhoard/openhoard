@@ -640,30 +640,33 @@ server on the next request (the principal epoch).
 
 The **admin API** is JSON under `/api/admin`, for the admin web app (below) and for scripts:
 
-| Route                                  | What it does                                                                                 |
-| -------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `GET /api/admin/clients`               | Every client the tenant's people tried, with its use (`people`, `lastUsedAt`)                |
-| `POST /api/admin/clients/:key/approve` | `{"trust": "local"}` (or `commercial`, `consumer`); relabels an approved one                 |
-| `POST /api/admin/clients/:key/refuse`  | A pending client                                                                             |
-| `POST /api/admin/clients/:key/revoke`  | An approved client: its grants and tokens end                                                |
-| `GET /api/admin/admins`                | The tenant's admins, how (`role`, `group`), and if they count now                            |
-| `POST /api/admin/admins`               | `{"userId": "usr_…"}`, or `{"email": …}`, or `{"userName": …}`                               |
-| `DELETE /api/admin/admins/:userId`     | Takes the role away                                                                          |
-| `GET /api/admin/sources`               | Each connector sync: its `standing`, phase, reconcile, last run, stop                        |
-| `GET /api/admin/sources/:source/skips` | What the source's syncs left out: counts by reason, items (`?reason=`, `?limit=` 1 to 1,000) |
-| `GET /api/admin/vocabulary`            | Every facet and value, the proposed too, and how many review items wait                      |
-| `GET /api/admin/audit`                 | The audit log newest first (`?limit=` 1 to 200, `?before=<seq>`; filters as below), `next`   |
-| `POST /api/admin/audit/export`         | The log as a download (`{"format": "csv"}` or `ndjson`, filters); recorded (`audit.export`)  |
-| `POST /api/admin/audit/verify`         | Checks the whole chain: `{"ok": true, "count", "head"}` or where it breaks                   |
-| `POST /api/admin/health`               | The File Health Report in core's words (`{"show": 1 to 100, "staleDays", "largeMb"}`)        |
-| `POST /api/admin/health/export`        | The same as CSV, every file listed (`{"staleDays", "largeMb"}`); `x-report-cut`              |
+| Route                                       | What it does                                                                                 |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `GET /api/admin/clients`                    | Every client the tenant's people tried, with its use (`people`, `lastUsedAt`)                |
+| `POST /api/admin/clients/:key/approve`      | `{"trust": "local"}` (or `commercial`, `consumer`); relabels an approved one                 |
+| `POST /api/admin/clients/:key/refuse`       | A pending client                                                                             |
+| `POST /api/admin/clients/:key/revoke`       | An approved client: its grants and tokens end                                                |
+| `GET /api/admin/admins`                     | The tenant's admins, how (`role`, `group`), and if they count now                            |
+| `POST /api/admin/admins`                    | `{"userId": "usr_…"}`, or `{"email": …}`, or `{"userName": …}`                               |
+| `DELETE /api/admin/admins/:userId`          | Takes the role away                                                                          |
+| `GET /api/admin/sources`                    | Each connector sync: its `standing`, phase, reconcile, last run, stop                        |
+| `GET /api/admin/sources/:source/skips`      | What the source's syncs left out: counts by reason, items (`?reason=`, `?limit=` 1 to 1,000) |
+| `GET /api/admin/vocabulary`                 | Every facet and value, the proposed too, and how many review items wait                      |
+| `GET /api/admin/audit`                      | The audit log newest first (`?limit=` 1 to 200, `?before=<seq>`; filters as below), `next`   |
+| `POST /api/admin/audit/export`              | The log as a download (`{"format": "csv"}` or `ndjson`, filters); recorded (`audit.export`)  |
+| `POST /api/admin/audit/verify`              | Checks the whole chain: `{"ok": true, "count", "head"}` or where it breaks                   |
+| `POST /api/admin/health`                    | The File Health Report in core's words (`{"show": 1 to 100, "staleDays", "largeMb"}`)        |
+| `POST /api/admin/health/export`             | The same as CSV, every file listed (`{"staleDays", "largeMb"}`); `x-report-cut`              |
+| `POST /api/admin/files/:id/not-injection`   | The admin's verdict: a flagged file is not an injection; the flag comes off (`flagCleared`)  |
+| `DELETE /api/admin/files/:id/not-injection` | Withdraws it: the detector judges the file again at its next enrichment (`withdrawn`)        |
 
 - **Who.** A person signed in with the session cookie (above), who is an admin, through
   OpenHoard's own app (an AI client's token never administers). Anyone else gets 401 or 403, and
   a 403 is audited (`admin.access`). Each change checks again, in its own transaction.
 - **CSRF.** Changes carry the session cookie, so their `Origin` must be `publicUrl`'s, and they
   take `application/json` only.
-- **A recent sign-in.** Approving a client and changing who is an admin take a sign-in within
+- **A recent sign-in.** Approving a client, changing who is an admin, and taking an injection
+  flag off a file (AI clients then see it) take a sign-in within
   `auth.adminSignInMinutes` (default 15): otherwise 403 with `"signIn": "/auth/sign-in"`.
   Refusing and revoking a client never do, so an emergency cut-off is never a sign-in away.
 - **A client's use** (T-904): `people` is how many people hold a connection through it that
@@ -1002,6 +1005,8 @@ node apps/server/dist/main.js admin source list --tenant ten_…
 node apps/server/dist/main.js admin source status --tenant ten_… [--source <name>]
 node apps/server/dist/main.js admin source skips --tenant ten_… --source <name> [--reason <code>] [--limit 100]
 node apps/server/dist/main.js admin resummarize --tenant ten_… [--reason budget,refused,unavailable,no-provider] [--limit 10000] [--dry-run]
+node apps/server/dist/main.js admin injection dismiss --tenant ten_… --user <a tenant admin> --id obj_…
+node apps/server/dist/main.js admin injection reconsider --tenant ten_… --user <a tenant admin> --id obj_…
 node apps/server/dist/main.js admin source run-now --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source resume --tenant ten_… --source <name>
 node apps/server/dist/main.js admin source confirm-reconcile --tenant ten_… --source <name>
@@ -1043,6 +1048,15 @@ node apps/server/dist/main.js admin audit export --tenant ten_… [--format ndjs
   sign-in). Each read is audited as `health.report` with the same detail (`reader`, each
   finding's count, a refusal's reason), but the admin is the actor, the client is `openhoard`,
   and `format` is `page` or `csv`.
+- **A flagged file that is fine.** The injection detector flags a file whose name, folders or
+  text look like instructions for an AI (`risk:injection`): AI clients see no more than that it
+  exists. When a tenant admin decides it is harmless, `injection dismiss` (or the button on the
+  health page's flagged finding, `POST /api/admin/files/:id/not-injection`) takes the
+  detector's flag off for the file's current content (core/catalog `markNotInjection()`); a new
+  version is judged afresh, and a flag a person or a pack put on stays. `injection reconsider`
+  (`DELETE` on the same address) withdraws the verdict. Core audits both as the admin
+  (`injection.review`, `injection.review-withdrawn`); the CLI also audits a refusal of someone
+  who isn't an admin.
 - **The audit log (T-702, T-703, T-1404).** `audit verify` checks a tenant's whole chain: every
   hash and link, and that the columns queries read say what the hashed events say. It prints
   `ok`, the number of events and the head hash (exit 0), or `failed`, how many events check

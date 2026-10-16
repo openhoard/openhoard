@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { exportAudit } from "@openhoard/core-audit";
+import { applyInjectionFlag, hasInjectionFlag } from "@openhoard/core-catalog";
 import { newId, oauthClients, sessions, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import {
@@ -592,6 +593,37 @@ describe("the admin API's gate", () => {
     expect([401, 403]).toContain(res.status);
     const [row] = await db.withTenant(t.tenantId, (tx) => tx.select().from(oauthClients));
     expect(row?.status).toBe("pending");
+  });
+});
+
+describe("an admin's verdict on the injection flag", () => {
+  it("takes the flag off with a recent sign-in, and withdraws the verdict without one", async () => {
+    const flagged = () =>
+      db.withTenant(t.tenantId, (tx) => hasInjectionFlag(tx, t.tenantId, t.objectId));
+    await db.withTenant(t.tenantId, (tx) => applyInjectionFlag(tx, t.tenantId, t.objectId, true));
+    const boss = await signedIn(adminPerson);
+    const cleared = await boss.api("POST", `/files/${t.objectId}/not-injection`, {});
+    expect([cleared.status, await cleared.json()]).toEqual([200, { flagCleared: true }]);
+    expect(await flagged()).toBe(false);
+    expect((await boss.api("POST", `/files/${newId("object")}/not-injection`, {})).status).toBe(
+      404,
+    );
+    // Clearing loosens what AI clients see: a recent sign-in. Withdrawing doesn't.
+    await db.withTenant(t.tenantId, (tx) =>
+      tx
+        .update(sessions)
+        .set({ createdAt: sql`created_at - interval '1 hour'` })
+        .where(eq(sessions.userId, admin.id)),
+    );
+    expect((await boss.api("POST", `/files/${t.objectId}/not-injection`, {})).status).toBe(403);
+    const withdrawn = await boss.api("DELETE", `/files/${t.objectId}/not-injection`);
+    expect([withdrawn.status, await withdrawn.json()]).toEqual([200, { withdrawn: true }]);
+    expect(await decisions("injection.")).toEqual([
+      "injection.review:allow:",
+      "injection.review:deny:unknown-object",
+      "injection.review:deny:sign-in-again",
+      "injection.review-withdrawn:allow:",
+    ]);
   });
 });
 

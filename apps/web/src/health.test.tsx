@@ -117,6 +117,42 @@ const type = (label: string, value: string) =>
   });
 
 describe("the File Health page (T-1002)", () => {
+  it("lets an admin say a flagged file is not an injection, signing in again if asked", async () => {
+    const flagged = {
+      section: "flagged",
+      heading: "May carry instructions aimed at AI assistants",
+      advice: "Look at each.",
+      count: 1,
+      size: null,
+      also: null,
+      items: [{ objectId: "obj_9", title: "Read me.txt", url: null, size: null, why: "" }],
+      more: 0,
+    };
+    const dismissInjection = vi
+      .fn<Api["dismissInjection"]>()
+      .mockResolvedValueOnce("sign-in-again")
+      .mockResolvedValueOnce("done");
+    const { show, signInAgain } = page({
+      health: vi.fn(async () => ({ ...REPORT, findings: [flagged] })),
+      dismissInjection,
+    });
+    await show();
+    await click(button("Not an injection"));
+    expect(text()).toContain("This needs a recent sign-in.");
+    await click(button("Sign out and in again"));
+    expect(signInAgain).toHaveBeenCalledTimes(1);
+    await click(button("Not an injection"));
+    expect(dismissInjection.mock.calls).toEqual([["obj_9"], ["obj_9"]]);
+    expect(text()).toContain("Marked as not an injection: AI assistants can find it again.");
+    expect(button("Not an injection")).toBeUndefined();
+  });
+
+  it("offers no verdict on any other finding", async () => {
+    const { show } = page();
+    await show();
+    expect(button("Not an injection")).toBeUndefined();
+  });
+
   it("says the findings in the server's words, most pressing first, with their files", async () => {
     const { show } = page();
     await show();

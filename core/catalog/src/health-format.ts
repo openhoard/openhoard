@@ -117,7 +117,7 @@ export function healthWording(
       return {
         heading: "May carry instructions aimed at AI assistants",
         advice:
-          "The name or text of these looks like it tries to tell an AI assistant what to do, a way to trick an assistant into leaking or changing things. OpenHoard already keeps them from AI assistants, which see only that they exist; people can still open them. Look at each: delete what is malicious, and tell whoever set up OpenHoard about any that are harmless.",
+          "The name or text of these looks like it tries to tell an AI assistant what to do, a way to trick an assistant into leaking or changing things. OpenHoard already keeps them from AI assistants, which see only that they exist; people can still open them. Look at each: delete what is malicious. An admin can mark a harmless one as not an injection (on this page, or with admin injection dismiss), and AI assistants then see it again.",
       };
     case "longPaths":
       return {

@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportAudit } from "@openhoard/core-audit";
 import {
+  applyInjectionFlag,
+  hasInjectionFlag,
   markProcessed,
   proposeTag,
   saveCard,
@@ -1771,5 +1773,63 @@ describe("openhoard admin resummarize", { timeout: 180_000 }, () => {
         2,
       );
     }
+  });
+});
+
+describe("openhoard admin injection", { timeout: 180_000 }, () => {
+  it("takes the detector's flag off on an admin's verdict, and withdraws it; nobody else", async () => {
+    const t = await inspect(async (db) => {
+      const seeded = await seedTenant(db, 10);
+      await db.withTenant(seeded.tenantId, async (tx) => {
+        await applyInjectionFlag(tx, seeded.tenantId, seeded.objectId, true);
+        for (const name of ["boss", "pat"]) {
+          await createUser(tx, seeded.tenantId, {
+            email: `${name}@example.com`,
+            displayName: name,
+            source: "local",
+          });
+        }
+      });
+      return seeded;
+    });
+    expect(
+      (await admin("user", "grant-admin", "--tenant", t.tenantId, "--user", "boss@example.com"))
+        .code,
+    ).toBe(0);
+    const verdict = (what: string, user: string) =>
+      admin("injection", what, "--tenant", t.tenantId, "--user", user, "--id", t.objectId);
+    const flagged = () =>
+      inspect((db) =>
+        db.withTenant(t.tenantId, (tx) => hasInjectionFlag(tx, t.tenantId, t.objectId)),
+      );
+
+    const refused = await verdict("dismiss", "pat@example.com");
+    expect([refused.code, refused.err]).toEqual([
+      1,
+      "pat@example.com isn't a tenant admin: only an admin decides a flag\n",
+    ]);
+    expect(await flagged()).toBe(true);
+    const done = await verdict("dismiss", "boss@example.com");
+    expect([done.code, done.out]).toEqual([0, `${t.objectId}\n`]);
+    expect(done.err).toContain("its flag is off");
+    expect(await flagged()).toBe(false);
+    expect((await verdict("reconsider", "boss@example.com")).err).toContain("Withdrawn");
+
+    const events = await inspect(async (db) => {
+      const lines: string[] = [];
+      await exportAudit(db, t.tenantId, {}, "ndjson", (s: string) => void lines.push(s));
+      return lines
+        .join("")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l) as { actor: string; action: string; decision: string })
+        .filter((e) => e.action.startsWith("injection."))
+        .map((e) => [e.action, e.decision, e.actor.startsWith("user:") ? "admin" : e.actor]);
+    });
+    expect(events).toEqual([
+      ["injection.review", "deny", "system:admin-cli"],
+      ["injection.review", "allow", "admin"],
+      ["injection.review-withdrawn", "allow", "admin"],
+    ]);
   });
 });

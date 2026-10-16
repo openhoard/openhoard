@@ -14,6 +14,7 @@ import {
 import {
   APPLY_TRANSACTION,
   applyPack,
+  clearInjectionReview,
   decideReview,
   HEALTH_SECTIONS,
   healthCsv,
@@ -21,6 +22,8 @@ import {
   HealthError,
   healthReport,
   healthText,
+  InjectionReviewError,
+  markNotInjection,
   PackError,
   planPack,
   REVIEW_INBOX_MAX,
@@ -149,6 +152,8 @@ import { retrying } from "./retry.js";
  *                       [--stale-days <n>] [--large-mb <n>]
  *   admin resummarize   --tenant ten_… [--reason budget,refused,unavailable] [--limit 10000]
  *                       [--dry-run]
+ *   admin injection dismiss    --tenant ten_… --user <admin> --id obj_…
+ *   admin injection reconsider --tenant ten_… --user <admin> --id obj_…
  *
  * It reads the server's configuration (and `--data-dir`, as the server does) and opens the same
  * database. The embedded database (PGlite) belongs to one process at a time, so while the
@@ -238,6 +243,14 @@ import { retrying } from "./retry.js";
  * admin's to read: `--user` names one, and it is audited (`health.report`: who it was for,
  * the format and each finding's count), a refusal too. `--stale-days` and `--large-mb` move
  * two of its thresholds. `--out` writes a new file, never over an existing one.
+ *
+ * `injection dismiss` is a tenant admin's verdict that a file the injection detector flagged
+ * (`risk:injection`) is fine as it is now (core/catalog markNotInjection()): the detector's flag
+ * comes off, AI clients see the file again, and the detector won't flag that content again. A
+ * new version is judged afresh. `injection reconsider` withdraws the verdict: the detector
+ * judges the file at its next enrichment. `--user` names the admin, whose decision it is;
+ * core audits it as them (`injection.review`, `injection.review-withdrawn`). Someone who isn't
+ * an admin is refused, and that refusal is audited too.
  */
 
 export const ADMIN_ACTOR = "system:admin-cli";
@@ -353,6 +366,11 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
   resummarize --tenant <ten_…> [--reason budget,refused,unavailable,no-provider] [--limit <n>] [--dry-run]
                                                    summarize again what a provider refused or
                                                    failed, or the budget had no room for
+  injection dismiss --tenant <ten_…> --user <a tenant admin> --id <obj_…>
+                                                   a flagged file is not an injection: the
+                                                   flag comes off, AI clients see it again
+  injection reconsider --tenant <ten_…> --user <a tenant admin> --id <obj_…>
+                                                   withdraw that: the detector judges it again
 `;
 
 class UsageError extends Error {}
@@ -449,6 +467,8 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "audit export",
     "health report",
     "resummarize",
+    "injection dismiss",
+    "injection reconsider",
   ];
   if (!known.includes(command)) {
     io.err(`unknown command: ${command}\n\n${USAGE}`);
@@ -650,6 +670,17 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
           values.reason,
           values.limit,
           values["dry-run"] === true,
+          io,
+        );
+      case "injection dismiss":
+      case "injection reconsider":
+        return await injectionVerdict(
+          db,
+          config,
+          command === "injection dismiss" ? "dismiss" : "reconsider",
+          tenantArg(values.tenant),
+          need(values.user, "--user"),
+          need(values.id, "--id"),
           io,
         );
       default:
@@ -2353,4 +2384,65 @@ async function healthCommand(
     // Whatever went wrong on the way (the audit, the write): the file goes with it.
     discard();
   }
+}
+
+/** `injection dismiss` and `injection reconsider`: see the header. */
+async function injectionVerdict(
+  db: Database,
+  config: Config,
+  verdict: "dismiss" | "reconsider",
+  tenantId: string,
+  named: string,
+  objectId: string,
+  io: AdminIo,
+): Promise<number> {
+  if (!isId("object", objectId)) throw new UsageError(`not a file id: ${objectId}`);
+  const user = await namedUser(db, tenantId, named, io);
+  if (user === null) return 1;
+  const adminGroupId = adminGroupOf(config.auth)(tenantId);
+  const input = {
+    objectId,
+    by: userPrincipal(user.id),
+    ...(adminGroupId === undefined ? {} : { adminGroupId }),
+  };
+  let changed: boolean;
+  try {
+    changed = await retrying(() =>
+      db.withTenant(tenantId, (tx) =>
+        verdict === "dismiss"
+          ? markNotInjection(tx, tenantId, input)
+          : clearInjectionReview(tx, tenantId, input),
+      ),
+    );
+  } catch (e) {
+    if (!(e instanceof InjectionReviewError)) throw e;
+    if (e.code === "not-admin") {
+      await db.withTenant(tenantId, (tx) =>
+        appendAudit(tx, tenantId, {
+          actor: ADMIN_ACTOR,
+          action: verdict === "dismiss" ? "injection.review" : "injection.review-withdrawn",
+          decision: "deny",
+          object: objectId,
+          detail: { reviewer: `user:${user.id}`, refusal: "not-admin" },
+        }),
+      );
+      io.err(
+        `${oneLine(user.email ?? user.id)} isn't a tenant admin: only an admin decides a flag\n`,
+      );
+    } else {
+      io.err(`tenant ${tenantId} has no file ${objectId}\n`);
+    }
+    return 1;
+  }
+  io.err(
+    verdict === "dismiss"
+      ? changed
+        ? `${objectId} is not an injection, for ${oneLine(user.email ?? user.id)}: its flag is off, and AI clients see it again.\n`
+        : `Recorded: ${objectId} is not an injection. It carried no flag of the detector's (a person's or a pack's own stays).\n`
+      : changed
+        ? `Withdrawn: the detector judges ${objectId} again at its next enrichment (a new version, a rename, or a re-run).\n`
+        : `${objectId} had no verdict to withdraw.\n`,
+  );
+  io.out(`${objectId}\n`);
+  return 0;
 }

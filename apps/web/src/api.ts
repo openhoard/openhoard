@@ -262,6 +262,8 @@ export interface Api {
   sourceSkips(source: string, reason?: string): Promise<SourceSkips>;
   health(query: HealthQuery): Promise<HealthReportPage>;
   exportHealth(query: HealthQuery): Promise<HealthSheet>;
+  /** An admin's verdict: this flagged file is not an injection (its flag comes off). */
+  dismissInjection(objectId: string): Promise<Changed>;
   audit(query: AuditQuery, before?: number): Promise<AuditPage>;
   exportAudit(query: AuditQuery, format: "csv" | "ndjson"): Promise<Exported>;
   verifyAudit(): Promise<Verified>;
@@ -322,6 +324,21 @@ export function createApi(fetcher: typeof fetch): Api {
       const body = (await get("/api/admin/clients")) as { clients?: unknown } | null;
       if (!Array.isArray(body?.clients)) throw new ApiError(200);
       return body.clients.map(asClient);
+    },
+    async dismissInjection(objectId) {
+      if (!/^obj_[0-9a-z]{26}$/.test(objectId)) return "failed";
+      let res: Response;
+      try {
+        res = await send(`/api/admin/files/${objectId}/not-injection`, "POST", {});
+      } catch (err) {
+        if (err instanceof SignedOut) throw err;
+        return "failed";
+      }
+      if (res.ok) return "done";
+      if (res.status === 404) return "gone";
+      if (res.status !== 403) return "failed";
+      const why = (await res.json().catch(() => null)) as { signIn?: unknown } | null;
+      return typeof why?.signIn === "string" ? "sign-in-again" : "refused";
     },
     async decideClient(clientKey, decision) {
       if (!/^[0-9a-f]{64}$/.test(clientKey)) return "failed";

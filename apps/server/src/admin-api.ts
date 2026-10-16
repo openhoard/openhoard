@@ -32,12 +32,15 @@ import {
   type User,
 } from "@openhoard/core-identity";
 import {
+  clearInjectionReview,
   HEALTH_SECTIONS,
   healthCsv,
   healthCsvCut,
   HealthError,
   healthPage,
   healthReport,
+  InjectionReviewError,
+  markNotInjection,
   tenantVocabulary,
   VIEW_TRANSACTION,
   VocabularyError,
@@ -887,6 +890,45 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
       ...NO_STORE,
     });
   });
+
+  // An admin's verdict on the injection flag (core/catalog risk.ts): POST, the file's current
+  // version is not an injection, so the detector's flag comes off and AI clients see the file
+  // again; DELETE, that verdict is withdrawn and the detector judges the file at its next
+  // enrichment. Clearing loosens what AI clients see, so it takes a recent sign-in. Core audits
+  // both (`injection.review`, `injection.review-withdrawn`), as the admin.
+  for (const method of ["post", "delete"] as const) {
+    app[method]("/api/admin/files/:objectId/not-injection", async (c) => {
+      const objectId = c.req.param("objectId");
+      if (!isId("object", objectId)) return c.json({ error: "not a file id" }, 404);
+      const clearing = method === "post";
+      const result = await change(
+        c,
+        {
+          action: clearing ? "injection.review" : "injection.review-withdrawn",
+          detail: { object: objectId },
+        },
+        async (tx, signedIn) => {
+          const input = {
+            objectId,
+            by: userPrincipal(signedIn.principal.userId),
+            ...groupOf(signedIn.tenantId),
+          };
+          try {
+            return clearing
+              ? { flagCleared: await markNotInjection(tx, signedIn.tenantId, input) }
+              : { withdrawn: await clearInjectionReview(tx, signedIn.tenantId, input) };
+          } catch (e) {
+            if (e instanceof InjectionReviewError && e.code === "unknown-object") {
+              throw new Refusal(404, "unknown-object", "no such file");
+            }
+            throw e;
+          }
+        },
+        { recentSignIn: clearing },
+      );
+      return result instanceof Response ? result : c.json(result, 200, NO_STORE);
+    });
+  }
 
   // The tag vocabulary (T-903): every facet and value, the proposed too, with how many open
   // review items propose each. Read-only; core checks again that the asker is an admin.

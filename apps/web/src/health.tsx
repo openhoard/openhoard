@@ -3,6 +3,7 @@ import {
   ApiError,
   SignedOut,
   type Api,
+  type Changed,
   type HealthFinding,
   type HealthQuery,
   type HealthReportPage,
@@ -244,12 +245,14 @@ export function Health(props: {
           in.
         </p>
       )}
-      {loaded.state === "ready" && <Report report={loaded.report} />}
+      {loaded.state === "ready" && (
+        <Report report={loaded.report} dismiss={{ api, onSignedOut, onSignInAgain }} />
+      )}
     </>
   );
 }
 
-function Report({ report }: { report: HealthReportPage }) {
+function Report({ report, dismiss }: { report: HealthReportPage; dismiss: Dismissing }) {
   return (
     <>
       <p>
@@ -265,7 +268,7 @@ function Report({ report }: { report: HealthReportPage }) {
         </section>
       )}
       {report.findings.map((f) => (
-        <Finding key={f.section} finding={f} />
+        <Finding key={f.section} finding={f} {...(f.section === "flagged" ? { dismiss } : {})} />
       ))}
       {report.clean.length > 0 && (
         <section aria-labelledby="health-clean">
@@ -291,7 +294,23 @@ function Report({ report }: { report: HealthReportPage }) {
   );
 }
 
-function Finding({ finding: f }: { finding: HealthFinding }) {
+/** What a flagged file's "not an injection" button needs. */
+interface Dismissing {
+  api: Api;
+  onSignedOut: () => void;
+  onSignInAgain: () => Promise<boolean>;
+}
+
+/** What an admin's verdict on a flagged file came to, said where the button was. */
+const DISMISSED: Record<Exclude<Changed, "conflict">, string> = {
+  done: "Marked as not an injection: AI assistants can find it again.",
+  "sign-in-again": "This needs a recent sign-in.",
+  gone: "That file is gone.",
+  refused: "The server refused.",
+  failed: "That didn't work. Try again.",
+};
+
+function Finding({ finding: f, dismiss }: { finding: HealthFinding; dismiss?: Dismissing }) {
   const id = `health-${f.section}`;
   return (
     <section aria-labelledby={id} className="health-finding">
@@ -317,6 +336,7 @@ function Finding({ finding: f }: { finding: HealthFinding }) {
                 {item.size !== null && <span className="muted">{item.size}</span>}
               </span>
               {item.why !== "" && <span className="value-does">{item.why}</span>}
+              {dismiss !== undefined && <Dismiss objectId={item.objectId} {...dismiss} />}
             </li>
           );
         })}
@@ -325,5 +345,40 @@ function Finding({ finding: f }: { finding: HealthFinding }) {
         <p className="muted">… and {count(f.more, "more file")}. The spreadsheet lists them all.</p>
       )}
     </section>
+  );
+}
+
+/**
+ * "Not an injection", for one flagged file: the admin's verdict that it is fine as it is now
+ * (the server takes the detector's flag off, and records it as theirs). It asks for a recent
+ * sign-in, since AI assistants then see the file.
+ */
+function Dismiss(props: Dismissing & { objectId: string }) {
+  const { api, onSignedOut, onSignInAgain, objectId } = props;
+  const [ended, setEnded] = useState<Changed | "busy" | null>(null);
+  const [stuck, setStuck] = useState(false);
+  const decide = () => {
+    setEnded("busy");
+    api.dismissInjection(objectId).then(setEnded, (err: unknown) => {
+      if (err instanceof SignedOut) onSignedOut();
+      else setEnded("failed");
+    });
+  };
+  if (ended === "done") return <span className="notice">{DISMISSED.done}</span>;
+  return (
+    <span className="decide">
+      <button type="button" disabled={ended === "busy"} onClick={decide}>
+        Not an injection
+      </button>
+      {ended !== null && ended !== "busy" && ended !== "conflict" && (
+        <span role="status">{DISMISSED[ended]}</span>
+      )}
+      {ended === "sign-in-again" && (
+        <button type="button" onClick={() => void onSignInAgain().then((left) => setStuck(!left))}>
+          Sign out and in again
+        </button>
+      )}
+      {stuck && <span>Signing out didn't go through. Try again.</span>}
+    </span>
   );
 }
