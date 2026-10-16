@@ -21,8 +21,8 @@
     "clean": "rimraf dist coverage"
   },
   "dependencies": {
-    "csv-parse": "7.0.2",
-    "pdfjs-dist": "6.3.289",
+    "csv-parse": "7.0.3",
+    "pdfjs-dist": "6.4.299",
     "saxes": "6.0.0",
     "yauzl": "3.4.0"
   },

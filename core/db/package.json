@@ -31,11 +31,11 @@
     "clean": "rimraf dist coverage"
   },
   "dependencies": {
-    "@electric-sql/pglite": "0.5.8",
-    "@electric-sql/pglite-pgvector": "0.0.9",
+    "@electric-sql/pglite": "0.5.9",
+    "@electric-sql/pglite-pgvector": "0.0.10",
     "@openhoard/core-policy": "workspace:^",
-    "drizzle-orm": "^0.45.3",
-    "pg": "^8.23.0"
+    "drizzle-orm": "^0.45.4",
+    "pg": "^8.23.1"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*",
