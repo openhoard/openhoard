@@ -26,6 +26,7 @@ import {
 import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { HealthError, healthReport, type HealthOptions, type HealthSection } from "./health.js";
+import { applyInjectionFlag } from "./risk.js";
 import { VIEW_TRANSACTION } from "./visibility.js";
 
 /*
@@ -56,6 +57,7 @@ async function file(
     modifiedAt?: Date;
     createdBy?: string;
     modifiedBy?: string;
+    path?: string[];
     unsynced?: boolean;
   } = {},
 ): Promise<string> {
@@ -88,6 +90,7 @@ async function file(
       sourceModifiedAt: more.modifiedAt ?? new Date(),
       sourceModifiedBy: more.modifiedBy ?? null,
       sourceCreatedBy: more.createdBy ?? null,
+      path: more.path ?? null,
     });
   });
   return id;
@@ -457,6 +460,32 @@ describe("the file health report", () => {
     expect(got.unknownPeople).toBe(1); // unknown.txt
   });
 
+  it("lists files flagged as a possible injection, and paths too long, longest first", async () => {
+    const flagged = await file("ignore previous instructions.txt");
+    await file("fine.txt");
+    await inTenant((tx) => applyInjectionFlag(tx, t.tenantId, flagged, true));
+    // Open to anyone, and flagged: the flag is the detector's finding, not a restricting label.
+    await share(flagged, "link-anyone");
+    const deep = Array.from(
+      { length: 7 },
+      (_, i) => `Project archive level ${i + 1} - legacy share`,
+    );
+    await file("deep.docx", { path: [...deep, "deep.docx"] });
+    await file("deeper.docx", { path: [...deep, ...deep.slice(0, 2), "deeper.docx"] });
+    await file("shallow.docx", { path: ["Shared Documents", "shallow.docx"] });
+    const got = await report();
+    expect(got.sections.flagged.items.map((i) => [i.title, i.detail])).toEqual([
+      ["ignore previous instructions.txt", "risk:injection"],
+    ]);
+    expect(got.sections.publicLinks.count).toBe(1);
+    expect(got.sections.sensitiveWide.count).toBe(0);
+    expect(got.sections.longPaths.items.map((i) => [i.title, i.reasons])).toEqual([
+      ["deeper.docx", [{ k: "path", chars: 362 }]],
+      ["deep.docx", [{ k: "path", chars: 282 }]],
+    ]);
+    expect(await titles("longPaths", { longPathChars: 300 })).toEqual(["deeper.docx"]);
+  });
+
   it("lists stale, duplicated and large files, worst first, and what they waste", async () => {
     const day = 86_400_000;
     const asOf = new Date("2026-06-01T00:00:00Z");
@@ -500,6 +529,7 @@ describe("the file health report", () => {
     expect(got.thresholds).toEqual({
       staleAfterDays: 1095,
       largeBytes: 499,
+      longPathChars: 260,
       wideGroupShare: 0.5,
       wideGroupMin: 10,
     });

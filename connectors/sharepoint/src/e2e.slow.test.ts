@@ -1,4 +1,5 @@
 import {
+  applyInjectionFlag,
   healthReport,
   proposeTag,
   VIEW_TRANSACTION,
@@ -12,6 +13,7 @@ import {
   sourceRefs,
   sourceSyncs,
   type Database,
+  type Tx,
 } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -25,7 +27,7 @@ import {
   lockUser,
   resolvePrincipal,
 } from "@openhoard/core-identity";
-import { runSync, type SyncReport } from "@openhoard/core-jobs";
+import { runSync, scoreVersion, type SyncReport } from "@openhoard/core-jobs";
 import type { SyncEvent } from "@openhoard/sdk";
 import { and, count, eq, isNull } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -803,6 +805,28 @@ describe("the File Health Report over a synced tenant (T-1001)", () => {
       }
     });
 
+    // The injection detector over every file's name and folders, as the pipeline's
+    // injection-flag step runs it (no text here: the fake's content isn't extracted).
+    const named = await db.withTenant(t.tenantId, (tx) =>
+      tx
+        .select({ id: objects.id, title: objects.title, path: sourceRefs.path })
+        .from(objects)
+        .innerJoin(
+          sourceRefs,
+          and(eq(sourceRefs.tenantId, objects.tenantId), eq(sourceRefs.objectId, objects.id)),
+        )
+        .where(isNull(objects.deletedAt)),
+    );
+    const read = <T>(work: (tx: Tx) => Promise<T>) => db.withTenant(t.tenantId, work);
+    for (const f of named) {
+      const target = { tenantId: t.tenantId, objectId: f.id, versionId: "", seq: 1 };
+      const verdict = await scoreVersion(
+        { ...target, title: f.title, path: f.path, mime: "", blobId: "" },
+        read,
+      );
+      if (verdict.flagged) await read((tx) => applyInjectionFlag(tx, t.tenantId, f.id, true));
+    }
+
     const report = await db.withTenant(
       t.tenantId,
       (tx) =>
@@ -905,6 +929,13 @@ describe("the File Health Report over a synced tenant (T-1001)", () => {
     // Large files, by the size asked for (the fake's are cut down to be read whole).
     expect(found("large")).toEqual(ids((i) => i.size > 400));
     expect(report.sections.large.count).toBeGreaterThan(0);
+
+    // Names that carry instructions for an AI, as the detector flags them; paths over
+    // SharePoint's own limit (the fake plants some), and so over the report's 260.
+    expect(found("flagged")).toEqual(expect.arrayContaining(seeded("injection-filename")));
+    expect(seeded("injection-filename").length).toBeGreaterThan(0);
+    expect(found("longPaths")).toEqual(expect.arrayContaining(seeded("long-path")));
+    expect(seeded("long-path").length).toBeGreaterThan(0);
 
     // The totals are the tenant's; the one file no source dated is said to be so.
     expect(report.files).toBe(files.length + 1);

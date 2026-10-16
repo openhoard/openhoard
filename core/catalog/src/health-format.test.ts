@@ -25,6 +25,7 @@ import {
 const THRESHOLDS = {
   staleAfterDays: 1095,
   largeBytes: 1024 ** 3,
+  longPathChars: 260,
   wideGroupShare: 0.5,
   wideGroupMin: 10,
 };
@@ -263,7 +264,7 @@ describe("the report as text", () => {
     report.sections.unmatched = { count: 1, bytes: 1, items: [item(7)] };
     const text = healthText(report, { tenant: "Acme", show: 2 });
     const lines = text.split("\n");
-    expect(lines[2]).toBe("5 things to look at, most pressing first; 4 checks found nothing.");
+    expect(lines[2]).toBe("5 things to look at, most pressing first; 6 checks found nothing.");
     const at = lines.indexOf("Open to anyone with the link: 12 files");
     expect(at).toBeGreaterThan(0);
     expect(lines.slice(at + 1, at + 7)).toEqual([

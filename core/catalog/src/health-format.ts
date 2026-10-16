@@ -37,9 +37,11 @@ export const HEALTH_PAGE_ORDER: readonly HealthSection[] = Object.freeze([
   "guests",
   "formerStaff",
   "organization",
+  "flagged",
   "stale",
   "duplicates",
   "large",
+  "longPaths",
   "unmatched",
 ] as const);
 
@@ -110,6 +112,18 @@ export function healthWording(
       return {
         heading: `Larger than ${exactBytes(thresholds.largeBytes)}`,
         advice: "These take the most room. Check that each is still needed where it is.",
+      };
+    case "flagged":
+      return {
+        heading: "May carry instructions aimed at AI assistants",
+        advice:
+          "The name or text of these looks like it tries to tell an AI assistant what to do, a way to trick an assistant into leaking or changing things. OpenHoard already keeps them from AI assistants, which see only that they exist; people can still open them. Look at each: delete what is malicious, and tell whoever set up OpenHoard about any that are harmless.",
+      };
+    case "longPaths":
+      return {
+        heading: `Paths longer than ${count(thresholds.longPathChars)} characters`,
+        advice:
+          "The folders and name of these add up to a very long path. On a Windows computer that keeps copies of them (with OneDrive), files like these often fail to open or copy, and SharePoint refuses to move them anywhere that makes the path longer still. Shorten folder names, or move the files up a level or two.",
       };
     case "unmatched":
       return {
@@ -232,6 +246,10 @@ export function reasonText(reason: HealthReason): string {
         : `${count(reason.others)} other files have the same content`;
     case "large":
       return "";
+    case "flagged":
+      return "looks like it carries instructions for an AI assistant";
+    case "path":
+      return `its path is ${count(reason.chars)} characters long`;
   }
 }
 

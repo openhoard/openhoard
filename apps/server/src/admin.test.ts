@@ -1594,7 +1594,7 @@ describe("openhoard admin health report (T-1002)", { timeout: 180_000 }, () => {
     const page = await health("--user", "boss@example.com");
     expect(page.code, page.err).toBe(0);
     expect(page.out).toMatch(
-      /^File health report for Tenant 9, \d{1,2} [A-Z][a-z]{2} \d{4}\nOpenHoard looked at 1 file \(1\.2 KB in all\)\.\n1 thing to look at, most pressing first; 8 checks found nothing\.\n/,
+      /^File health report for Tenant 9, \d{1,2} [A-Z][a-z]{2} \d{4}\nOpenHoard looked at 1 file \(1\.2 KB in all\)\.\n1 thing to look at, most pressing first; 10 checks found nothing\.\n/,
     );
     expect(page.out).toContain("Open to anyone with the link: 1 file\n");
     expect(page.out).toContain(

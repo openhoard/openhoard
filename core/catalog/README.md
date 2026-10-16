@@ -442,17 +442,19 @@ account. Run it in one snapshot: `db.withTenant(tenant, work, VIEW_TRANSACTION)`
 `healthReport(tx, tenant, { userId }, options)` (T-1001) is what a tenant's admin should look at
 among the files OpenHoard indexes, found from what the catalog already holds:
 
-| Section         | A live file is listed when                                                                                                                                                                         |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `publicLinks`   | its source shares it by a link anyone can open                                                                                                                                                     |
-| `organization`  | its source shares it with the whole organization, or a group holding most of the tenant's current members (`wideGroupShare`, 0.5) has a grant reaching it                                          |
-| `sensitiveWide` | it is in either of those and carries a trusted tag whose value restricts it: visibility `hidden`, or exposure `metadata-only` or `local-only`                                                      |
-| `guests`        | its source shares it with someone outside, or a guest, or a group a guest is in, holds a grant reaching it                                                                                         |
-| `formerStaff`   | someone locked, disabled by the identity provider or retired made it or changed it last (as the source says, unless they were provisioned again), owns it, or holds a grant reaching it themselves |
-| `unmatched`     | its source shares it with a person or group OpenHoard doesn't know (a SharePoint site group, someone not provisioned): they get nothing here                                                       |
-| `stale`         | its source last saw it change more than `staleAfterDays` ago (1095)                                                                                                                                |
-| `duplicates`    | another live file's current content is the same, byte for byte (empty files aside); `bytes` is what the extra copies take                                                                          |
-| `large`         | its current content is over `largeBytes` (1 GiB)                                                                                                                                                   |
+| Section         | A live file is listed when                                                                                                                                                                                             |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `publicLinks`   | its source shares it by a link anyone can open                                                                                                                                                                         |
+| `organization`  | its source shares it with the whole organization, or a group holding most of the tenant's current members (`wideGroupShare`, 0.5) has a grant reaching it                                                              |
+| `sensitiveWide` | it is in either of those and carries a trusted tag whose value restricts it: visibility `hidden`, or exposure `metadata-only` or `local-only`                                                                          |
+| `guests`        | its source shares it with someone outside, or a guest, or a group a guest is in, holds a grant reaching it                                                                                                             |
+| `formerStaff`   | someone locked, disabled by the identity provider or retired made it or changed it last (as the source says, unless they were provisioned again), owns it, or holds a grant reaching it themselves                     |
+| `unmatched`     | its source shares it with a person or group OpenHoard doesn't know (a SharePoint site group, someone not provisioned): they get nothing here                                                                           |
+| `stale`         | its source last saw it change more than `staleAfterDays` ago (1095)                                                                                                                                                    |
+| `duplicates`    | another live file's current content is the same, byte for byte (empty files aside); `bytes` is what the extra copies take                                                                                              |
+| `large`         | its current content is over `largeBytes` (1 GiB)                                                                                                                                                                       |
+| `flagged`       | it carries `risk:injection` (its name, folders or text look like instructions for an AI; see [Model cards and risk flags](#model-cards-and-risk-flags)); `sensitiveWide` doesn't count the flag as a restricting label |
+| `longPaths`     | its path at its source, folders and name joined by `/`, is longer than `longPathChars` (260, where Windows apps start failing on a synced file)                                                                        |
 
 A grant reaches a file when it is live and on the file, or on a tag the file carries as a
 trusted tag, as `authorize()` reads grants. Each section has a count and bytes over all its

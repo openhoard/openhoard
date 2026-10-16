@@ -1022,7 +1022,8 @@ node apps/server/dist/main.js admin audit export --tenant ten_… [--format ndjs
 - **The File Health Report (T-1001, T-1002).** `health report` says what a tenant's admin
   should look at among its files: files labelled as restricted yet widely shared, open to
   anyone with a link, shared with people outside, tied to people who have left, shared with
-  the whole organization, unchanged for years, duplicated, very large, or shared with people
+  the whole organization, flagged as possibly carrying instructions for an AI, unchanged for
+  years, duplicated, very large, with paths too long to copy or sync, or shared with people
   OpenHoard doesn't know ([core/catalog](../../core/catalog/README.md#file-health-report) has
   what each means and what it can't see). As text (the default) it is a page for the tenant's
   owner, in plain words: each finding, most pressing first, with why it matters, what to do and

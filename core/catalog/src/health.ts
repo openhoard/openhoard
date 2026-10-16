@@ -26,6 +26,10 @@ import { requireSnapshot } from "./visibility.js";
  * | `stale`          | its source last saw it change longer ago than `staleAfterDays`       |
  * | `duplicates`     | another live file has the same content (byte for byte)               |
  * | `large`          | it is larger than `largeBytes`                                       |
+ * | `flagged`        | it carries `risk:injection`: its name or text looks like instructions |
+ * |                  | for an AI (risk.ts), so AI clients get no more than that it exists   |
+ * | `longPaths`      | its path at its source (folders and name, joined by `/`) is longer   |
+ * |                  | than `longPathChars`                                                 |
  *
  * A grant reaches a file when it is live and on the file itself or on a tag the file carries
  * as a trusted tag (not a model's unreviewed guess), as authorize() reads grants.
@@ -69,6 +73,8 @@ export const HEALTH_SECTIONS = [
   "stale",
   "duplicates",
   "large",
+  "flagged",
+  "longPaths",
 ] as const;
 export type HealthSection = (typeof HEALTH_SECTIONS)[number];
 
@@ -79,6 +85,11 @@ export interface HealthOptions {
   staleAfterDays?: number;
   /** A file over this many bytes is large. Default 1 GiB. */
   largeBytes?: number;
+  /**
+   * A path at the source longer than this many characters is long. Default 260: where Windows
+   * apps start failing on a synced file (SharePoint itself refuses 400 with its site's address).
+   */
+  longPathChars?: number;
   /**
    * A group counts as "most of the tenant" when it holds at least this share of the tenant's
    * current members (0 to 1, above 0). Default 0.5. Groups of fewer than `wideGroupMin` people
@@ -133,7 +144,11 @@ export type HealthReason =
   | { k: "former"; name: string; role: Role; tag: string | null }
   | { k: "stale"; since: string }
   | { k: "copies"; others: number }
-  | { k: "large"; over: number };
+  | { k: "large"; over: number }
+  /** It carries `risk:injection`. */
+  | { k: "flagged" }
+  /** Its path at the source is this many characters long. */
+  | { k: "path"; chars: number };
 
 /** The reasons in one compact line (HealthItem.detail). */
 function compact(reasons: readonly HealthReason[]): string {
@@ -175,6 +190,12 @@ function compact(reasons: readonly HealthReason[]): string {
         break;
       case "large":
         parts.push(`over ${r.over} bytes`);
+        break;
+      case "flagged":
+        parts.push("risk:injection");
+        break;
+      case "path":
+        parts.push(`path of ${r.chars} characters`);
         break;
       default:
         break;
@@ -218,6 +239,7 @@ export interface HealthReport {
   thresholds: {
     staleAfterDays: number;
     largeBytes: number;
+    longPathChars: number;
     wideGroupShare: number;
     wideGroupMin: number;
   };
@@ -264,6 +286,7 @@ export async function healthReport(
   const limit = options.limit ?? 100;
   const staleAfterDays = options.staleAfterDays ?? 1095;
   const largeBytes = options.largeBytes ?? 1024 ** 3;
+  const longPathChars = options.longPathChars ?? 260;
   const wideShare = options.wideGroupShare ?? 0.5;
   const wideMin = options.wideGroupMin ?? 10;
   const whole = (n: number, min: number, max: number) =>
@@ -272,6 +295,7 @@ export async function healthReport(
     !whole(limit, 1, 10_000) ||
     !whole(staleAfterDays, 1, 36_500) ||
     !whole(largeBytes, 1, Number.MAX_SAFE_INTEGER) ||
+    !whole(longPathChars, 1, 100_000) ||
     !whole(wideMin, 1, 1_000_000_000) ||
     !(wideShare > 0 && wideShare <= 1)
   ) {
@@ -296,14 +320,15 @@ export async function healthReport(
    */
   const files = sql`
     select o.id as object_id, o.title, o.owner_id, cur.blob_id, b.size as bytes,
-           r.source, r.url, r.source_modified_at, r.source_modified_by, r.source_created_by
+           r.source, r.url, r.source_modified_at, r.source_modified_by, r.source_created_by,
+           char_length(array_to_string(r.path, '/')) as path_chars
       from objects o
       join lateral (select v.blob_id from versions v
                      where v.tenant_id = o.tenant_id and v.object_id = o.id
                      order by v.seq desc limit 1) cur on true
       join blobs b on b.tenant_id = o.tenant_id and b.id = cur.blob_id
       left join lateral (select s.source, s.url, s.source_modified_at, s.source_modified_by,
-                                s.source_created_by
+                                s.source_created_by, s.path
                            from source_refs s
                           where s.tenant_id = o.tenant_id and s.object_id = o.id
                           order by s.source, s.external_id limit 1) r on true
@@ -429,7 +454,8 @@ export async function healthReport(
            from ${reaching} join wide w on ${toWide})`,
   );
   // Trusted tags (not a model's unreviewed guess) whose value restricts the file: the tightest
-  // visibility, or an exposure that keeps content from commercial AI clients.
+  // visibility, or an exposure that keeps content from commercial AI clients. Not the
+  // injection flag: it restricts, but it is the detector's finding (`flagged`), not a label.
   const sensitive = sql`
     (select jsonb_agg(jsonb_build_object('k', 'label', 'tag', t.facet || ':' || t.value)
                       order by t.facet, t.value)
@@ -437,6 +463,7 @@ export async function healthReport(
        join facet_values fv on fv.tenant_id = t.tenant_id and fv.facet = t.facet and fv.value = t.value
       where t.tenant_id = ${tenantId} and t.object_id = f.object_id
         and (t.source <> 'model' or t.reviewed) and fv.approved
+        and not (t.facet = 'risk' and t.value = 'injection')
         and (fv.visibility = 'hidden' or fv.exposure in ('metadata-only', 'local-only')))`;
 
   /** Who left, by what the source calls them (`column` is an id there), or null. */
@@ -561,6 +588,18 @@ export async function healthReport(
       sql`f.bytes > ${largeBytes}`,
       sql`f.bytes desc`,
     ),
+    flagged: await section(
+      sql`jsonb_build_array(jsonb_build_object('k', 'flagged'))`,
+      sql`exists (select 1 from object_tags t
+                   where t.tenant_id = ${tenantId} and t.object_id = f.object_id
+                     and t.facet = 'risk' and t.value = 'injection')`,
+      sql`f.title`,
+    ),
+    longPaths: await section(
+      sql`jsonb_build_array(jsonb_build_object('k', 'path', 'chars', f.path_chars))`,
+      sql`f.path_chars > ${longPathChars}`,
+      sql`f.path_chars desc`,
+    ),
   };
   // What the copies beyond the first of each take.
   const [wasted] = await queryRows<Total>(
@@ -581,7 +620,13 @@ export async function healthReport(
     unattributed: Number(totals?.unattributed ?? 0),
     unknownPeople: Number(totals?.unknown_people ?? 0),
     formerStaffInGroups: Number(totals?.in_groups ?? 0),
-    thresholds: { staleAfterDays, largeBytes, wideGroupShare: wideShare, wideGroupMin: wideMin },
+    thresholds: {
+      staleAfterDays,
+      largeBytes,
+      longPathChars,
+      wideGroupShare: wideShare,
+      wideGroupMin: wideMin,
+    },
     sections,
   };
 }
