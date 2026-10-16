@@ -50,6 +50,7 @@ import {
 } from "@openhoard/core-catalog";
 import {
   listSourceSkips,
+  type StorageJob,
   listSourceSyncs,
   MAX_SKIP_PAGE,
   syncStanding,
@@ -57,6 +58,21 @@ import {
   type SyncStanding,
 } from "@openhoard/core-jobs";
 import { mayAdminister, type AuthzClient, type ClientTrust } from "@openhoard/core-policy";
+import {
+  changeTenantStorage,
+  checkChoice,
+  probeStorage,
+  restartMove,
+  startCleaning,
+  StorageBusyError,
+  StorageChoiceError,
+  tenantStorageOf,
+  testConfig,
+  type StorageChoice,
+  type StorageConfig,
+  type TenantBlobStores,
+  type TenantStorageView,
+} from "@openhoard/core-storage";
 import type { Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { Logger } from "pino";
@@ -84,6 +100,11 @@ import { retrying } from "./retry.js";
  *   POST   /api/admin/audit/verify            checks the tenant's whole chain
  *   POST   /api/admin/health                  the File Health Report as a page says it
  *   POST   /api/admin/health/export           the same as CSV, every file listed (recent sign-in)
+ *   GET    /api/admin/storage                 where the tenant's files are kept, and a move's progress
+ *   POST   /api/admin/storage/test            tries a place: write, read back, remove
+ *   POST   /api/admin/storage                 keeps a place (tried first; recent sign-in); a job moves
+ *   POST   /api/admin/storage/retry           the last move again
+ *   POST   /api/admin/storage/remove-old      removes the old copies (recent sign-in)
  *   GET    /api/admin/vocabulary              every facet and value, and what waits in review
  *
  * - Signed in with the session cookie (T-102), as an admin (core/policy mayAdminister(): an
@@ -104,10 +125,30 @@ import { retrying } from "./retry.js";
  *   `claimedName`, never the identity (anyone can call themselves "Claude").
  */
 
+/** Each tenant's storage (core/storage tenant-storage.ts), as the server set it up. */
+export interface StorageDeps {
+  stores: TenantBlobStores;
+  /**
+   * The server's storage key, which seals tenants' secrets: `seal()` makes it if need be,
+   * `open()` only reads it.
+   */
+  keys: { seal(): Uint8Array; open(): Uint8Array };
+  /** Whether a tenant may name an endpoint other than S3's and Azure's own. */
+  allowEndpoints: boolean;
+  /** The server's own disk, for testing a move back to it. */
+  local: StorageConfig;
+  /** Queues a tenant's move or removal (core/jobs requestStorageJob()). */
+  requestJob: (job: StorageJob) => Promise<unknown>;
+  /** Whether this server keeps files at all (uploads or mail-in): else nothing is stored yet. */
+  keepsFiles: boolean;
+}
+
 export interface AdminApiDeps {
   auth: AuthConfig;
   db: Database;
   log?: Logger;
+  /** Tenants' storage; without it, the storage routes say storage can't be changed here. */
+  storage?: StorageDeps;
   /** The configured sources: each one's staleness limit. */
   sources?: readonly Pick<SourceConfig, "tenantId" | "id" | "staleAfterHours">[];
   /** Configured sources this server couldn't start (sources.ts prepareSources()). */
@@ -137,6 +178,8 @@ class Refusal extends Error {
     readonly status: 400 | 403 | 404 | 409,
     readonly reason: string,
     message: string,
+    /** More for the answer (the field a choice got wrong, say). */
+    readonly extra: Record<string, string> = {},
   ) {
     super(message);
   }
@@ -212,7 +255,7 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
       return c.json(
         r.reason === "sign-in-again"
           ? { error: r.message, signIn: "/auth/sign-in" }
-          : { error: r.message },
+          : { error: r.message, ...r.extra },
         r.status,
         NO_STORE,
       );
@@ -928,6 +971,249 @@ export function mountAdminApi(app: Hono<AuthEnv>, deps: AdminApiDeps): void {
         { recentSignIn: clearing },
       );
       return result instanceof Response ? result : c.json(result, 200, NO_STORE);
+    });
+  }
+
+  // --- Storage: where the tenant's files are kept --------------------------------------------
+
+  const storage = deps.storage;
+  /** A choice from a body, checked, or the refusal saying which field is wrong. */
+  const choiceOf = (body: Record<string, unknown> | null): StorageChoice => {
+    try {
+      return checkChoice(body?.choice, { allowEndpoints: storage?.allowEndpoints === true });
+    } catch (e) {
+      if (e instanceof StorageChoiceError) {
+        throw new Refusal(400, "invalid", e.message, { field: e.field });
+      }
+      throw e;
+    }
+  };
+  /** What the audit log keeps of a choice: where, never the key. */
+  const placeOf = (choice: StorageChoice): Record<string, string> =>
+    choice.kind === "s3"
+      ? {
+          kind: "s3",
+          bucket: choice.bucket,
+          region: choice.region,
+          ...(choice.endpoint ? { endpoint: choice.endpoint } : {}),
+        }
+      : choice.kind === "azblob"
+        ? {
+            kind: "azblob",
+            account: choice.accountName,
+            container: choice.container,
+            ...(choice.endpoint ? { endpoint: choice.endpoint } : {}),
+          }
+        : { kind: "local" };
+  const showStorage = (v: TenantStorageView) => ({
+    kind: v.kind,
+    settings: v.settings,
+    hasSecret: v.hasSecret,
+    phase: v.phase,
+    previous: v.previous,
+    total: v.total,
+    done: v.done,
+    failed: v.failed,
+    lost: v.lost,
+    lastError: v.lastError,
+    changedAt: v.changedAt?.toISOString() ?? null,
+    changedBy: v.changedBy,
+  });
+  const jsonBody = async (c: Context<AuthEnv>) => {
+    const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null;
+    return typeof body === "object" && body !== null && !Array.isArray(body) ? body : null;
+  };
+
+  // Where the tenant's files are kept, how a move stands, and what this server allows.
+  app.get("/api/admin/storage", async (c) => {
+    const signedIn = c.get("auth") as SignedIn;
+    if (!(await stillAdmin(signedIn))) return c.json({ error: "forbidden" }, 403, NO_STORE);
+    const [view, changedByName] = await db.withTenant(
+      signedIn.tenantId,
+      async (tx) => {
+        const v = await tenantStorageOf(tx, signedIn.tenantId);
+        // Who chose it, by name: `user:<id>` is a person of this tenant.
+        const id = v.changedBy?.startsWith("user:") ? v.changedBy.slice(5) : undefined;
+        const who = id ? await getUser(tx, signedIn.tenantId, id) : null;
+        return [v, who?.displayName ?? null] as const;
+      },
+      { accessMode: "read only" },
+    );
+    return c.json(
+      {
+        ...showStorage(view),
+        changedByName,
+        available: storage !== undefined,
+        allowEndpoints: storage?.allowEndpoints === true,
+        keepsFiles: storage?.keepsFiles === true,
+      },
+      200,
+      NO_STORE,
+    );
+  });
+
+  // Tries a place before it is kept: a small object written, read back and removed, each step
+  // said. The key typed is used for this only; for the place already kept, with no key typed,
+  // the kept one. Audited (`storage.test`): it makes this server connect where an admin says.
+  app.post("/api/admin/storage/test", async (c) => {
+    const signedIn = c.get("auth") as SignedIn;
+    const { tenantId } = signedIn;
+    if (!storage) return c.json({ error: "storage can't be changed on this server" }, 409);
+    let choice: StorageChoice;
+    try {
+      choice = choiceOf(await jsonBody(c));
+    } catch (e) {
+      if (e instanceof Refusal) return c.json({ error: e.message, ...e.extra }, 400, NO_STORE);
+      throw e;
+    }
+    if (!(await stillAdmin(signedIn))) return c.json({ error: "forbidden" }, 403, NO_STORE);
+    const config = await db.withTenant(
+      tenantId,
+      (tx) =>
+        testConfig(tx, tenantId, choice, { sealKey: storage.keys.open, local: storage.local }),
+      { accessMode: "read only" },
+    );
+    if (config === null) {
+      const field = choice.kind === "s3" ? "secretAccessKey" : "accountKey";
+      return c.json({ error: "the key is needed to try this place", field }, 400, NO_STORE);
+    }
+    const result = await probeStorage(config, tenantId);
+    const failed = result.steps.find((s) => !s.ok);
+    await db.withTenant(tenantId, (tx) =>
+      audit(tx, tenantId, {
+        actor: userPrincipal(signedIn.principal.userId),
+        action: "storage.test",
+        decision: "allow",
+        client: FIRST_PARTY.id,
+        detail: {
+          ...placeOf(choice),
+          ok: result.ok,
+          ...(failed?.problem ? { problem: failed.problem } : {}),
+          ...(failed?.code ? { code: failed.code } : {}),
+        },
+      }),
+    );
+    return c.json(result, 200, NO_STORE);
+  });
+
+  // Keeps a place as where the tenant's files go: tried first (a place that doesn't work isn't
+  // kept), then recorded, and the files already kept are copied over by a job. A recent sign-in,
+  // as any change of where content goes.
+  app.post("/api/admin/storage", async (c) => {
+    const signedIn = c.get("auth") as SignedIn;
+    const { tenantId } = signedIn;
+    if (!storage) return c.json({ error: "storage can't be changed on this server" }, 409);
+    const body = await jsonBody(c);
+    let choice: StorageChoice;
+    try {
+      choice = choiceOf(body);
+    } catch (e) {
+      if (e instanceof Refusal) return c.json({ error: e.message, ...e.extra }, 400, NO_STORE);
+      throw e;
+    }
+    const place = placeOf(choice);
+    // An admin still, before this server connects anywhere with the tenant's kept key.
+    if (!(await stillAdmin(signedIn))) return c.json({ error: "forbidden" }, 403, NO_STORE);
+    if (!recent(signedIn)) {
+      await auditDenial(signedIn, {
+        action: "storage.change",
+        client: FIRST_PARTY.id,
+        detail: { ...place, reason: "sign-in-again" },
+      });
+      return c.json({ error: "sign in again to do this", signIn: "/auth/sign-in" }, 403, NO_STORE);
+    }
+    const config = await db.withTenant(
+      tenantId,
+      (tx) =>
+        testConfig(tx, tenantId, choice, { sealKey: storage.keys.open, local: storage.local }),
+      { accessMode: "read only" },
+    );
+    if (config !== null) {
+      const tried = await probeStorage(config, tenantId);
+      if (!tried.ok) {
+        await auditDenial(signedIn, {
+          action: "storage.change",
+          client: FIRST_PARTY.id,
+          detail: { ...place, reason: "probe-failed" },
+        });
+        return c.json({ error: "that place didn't work", probe: tried }, 409, NO_STORE);
+      }
+    }
+    const done = await change(
+      c,
+      { action: "storage.change", client: FIRST_PARTY.id, detail: place },
+      async (tx, who) => {
+        try {
+          const changed = await changeTenantStorage(tx, tenantId, choice, {
+            by: userPrincipal(who.principal.userId),
+            sealKey: storage.keys.seal(),
+          });
+          if (changed.outcome !== "unchanged") {
+            await audit(tx, tenantId, {
+              actor: userPrincipal(who.principal.userId),
+              action: "storage.change",
+              decision: "allow",
+              client: FIRST_PARTY.id,
+              detail: { ...place, outcome: changed.outcome, version: changed.version },
+            });
+          }
+          return changed;
+        } catch (e) {
+          if (e instanceof StorageBusyError) throw new Refusal(409, e.reason, e.message);
+          if (e instanceof StorageChoiceError) {
+            throw new Refusal(400, "invalid", e.message, { field: e.field });
+          }
+          throw e;
+        }
+      },
+      { recentSignIn: true },
+    );
+    if (done instanceof Response) return done;
+    storage.stores.forget(tenantId);
+    if (done.outcome === "moving") {
+      await storage.requestJob({ tenantId, version: done.version, task: "move" });
+    }
+    return c.json({ outcome: done.outcome }, 200, NO_STORE);
+  });
+
+  // The last move again (after files failed to copy), or removing the old copies once all are
+  // over. Recent sign-in for the removal: what it deletes can't be brought back from here.
+  for (const task of ["move", "clean"] as const) {
+    app.post(`/api/admin/storage/${task === "move" ? "retry" : "remove-old"}`, async (c) => {
+      const signedIn = c.get("auth") as SignedIn;
+      const { tenantId } = signedIn;
+      if (!storage) return c.json({ error: "storage can't be changed on this server" }, 409);
+      const action = task === "move" ? "storage.retry" : "storage.remove-old";
+      const done = await change(
+        c,
+        { action, client: FIRST_PARTY.id, detail: {} },
+        async (tx, who) => {
+          const by = userPrincipal(who.principal.userId);
+          try {
+            const { version } =
+              task === "move"
+                ? await restartMove(tx, tenantId, by)
+                : await startCleaning(tx, tenantId, by);
+            await audit(tx, tenantId, {
+              actor: by,
+              action,
+              decision: "allow",
+              client: FIRST_PARTY.id,
+              detail: { version },
+            });
+            return { version };
+          } catch (e) {
+            if (e instanceof StorageBusyError) throw new Refusal(409, e.reason, e.message);
+            if (e instanceof RangeError) throw new Refusal(409, "not-now", e.message);
+            throw e;
+          }
+        },
+        { recentSignIn: task === "clean" },
+      );
+      if (done instanceof Response) return done;
+      storage.stores.forget(tenantId);
+      await storage.requestJob({ tenantId, version: done.version, task });
+      return c.json({ ok: true }, 200, NO_STORE);
     });
   }
 

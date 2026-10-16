@@ -3,7 +3,7 @@ import { appendAudit } from "@openhoard/core-audit";
 import { ingest, INGEST_LIMITS, IngestError, type IngestResult } from "@openhoard/core-catalog";
 import { getTenant, isId, type Database, type Tx } from "@openhoard/core-db";
 import { findUserByEmail, getUser, userPrincipal, type User } from "@openhoard/core-identity";
-import { blobPath, type BlobStore } from "@openhoard/core-storage";
+import { blobPath, type BlobStorage } from "@openhoard/core-storage";
 import { ImapFlow } from "imapflow";
 import type { Logger } from "pino";
 import PostalMime, { type Address, type Email } from "postal-mime";
@@ -69,7 +69,7 @@ export interface MailSession {
 
 export interface MailInDeps {
   db: Database;
-  store: BlobStore;
+  store: BlobStorage;
   tenantKey: (tenantId: string) => Promise<Uint8Array>;
   /** Queues enrichment once a file committed (core/jobs enqueueAfterIngest). */
   enqueue?: (tenantId: string, result: IngestResult) => Promise<unknown>;

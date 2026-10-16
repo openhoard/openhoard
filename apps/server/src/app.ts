@@ -3,7 +3,7 @@ import { Hono, type Context } from "hono";
 import { secureHeaders } from "hono/secure-headers";
 import type { Database } from "@openhoard/core-db";
 import type { Logger } from "pino";
-import { mountAdminApi } from "./admin-api.js";
+import { mountAdminApi, type StorageDeps } from "./admin-api.js";
 import { builtAdminUi, mountAdminUi } from "./admin-ui.js";
 import { mountAuth, type AuthEnv } from "./auth.js";
 import { adminGroupOf, type Config } from "./config.js";
@@ -34,6 +34,8 @@ export interface AppDeps {
   unavailableSources?: readonly UnavailableSource[];
   /** True once the server is shutting down: /healthz then says unavailable. */
   stopping?: () => boolean;
+  /** Tenants' storage: where each tenant's files are kept, for the admin API. */
+  storage?: StorageDeps;
   /** Where uploads go (T-1206); needed when `uploads` is configured. */
   uploads?: Pick<UploadDeps, "store" | "tenantKey" | "enqueue">;
   /** SCIM limits (tests lower or raise them). */
@@ -115,6 +117,7 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
       db: deps.db,
       sources: config.sources,
       ...(deps.unavailableSources ? { unavailable: deps.unavailableSources } : {}),
+      ...(deps.storage ? { storage: deps.storage } : {}),
       ...(log ? { log } : {}),
     });
     // The tag review inbox, for whoever is signed in (T-903).

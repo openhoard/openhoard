@@ -27,6 +27,11 @@ export type StorageConfig =
       accessKeyId?: string;
       secretAccessKey?: string;
       root?: string;
+      /**
+       * Whether credentials may also come from the server's environment, config files and EC2
+       * instance role (default true). False for a tenant's own bucket: its keys, nothing else.
+       */
+      ambientCredentials?: boolean;
     }
   | {
       kind: "azblob";
@@ -98,6 +103,9 @@ export function operatorFor(config: StorageConfig): Operator {
           access_key_id: config.accessKeyId,
           secret_access_key: config.secretAccessKey,
           root: config.root,
+          ...(config.ambientCredentials === false
+            ? { disable_config_load: "true", disable_ec2_metadata: "true" }
+            : {}),
         }),
       );
     case "azblob":
@@ -267,6 +275,22 @@ export class BlobStore {
   /** Removes a blob. Removing one that is not there is not an error. */
   async delete(tenantId: string, blobId: string): Promise<void> {
     await this.op.delete(blobPath(tenantId, blobId));
+  }
+
+  /**
+   * Whether `other` is the same storage as this one, whatever their settings say (one bucket
+   * reached by two addresses, say): a marker written here under the tenant's
+   * `.openhoard-place/` is looked for there, then removed. A move between the two would find
+   * every blob already there, and removing the "old" copies would remove the only ones.
+   */
+  async sameStorageAs(other: BlobStore, tenantId: string): Promise<boolean> {
+    const marker = `${tenantSegment(tenantId)}/.openhoard-place/${randomUUID()}`;
+    await this.op.write(marker, Buffer.from("openhoard"));
+    try {
+      return await other.op.exists(marker);
+    } finally {
+      await this.op.delete(marker).catch(() => {});
+    }
   }
 
   /**

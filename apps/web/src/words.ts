@@ -1,4 +1,4 @@
-import type { Client, ReviewItem, Source, Trust } from "./api.js";
+import type { Client, ProbeProblem, ReviewItem, Source, Trust } from "./api.js";
 
 /*
  * A source's sync in an admin's words. Which state it is in, and so which command lifts it, the
@@ -401,3 +401,45 @@ export const LEFT_OUT_CODES: readonly string[] = [...LEFT_OUT.keys()];
 export function leftOutText(reason: string): string {
   return LEFT_OUT.get(reason) ?? `Another reason (${reason})`;
 }
+
+/*
+ * Where a tenant's files are kept (the Storage page): the place, and why trying one failed, in
+ * an admin's words.
+ */
+
+/** A place, said whole: "Amazon S3 bucket acme-hoard (us-east-1), folder openhoard". */
+export function placeText(
+  kind: "local" | "s3" | "azblob",
+  settings: Record<string, string>,
+): string {
+  const folder = settings.prefix ? `, folder ${settings.prefix}` : "";
+  if (kind === "local") return "this server's own disk";
+  if (kind === "s3") {
+    const where = settings.endpoint ? `at ${settings.endpoint}` : `(${settings.region ?? "?"})`;
+    return `the ${settings.endpoint ? "S3-compatible" : "Amazon S3"} bucket ${settings.bucket ?? "?"} ${where}${folder}`;
+  }
+  return `the Azure Blob container ${settings.container ?? "?"} in storage account ${settings.accountName ?? "?"}${folder}`;
+}
+
+/** Why a step of trying a place failed. */
+export const PROBE_WORDS: Record<ProbeProblem, string> = {
+  "not-found":
+    "The bucket or container wasn't found. Check its name (and for S3, its region): OpenHoard doesn't create it.",
+  denied:
+    "The keys were refused, or don't allow reading, writing and deleting there. Check the key and what it is allowed to do.",
+  "cant-list":
+    'Asking for a file that isn\'t there was refused instead of answered "not found". The keys may be wrong, or, on S3, not allowed to list the bucket (s3:ListBucket), which OpenHoard needs.',
+  "wrong-region": "The bucket is in another region than the one given.",
+  unreachable: "Nothing answered. Check the address, and that this server can reach it.",
+  busy: "The service asked to slow down. Try again in a minute.",
+  mismatch: "What was read back wasn't what was written: the service changed it.",
+  timeout: "No answer within 15 seconds.",
+  failed: "It didn't work.",
+};
+
+export const PROBE_STEPS: Record<"check" | "write" | "read" | "delete", string> = {
+  check: "Look for a file that isn't there",
+  write: "Write a small test file",
+  read: "Read it back",
+  delete: "Remove it",
+};

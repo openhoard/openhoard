@@ -3,7 +3,14 @@ import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
 import { openDatabase } from "@openhoard/core-db";
 import { startJobs, type Jobs } from "@openhoard/core-jobs";
-import { BlobStore, blobContentSource } from "@openhoard/core-storage";
+import {
+  BlobStore,
+  blobContentSource,
+  cleanTenantBlobs,
+  moveTenantBlobs,
+  TenantBlobStores,
+  type StorageConfig,
+} from "@openhoard/core-storage";
 import { adminArgument, runAdmin } from "./admin.js";
 import { closeApp, createApp } from "./app.js";
 import { runConnect } from "./connect.js";
@@ -13,7 +20,7 @@ import { checkMailboxes, startMailIn } from "./mail-in.js";
 import { createServerModels, modelsStartupWarnings } from "./models.js";
 import { runInit, soloArgument } from "./solo.js";
 import { prepareSources, type ServerSources } from "./sources.js";
-import { blobsIn, tenantKeyStore } from "./tenant-keys.js";
+import { blobsIn, storageKeyStore, tenantKeyStore } from "./tenant-keys.js";
 import { runTunnel } from "./tunnel.js";
 import { watchSources } from "./watch.js";
 
@@ -87,9 +94,18 @@ const tenantKey = tenantKeyStore(config.dataDir, { hasContent: blobsIn(db) });
 // The configured sources (T-303): their zones, bindings and connectors. A source that can't be
 // set up stops the server, naming it.
 let sources: ServerSources;
-// What OpenHoard holds itself (managed zones: uploads, T-1206), in <dataDir>/blobs.
-const blobStore = BlobStore.open({ kind: "fs", root: join(config.dataDir, "blobs") });
+// What OpenHoard holds itself (managed zones: uploads, T-1206): on the server's disk, in
+// <dataDir>/blobs, unless a tenant's admin chose a bucket of its own (core/storage
+// tenant-storage.ts), whose key is sealed with <dataDir>/keys/storage.key.
+const localStorage: StorageConfig = { kind: "fs", root: join(config.dataDir, "blobs") };
+const storageKey = storageKeyStore(config.dataDir);
+const blobStore = new TenantBlobStores({
+  db,
+  local: BlobStore.open(localStorage),
+  sealKey: storageKey.open,
+});
 const blobs = blobContentSource(blobStore, { tenantKey });
+const storageLog = log.child({ component: "storage" });
 try {
   sources = await prepareSources(db, config, {
     tenantKey,
@@ -119,6 +135,18 @@ try {
   // Content is read only from sources that opted in (`extract`): say so when models can't run.
   for (const warning of modelsStartupWarnings(models, content !== null)) log.warn(warning);
   jobs = await startJobs(db, {
+    // Tenants' storage moves and removals of old copies (core/storage), as admins start them.
+    storage: {
+      async run(job, signal) {
+        const tenant = { id: job.tenantId, key: await tenantKey(job.tenantId) };
+        const options = { log: storageLog, signal };
+        const ran =
+          job.task === "move"
+            ? await moveTenantBlobs(db, blobStore, tenant, job.version, options)
+            : await cleanTenantBlobs(db, blobStore, tenant, job.version, options);
+        return { ran };
+      },
+    },
     worker: config.jobs.worker,
     log: log.child({ component: "jobs" }),
     // Folders' content only where a folder opted in; what OpenHoard holds, always.
@@ -199,6 +227,14 @@ const app = createApp(config, log, {
   db,
   unavailableSources: sources.unavailable,
   stopping: () => stopping,
+  storage: {
+    stores: blobStore,
+    keys: storageKey,
+    allowEndpoints: config.storage.allowEndpoints,
+    local: localStorage,
+    requestJob: (job) => jobs.requestStorageJob(job),
+    keepsFiles: config.uploads !== undefined || config.mailIn.length > 0,
+  },
   ...(config.uploads
     ? {
         uploads: {

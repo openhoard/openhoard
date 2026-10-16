@@ -50,7 +50,7 @@ tamper-evident audit log.
 **Planned** (on the [roadmap](docs/roadmap.md), not in `main`):
 
 - **Governed sharing:** "Share the forecast with Acme, read-only, until Oct 31", with external links that expire by default.
-- **Cloud buckets and Git:** move shared work into S3 or Azure Blob when you're ready; link GitHub repositories.
+- **Cloud buckets and Git:** index and move shared work in S3 or Azure Blob; link GitHub repositories. (The files OpenHoard keeps itself, uploads and mail-in, can already live in your own S3 or Azure Blob bucket, set up from the admin Storage page.)
 - **SFTP is over:** send customers a link, and they drag in 1 GB+ files from any browser, with no account and no client.
 - **No more `Final_v2_FINAL.docx`:** AI that names files, spots the real final version and warns you before you send an old one.
 - **30-day undo** on everything, and HIPAA / SOC 2 / legal-hold packs.

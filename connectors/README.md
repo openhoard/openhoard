@@ -10,10 +10,10 @@ runner drives it (see [core/jobs](../core/jobs/README.md#connector-sync)).
 **Tested by:** the contract kit (`@openhoard/sdk/testing`), which every connector runs against a
 source it can change.
 
-| Connector                 | Serves                                        | Status                                                                  |
-| ------------------------- | --------------------------------------------- | ----------------------------------------------------------------------- |
-| [`fs`](fs/)               | a local folder, indexed in place              | passes the contract kit                                                 |
-| [SharePoint](sharepoint/) | sites' document libraries, through Graph (S4) | signs in and crawls a site (T-302, T-303); changes and permissions next |
+| Connector                 | Serves                                        | Status                                                                    |
+| ------------------------- | --------------------------------------------- | ------------------------------------------------------------------------- |
+| [`fs`](fs/)               | a local folder, indexed in place              | passes the contract kit                                                   |
+| [SharePoint](sharepoint/) | sites' document libraries, through Graph (S4) | passes the contract kit; changes, permissions and throttling (fake Graph) |
 
 Planned first-party connectors: S3, Azure Blob, SharePoint/OneDrive (Microsoft Graph),
 GitHub. Community wishlist: Google Drive, Dropbox, Box, SMB/NFS shares, GitLab.

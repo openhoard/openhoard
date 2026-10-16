@@ -277,8 +277,91 @@ export interface SourceSkips {
   skips: SourceSkip[];
 }
 
+/** Where a tenant's files are kept (GET /api/admin/storage). */
+export interface Storage {
+  kind: "local" | "s3" | "azblob";
+  /** Bucket, region, endpoint, prefix, accessKeyId; account and container: never a key. */
+  settings: Record<string, string>;
+  hasSecret: boolean;
+  phase: "moving" | "active" | "cleaning";
+  previous: { kind: "local" | "s3" | "azblob"; settings: Record<string, string> } | null;
+  total: number;
+  done: number;
+  failed: number;
+  /** Files in neither place: lost before the move. */
+  lost: number;
+  lastError: string | null;
+  changedAt: string | null;
+  changedBy: string | null;
+  /** Who chose it, by name, when that was a person. */
+  changedByName: string | null;
+  /** Whether this server lets storage be changed at all. */
+  available: boolean;
+  /** Whether endpoints other than S3's and Azure's own may be named. */
+  allowEndpoints: boolean;
+  /** Whether this server keeps files (uploads or mail-in on). */
+  keepsFiles: boolean;
+}
+
+/** A place to keep files, as the form sends it. */
+export type StorageChoice =
+  | { kind: "local" }
+  | {
+      kind: "s3";
+      bucket: string;
+      region: string;
+      endpoint?: string;
+      prefix?: string;
+      accessKeyId: string;
+      secretAccessKey?: string;
+    }
+  | {
+      kind: "azblob";
+      accountName: string;
+      container: string;
+      endpoint?: string;
+      prefix?: string;
+      accountKey?: string;
+    };
+
+export type ProbeProblem =
+  | "not-found"
+  | "denied"
+  | "cant-list"
+  | "wrong-region"
+  | "unreachable"
+  | "busy"
+  | "mismatch"
+  | "timeout"
+  | "failed";
+
+/** How trying a place went, step by step. */
+export interface Probe {
+  ok: boolean;
+  steps: {
+    step: "check" | "write" | "read" | "delete";
+    ok: boolean;
+    problem?: ProbeProblem;
+    code?: string;
+  }[];
+}
+
+/** How asking for something about storage ended. */
+export type StorageAsked =
+  | { ended: "done"; outcome?: "unchanged" | "rekeyed" | "moving" }
+  | { ended: "tested"; probe: Probe }
+  | { ended: "probe-failed"; probe: Probe }
+  | { ended: "invalid"; field: string | null; message: string }
+  | { ended: "busy"; message: string }
+  | { ended: "sign-in-again" | "refused" | "failed" };
+
 export interface Api {
   me(): Promise<Me>;
+  storage(): Promise<Storage>;
+  testStorage(choice: StorageChoice): Promise<StorageAsked>;
+  keepStorage(choice: StorageChoice): Promise<StorageAsked>;
+  retryStorageMove(): Promise<StorageAsked>;
+  removeOldCopies(): Promise<StorageAsked>;
   sourceSkips(source: string, reason?: string): Promise<SourceSkips>;
   health(query: HealthQuery): Promise<HealthReportPage>;
   exportHealth(query: HealthQuery): Promise<HealthSheet>;
@@ -328,6 +411,43 @@ export function createApi(fetcher: typeof fetch): Api {
       // Not this server's answer (a proxy's page, say).
       throw new ApiError(res.status);
     }
+  }
+  /** A POST about storage, and how it ended. `test`: a 200 is a probe's answer. */
+  async function askStorage(path: string, body: object, test: boolean): Promise<StorageAsked> {
+    let res: Response;
+    try {
+      res = await send(path, "POST", body);
+    } catch (err) {
+      if (err instanceof SignedOut) throw err;
+      return { ended: "failed" };
+    }
+    const why = (await res.json().catch(() => null)) as Record<string, unknown> | null;
+    if (res.ok) {
+      if (test) {
+        const probe = asProbe(why);
+        return probe === null ? { ended: "failed" } : { ended: "tested", probe };
+      }
+      const outcome = why?.outcome;
+      return outcome === "unchanged" || outcome === "rekeyed" || outcome === "moving"
+        ? { ended: "done", outcome }
+        : { ended: "done" };
+    }
+    const message = typeof why?.error === "string" ? why.error : "";
+    if (res.status === 400) {
+      return {
+        ended: "invalid",
+        field: typeof why?.field === "string" ? why.field : null,
+        message,
+      };
+    }
+    if (res.status === 409) {
+      const probe = asProbe(why?.probe);
+      return probe !== null ? { ended: "probe-failed", probe } : { ended: "busy", message };
+    }
+    if (res.status === 403) {
+      return { ended: typeof why?.signIn === "string" ? "sign-in-again" : "refused" };
+    }
+    return { ended: "failed" };
   }
   return {
     async me() {
@@ -541,6 +661,52 @@ export function createApi(fetcher: typeof fetch): Api {
         }),
       };
     },
+    async storage() {
+      const b = (await get("/api/admin/storage")) as Record<string, unknown> | null;
+      const kinds = ["local", "s3", "azblob"];
+      const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+      const settings = (v: unknown) =>
+        typeof v === "object" && v !== null && !Array.isArray(v)
+          ? Object.fromEntries(
+              Object.entries(v as Record<string, unknown>).filter(
+                (kv): kv is [string, string] => typeof kv[1] === "string",
+              ),
+            )
+          : {};
+      if (
+        !b ||
+        !kinds.includes(b.kind as string) ||
+        !["moving", "active", "cleaning"].includes(b.phase as string)
+      ) {
+        throw new ApiError(200);
+      }
+      const prev = b.previous as Record<string, unknown> | null | undefined;
+      return {
+        kind: b.kind as Storage["kind"],
+        settings: settings(b.settings),
+        hasSecret: b.hasSecret === true,
+        phase: b.phase as Storage["phase"],
+        previous:
+          prev && kinds.includes(prev.kind as string)
+            ? { kind: prev.kind as Storage["kind"], settings: settings(prev.settings) }
+            : null,
+        total: n(b.total),
+        done: n(b.done),
+        failed: n(b.failed),
+        lost: n(b.lost),
+        lastError: text(b.lastError),
+        changedAt: text(b.changedAt),
+        changedBy: text(b.changedBy),
+        changedByName: text(b.changedByName),
+        available: b.available === true,
+        allowEndpoints: b.allowEndpoints === true,
+        keepsFiles: b.keepsFiles === true,
+      };
+    },
+    testStorage: (choice) => askStorage("/api/admin/storage/test", { choice }, true),
+    keepStorage: (choice) => askStorage("/api/admin/storage", { choice }, false),
+    retryStorageMove: () => askStorage("/api/admin/storage/retry", {}, false),
+    removeOldCopies: () => askStorage("/api/admin/storage/remove-old", {}, false),
     async health(query) {
       // A POST: reading it is recorded (the server's Origin check keeps other sites out).
       const res = await send("/api/admin/health", "POST", query);
@@ -846,4 +1012,43 @@ function asHealthFinding(x: unknown): HealthFinding {
       };
     }),
   };
+}
+
+const PROBLEMS = [
+  "not-found",
+  "denied",
+  "cant-list",
+  "wrong-region",
+  "unreachable",
+  "busy",
+  "mismatch",
+  "timeout",
+  "failed",
+] as const;
+
+function asProbe(x: unknown): Probe | null {
+  if (typeof x !== "object" || x === null) return null;
+  const p = x as Record<string, unknown>;
+  if (typeof p.ok !== "boolean" || !Array.isArray(p.steps)) return null;
+  const steps: Probe["steps"] = [];
+  for (const raw of p.steps) {
+    const s = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>;
+    if (
+      (s.step !== "check" && s.step !== "write" && s.step !== "read" && s.step !== "delete") ||
+      typeof s.ok !== "boolean"
+    ) {
+      return null;
+    }
+    steps.push({
+      step: s.step,
+      ok: s.ok,
+      ...((PROBLEMS as readonly unknown[]).includes(s.problem)
+        ? { problem: s.problem as ProbeProblem }
+        : s.ok
+          ? {}
+          : { problem: "failed" as const }),
+      ...(typeof s.code === "string" && /^[A-Za-z]{1,64}$/.test(s.code) ? { code: s.code } : {}),
+    });
+  }
+  return { ok: p.ok, steps };
 }

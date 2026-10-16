@@ -562,6 +562,12 @@ importers:
       '@openhoard/core-catalog':
         specifier: workspace:^
         version: link:../catalog
+      '@openhoard/core-db':
+        specifier: workspace:^
+        version: link:../db
+      drizzle-orm:
+        specifier: ^0.45.3
+        version: 0.45.3(@electric-sql/pglite@0.5.8)(@types/pg@8.23.1)(pg@8.23.0)
       opendal:
         specifier: ^0.49.11
         version: 0.49.11
@@ -569,6 +575,9 @@ importers:
       '@openhoard/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@openhoard/testkit':
+        specifier: workspace:*
+        version: link:../../packages/testkit
 
   core/summarize:
     devDependencies:

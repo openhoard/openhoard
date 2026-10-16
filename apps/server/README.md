@@ -238,6 +238,39 @@ two tenants hold the same file. Back them up with the database; losing one makes
 that tenant unverifiable. Servers sharing one database must share them (a KMS-backed store is for
 later).
 
+## Where files are kept: the server's disk or a tenant's bucket
+
+What OpenHoard holds itself (uploads, mail-in: managed zones) is kept on the server's disk, in
+`<dataDir>/blobs`, unless a tenant's admin chooses a bucket of the tenant's own on the admin app's
+**Storage** page: Amazon S3 (or an S3-compatible service), or Azure Blob Storage
+([core/storage](../../core/storage/README.md#a-tenants-own-bucket)). The page guides the setup in
+the cloud's console, tries the bucket (a missing file looked for, to show the key may list; a
+small file written, read back and removed), and only then keeps it.
+
+- **Keys.** A bucket is reached with the key its admin types, and nothing else: never this
+  server's own AWS environment or instance role. The key is sealed (AES-256-GCM) with the
+  server's **storage key**, `<dataDir>/keys/storage.key` (made when the first key is kept, 0600,
+  never replaced), and never shown again. Back it up with the database: without it the kept keys
+  can't be read, until each admin types theirs again. **Several servers on one database share
+  one storage key**: copy the file from the server that made it before the others start; a
+  server without it says so and reads no bucket rather than making a different one.
+- **Moving.** New files go to the new place at once; a job copies those already kept, each
+  checked against its id, and until it has, a file is read from where it was. The old copies
+  stay until the admin removes them (recent sign-in), which copies over anything put meanwhile
+  on a server that hadn't seen the change yet (each server reads a tenant's choice again after
+  at most 10 s). One move at a time. A file in neither place is counted as **lost** and doesn't
+  hold the move up; one that couldn't be copied is (try the move again). If the new place turns
+  out to be the old one (the same bucket under another name), nothing is copied or removed.
+- **Other endpoints.** A tenant may name an endpoint other than S3's and Azure's own (MinIO,
+  Cloudflare R2, Azurite) only if `storage.allowEndpoints` is true in this server's config: off
+  by default, since it makes this server connect wherever an admin of any tenant says.
+- **Audit.** `storage.test` (where, and how it went), `storage.change`, `storage.retry`,
+  `storage.remove-old`, with the place and never the key; refusals too.
+
+```json
+{ "storage": { "allowEndpoints": false } }
+```
+
 ## Models (T-404, T-405)
 
 Off by default: with no `models.providers`, enrichment runs no model. Each provider has an id, a
@@ -664,6 +697,11 @@ The **admin API** is JSON under `/api/admin`, for the admin web app (below) and 
 | `POST /api/admin/audit/verify`              | Checks the whole chain: `{"ok": true, "count", "head"}` or where it breaks                   |
 | `POST /api/admin/health`                    | The File Health Report in core's words (`{"show": 1 to 100, "staleDays", "largeMb"}`)        |
 | `POST /api/admin/health/export`             | The same as CSV, every file listed (`{"staleDays", "largeMb"}`); `x-report-cut`              |
+| `GET /api/admin/storage`                    | Where the tenant's files are kept (never a key), and a move's progress                       |
+| `POST /api/admin/storage/test`              | `{"choice": …}`: write, read back and remove a small file there; each step's result          |
+| `POST /api/admin/storage`                   | `{"choice": …}`: tried again, then kept (recent sign-in); a job copies the files over        |
+| `POST /api/admin/storage/retry`             | The last move again, after files failed to copy                                              |
+| `POST /api/admin/storage/remove-old`        | Removes the old copies once all are over (recent sign-in)                                    |
 | `POST /api/admin/files/:id/not-injection`   | The admin's verdict: a flagged file is not an injection; the flag comes off (`flagCleared`)  |
 | `DELETE /api/admin/files/:id/not-injection` | Withdraws it: the detector judges the file again at its next enrichment (`withdrawn`)        |
 

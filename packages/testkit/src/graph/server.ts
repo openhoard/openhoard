@@ -473,7 +473,7 @@ export class FakeGraph {
       });
     }
     if (range) {
-      return new Response(contentStream(this.tenant, item, range), {
+      return new Response(bytesOf(item, range) ?? contentStream(this.tenant, item, range), {
         status: 206,
         headers: {
           ...headers,
@@ -482,7 +482,7 @@ export class FakeGraph {
         },
       });
     }
-    return new Response(contentStream(this.tenant, item), {
+    return new Response(bytesOf(item) ?? contentStream(this.tenant, item), {
       status: 200,
       headers: { ...headers, "content-length": String(item.size) },
     });
@@ -707,4 +707,10 @@ function safeEqual(a: string, b: string): boolean {
   const x = Buffer.from(a);
   const y = Buffer.from(b);
   return x.length === y.length && timingSafeEqual(x, y);
+}
+
+/** A file's bytes a test set (TenantStore.write()), or one inclusive range of them. */
+function bytesOf(item: StoredItem, range?: { start: number; end: number }): Uint8Array | null {
+  if (!item.bytes) return null;
+  return range ? item.bytes.subarray(range.start, range.end + 1) : item.bytes;
 }

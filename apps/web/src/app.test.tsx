@@ -66,6 +66,11 @@ function fakeApi(over: Partial<Api> = {}): Api {
     health: vi.fn(async () => Promise.reject(new ApiError(0))),
     exportHealth: vi.fn(async () => ({ ended: "failed" as const })),
     dismissInjection: vi.fn(async () => "done" as const),
+    storage: vi.fn(async () => Promise.reject(new ApiError(0))),
+    testStorage: vi.fn(async () => ({ ended: "failed" as const })),
+    keepStorage: vi.fn(async () => ({ ended: "failed" as const })),
+    retryStorageMove: vi.fn(async () => ({ ended: "failed" as const })),
+    removeOldCopies: vi.fn(async () => ({ ended: "failed" as const })),
     sourceSkips: vi.fn(async () => ({ total: 0, byReason: {}, skips: [] })),
     ...over,
   };
