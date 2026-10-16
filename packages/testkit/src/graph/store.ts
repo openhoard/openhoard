@@ -9,6 +9,8 @@ export interface StoredItem extends FakeItem {
   version: number;
   /** Bumped only when the bytes change (cTag), so a rename never forces a re-download. */
   contentVersion: number;
+  /** Bytes a test set (write()), served instead of the generated content. */
+  bytes?: Uint8Array;
 }
 
 export interface Tombstone {
@@ -107,6 +109,18 @@ export class TenantStore {
       item.contentKey = `${item.id}@c${item.contentVersion}`;
     }
     if (patch.modifiedBy !== undefined) item.modifiedBy = patch.modifiedBy;
+    this.touch(item, "updated");
+    return item;
+  }
+
+  /** Sets a file's exact bytes, as an upload of new content would. */
+  write(id: string, bytes: Uint8Array): StoredItem {
+    const item = this.require(id);
+    if (item.kind !== "file") throw new TypeError("folders have no content");
+    item.bytes = bytes;
+    item.size = bytes.byteLength;
+    item.contentVersion++;
+    item.contentKey = `${item.id}@c${item.contentVersion}`;
     this.touch(item, "updated");
     return item;
   }

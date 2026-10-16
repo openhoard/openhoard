@@ -67,7 +67,8 @@ const connector = sharepointConnector({
 Tested (`src/connector.test.ts`, `src/graph.test.ts`, `src/e2e.slow.test.ts`) against the fake
 Graph, whose delta feed is shaped as Graph documents it, and through the sync runner into the
 catalog: a 10,000-item tenant fully indexed, and a killed sync resumed (the slow lane, in CI on
-PostgreSQL).
+PostgreSQL). It passes the connector contract kit (T-308, `src/contract.test.ts`) over one
+library of the fake, changed as people would change it: the kit sees that library as its tree.
 
 ## Following changes (T-304)
 

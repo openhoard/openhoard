@@ -636,9 +636,9 @@ describe("reading a file", () => {
       ),
     ).toBe("changed");
     expect(f.sent.some((s) => s.url.endsWith("/content"))).toBe(false);
-    // Without a version asked for, the one Graph has is returned.
+    // Without a version asked for: refused, the caller's mistake.
     const { contentVersion: _any, ...loose } = refOf(other);
-    expect((await c.read(loose, never)).contentVersion).toBe(other.contentVersion);
+    expect(errorCode(await failure(c.read(loose, never)))).toBe("permanent");
   });
 
   it("tells versions by eTag where Graph gives no hash, at the crawl and at the read alike", async () => {
@@ -683,7 +683,10 @@ describe("reading a file", () => {
     f.graph.store.delete(stored(item).id);
     expect(errorCode(await failure(c.read(refOf(item), never)))).toBe("not-found");
     for (const externalId of ["nothing", ":x", "d-x:", "d x:i-1", `${site.driveId}:../x`]) {
-      expect(errorCode(await failure(c.read({ externalId }, never))), externalId).toBe("not-found");
+      expect(
+        errorCode(await failure(c.read({ externalId, contentVersion: "q:x" }, never))),
+        externalId,
+      ).toBe("not-found");
     }
     await expect(c.read(refOf(folder), AbortSignal.abort(new Error("early")))).rejects.toThrow(
       "early",
