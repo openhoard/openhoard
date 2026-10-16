@@ -174,6 +174,9 @@ export function Health(props: {
           <button type="button" disabled={busy || loaded.state !== "ready"} onClick={take}>
             Download the spreadsheet
           </button>
+          <button type="button" disabled={loaded.state !== "ready"} onClick={() => window.print()}>
+            Print or save as PDF
+          </button>
         </div>
         <div role="alert">
           {problem && (
@@ -183,9 +186,9 @@ export function Health(props: {
           )}
         </div>
       </form>
-      <p className="muted">
+      <p className="muted no-print">
         The spreadsheet lists every file of every finding, not only the first few. Taking it is
-        recorded too.
+        recorded too. Printing gives the page as it is shown.
       </p>
       <div role="status">
         {busy && <p>Preparing the spreadsheet…</p>}

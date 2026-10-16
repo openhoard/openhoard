@@ -6,9 +6,10 @@ serves at `/admin/` (see "The admin web app" in [apps/server/README.md](../serve
 It has the shell (who is signed in, the way around, the way out) and six pages: an overview of
 the tenant's sources (and what each one's syncs left out, and why), the tags AI suggested that
 wait for a person, the AI clients its people may connect, the vocabulary, the File Health
-Report (in the server's words, and its spreadsheet), the audit log (find, check, download), and
-Storage (where the files OpenHoard holds are kept: a guided setup of a bucket of the
-organization's own on S3 or Azure, tried before it is used, and the move there).
+Report (in the server's words, to print or save as a PDF from the browser, and its
+spreadsheet), the audit log (find, check, download), and Storage (where the files OpenHoard
+holds are kept: a guided setup of a bucket of the organization's own on S3 or Azure, tried
+before it is used, and the move there).
 
 ## How it is put together
 

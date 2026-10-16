@@ -484,11 +484,12 @@ What it can't say:
 - A file every member can find or read by its visibility level alone isn't listed (that is the
   tenant's own setting; `explainLevels()` says why), and pack rules that permit beyond grants
   aren't followed.
-- Of the problems the fake tenant is seeded with (packages/testkit), it finds public links,
-  guests, files made by someone who left, stale files, duplicates and sensitive files in an
-  open site. It does not look for broken inheritance or over-long paths (the catalog keeps
-  neither an item's path nor which matched permissions are inherited); a file name carrying
-  instructions is the injection detector's flag (`risk:injection`), not a section here.
+- Of the problems the fake tenant is seeded with (packages/testkit), it finds every kind but
+  one: public links, guests, files made by someone who left, stale files, duplicates,
+  sensitive files in an open site, files flagged as carrying instructions, and over-long paths.
+  Broken inheritance is left out on purpose (Steve, 2026-10-15): the catalog doesn't keep which
+  permissions are inherited, and what a file's own permissions grant shows in the other
+  sections (shared outside, open to anyone with a link, shared with the whole organization).
 
 Each file listed carries its `reasons` (who can open it and how, who left, since when) and the
 same as one compact `detail` line. [`health-format.ts`](src/health-format.ts) (T-1002) turns a
