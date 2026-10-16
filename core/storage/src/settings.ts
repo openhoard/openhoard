@@ -86,7 +86,7 @@ function required(value: unknown, field: string, what: string): string {
 function prefixOf(value: unknown): string | undefined {
   const v = text(value, "prefix");
   if (v === undefined) return undefined;
-  const parts = v.replace(/^\/+|\/+$/g, "").split("/");
+  const parts = v.split("/");
   if (parts.length > 8 || parts.some((p) => !PREFIX_PART.test(p) || p === "." || p === "..")) {
     throw new StorageChoiceError(
       "prefix",

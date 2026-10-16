@@ -675,7 +675,7 @@ function Change(props: {
 
 function S3Help({ draft }: { draft: Draft }) {
   const bucket = draft.bucket.trim() || "YOUR-BUCKET";
-  const prefix = draft.prefix.trim().replace(/^\/+|\/+$/g, "");
+  const prefix = draft.prefix.trim();
   const policy = JSON.stringify(
     {
       Version: "2012-10-17",

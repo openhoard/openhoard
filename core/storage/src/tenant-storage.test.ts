@@ -64,7 +64,7 @@ describe("a storage choice", () => {
   };
 
   it("takes a bucket as S3 and Azure name them, and a folder inside", () => {
-    expect(checkChoice({ ...S3, prefix: "/openhoard/blobs/" })).toEqual({
+    expect(checkChoice({ ...S3, prefix: "openhoard/blobs" })).toEqual({
       ...S3,
       prefix: "openhoard/blobs",
     });
@@ -86,6 +86,7 @@ describe("a storage choice", () => {
     expect(field({ ...S3, accessKeyId: "" })).toBe("accessKeyId");
     expect(field({ ...S3, secretAccessKey: "short" })).toBe("secretAccessKey");
     expect(field({ ...S3, prefix: "a/../b" })).toBe("prefix");
+    expect(field({ ...S3, prefix: "/a/" })).toBe("prefix");
     expect(field({ kind: "azblob", accountName: "Acme", container: "c1c" })).toBe("accountName");
     expect(field({ kind: "azblob", accountName: "acme", container: "a--b" })).toBe("container");
     expect(field({ kind: "gcs" })).toBe("kind");
