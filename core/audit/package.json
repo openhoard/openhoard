@@ -26,6 +26,6 @@
   "license": "Apache-2.0",
   "dependencies": {
     "@openhoard/core-db": "workspace:^",
-    "drizzle-orm": "^0.45.3"
+    "drizzle-orm": "^0.45.4"
   }
 }
