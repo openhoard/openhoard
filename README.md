@@ -9,7 +9,6 @@
   <a href="https://github.com/openhoard/openhoard/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/openhoard/openhoard/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-B23A1F">
   <img alt="Works with any MCP agent" src="https://img.shields.io/badge/MCP-any%20agent-15110D">
-  <img alt="Storage: S3 and Azure Blob" src="https://img.shields.io/badge/storage-S3%20%7C%20Azure%20Blob-6B4A1E">
   <img alt="SharePoint: index in place" src="https://img.shields.io/badge/SharePoint-index%20in%20place-0078D4">
 </p>
 
@@ -24,29 +23,39 @@
 ---
 
 > **"Open the Acme Q3 deck."** · **"What CSVs was I working on yesterday?"** ·
-> **"Share the forecast with Acme, read-only, until Oct 31."** · **"Who can see payroll, and why?"**
+> **"Find the onboarding checklist HR wrote last spring."** · **"Who can see payroll, and why?"**
 
 OpenHoard replaces the folder tree with an AI-managed, **governed** file layer. Every file is
 indexed, tagged, summarized and access-controlled, so people and their AI agents find
 things by _meaning_, not by path. Every action is checked by policy and written to a
 tamper-evident audit log.
 
-> **Status: pre-alpha, designed in the open.** The vision below is where we're headed; see
-> the [roadmap](docs/roadmap.md) for what exists today.
+> **Status: pre-alpha, designed in the open.** What the headlines say is in `main` today,
+> tested against a simulated SharePoint tenant; the first real site is next. What is
+> **planned** is listed as such, below them. The [roadmap](docs/roadmap.md) has the order.
 
 ## The headlines
 
-|                                           |                                                                                                                                                  |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 🐉 **Your files, finally findable**       | Ask in plain English. Permission-aware search across SharePoint, cloud buckets and Git, with zero AI tokens spent per search.                    |
-| 🔒 **Every file has a guardian**          | Access follows tags, not folders. Former employees lose access automatically. External links expire by default.                                  |
-| 🧠 **The filesystem that remembers**      | "What was I working on yesterday?" "What changed in the Acme contract?" OpenHoard keeps the history, so you don't have to.                       |
-| 🏷️ **No more `Final_v2_FINAL.docx`**      | AI names, tags, deduplicates and spots the real final version, and warns you before you send an old one.                                         |
-| 🤖 **Bring any AI. Keep control.**        | Works with Claude, ChatGPT, Copilot or local models over MCP. You decide, per tag, what AI is allowed to read.                                   |
-| 🛡️ **Built for auditors, not just users** | Hash-chained audit log, 30-day undo on everything, HIPAA / SOC 2 / legal-hold packs on the roadmap.                                              |
-| 📦 **No migration required**              | Index SharePoint and OneDrive in place today. Move shared work into S3 or Azure Blob when you're ready.                                          |
-| 🚚 **SFTP is over**                       | Send customers a link. They drag in 1 GB+ files from any browser, with no account and no client, and the files land tagged in the right project. |
-| 🧩 **Open core, open edges**              | Apache-2.0. Connectors, enrichers, policy packs and skills are plugins anyone can build.                                                         |
+|                                           |                                                                                                                                                                                    |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 🐉 **Your files, finally findable**       | Ask in plain English. Permission-aware search over SharePoint and local folders; full-text search needs no AI at all.                                                              |
+| 🔒 **Every file has a guardian**          | Access follows tags, not folders, and a grant ends after 90 days unless you say otherwise. Someone removed in your identity provider (SCIM) loses access at once.                  |
+| 🧠 **The filesystem that remembers**      | OpenHoard keeps each file's versions and what each person opened through it, so "what was I working on yesterday?" has an answer.                                                  |
+| 🤖 **Bring any AI. Keep control.**        | AI assistants connect over MCP, each person signing in with OAuth 2.1, from an allowlist you approve. You decide, per tag, what each kind of AI may read.                          |
+| 🛡️ **Built for auditors, not just users** | Every decision, allowed or refused, goes into a hash-chained audit log you can verify and export.                                                                                  |
+| 🩺 **A health check for your files**      | The File Health Report lists what to look at: files open to anyone with a link, shared outside, tied to people who left, labelled restricted yet widely shared, stale, duplicated. |
+| 📦 **No migration required**              | SharePoint is indexed in place, with `Sites.Selected`, and who can open what comes with it. Nothing is copied or moved.                                                            |
+| 🧩 **Open core, open edges**              | Apache-2.0. Connectors, enrichers, policy packs and skills are separate packages on a public SDK and manifest schema.                                                              |
+
+**Planned** (on the [roadmap](docs/roadmap.md), not in `main`):
+
+- **Governed sharing:** "Share the forecast with Acme, read-only, until Oct 31", with external links that expire by default.
+- **Cloud buckets and Git:** move shared work into S3 or Azure Blob when you're ready; link GitHub repositories.
+- **SFTP is over:** send customers a link, and they drag in 1 GB+ files from any browser, with no account and no client.
+- **No more `Final_v2_FINAL.docx`:** AI that names files, spots the real final version and warns you before you send an old one.
+- **30-day undo** on everything, and HIPAA / SOC 2 / legal-hold packs.
+- **Plugins in a sandbox**, with the capabilities they declare and nothing more.
+- **Checked live with Claude, ChatGPT and Microsoft Copilot.** OpenHoard speaks standard MCP with OAuth 2.1; it is tested against the protocol, not yet against those apps.
 
 ## Why your company needs this (the slide for your boss)
 
@@ -63,11 +72,11 @@ provable access control, and AI you can actually trust with company data.
 <details>
 <summary><b>For IT: the 60-second version</b></summary>
 
-- **Deploys like any managed app:** SSO (Entra ID, Google, Okta), SCIM, silent sign-in, MDM packages (planned).
-- **Least privilege by design:** SharePoint access via `Sites.Selected`; AI clients on an allowlist; plugins sandboxed with declared capabilities.
-- **One policy layer** across SharePoint, buckets and Git, readable as "who can see this and why".
-- **Security-first AI:** prompt injection is in the threat model from day one. Text in a file can never authorize an action.
-- **No lock-in:** open source, self-hostable, one-click export of files, tags and audit history.
+- **Deploys like any managed app:** SSO (Entra ID, Google, or any OIDC provider) and SCIM today; silent sign-in and MDM packages planned.
+- **Least privilege by design:** SharePoint access via `Sites.Selected`; AI clients on an allowlist; plugin sandboxing planned.
+- **One policy layer** for everything OpenHoard indexes, readable as "who can see this and why".
+- **Security-first AI:** prompt injection is in the threat model from day one. Text in a file can never authorize an action, and files that look like they try are kept from AI assistants.
+- **No lock-in:** open source, self-hostable; the audit history exports today, files and tags export planned.
 
 </details>
 
@@ -92,18 +101,18 @@ The core makes every trust decision. Plugins extend what OpenHoard can **reach**
 
 ## Repository layout
 
-| Path                      | What lives there                                                                                    |
-| ------------------------- | --------------------------------------------------------------------------------------------------- |
-| `core/`                   | The trusted core: `identity`, `policy`, `catalog` (index + search), `summarize`, `audit`, `sandbox` |
-| `connectors/`             | Storage and source connectors (S3, Azure Blob, SharePoint, Git hosts, …)                            |
-| `enrichers/`              | Extractors and taggers for specific file types                                                      |
-| `packs/`                  | Policy and tag-vocabulary packs (legal, healthcare, manufacturing, …)                               |
-| `skills/`                 | Agent skills built on the core MCP tools                                                            |
-| `clients/`                | Web app, desktop client, Office/Teams integrations                                                  |
-| `packages/schemas`        | Versioned JSON Schemas for plugin manifests and other contracts                                     |
-| `apps/server`, `apps/cli` | The gateway (HTTP, soon MCP) and the `openhoard` CLI (npm; PyPI twin in `packages/cli-py`)          |
-| `apps/web`                | The admin web app (React, Vite): static files the server serves at `/admin/`                        |
-| `assets/`                 | Logo and brand assets                                                                               |
+| Path                      | What lives there                                                                                            |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `core/`                   | The trusted core: `identity`, `policy`, `catalog` (index + search), `summarize`, `audit`, `sandbox`         |
+| `connectors/`             | Source connectors: SharePoint and local folders (`fs`), and an example to start from                        |
+| `enrichers/`              | Extractors and taggers for specific file types                                                              |
+| `packs/`                  | Policy and tag-vocabulary packs: a general-business starter so far                                          |
+| `skills/`                 | Agent skills built on the core MCP tools                                                                    |
+| `clients/`                | Client integrations: a browser extension so far                                                             |
+| `packages/schemas`        | Versioned JSON Schemas for plugin manifests and other contracts                                             |
+| `apps/server`, `apps/cli` | The gateway (HTTP API, MCP server, admin CLI) and the `openhoard` CLI (npm; PyPI twin in `packages/cli-py`) |
+| `apps/web`                | The admin web app (React, Vite): static files the server serves at `/admin/`                                |
+| `assets/`                 | Logo and brand assets                                                                                       |
 
 ## Try it
 

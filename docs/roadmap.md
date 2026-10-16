@@ -2,14 +2,18 @@
 
 Durations assume a small team building with AI coding tools. Dates will be set as work starts.
 
-**Where we are (2026-10-03).** M0 (spikes S1–S3, ADRs, repo foundations) is done; S4–S8 are
-partial or not run. M1 is in progress: core, search, policy, audit, identity and the MCP server
-are built; the SharePoint connector crawls a fake tenant and still needs delta, permission import,
-a real site, and wiring into the server. **M1 exits when one real SharePoint site is indexed in
-place and three named people find files through Claude weekly for two weeks.** The solo install
-(`init --solo`, a local folder, Claude Desktop) is a stepping stone — the dogfood path and the
-open-source on-ramp — and is frozen at what is merged until then. Website, launch and M2+ work
-wait for M1 exit. The order of work is in [CLAUDE.md](../CLAUDE.md).
+**Where we are (2026-10-15).** M0 (spikes S1–S3, ADRs, repo foundations) is done; S4–S8 are
+partial or not run, waiting on a real tenant. M1 is in progress: core, search, policy, audit,
+identity and the MCP server are built, and the SharePoint connector crawls, follows changes
+(delta), imports permissions as grants and paces itself to Graph's limits, all through the
+server's own config, against a simulated tenant. The review inbox, audit verify and export, the
+File Health Report and the admin web app have their doors. What is left for M1 needs the real
+world: one real SharePoint site, live runs with real AI clients, and three people using it.
+**M1 exits when one real SharePoint site is indexed in place and three named people find files
+through Claude weekly for two weeks.** The solo install (`init --solo`, a local folder, Claude
+Desktop) is a stepping stone (the dogfood path and the open-source on-ramp) and is frozen at
+what is merged until then. Website, launch and M2+ work wait for M1 exit. The order of work is
+in [CLAUDE.md](../CLAUDE.md).
 
 | Milestone                   | Scope                                                                                                                                                                                                                                                                              | Exit criteria                                                                                                                                                                   |
 | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
