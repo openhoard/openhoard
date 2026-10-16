@@ -36,7 +36,6 @@ beforeEach(() => {
     secret: "secret",
     certificate: cert.certificate,
     appRoles: ["Sites.Selected"],
-    delegatedScopes: ["Sites.Selected", "User.Read"],
   });
 });
 
@@ -62,15 +61,6 @@ const app = (over: Record<string, string> = {}) => ({
   client_id: CLIENT,
   client_secret: "secret",
   scope: `${GRAPH}/.default`,
-  ...over,
-});
-const obo = (assertion: string, over: Record<string, string> = {}) => ({
-  grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-  requested_token_use: "on_behalf_of",
-  client_id: CLIENT,
-  client_secret: "secret",
-  scope: `${GRAPH}/.default`,
-  assertion,
   ...over,
 });
 /** A client assertion as an app would sign it, with whatever is wrong with it. */
@@ -123,7 +113,6 @@ describe("the client credentials grant", () => {
     expect(await entra.verify(bySecret.body.access_token as string)).toEqual({
       appId: CLIENT,
       roles: ["Sites.Selected"],
-      scopes: [],
     });
     const byCert = await ask(await withCert());
     expect(byCert.status).toBe(200);
@@ -234,81 +223,6 @@ describe("the client credentials grant", () => {
   });
 });
 
-describe("the on-behalf-of grant", () => {
-  const member = () =>
-    tenant.users.find((u) => u.active && !u.guest) as { id: string; upn: string };
-
-  it("exchanges a user's token for this app into a delegated Graph token", async () => {
-    const a = await ask(obo(await entra.userToken(member().id, CLIENT)));
-    expect(a.status).toBe(200);
-    expect(a.body.scope).toBe(`${GRAPH}/Sites.Selected ${GRAPH}/User.Read`);
-    expect(await entra.verify(a.body.access_token as string)).toEqual({
-      appId: CLIENT,
-      roles: [],
-      scopes: ["Sites.Selected", "User.Read"],
-      userId: member().id,
-    });
-    const one = await ask(
-      obo(await entra.userToken(member().id, CLIENT), {
-        scope: `${GRAPH}/User.Read offline_access`,
-      }),
-    );
-    expect(one.body.scope).toBe(`${GRAPH}/User.Read`);
-  });
-
-  it("refuses what Entra refuses", async () => {
-    const user = member();
-    const codes = async (form: Record<string, string>) => {
-      const a = await ask(form);
-      return [a.body.error, a.body.error_codes?.[0]];
-    };
-    const good = () => entra.userToken(user.id, CLIENT);
-    expect(await codes(obo(await good(), { requested_token_use: "" }))).toEqual([
-      "invalid_request",
-      900144,
-    ]);
-    expect(await codes(obo("not-a-token"))).toEqual(["invalid_grant", 50013]);
-    expect(await codes(obo(await entra.userToken(user.id, "another-app")))).toEqual([
-      "invalid_grant",
-      500131,
-    ]);
-    expect(
-      await codes(obo(await entra.userToken(user.id, CLIENT, { expiresInSeconds: -5 }))),
-    ).toEqual(["invalid_grant", 500133]);
-    // A Graph token (the app's own, or a user's) is for Graph, not for this app.
-    const own = (await ask(app())).body.access_token as string;
-    expect(await codes(obo(own))).toEqual(["invalid_grant", 500131]);
-    expect(
-      await codes(obo(await good(), { scope: `${GRAPH}/.default ${GRAPH}/User.Read` })),
-    ).toEqual(["invalid_scope", 70011]);
-    const gone = tenant.users.find((u) => !u.active) as { id: string };
-    expect(await codes(obo(await entra.userToken(gone.id, CLIENT)))).toEqual([
-      "invalid_grant",
-      50057,
-    ]);
-    expect(await codes(obo(await entra.userToken("u-nobody", CLIENT)))).toEqual([
-      "invalid_grant",
-      50057,
-    ]);
-    expect(await codes(obo(await good(), { scope: `${GRAPH}/Files.ReadWrite.All` }))).toEqual([
-      "invalid_grant",
-      65001,
-    ]);
-    entra.requireInteraction(user.id);
-    const mfa = await ask(obo(await good()));
-    expect([mfa.body.error, mfa.body.error_codes?.[0], typeof mfa.body.claims]).toEqual([
-      "interaction_required",
-      50079,
-      "string",
-    ]);
-    entra.requireInteraction(user.id, false);
-    expect((await ask(obo(await good()))).status).toBe(200);
-    // Nothing consented: `.default` asks for nothing.
-    entra.registerApp({ clientId: CLIENT, secret: "secret" });
-    expect(await codes(obo(await good()))).toEqual(["invalid_grant", 65001]);
-  });
-});
-
 describe("its tokens", () => {
   it("lapse, and are nobody else's", async () => {
     const token = (await ask(app())).body.access_token as string;
@@ -325,10 +239,6 @@ describe("its tokens", () => {
     });
     const foreign = ((await res.json()) as { access_token: string }).access_token;
     expect(await entra.verify(foreign)).toBeUndefined();
-    // A user's token for the app is not a Graph token.
-    expect(
-      await entra.verify(await entra.userToken(tenant.users[0]?.id as string, CLIENT)),
-    ).toBeUndefined();
   });
 
   it("are served over HTTP too", async () => {
@@ -447,37 +357,6 @@ describe("the fake Graph with a fake Entra", () => {
     const token = (await ask(app())).body.access_token as string;
     const listed = (await (await get(graph, "/v1.0/sites", token)).json()) as { value: unknown[] };
     expect(listed.value).toHaveLength(tenant.sites.length);
-  });
-
-  it("gives a delegated token no more than its user reaches", async () => {
-    entra.registerApp({ clientId: CLIENT, secret: "secret", delegatedScopes: ["Files.Read.All"] });
-    const graph = new FakeGraph(tenant, { entra, now: () => now });
-    const site = tenant.sites.find((s) => s.readerGroups.length > 0) as (typeof tenant.sites)[0];
-    const groups = new Set([...site.readerGroups, ...site.writerGroups]);
-    const members = new Set(
-      tenant.groups.filter((g) => groups.has(g.id)).flatMap((g) => g.members),
-    );
-    const inside = tenant.users.find((u) => u.active && members.has(u.id)) as {
-      id: string;
-      upn: string;
-    };
-    const outside = tenant.users.find((u) => u.active && !members.has(u.id)) as { id: string };
-    const tokenFor = async (id: string) =>
-      (await ask(obo(await entra.userToken(id, CLIENT)))).body.access_token as string;
-    const mine = await tokenFor(inside.id);
-    expect((await get(graph, `/v1.0/sites/${site.id}`, mine)).status).toBe(200);
-    expect(
-      ((await (await get(graph, "/v1.0/me", mine)).json()) as { userPrincipalName: string })
-        .userPrincipalName,
-    ).toBe(inside.upn);
-    expect((await get(graph, `/v1.0/sites/${site.id}`, await tokenFor(outside.id))).status).toBe(
-      403,
-    );
-    // Listing shows the sites the user reaches, not all of them.
-    const listed = (await (await get(graph, "/v1.0/sites", await tokenFor(outside.id))).json()) as {
-      value: { id: string }[];
-    };
-    expect(listed.value.map((s) => s.id)).not.toContain(site.id);
   });
 });
 

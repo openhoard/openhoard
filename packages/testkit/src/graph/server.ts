@@ -238,19 +238,15 @@ export class FakeGraph {
       );
     }
 
-    app.get("/v1.0/me", (c) => {
-      const caller = c.get("caller");
-      const user = caller?.userId === undefined ? undefined : this.users.get(caller.userId);
-      if (!user) {
-        return graphError(
-          c,
-          400,
-          "BadRequest",
-          "/me request is only valid with delegated authentication flow.",
-        );
-      }
-      return c.json({ id: user.id, displayName: user.displayName, userPrincipalName: user.upn });
-    });
+    // App-only tokens: there is no signed-in user.
+    app.get("/v1.0/me", (c) =>
+      graphError(
+        c,
+        400,
+        "BadRequest",
+        "/me request is only valid with delegated authentication flow.",
+      ),
+    );
 
     app.get("/v1.0/sites", (c) => {
       const caller = c.get("caller");
@@ -370,17 +366,10 @@ export class FakeGraph {
   private mayReach(caller: GraphCaller | undefined, site: FakeSite): boolean {
     if (!caller) return true;
     const entra = this.options.entra as FakeEntra;
-    const granted =
-      reachesAllSites(caller) ||
-      ([...caller.roles, ...caller.scopes].includes("Sites.Selected") &&
-        entra.siteRole(caller.appId, site.id) !== undefined);
-    if (!granted || caller.userId === undefined) return granted;
-    // Delegated: never more than the user reaches.
-    const user = this.users.get(caller.userId);
-    const groups = new Set([...site.readerGroups, ...site.writerGroups]);
     return (
-      user?.active === true &&
-      this.tenant.groups.some((g) => groups.has(g.id) && g.members.includes(user.id))
+      reachesAllSites(caller) ||
+      (caller.roles.includes("Sites.Selected") &&
+        entra.siteRole(caller.appId, site.id) !== undefined)
     );
   }
 
@@ -707,8 +696,7 @@ function graphError(c: Context, status: number, code: string, message: string): 
 }
 
 function reachesAllSites(caller: GraphCaller): boolean {
-  const held = caller.userId === undefined ? caller.roles : caller.scopes;
-  return held.some((p) => (ALL_SITES_PERMISSIONS as readonly string[]).includes(p));
+  return caller.roles.some((p) => (ALL_SITES_PERMISSIONS as readonly string[]).includes(p));
 }
 
 function notFound(c: Context): Response {

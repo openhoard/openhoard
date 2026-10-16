@@ -76,7 +76,6 @@ describe("an app-only token", () => {
     expect(await f.entra.verify(bearer)).toEqual({
       appId: CLIENT_ID,
       roles: ["Sites.Selected"],
-      scopes: [],
     });
     expect(f.entra.requests).toEqual([
       { grant: "client_credentials", clientId: CLIENT_ID, auth: "secret", status: 200 },

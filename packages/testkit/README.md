@@ -84,15 +84,12 @@ entra.grantSite(clientId, tenant.sites[0].id); // Sites.Selected is granted site
 const graph = new FakeGraph(tenant, { entra }); // accepts the tokens entra issues
 ```
 
-- `POST /{tenant}/oauth2/v2.0/token`: the client credentials grant and the on-behalf-of grant,
-  with a client secret or a certificate assertion (PS256, `x5t#S256`, audience, lifetime and a
-  `jti` used once are checked). Refusals have Entra's shape and AADSTS codes.
-- `entra.userToken(userId, clientId)` makes the token a person's client would send the app (the
-  on-behalf-of `assertion`); `requireInteraction(userId)` makes their exchange answer
-  `interaction_required` with a claims challenge; `failNext(429, 1, 7)` injects faults.
+- `POST /{tenant}/oauth2/v2.0/token`: the client credentials grant (app-only; the connector
+  uses nothing else), with a client secret or a certificate assertion (PS256, `x5t#S256`,
+  audience, lifetime and a `jti` used once are checked). Refusals have Entra's shape and AADSTS
+  codes. `failNext(429, 1, 7)` injects faults.
 - A `FakeGraph` given `entra` applies what a token says: `Sites.Selected` reaches granted sites
-  only and can't list sites; `Sites.Read.All` (and the like) reaches all; a delegated token
-  reaches, of those, the sites whose groups its user is in; `/v1.0/me` answers for it.
+  only and can't list sites; `Sites.Read.All` (and the like) reaches all.
 
 The delta feed is shaped as Graph documents it for SharePoint: an item's `parentReference` has no `path` and there is no `cTag`; files carry a `quickXorHash` that stands in for the real one (stable for the same bytes, not computed from them). Response shapes follow the Graph v1.0 documentation for the fields connectors read. The source tenant is never modified: `graph.store` holds a mutable copy.
 

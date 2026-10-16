@@ -2,13 +2,13 @@ import { randomBytes, randomUUID, timingSafeEqual, X509Certificate } from "node:
 import type { AddressInfo } from "node:net";
 import { serve } from "@hono/node-server";
 import { Hono, type Context } from "hono";
-import { decodeProtectedHeader, errors, jwtVerify, SignJWT } from "jose";
+import { decodeProtectedHeader, jwtVerify, SignJWT } from "jose";
 import type { FakeTenant } from "../tenant/types.js";
 
 /*
  * A fake of Microsoft Entra ID's token endpoint (T-302), limited to what a SharePoint connector
- * uses: the client credentials grant (app-only tokens) and the on-behalf-of grant (a user's
- * token exchanged for a Graph token), each with a client secret or a certificate assertion.
+ * uses: the client credentials grant (app-only tokens), with a client secret or a certificate
+ * assertion. (The on-behalf-of grant went with the connector's: M1 is app-only.)
  *
  * It checks requests the way Entra does and refuses with Entra's error shapes and AADSTS codes,
  * so a connector's error handling can be tested offline. The tokens it issues are JWTs only it
@@ -16,7 +16,7 @@ import type { FakeTenant } from "../tenant/types.js";
  * Graph accepts them, applying `Sites.Selected` site by site.
  */
 
-/** Graph application permissions (and delegated scopes) that reach every site. */
+/** Graph application permissions that reach every site. */
 export const ALL_SITES_PERMISSIONS = [
   "Sites.Read.All",
   "Sites.ReadWrite.All",
@@ -36,20 +36,14 @@ export interface FakeApp {
   certificate?: string;
   /** Application permissions consented by an admin (`Sites.Selected`, `Sites.Read.All`). */
   appRoles?: readonly string[];
-  /** Delegated permissions consented (`Sites.Selected`, `Files.Read.All`, `User.Read`). */
-  delegatedScopes?: readonly string[];
 }
 
 /** What a token the fake issued says, once verified. */
 export interface GraphCaller {
   /** The app the token was issued to. */
   appId: string;
-  /** App-only tokens: the application permissions. */
+  /** The application permissions. */
   roles: readonly string[];
-  /** Delegated tokens: the scopes. */
-  scopes: readonly string[];
-  /** Delegated tokens: the user's id. Undefined for app-only tokens. */
-  userId?: string;
 }
 
 export interface FakeEntraOptions {
@@ -75,7 +69,6 @@ export interface TokenRequestLog {
   error?: string;
 }
 
-const JWT_BEARER = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 const ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 /** Entra's own limit on a client assertion's lifetime is longer; its guidance is ten minutes. */
 const MAX_ASSERTION_SECONDS = 600;
@@ -88,7 +81,6 @@ export class FakeEntra {
   private readonly apps = new Map<string, FakeApp>();
   private readonly grants = new Map<string, SiteRole>();
   private readonly seenJti = new Set<string>();
-  private readonly interaction = new Set<string>();
   private readonly faults: { status: number; retryAfter?: number }[] = [];
   private readonly key = randomBytes(32);
   private readonly lifetime: number;
@@ -131,12 +123,6 @@ export class FakeEntra {
     return this.grants.get(`${clientId} ${siteId}`);
   }
 
-  /** On-behalf-of exchanges for this user answer `interaction_required` (MFA), until undone. */
-  requireInteraction(userId: string, required = true): void {
-    if (required) this.interaction.add(userId);
-    else this.interaction.delete(userId);
-  }
-
   /** The next `count` token requests fail with `status` (429, 503), optionally Retry-After. */
   failNext(status: number, count = 1, retryAfterSeconds?: number): void {
     for (let i = 0; i < count; i++) {
@@ -145,24 +131,6 @@ export class FakeEntra {
         ...(retryAfterSeconds === undefined ? {} : { retryAfter: retryAfterSeconds }),
       });
     }
-  }
-
-  /**
-   * A token a signed-in user's client would send to the app `audience` (the middle tier): what
-   * the on-behalf-of grant takes as its `assertion`. `expiresInSeconds` may be negative.
-   */
-  userToken(
-    userId: string,
-    audience: string,
-    { expiresInSeconds = 3600 }: { expiresInSeconds?: number } = {},
-  ): Promise<string> {
-    const seconds = Math.floor(this.now() / 1000);
-    return new SignJWT({ oid: userId, tid: this.tenant.id, scp: "access_as_user", ver: "2.0" })
-      .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-      .setAudience(audience)
-      .setIssuedAt(seconds)
-      .setExpirationTime(seconds + expiresInSeconds)
-      .sign(this.key);
   }
 
   /** What a bearer token says, when this fake issued it for Graph and it hasn't expired. */
@@ -176,14 +144,7 @@ export class FakeEntra {
       });
       const appId = typeof payload.appid === "string" ? payload.appid : "";
       if (appId === "" || payload.tid !== this.tenant.id) return undefined;
-      const roles = Array.isArray(payload.roles) ? (payload.roles as string[]) : [];
-      const scopes = typeof payload.scp === "string" ? payload.scp.split(" ") : [];
-      return {
-        appId,
-        roles,
-        scopes: scopes.filter((s) => s !== ""),
-        ...(typeof payload.oid === "string" ? { userId: payload.oid } : {}),
-      };
+      return { appId, roles: Array.isArray(payload.roles) ? (payload.roles as string[]) : [] };
     } catch {
       return undefined;
     }
@@ -311,120 +272,40 @@ export class FakeEntra {
       );
     }
     const seconds = Math.floor(this.now() / 1000);
-    const issue = async (claims: Record<string, unknown>, granted: string | undefined) => {
-      const token = await new SignJWT({ appid: app.clientId, tid: this.tenant.id, ...claims })
-        .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-        .setAudience(this.graph)
-        .setIssuedAt(seconds)
-        .setExpirationTime(seconds + this.lifetime)
-        .sign(this.key);
-      c.header("Cache-Control", "no-store");
-      return c.json({
-        token_type: "Bearer",
-        expires_in: this.lifetime,
-        ext_expires_in: this.lifetime,
-        ...(granted === undefined ? {} : { scope: granted }),
-        access_token: token,
-      });
-    };
-
-    if (log.grant === "client_credentials") {
-      if (scope.length !== 1 || scope[0] !== `${this.graph}/.default`) {
-        return refuse(
-          400,
-          "invalid_scope",
-          1002012,
-          "The provided value for scope is not valid. Client credential flows must have a scope value with /.default suffixed to the resource identifier.",
-        );
-      }
-      return issue({ roles: [...(app.appRoles ?? [])], idtyp: "app" }, undefined);
-    }
-
-    if (log.grant === JWT_BEARER) {
-      if (one("requested_token_use") !== "on_behalf_of") {
-        return refuse(400, "invalid_request", 900144, "requested_token_use must be on_behalf_of.");
-      }
-      let userId: string;
-      try {
-        const { payload } = await jwtVerify(one("assertion"), this.key, {
-          audience: app.clientId,
-          algorithms: ["HS256"],
-          currentDate: new Date(this.now()),
-          clockTolerance: 0,
-        });
-        // An app-only token names no user: there is nobody to act on behalf of.
-        if (typeof payload.oid !== "string" || payload.idtyp === "app") throw new Error("no user");
-        userId = payload.oid;
-      } catch (e) {
-        // Entra tells these apart: out of its time range, for another app, anything else.
-        if (e instanceof errors.JWTExpired) {
-          return refuse(
-            400,
-            "invalid_grant",
-            500133,
-            "Assertion is not within its valid time range. Ensure that the access token is not expired before using it for user assertion.",
-          );
-        }
-        if (e instanceof errors.JWTClaimValidationFailed && e.claim === "aud") {
-          return refuse(
-            400,
-            "invalid_grant",
-            500131,
-            "Assertion audience does not match the Client app presenting the assertion.",
-          );
-        }
-        return refuse(400, "invalid_grant", 50013, "Assertion failed signature validation.");
-      }
-      const user = this.tenant.users.find((u) => u.id === userId);
-      if (!user?.active) {
-        return refuse(400, "invalid_grant", 50057, "The user account is disabled.");
-      }
-      if (this.interaction.has(userId)) {
-        return refuse(
-          400,
-          "interaction_required",
-          50079,
-          "Due to a configuration change made by your administrator, you must enroll in multifactor authentication.",
-          {
-            claims: JSON.stringify({ access_token: { polids: { essential: true } } }),
-            suberror: "basic_action",
-          },
-        );
-      }
-      const consented = app.delegatedScopes ?? [];
-      const asked = scope.filter((s) => s !== "offline_access");
-      if (asked.length > 1 && asked.includes(`${this.graph}/.default`)) {
-        return refuse(
-          400,
-          "invalid_scope",
-          70011,
-          "The provided value for scope is not valid: .default can't be combined with other scopes.",
-        );
-      }
-      const wanted = asked.includes(`${this.graph}/.default`)
-        ? [...consented]
-        : asked.map((s) => s.slice(this.graph.length + 1));
-      if (wanted.length === 0 || wanted.some((s) => !consented.includes(s))) {
-        return refuse(
-          400,
-          "invalid_grant",
-          65001,
-          "The user or administrator has not consented to use the application.",
-          { suberror: "consent_required" },
-        );
-      }
-      return issue(
-        { scp: wanted.join(" "), oid: userId, upn: user.upn },
-        wanted.map((s) => `${this.graph}/${s}`).join(" "),
+    if (log.grant !== "client_credentials") {
+      return refuse(
+        400,
+        "unsupported_grant_type",
+        70003,
+        `The grant type '${log.grant}' is not supported.`,
       );
     }
-
-    return refuse(
-      400,
-      "unsupported_grant_type",
-      70003,
-      `The grant type '${log.grant}' is not supported.`,
-    );
+    if (scope.length !== 1 || scope[0] !== `${this.graph}/.default`) {
+      return refuse(
+        400,
+        "invalid_scope",
+        1002012,
+        "The provided value for scope is not valid. Client credential flows must have a scope value with /.default suffixed to the resource identifier.",
+      );
+    }
+    const token = await new SignJWT({
+      appid: app.clientId,
+      tid: this.tenant.id,
+      roles: [...(app.appRoles ?? [])],
+      idtyp: "app",
+    })
+      .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+      .setAudience(this.graph)
+      .setIssuedAt(seconds)
+      .setExpirationTime(seconds + this.lifetime)
+      .sign(this.key);
+    c.header("Cache-Control", "no-store");
+    return c.json({
+      token_type: "Bearer",
+      expires_in: this.lifetime,
+      ext_expires_in: this.lifetime,
+      access_token: token,
+    });
   }
 
   /** Checks a certificate assertion as Entra's documentation describes it. */
