@@ -274,6 +274,8 @@ function etagOf(raw: Raw, path: readonly string[], contentVersion: string | unde
 interface Tree {
   paths: Map<string, readonly string[] | null>;
   met: LogLine[];
+  /** Folders asked of Graph and yielded this run: the feed's own entry isn't yielded again. */
+  fetched: Set<string>;
 }
 
 /** What a round may still ask of Graph. Spent, the round is a crawl's work. */
@@ -620,6 +622,7 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       tree.paths.set(link.id, path);
       if (path !== null) {
         tree.met.push([drive.id, link.id, link.parentId, name as string]);
+        tree.fetched.add(link.id);
         out.push(eventOf(drive, link.raw, link.id, "folder", link.parentId, path));
       }
     }
@@ -685,8 +688,12 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     }
     const path = [...above, name];
     if (kind === "folder") {
+      // Asked of Graph and yielded already this run: again only if it moved since.
+      const yielded =
+        tree.fetched.has(id) && JSON.stringify(tree.paths.get(id)) === JSON.stringify(path);
       tree.paths.set(id, path);
       tree.met.push([drive.id, id, parentId as string, name]);
+      if (yielded) return out;
     }
     out.push(eventOf(drive, raw, id, kind, parentId as string, path));
     return out;
@@ -738,7 +745,9 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       // Resumed, folders are where the crawl placed them before, not where Graph has them now:
       // one renamed since is then seen to differ when the feed (or the first delta) gives it.
       const before = logged?.get(drive.id);
-      const tree: Tree = before ? treeOf(drive, before, met) : { paths: new Map(), met };
+      const tree: Tree = before
+        ? treeOf(drive, before, met)
+        : { paths: new Map(), met, fetched: new Set() };
       // A link out of a token may have lapsed since: refused, it means "from the start". (And
       // the feed is asked for sharing changes from the start, so the link the crawl ends with
       // is one Graph follows them from.)
@@ -812,7 +821,7 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
       return path;
     };
     for (const id of folders.keys()) pathOfKept(id, 0);
-    return { paths, met };
+    return { paths, met, fetched: new Set() };
   }
 
   /**
@@ -1023,6 +1032,9 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
 
   async function read(ref: ItemRef, signal: AbortSignal): Promise<ReadResult> {
     signal.throwIfAborted();
+    if (ref.contentVersion === undefined) {
+      throw new ConnectorError("permanent", "a read names the content version the crawl recorded");
+    }
     const fields = "id,size,eTag,file,deleted";
     const { at, raw } = await itemNow(ref, fields, signal);
     // Like with like: the version of the kind the crawl recorded, from this answer.
@@ -1031,12 +1043,7 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     if (!isObject(raw.file) || !Number.isSafeInteger(size)) {
       throw new ConnectorError("permanent", "the item is not a file");
     }
-    if (
-      version === undefined ||
-      (ref.contentVersion !== undefined && ref.contentVersion !== version)
-    ) {
-      throw changedError();
-    }
+    if (version !== ref.contentVersion) throw changedError();
     // Before any bytes are asked for: nothing is left open when the caller stops here.
     if (ref.size !== undefined && ref.size !== size) throw changedError();
 
