@@ -683,3 +683,30 @@ code.inline {
   margin: 0;
   padding: 0 0.2rem;
 }
+
+/* Printed (or saved as a PDF from the print dialog): the page alone, dark on white. */
+@media print {
+  :root {
+    color-scheme: light;
+    --bg: #ffffff;
+    --surface: #ffffff;
+    --text: #000000;
+    --muted: #333333;
+    --line: #bbbbbb;
+    --accent: #7a4f00;
+    --attention-text: #8a2c0d;
+  }
+  .skip,
+  .top,
+  .side,
+  form,
+  button,
+  [role="status"],
+  [role="alert"],
+  .no-print {
+    display: none !important;
+  }
+  .shell {
+    display: block;
+  }
+}
