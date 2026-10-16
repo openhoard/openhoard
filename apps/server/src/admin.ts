@@ -1,4 +1,4 @@
-import { closeSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
@@ -47,6 +47,7 @@ import {
   openDatabase,
   type Database,
   type GrantRole,
+  type TenantRow,
   type Tx,
 } from "@openhoard/core-db";
 import {
@@ -153,10 +154,13 @@ import { retrying } from "./retry.js";
  * database. The embedded database (PGlite) belongs to one process at a time, so while the
  * server runs on it these commands refuse, and say so; with PostgreSQL they run beside it.
  * Every change (a tenant, a token issued or revoked, an admin granted or removed) is audited as
- * `system:admin-cli`, refusals too for admins. A token is printed once, and only its hash is
- * kept. The CLI is the way in when a tenant has no admin (the first one, or after the last was
- * locked or left); admins then make others in the app (the admin API). Removing the last admin
- * is refused here too.
+ * `system:admin-cli`. A command that changes nothing because the operator named something that
+ * isn't there, or asked for a change the directory refuses, says so and exits 1: it is not
+ * audited (CLAUDE.md, "Input handling and tests"). What is audited as a refusal is a decision
+ * made for a named person: a review they may not decide, a report they may not read. A token is
+ * printed once, and only its hash is kept. The CLI is the way in when a tenant has no admin
+ * (the first one, or after the last was locked or left); admins then make others in the app
+ * (the admin API). Removing the last admin is refused here too.
  *
  * `user lock` is the operator's emergency stop (T-104), for anyone: a person of either source,
  * or a service account. It ends their sessions and revokes their AI clients' grants at once, and
@@ -196,8 +200,7 @@ import { retrying } from "./retry.js";
  * and confirms it (`source.confirm-reconcile`, with the count) or discards it and has the
  * source crawled afresh (`source.discard-reconcile`); a source whose connector says it
  * is now another one (another disk at the path) syncs again only once accepted
- * (`source.accept-identity`), which starts a crawl from the beginning. Both are audited, refusals
- * too.
+ * (`source.accept-identity`), which starts a crawl from the beginning. All three are audited.
  *
  * `review …` is the tag review inbox (T-406, T-1403) until the app has one: what models and AI
  * assistants proposed and a person must decide. A decision is a person's, so each command
@@ -210,8 +213,8 @@ import { retrying } from "./retry.js";
  * when some decision on it takes one, the file's id and title. `approve` applies the tag
  * (grants on it then count for the file), `reject` drops it, `merge` applies an approved value of the same facet
  * instead; `--replace` confirms taking another value of a single-value facet off the file.
- * Audited as `tag.review`, acted by `system:admin-cli` for the person; a refused decision too
- * (`refusal`: why), unless the tenant doesn't exist.
+ * Audited as `tag.review`, acted by `system:admin-cli` for the person; a decision refused them
+ * too (`refusal`: why).
  *
  * `audit verify` (T-702, T-1404) checks a tenant's whole audit chain (core/audit verifyAudit()):
  * every hash and link, and that the columns queries read agree with the hashed events. It
@@ -466,6 +469,14 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
   if (db === null) return 1;
 
   try {
+    // The tenant, once: every command below that names one has it.
+    if (values.tenant !== undefined) {
+      const tenantId = tenantArg(values.tenant);
+      if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
+        io.err(`no tenant ${tenantId}\n`);
+        return 1;
+      }
+    }
     switch (command) {
       case "tenant create":
         return await tenantCreate(db, need(values.name, "--name"), io);
@@ -725,15 +736,11 @@ async function principalNamed(
     throw new UsageError("name one of --user or --group");
   }
   if (values.user !== undefined) {
-    const user = await reviewerNamed(db, tenantId, need(values.user, "--user"), io);
-    if (typeof user === "string") return null;
+    const user = await namedUser(db, tenantId, need(values.user, "--user"), io);
+    if (user === null) return null;
     return { principal: userPrincipal(user.id), label: oneLine(user.email ?? user.displayName) };
   }
   const named = need(values.group, "--group");
-  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
-    io.err(`no tenant ${tenantId}\n`);
-    return null;
-  }
   const found = await db.withTenant(tenantId, async (tx) => {
     if (isId("group", named)) {
       const g = await getGroup(tx, tenantId, named);
@@ -814,7 +821,6 @@ async function tokenIssue(
     throw new UsageError(`--days is a whole number from 1 to ${SCIM_TOKEN_MAX_DAYS}`);
   }
   const issued = await db.withTenant(tenantId, async (tx) => {
-    if (!(await getTenant(tx, tenantId))) return null;
     const token = await issueScimToken(tx, tenantId, {
       name,
       days,
@@ -828,10 +834,6 @@ async function tokenIssue(
     });
     return token;
   });
-  if (!issued) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
   const tenantUrl = config.auth
     ? new URL("/scim/v2", config.auth.publicUrl).href
     : "<publicUrl>/scim/v2 (the address Entra reaches this server at, over https)";
@@ -847,13 +849,7 @@ async function tokenIssue(
 }
 
 async function tokenList(db: Database, tenantId: string, io: AdminIo): Promise<number> {
-  const tokens = await db.withTenant(tenantId, async (tx) =>
-    (await getTenant(tx, tenantId)) ? listScimTokens(tx, tenantId) : null,
-  );
-  if (!tokens) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
+  const tokens = await db.withTenant(tenantId, (tx) => listScimTokens(tx, tenantId));
   const now = Date.now();
   for (const t of tokens) {
     const state =
@@ -882,25 +878,20 @@ async function tokenRevoke(
   tokenId: string,
   io: AdminIo,
 ): Promise<number> {
-  const result = await db.withTenant(tenantId, async (tx) => {
-    if (!(await getTenant(tx, tenantId))) return "no-tenant" as const;
-    const revoked = await revokeScimToken(tx, tenantId, tokenId, ADMIN_ACTOR);
-    await appendAudit(tx, tenantId, {
-      actor: ADMIN_ACTOR,
-      action: "scim-token.revoke",
-      decision: revoked ? "allow" : "deny",
-      detail: {
-        token: isId("scimToken", tokenId) ? tokenId : "not-a-token-id",
-        ...(revoked ? {} : { reason: "unknown-or-revoked" }),
-      },
-    });
-    return revoked ? ("revoked" as const) : ("none" as const);
+  if (!isId("scimToken", tokenId)) throw new UsageError(`not a SCIM token id: ${tokenId}`);
+  const revoked = await db.withTenant(tenantId, async (tx) => {
+    const done = await revokeScimToken(tx, tenantId, tokenId, ADMIN_ACTOR);
+    if (done) {
+      await appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "scim-token.revoke",
+        decision: "allow",
+        detail: { token: tokenId },
+      });
+    }
+    return done;
   });
-  if (result === "no-tenant") {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
-  if (result === "none") {
+  if (!revoked) {
     io.err(`tenant ${tenantId} has no live SCIM token ${tokenId}\n`);
     return 1;
   }
@@ -911,49 +902,47 @@ async function tokenRevoke(
 /**
  * The current person `--user` names: an id, or an email or userName that exactly one current
  * person has (a UPN often looks like an email: both are tried, and two people are ambiguous).
+ * Null, with the reason said, when there is no such person or more than one.
  */
 async function namedUser(
   db: Database,
   tenantId: string,
   named: string,
-): Promise<User | "none" | "ambiguous"> {
-  return db.withTenant(tenantId, async (tx) => {
+  io: AdminIo,
+): Promise<User | null> {
+  const found = await db.withTenant(tenantId, async (tx) => {
     if (isId("user", named)) {
       const u = await getUser(tx, tenantId, named);
-      return u && u.retired === null ? u : "none";
+      return u && u.retired === null ? [u] : [];
     }
-    const found = [
+    const both = [
       await findUserByEmail(tx, tenantId, named),
       await findUserByUserName(tx, tenantId, named),
     ].filter((u): u is User => u !== null);
-    const ids = new Set(found.map((u) => u.id));
-    if (ids.size === 0) return "none";
-    return ids.size === 1 ? (found[0] as User) : "ambiguous";
+    return [...new Map(both.map((u) => [u.id, u])).values()];
   });
+  if (found.length === 1) return found[0] as User;
+  io.err(
+    found.length === 0
+      ? `tenant ${tenantId} has no current person ${oneLine(named)}\n`
+      : `${oneLine(named)} is one person's email and another's userName: use the usr_… id\n`,
+  );
+  return null;
 }
 
 /** Why the directory refused an admin change, for the operator. */
-function adminRefusal(e: IdentityError): { reason: string; message: string } {
+function adminRefusal(e: IdentityError): string {
   switch (e.code) {
     case "invalid":
-      return {
-        reason: "not-a-member",
-        message: "only a member is an admin, never a guest or a service account",
-      };
+      return "only a member is an admin, never a guest or a service account";
     case "inactive":
-      return { reason: "inactive", message: "they are locked or disabled: unlock them first" };
+      return "they are locked or disabled: unlock them first";
     case "wrong-source":
-      return {
-        reason: "admin-group",
-        message: "they are an admin through the identity provider's admin group: remove them there",
-      };
+      return "they are an admin through the identity provider's admin group: remove them there";
     case "conflict":
-      return {
-        reason: "last-admin",
-        message: "the tenant's last admin: make someone else admin first",
-      };
+      return "the tenant's last admin: make someone else admin first";
     default:
-      return { reason: "unknown-user", message: "no such person" };
+      return "no such person";
   }
 }
 
@@ -965,32 +954,9 @@ async function adminChange(
   named: string,
   io: AdminIo,
 ): Promise<number> {
-  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
   const action = change === "grant" ? "admin.grant" : "admin.revoke";
-  const user = await namedUser(db, tenantId, named);
-  const refused = async (reason: string, message: string, userId?: string) => {
-    await db.withTenant(tenantId, (tx) =>
-      appendAudit(tx, tenantId, {
-        actor: ADMIN_ACTOR,
-        action,
-        decision: "deny",
-        detail: { ...(userId ? { user: userId } : {}), reason },
-      }),
-    );
-    io.err(`${message}\n`);
-    return 1;
-  };
-  if (user === "none")
-    return refused("unknown-user", `tenant ${tenantId} has no current person ${named}`);
-  if (user === "ambiguous") {
-    return refused(
-      "ambiguous",
-      `${named} is one person's email and another's userName: use the id`,
-    );
-  }
+  const user = await namedUser(db, tenantId, named, io);
+  if (user === null) return 1;
   const adminGroup = adminGroupOf(config.auth)(tenantId);
   try {
     // Run again after a deadlock or serialization failure (beside a running server on Postgres).
@@ -1035,8 +1001,8 @@ async function adminChange(
     return 0;
   } catch (e) {
     if (!(e instanceof IdentityError)) throw e;
-    const { reason, message } = adminRefusal(e);
-    return refused(reason, message, user.id);
+    io.err(`${adminRefusal(e)}\n`);
+    return 1;
   }
 }
 
@@ -1051,33 +1017,9 @@ async function lockChange(
   named: string,
   io: AdminIo,
 ): Promise<number> {
-  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
   const action = change === "lock" ? "user.lock" : "user.unlock";
-  const refused = async (reason: string, message: string) => {
-    await db.withTenant(tenantId, (tx) =>
-      appendAudit(tx, tenantId, {
-        actor: ADMIN_ACTOR,
-        action,
-        decision: "deny",
-        detail: { reason },
-      }),
-    );
-    io.err(`${message}\n`);
-    return 1;
-  };
-  const user = await namedUser(db, tenantId, named);
-  if (user === "none") {
-    return refused("unknown-user", `tenant ${tenantId} has no current person ${named}`);
-  }
-  if (user === "ambiguous") {
-    return refused(
-      "ambiguous",
-      `${named} is one person's email and another's userName: use the id`,
-    );
-  }
+  const user = await namedUser(db, tenantId, named, io);
+  if (user === null) return 1;
   let outcome: { changed: boolean; ended?: EndedAccess };
   try {
     // Run again after a deadlock or serialization failure: a lock ends sessions and grants, and
@@ -1115,7 +1057,8 @@ async function lockChange(
   } catch (e) {
     // Retired since it was found.
     if (!(e instanceof IdentityError)) throw e;
-    return refused("unknown-user", `tenant ${tenantId} has no current person ${named}`);
+    io.err(`tenant ${tenantId} has no current person ${oneLine(named)}\n`);
+    return 1;
   }
   const who = `${oneLine(user.displayName)} (${user.id})`;
   if (change === "unlock") {
@@ -1150,15 +1093,9 @@ async function adminList(
   io: AdminIo,
 ): Promise<number> {
   const adminGroup = adminGroupOf(config.auth)(tenantId);
-  const admins = await db.withTenant(tenantId, async (tx) =>
-    (await getTenant(tx, tenantId))
-      ? listAdmins(tx, tenantId, adminGroup === undefined ? {} : { adminGroupId: adminGroup })
-      : null,
+  const admins = await db.withTenant(tenantId, (tx) =>
+    listAdmins(tx, tenantId, adminGroup === undefined ? {} : { adminGroupId: adminGroup }),
   );
-  if (!admins) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
   for (const a of admins) {
     const state = a.effective
       ? "active"
@@ -1205,10 +1142,6 @@ async function groupList(
   io: AdminIo,
 ): Promise<number> {
   const adminGroup = adminGroupOf(config.auth)(tenantId);
-  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
   let shown = 0;
   for (let offset = 0; ; offset += MAX_LIST) {
     const rows = await db.withTenant(tenantId, async (tx) => {
@@ -1231,13 +1164,7 @@ async function groupList(
 }
 
 async function sourceList(db: Database, tenantId: string, io: AdminIo): Promise<number> {
-  const syncs = await db.withTenant(tenantId, async (tx) =>
-    (await getTenant(tx, tenantId)) ? listSourceSyncs(tx, tenantId) : null,
-  );
-  if (!syncs) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
+  const syncs = await db.withTenant(tenantId, (tx) => listSourceSyncs(tx, tenantId));
   for (const s of syncs) {
     const reconcile = reconcileText(s);
     io.out(
@@ -1373,10 +1300,6 @@ async function packCommand(
     io.err(`cannot read the pack: ${(e as Error).message}\n`);
     return 1;
   }
-  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
   let plan: PackPlan;
   try {
     plan =
@@ -1393,16 +1316,6 @@ async function packCommand(
           );
   } catch (e) {
     if (!(e instanceof PackError)) throw e;
-    if (step === "apply") {
-      await db.withTenant(tenantId, (tx) =>
-        appendAudit(tx, tenantId, {
-          actor: ADMIN_ACTOR,
-          action: "pack.apply",
-          decision: "deny",
-          detail: { reason: e.code },
-        }),
-      );
-    }
     io.err(`${e.message}\n`);
     return 1;
   }
@@ -1424,13 +1337,7 @@ async function sourceStatus(
   source: string | undefined,
   io: AdminIo,
 ): Promise<number> {
-  const syncs = await db.withTenant(tenantId, async (tx) =>
-    (await getTenant(tx, tenantId)) ? listSourceSyncs(tx, tenantId) : null,
-  );
-  if (!syncs) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
+  const syncs = await db.withTenant(tenantId, (tx) => listSourceSyncs(tx, tenantId));
   const shown = syncs.filter((s) => source === undefined || s.source === source);
   if (shown.length === 0) {
     io.err(
@@ -1498,7 +1405,6 @@ async function sourceSkipsList(
     throw new UsageError(`not a reason code: ${reason}`);
   }
   const found = await db.withTenant(tenantId, async (tx) => {
-    if (!(await getTenant(tx, tenantId))) return "no-tenant" as const;
     if (!(await listSourceSyncs(tx, tenantId)).some((s) => s.source === source)) {
       return "no-source" as const;
     }
@@ -1507,10 +1413,6 @@ async function sourceSkipsList(
       ...(reason === undefined ? {} : { reason }),
     });
   });
-  if (found === "no-tenant") {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
   if (found === "no-source") {
     io.err(`tenant ${tenantId} has no source ${source}\n`);
     return 1;
@@ -1559,10 +1461,6 @@ async function resummarizeCommand(
   const limit = limitArg === undefined ? 10_000 : /^\d{1,6}$/.test(limitArg) ? Number(limitArg) : 0;
   if (limit < 1 || limit > 100_000) throw new UsageError("--limit is 1 to 100000");
   const chosen = [...new Set(reasons)] as CardSkipReason[];
-  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
   let count: number;
   if (dryRun) {
     // Counted as resummarize() would find them: none enqueued.
@@ -1623,27 +1521,12 @@ async function sourceRunNow(
   source: string,
   io: AdminIo,
 ): Promise<number> {
-  const found = await db.withTenant(tenantId, async (tx) => {
-    if (!(await getTenant(tx, tenantId))) return "no-tenant" as const;
-    const state = (await listSourceSyncs(tx, tenantId)).find((s) => s.source === source);
-    const reason = !state ? "unknown-source" : state.stoppedAt !== null ? "stopped" : null;
-    if (reason !== null) {
-      await appendAudit(tx, tenantId, {
-        actor: ADMIN_ACTOR,
-        action: "source.run-now",
-        decision: "deny",
-        detail: { source, reason },
-      });
-    }
-    return reason ?? ("ok" as const);
-  });
-  if (found === "no-tenant") {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
-  if (found !== "ok") {
+  const state = (await db.withTenant(tenantId, (tx) => listSourceSyncs(tx, tenantId))).find(
+    (s) => s.source === source,
+  );
+  if (!state || state.stoppedAt !== null) {
     io.err(
-      found === "stopped"
+      state
         ? `source ${source} is stopped: fix what failed (source status), then source resume\n`
         : `tenant ${tenantId} has no source ${source} (the server binds configured sources when it starts)\n`,
     );
@@ -1680,20 +1563,17 @@ async function sourceResume(
   io: AdminIo,
 ): Promise<number> {
   const was = await db.withTenant(tenantId, async (tx) => {
-    if (!(await getTenant(tx, tenantId))) return "no-tenant" as const;
     const resumed = await resumeSource(tx, tenantId, source);
-    await appendAudit(tx, tenantId, {
-      actor: ADMIN_ACTOR,
-      action: "source.resume",
-      decision: resumed === null ? "deny" : "allow",
-      detail: { source, ...(resumed === null ? { reason: "not-stopped" } : { was: resumed }) },
-    });
+    if (resumed !== null) {
+      await appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: "source.resume",
+        decision: "allow",
+        detail: { source, was: resumed },
+      });
+    }
     return resumed;
   });
-  if (was === "no-tenant") {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
   if (was === null) {
     io.err(`source ${source} isn't stopped\n`);
     return 1;
@@ -1712,14 +1592,10 @@ async function userCreate(
   name: string,
   io: AdminIo,
 ): Promise<number> {
-  const made = await db
-    .withTenant(tenantId, async (tx) => {
-      if (!(await getTenant(tx, tenantId))) return "no-tenant" as const;
-      const user = await createUser(tx, tenantId, {
-        email,
-        displayName: name,
-        source: "local",
-      });
+  let made: User;
+  try {
+    made = await db.withTenant(tenantId, async (tx) => {
+      const user = await createUser(tx, tenantId, { email, displayName: name, source: "local" });
       await appendAudit(tx, tenantId, {
         actor: ADMIN_ACTOR,
         action: "user.create",
@@ -1727,28 +1603,13 @@ async function userCreate(
         detail: { user: user.id, source: "local" },
       });
       return user;
-    })
-    .catch((e: unknown) => {
-      if (e instanceof IdentityError) return e;
-      throw e;
     });
-  if (made === "no-tenant") {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
-  if (made instanceof IdentityError) {
-    await db.withTenant(tenantId, (tx) =>
-      appendAudit(tx, tenantId, {
-        actor: ADMIN_ACTOR,
-        action: "user.create",
-        decision: "deny",
-        detail: { reason: made.code },
-      }),
-    );
+  } catch (e) {
+    if (!(e instanceof IdentityError)) throw e;
     io.err(
-      made.code === "conflict"
+      e.code === "conflict"
         ? `someone in tenant ${tenantId} has that email already\n`
-        : `${made.message}\n`,
+        : `${e.message}\n`,
     );
     return 1;
   }
@@ -1784,32 +1645,8 @@ export async function signInLink(
     );
     return 1;
   }
-  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
-  const refused = async (reason: string, message: string, userId?: string) => {
-    await db.withTenant(tenantId, (tx) =>
-      appendAudit(tx, tenantId, {
-        actor: ADMIN_ACTOR,
-        action: "sign-in-link.issue",
-        decision: "deny",
-        detail: { ...(userId ? { user: userId } : {}), reason },
-      }),
-    );
-    io.err(`${message}\n`);
-    return 1;
-  };
-  const user = await namedUser(db, tenantId, named);
-  if (user === "none") {
-    return refused("unknown-user", `tenant ${tenantId} has no current person ${named}`);
-  }
-  if (user === "ambiguous") {
-    return refused(
-      "ambiguous",
-      `${named} is one person's email and another's userName: use the id`,
-    );
-  }
+  const user = await namedUser(db, tenantId, named, io);
+  if (user === null) return 1;
   let link;
   try {
     link = await db.withTenant(tenantId, async (tx) => {
@@ -1828,7 +1665,8 @@ export async function signInLink(
     });
   } catch (e) {
     if (!(e instanceof IdentityError)) throw e;
-    return refused(e.code, e.message, user.id);
+    io.err(`${e.message}\n`);
+    return 1;
   }
   const url = new URL("/auth/link", config.auth.publicUrl);
   url.searchParams.set("token", link.token);
@@ -1864,32 +1702,8 @@ export async function invite(
     );
     return 1;
   }
-  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
-  const refused = async (reason: string, message: string, userId?: string) => {
-    await db.withTenant(tenantId, (tx) =>
-      appendAudit(tx, tenantId, {
-        actor: ADMIN_ACTOR,
-        action: "invite.issue",
-        decision: "deny",
-        detail: { ...(userId ? { user: userId } : {}), reason },
-      }),
-    );
-    io.err(`${message}\n`);
-    return 1;
-  };
-  const user = await namedUser(db, tenantId, named);
-  if (user === "none") {
-    return refused("unknown-user", `tenant ${tenantId} has no current person ${named}`);
-  }
-  if (user === "ambiguous") {
-    return refused(
-      "ambiguous",
-      `${named} is one person's email and another's userName: use the id`,
-    );
-  }
+  const user = await namedUser(db, tenantId, named, io);
+  if (user === null) return 1;
   let issued;
   try {
     issued = await db.withTenant(tenantId, async (tx) => {
@@ -1909,7 +1723,8 @@ export async function invite(
     });
   } catch (e) {
     if (!(e instanceof IdentityError)) throw e;
-    return refused(e.code, e.message, user.id);
+    io.err(`${e.message}\n`);
+    return 1;
   }
   // In the fragment: browsers send it to no server, so it reaches no proxy's or tunnel's log.
   const url = new URL("/auth/invite", config.auth.publicUrl);
@@ -1932,11 +1747,8 @@ async function passkeyList(
   named: string,
   io: AdminIo,
 ): Promise<number> {
-  const user = await namedUser(db, tenantId, named);
-  if (user === "none" || user === "ambiguous") {
-    io.err(`tenant ${tenantId} has no one current person ${named}\n`);
-    return 1;
-  }
+  const user = await namedUser(db, tenantId, named, io);
+  if (user === null) return 1;
   const held = await db.withTenant(tenantId, (tx) => listPasskeys(tx, tenantId, user.id));
   for (const p of held) {
     io.out(
@@ -1964,11 +1776,8 @@ async function passkeyRemove(
   io: AdminIo,
 ): Promise<number> {
   if (!isId("passkey", passkeyId)) throw new UsageError("--id is a passkey id (pky_…)");
-  const user = await namedUser(db, tenantId, named);
-  if (user === "none" || user === "ambiguous") {
-    io.err(`tenant ${tenantId} has no one current person ${named}\n`);
-    return 1;
-  }
+  const user = await namedUser(db, tenantId, named, io);
+  if (user === null) return 1;
   const ended = await db.withTenant(tenantId, async (tx) => {
     const result = await removePasskey(tx, tenantId, user.id, passkeyId, ADMIN_ACTOR);
     if (result) {
@@ -2008,7 +1817,6 @@ async function sourceChange(
   io: AdminIo,
 ): Promise<number> {
   const result = await db.withTenant(tenantId, async (tx) => {
-    if (!(await getTenant(tx, tenantId))) return "no-tenant" as const;
     const done =
       change === "confirm-reconcile"
         ? await confirmReconcile(tx, tenantId, source)
@@ -2019,25 +1827,16 @@ async function sourceChange(
             ))
           ? 0
           : null;
-    await appendAudit(tx, tenantId, {
-      actor: ADMIN_ACTOR,
-      action: `source.${change}`,
-      decision: done === null ? "deny" : "allow",
-      detail: {
-        source,
-        ...(done === null
-          ? { reason: change === "accept-identity" ? "unknown-source" : "nothing-held" }
-          : change === "confirm-reconcile"
-            ? { confirmed: done }
-            : {}),
-      },
-    });
+    if (done !== null) {
+      await appendAudit(tx, tenantId, {
+        actor: ADMIN_ACTOR,
+        action: `source.${change}`,
+        decision: "allow",
+        detail: { source, ...(change === "confirm-reconcile" ? { confirmed: done } : {}) },
+      });
+    }
     return done;
   });
-  if (result === "no-tenant") {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
   if (result === null) {
     io.err(
       change === "accept-identity"
@@ -2062,28 +1861,6 @@ const oneLine = (text: string) => text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]+/gu, 
 /** The text's characters, without the halves of a pair left alone (audit text must be whole). */
 const wellFormed = (text: string) => [...text].filter((c) => !/^[\ud800-\udfff]$/.test(c));
 
-/** The person a `review` command names; "none" or "ambiguous" with the reason said. */
-async function reviewerNamed(
-  db: Database,
-  tenantId: string,
-  named: string,
-  io: AdminIo,
-): Promise<User | "no-tenant" | "none" | "ambiguous"> {
-  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
-    io.err(`no tenant ${tenantId}\n`);
-    return "no-tenant";
-  }
-  const user = await namedUser(db, tenantId, named);
-  if (user === "none" || user === "ambiguous") {
-    io.err(
-      user === "none"
-        ? `tenant ${tenantId} has no user ${oneLine(named)}\n`
-        : `${oneLine(named)} names more than one user: use the usr_… id\n`,
-    );
-  }
-  return user;
-}
-
 /** The tenant's policies, compiled: what the server decides with (tools/context.ts). */
 const authorizerOf = async (tx: Tx, tenantId: string) =>
   new Authorizer(createCedarEngine(await tenantPolicies(tx, tenantId)));
@@ -2101,8 +1878,8 @@ async function reviewList(
   if (!Number.isInteger(limit) || limit < 1 || limit > REVIEW_INBOX_MAX) {
     throw new UsageError(`--limit is 1 to ${REVIEW_INBOX_MAX}`);
   }
-  const user = await reviewerNamed(db, tenantId, named, io);
-  if (typeof user === "string") return 1;
+  const user = await namedUser(db, tenantId, named, io);
+  if (user === null) return 1;
   const reviewer = { userId: user.id, adminGroupId: adminGroupOf(config.auth)(tenantId) };
   let inbox;
   try {
@@ -2162,7 +1939,8 @@ async function reviewDecide(
       ? { into: wellFormed(oneLine(how.into)).slice(0, 200).join("") }
       : {}),
   };
-  const refused = async (detail: Record<string, string>, message?: string, object?: string) => {
+  /** A decision refused the person: audited, as a decision they asked for and may not make. */
+  const refused = async (detail: Record<string, string>, message: string, object?: string) => {
     await db.withTenant(tenantId, (tx) =>
       appendAudit(tx, tenantId, {
         actor: ADMIN_ACTOR,
@@ -2172,14 +1950,11 @@ async function reviewDecide(
         detail: { ...asked, ...detail },
       }),
     );
-    if (message !== undefined) io.err(`${message}\n`);
+    io.err(`${message}\n`);
     return 1;
   };
-  const user = await reviewerNamed(db, tenantId, named, io);
-  if (user === "no-tenant") return 1;
-  if (typeof user === "string") {
-    return refused({ refusal: user === "none" ? "unknown-user" : "ambiguous-user" });
-  }
+  const user = await namedUser(db, tenantId, named, io);
+  if (user === null) return 1;
   const who = oneLine(user.email ?? user.id);
   const reviewer = `user:${user.id}`;
   const adminGroupId = adminGroupOf(config.auth)(tenantId);
@@ -2246,10 +2021,6 @@ async function reviewDecide(
 
 /** `audit verify`: the tenant's whole chain, checked; `ok`, its length and head on stdout. */
 async function auditVerify(db: Database, tenantId: string, io: AdminIo): Promise<number> {
-  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
   const result = await verifyAudit(db, tenantId);
   if (!result.ok) {
     io.out(`failed\t${result.count}\t${result.seq}\n`);
@@ -2316,10 +2087,6 @@ async function auditExport(
   args: ExportArgs,
   io: AdminIo,
 ): Promise<number> {
-  if (!(await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId)))) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
   let fd: number | undefined;
   const path = args.out === undefined ? undefined : resolve(io.cwd ?? process.cwd(), args.out);
   if (path !== undefined) {
@@ -2472,11 +2239,7 @@ async function healthCommand(
   args: HealthArgs,
   io: AdminIo,
 ): Promise<number> {
-  const tenant = await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId));
-  if (!tenant) {
-    io.err(`no tenant ${tenantId}\n`);
-    return 1;
-  }
+  const tenant = (await db.withTenant(tenantId, (tx) => getTenant(tx, tenantId))) as TenantRow;
   const audit = (decision: "allow" | "deny", detail: Record<string, string | number>) =>
     db.withTenant(tenantId, (tx) =>
       appendAudit(tx, tenantId, {
@@ -2486,16 +2249,8 @@ async function healthCommand(
         detail: { format: args.format, ...detail },
       }),
     );
-  const user = await namedUser(db, tenantId, named);
-  if (user === "none" || user === "ambiguous") {
-    await audit("deny", { refusal: user === "none" ? "unknown-user" : "ambiguous-user" });
-    io.err(
-      user === "none"
-        ? `tenant ${tenantId} has no user ${oneLine(named)}\n`
-        : `${oneLine(named)} names more than one user: use the usr_… id\n`,
-    );
-    return 1;
-  }
+  const user = await namedUser(db, tenantId, named, io);
+  if (user === null) return 1;
   const reader = `user:${user.id}`;
   // The file first: a report nobody can be handed isn't read, or recorded as read. A new
   // file, its owner's alone where the system has file modes, never over one that exists.
@@ -2514,24 +2269,16 @@ async function healthCommand(
       return 1;
     }
   }
-  /** Closes the file, and removes it unless the report is in it whole. */
-  const finish = (whole: boolean) => {
+  /** No file left that isn't the report: closes it (once) and removes it. */
+  const discard = () => {
     if (fd === undefined || path === undefined) return;
     const file = fd;
     fd = undefined;
-    let closed = true;
     try {
       closeSync(file);
-    } catch {
-      closed = false;
+    } finally {
+      rmSync(path, { force: true });
     }
-    if (whole && closed) return;
-    try {
-      unlinkSync(path);
-    } catch {
-      // Gone already, or not ours to remove.
-    }
-    if (whole) throw new Error(`cannot finish writing ${path}`);
   };
   try {
     let report: HealthReport;
@@ -2549,7 +2296,7 @@ async function healthCommand(
       );
     } catch (e) {
       if (!(e instanceof HealthError)) throw e;
-      finish(false);
+      discard();
       await audit("deny", { reader, refusal: e.code });
       io.err(
         e.code === "not-admin"
@@ -2574,7 +2321,9 @@ async function healthCommand(
       } else {
         // (A sheet opened by a double click is read as UTF-8 only when it says so.)
         writeFileSync(fd, args.format === "csv" ? `${UTF8_MARK}${text}` : text);
-        finish(true);
+        const file = fd;
+        fd = undefined;
+        closeSync(file);
       }
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
@@ -2601,7 +2350,7 @@ async function healthCommand(
     }
     return 0;
   } finally {
-    // Whatever went wrong on the way: no file left that isn't the report.
-    finish(false);
+    // Whatever went wrong on the way (the audit, the write): the file goes with it.
+    discard();
   }
 }

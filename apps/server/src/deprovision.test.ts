@@ -404,7 +404,6 @@ describe("deprovisioning a person (T-104)", () => {
       ["user.lock", "allow", { user: userId, unchanged: true }],
       ["user.unlock", "allow", { user: userId }],
       ["user.unlock", "allow", { user: userId, unchanged: true }],
-      ["user.lock", "deny", { reason: "unknown-user" }],
     ]);
   });
 

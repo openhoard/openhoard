@@ -1033,7 +1033,7 @@ node apps/server/dist/main.js admin audit export --tenant ten_… [--format ndjs
   formula gets a leading apostrophe, and a sheet written with `--out` is marked as UTF-8. It
   names files by their real titles whoever may read them, so it is a tenant admin's: `--user`
   names one, and each report read is audited (`health.report`: who it was for, the format, each
-  finding's count), a refusal too. `--stale-days` (1095) and `--large-mb` (1024) move two
+  finding's count); so is a report refused someone who isn't an admin. `--stale-days` (1095) and `--large-mb` (1024) move two
   thresholds, and the page says what it was judged by. `--out` writes a new file, never over
   an existing one.
   The admin web app shows the same page (`POST /api/admin/health`: core's `healthPage()`, so
@@ -1085,8 +1085,8 @@ node apps/server/dist/main.js admin audit export --tenant ten_… [--format ndjs
   the file may `merge` a new value `--into` an approved one of the same facet. Approving applies
   the tag, and grants on that tag then count for the file; `--replace` confirms taking another
   value of a single-value facet off the file. Audited as `tag.review`, acted by
-  `system:admin-cli` with the reviewer named; a refused decision is audited too (`refusal` says
-  why). An item on a file no admin may tag waits until one is given access.
+  `system:admin-cli` with the reviewer named; a decision refused them is audited too (`refusal`
+  says why). An item on a file no admin may tag waits until one is given access.
 
 - **Admins.** `user grant-admin` makes the tenant's first admin (the person must exist: provisioned
   over SCIM, or invited), and is the way back in when a tenant has none left. `--user` takes an
@@ -1131,7 +1131,7 @@ node apps/server/dist/main.js admin audit export --tenant ten_… [--format ndjs
   met a place it couldn't read. A source whose connector now says it is another one (another
   disk at the folder's path) stops syncing until `source accept-identity`, which starts a crawl
   from the beginning (guarded the same way). All three are audited (`source.confirm-reconcile`,
-  `source.discard-reconcile`, `source.accept-identity`), refusals too, and each also lifts a stop
+  `source.discard-reconcile`, `source.accept-identity`), and each also lifts a stop
   (below).
 - **Scheduled syncs (T-303).** `source list` also says whether each source is scheduled, stopped
   (and why) or never run; `source status` prints each source (or one) in full: its state, last
@@ -1149,8 +1149,9 @@ node apps/server/dist/main.js admin audit export --tenant ten_… [--format ndjs
 - **What a new tenant gets.** `tenant create` makes the tenant row, with the fail-closed
   defaults (hidden, metadata-only), and its principal epoch: nothing else.
 - **Audit.** Creating a tenant, issuing or revoking a token, granting or removing an admin, and
-  locking or unlocking someone (refusals too) are audited as `system:admin-cli`; a lock's record
-  says what it ended.
+  locking or unlocking someone are audited as `system:admin-cli`; a lock's record says what it
+  ended. A command that changes nothing (no such person, token or source; a change the directory
+  refuses) says so and exits 1, unaudited.
 
 ## One person on one machine: `init --solo` (T-1201)
 
