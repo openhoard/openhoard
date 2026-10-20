@@ -4,11 +4,10 @@ import {
   proposeTag,
   viewObjects,
   VIEW_TRANSACTION,
+  TagError,
   type TagOutcome,
 } from "@openhoard/core-catalog";
-import { facetValues, grants } from "@openhoard/core-db";
 import { grantIsLive } from "@openhoard/core-identity";
-import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { actorOf, answer, readRequest, refuse, type McpTool } from "./context.js";
 
@@ -33,6 +32,10 @@ import { actorOf, answer, readRequest, refuse, type McpTool } from "./context.js
  *   server process: with several processes behind a balancer, each keeps its own.
  * - Written in one transaction with its audit record (`tag.propose`), after the grant is
  *   checked live again (T-104).
+ *
+ * The first two are core's (core/catalog proposeTag() with `review: "agent"` refuses with
+ * `unknown-value` or `decides-access`); this tool checks the person may tag the file, counts
+ * the proposal and words the refusal.
  *
  * T-605 (writes from agents need a first-party confirmation token) is met for tagging by
  * construction: nothing an agent sends here changes a file's tags or who can see it; the
@@ -99,7 +102,7 @@ export const TagOutput = {
   status: z.enum(["proposed", "already-tagged"]),
   id: z.string(),
   tag: z.string(),
-  /** Why it waits (`agent`, or a stronger reason: `sensitive`, `conflict`…). */
+  /** Why it waits (`agent`, or a stronger reason: `conflict`, an item already open…). */
   reason: z.string().optional(),
   note: z.string(),
 };
@@ -139,8 +142,6 @@ export function tagTool(
         );
       }
       if (!TAG.test(a.tag)) return refuse(ctx, "tag must be facet:value", { outcome: "invalid" });
-      const at = a.tag.indexOf(":");
-      const [facet, value] = [a.tag.slice(0, at), a.tag.slice(at + 1)];
 
       const check = await ctx.db.withTenant(
         tenantId,
@@ -155,37 +156,7 @@ export function tagTool(
             client: bearer.client,
             ...(bearer.principal.scope ? { scope: bearer.principal.scope } : {}),
           });
-          if (!decision.allowed) return "refused" as const;
-          const [known] = await tx
-            .select({
-              approved: facetValues.approved,
-              visibility: facetValues.visibility,
-              exposure: facetValues.exposure,
-            })
-            .from(facetValues)
-            .where(
-              and(
-                eq(facetValues.tenantId, tenantId),
-                eq(facetValues.facet, facet),
-                eq(facetValues.value, value),
-              ),
-            );
-          if (known?.approved !== true) return "unknown-value" as const;
-          if (known.visibility !== null || known.exposure !== null) return "levels" as const;
-          const [granted] = await tx
-            .select({ id: grants.id })
-            .from(grants)
-            .where(
-              and(
-                eq(grants.tenantId, tenantId),
-                eq(grants.facet, facet),
-                eq(grants.value, value),
-                or(isNull(grants.revokedAt), gt(grants.revokedAt, sql`now()`)),
-                or(isNull(grants.expiresAt), gt(grants.expiresAt, sql`now()`)),
-              ),
-            )
-            .limit(1);
-          return granted ? ("levels" as const) : ("ok" as const);
+          return decision.allowed ? ("ok" as const) : ("refused" as const);
         },
         VIEW_TRANSACTION,
       );
@@ -206,56 +177,62 @@ export function tagTool(
           outcome: "rate-limited",
           object: a.id,
         });
-      // What the next two answers say of a value (it isn't one; it decides access) is the
-      // vocabulary's, which isn't everyone's to list: each such answer counts as a proposal, so
-      // nobody reads the vocabulary out by guessing.
-      if ((check === "unknown-value" || check === "levels") && !room()) return tooMany();
-      if (check === "unknown-value") {
-        return refuse(
-          ctx,
-          "That tag isn't in the vocabulary. Agents can only propose existing tags; ask an admin to add the value.",
-          { outcome: "unknown-value", object: a.id },
-        );
-      }
-      if (check === "levels") {
-        return refuse(
-          ctx,
-          "That tag changes who can see the file, so only a person can set it, in OpenHoard. Tell the person.",
-          { outcome: "decides-access", object: a.id },
-        );
-      }
+      // Every proposal counts, refused or not: what core's refusals say of a value (it isn't
+      // one; it decides access) is the vocabulary's, which isn't everyone's to list, so nobody
+      // reads the vocabulary out by guessing.
       if (!room()) return tooMany();
 
-      const outcome = await ctx.db.withTenant(tenantId, async (tx) => {
-        const live = await grantIsLive(tx, tenantId, bearer.grantId, { tokenId: bearer.tokenId });
-        if (!live) return null;
-        const got: TagOutcome = await proposeTag(
-          tx,
-          tenantId,
-          {
-            objectId: a.id,
-            tag: a.tag,
-            source: "model",
-            appliedBy: `model:agent/${bearer.client.id}`,
-            confidence: 1,
-          },
-          { review: "agent" },
-        );
-        await appendAudit(tx, tenantId, {
-          actor: actorOf(ctx),
-          action: "tag.propose",
-          decision: "allow",
-          client: bearer.client.id,
-          object: a.id,
-          detail: {
-            tag: a.tag,
-            outcome: got.applied ? "already-tagged" : got.reason,
-            ...(got.applied ? {} : { review: got.reviewId }),
-            model: ctx.model,
-          },
+      let outcome: TagOutcome | null;
+      try {
+        outcome = await ctx.db.withTenant(tenantId, async (tx) => {
+          const live = await grantIsLive(tx, tenantId, bearer.grantId, { tokenId: bearer.tokenId });
+          if (!live) return null;
+          const got: TagOutcome = await proposeTag(
+            tx,
+            tenantId,
+            {
+              objectId: a.id,
+              tag: a.tag,
+              source: "model",
+              appliedBy: `model:agent/${bearer.client.id}`,
+              confidence: 1,
+            },
+            { review: "agent" },
+          );
+          await appendAudit(tx, tenantId, {
+            actor: actorOf(ctx),
+            action: "tag.propose",
+            decision: "allow",
+            client: bearer.client.id,
+            object: a.id,
+            detail: {
+              tag: a.tag,
+              outcome: got.applied ? "already-tagged" : got.reason,
+              ...(got.applied ? {} : { review: got.reviewId }),
+              model: ctx.model,
+            },
+          });
+          return got;
         });
-        return got;
-      });
+      } catch (err) {
+        // core/catalog proposeTag() decides what an assistant may propose (review: "agent").
+        if (!(err instanceof TagError)) throw err;
+        if (err.code === "unknown-value" || err.code === "unknown-facet") {
+          return refuse(
+            ctx,
+            "That tag isn't in the vocabulary. Agents can only propose existing tags; ask an admin to add the value.",
+            { outcome: "unknown-value", object: a.id },
+          );
+        }
+        if (err.code === "decides-access") {
+          return refuse(
+            ctx,
+            "That tag changes who can see the file, so only a person can set it, in OpenHoard. Tell the person.",
+            { outcome: "decides-access", object: a.id },
+          );
+        }
+        throw err;
+      }
       // The grant ended meanwhile: mcp.ts refuses the whole answer.
       if (outcome === null) return refuse(ctx, "not found", { outcome: "grant-ended" });
       ctx.trail.note({ outcome: "ok", object: a.id, results: 1 });

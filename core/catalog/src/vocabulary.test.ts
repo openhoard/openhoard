@@ -54,12 +54,13 @@ describe("the tenant's vocabulary (T-903)", () => {
     // A model proposes a value the vocabulary doesn't have, and one it has.
     for (const tag of ["client:umbrella", "client:globex"]) {
       await inTenant((tx) =>
-        proposeTag(
-          tx,
-          t.tenantId,
-          { objectId: t.objectId, tag, source: "model", appliedBy: "model:x", confidence: 0.4 },
-          { review: "agent" },
-        ),
+        proposeTag(tx, t.tenantId, {
+          objectId: t.objectId,
+          tag,
+          source: "model",
+          appliedBy: "model:x",
+          confidence: 0.4,
+        }),
       );
     }
     const v = await view((tx) => tenantVocabulary(tx, t.tenantId, { userId: admin }));

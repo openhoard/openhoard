@@ -106,9 +106,11 @@ export interface ProposeOptions {
   now?: Date;
   /**
    * `agent`: whatever the table above says, the tag waits for a person (reason `agent`, unless
-   * a stronger reason applies first: a new value, a sensitive one, a conflict). For an AI
-   * assistant's proposals (T-804), which are never applied directly: a person approves each in
-   * OpenHoard's own app (T-605). Only with a model source, so provenance stays untrusted.
+   * a stronger reason applies first: a conflict, or an item already open for the tag). For an AI assistant's
+   * proposals (T-804), which are never applied directly: a person approves each in OpenHoard's
+   * own app (T-605). Only with a model source, so provenance stays untrusted. An assistant
+   * proposes approved values only (`unknown-value` otherwise), and none that decides access
+   * (`decides-access`: the value sets levels, or a grant names it).
    */
   review?: "agent";
 }
@@ -140,6 +142,19 @@ export async function proposeTag(
     .where(and(eq(facets.tenantId, tenantId), eq(facets.key, facet)));
   // Facets come from packs and admins; a tag can't invent one.
   if (!facetRow) throw new TagError("unknown-facet", `unknown facet: ${facet}`);
+  if (options.review === "agent") {
+    const known = await findValue(tx, tenantId, facet, value);
+    if (known?.approved !== true) {
+      throw new TagError("unknown-value", `${facet}:${value} is not an approved value`);
+    }
+    if (
+      known.visibility !== null ||
+      known.exposure !== null ||
+      (await hasLiveGrant(tx, tenantId, facet, value, undefined))
+    ) {
+      throw new TagError("decides-access", `${facet}:${value} changes who can see a file`);
+    }
+  }
 
   const tagKey = and(
     eq(objectTags.tenantId, tenantId),

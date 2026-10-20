@@ -546,9 +546,15 @@ describe("proposeTag for an agent (review: agent)", () => {
     expect(await tagsOn()).toContain("client:globex (reviewed)");
   });
 
-  it("keeps a stronger reason, and changes nothing for a tag already on the file", async () => {
-    expect(await agent({ tag: "sensitivity:restricted" })).toMatchObject({ reason: "sensitive" });
-    expect(await agent({ tag: t.tag })).toEqual({ applied: true, tag: t.tag });
+  it("refuses a value that isn't approved or decides access", async () => {
+    await expect(agent({ tag: "client:umbrella" })).rejects.toMatchObject({
+      code: "unknown-value",
+    });
+    await expect(agent({ tag: "sensitivity:restricted" })).rejects.toMatchObject({
+      code: "decides-access",
+    });
+    // The seeded tag has a grant: one already on the file is refused alike.
+    await expect(agent({ tag: t.tag })).rejects.toMatchObject({ code: "decides-access" });
   });
 
   it("is only for model sources", async () => {

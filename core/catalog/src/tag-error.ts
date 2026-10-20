@@ -4,6 +4,13 @@ export type TagErrorCode =
   | "unknown-facet"
   | "unknown-object"
   | "unknown-review"
+  /** An assistant's proposal (`review: "agent"`) of a value that isn't approved vocabulary. */
+  | "unknown-value"
+  /**
+   * An assistant's proposal of a value that changes who can see the file (it sets levels, or a
+   * grant names it): only a person sets those, in OpenHoard's own app.
+   */
+  | "decides-access"
   /**
    * Deciding this would take another value of a single-value facet off the object; decide again
    * with `replace` to confirm.

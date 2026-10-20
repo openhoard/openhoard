@@ -125,8 +125,11 @@ const decide = (
     body: JSON.stringify(body),
   });
 
-/** An assistant proposes a tag on the seeded file, as the `tag` tool does. */
-async function proposed(tag: string): Promise<string> {
+/**
+ * An assistant proposes a tag on the seeded file, as the `tag` tool does; or, `by` "model", the
+ * enrichment's model (summaries): only that one may propose a value that decides access.
+ */
+async function proposed(tag: string, by: "agent" | "model" = "agent"): Promise<string> {
   const out = await inTenant((tx) =>
     proposeTag(
       tx,
@@ -135,10 +138,10 @@ async function proposed(tag: string): Promise<string> {
         objectId: t.objectId,
         tag,
         source: "model",
-        appliedBy: "model:agent/cli_x",
+        appliedBy: `model:${by}/cli_x`,
         confidence: 1,
       },
-      { review: "agent" },
+      by === "agent" ? { review: "agent" } : {},
     ),
   );
   if (out.applied) throw new Error("applied, not sent to review");
@@ -361,7 +364,7 @@ describe("the review inbox over HTTP (T-903)", () => {
       }),
     );
     // A model's restriction, waiting: the file is hidden meanwhile.
-    const id = await proposed("sensitivity:restricted");
+    const id = await proposed("sensitivity:restricted", "model");
     const cookie = await signedIn(editor.id);
     expect(await (await list(cookie)).json()).toMatchObject({ items: [{ id, admin: true }] });
     for (const [decision, body] of [

@@ -92,14 +92,21 @@ beforeEach(async () => {
 });
 afterEach(() => db?.close());
 
-/** An assistant proposes a tag on the seeded file, as the `tag` tool does. */
-async function proposed(tag: string, objectId = t.objectId): Promise<string> {
+/**
+ * An assistant proposes a tag on the seeded file, as the `tag` tool does; or, `by` "model", the
+ * enrichment's model (summaries): only that one may propose a value that decides access.
+ */
+async function proposed(
+  tag: string,
+  objectId = t.objectId,
+  by: "agent" | "model" = "agent",
+): Promise<string> {
   const out = await inTenant((tx) =>
     proposeTag(
       tx,
       t.tenantId,
-      { objectId, tag, source: "model", appliedBy: "model:agent/cli_x", confidence: 1 },
-      { review: "agent" },
+      { objectId, tag, source: "model", appliedBy: `model:${by}/cli_x`, confidence: 1 },
+      by === "agent" ? { review: "agent" } : {},
     ),
   );
   if (out.applied) throw new Error("applied");
@@ -471,7 +478,7 @@ describe("the review inbox", () => {
 
     // A model's "open" waits, and approving it would put the first level on the file: one
     // looser than the default it replaces. Not the editor's, however it is decided.
-    const open = await proposed("sensitivity:open");
+    const open = await proposed("sensitivity:open", t.objectId, "model");
     expect(await code(item(editor, open, { decision: "approve" }))).toBe("not-admin");
     expect(await code(decide(editor, open, { decision: "approve" }))).toBe("not-admin");
     // Nor by filing a harmless suggestion under it.
@@ -526,10 +533,10 @@ describe("the review inbox", () => {
       ]),
     );
     // "full" is no looser than the default, but it is the file's first classification.
-    const anyone = await proposed("sensitivity:anyone");
+    const anyone = await proposed("sensitivity:anyone", t.objectId, "model");
     expect(await code(decide(editor, anyone, { decision: "approve" }))).toBe("not-admin");
     // One at the ceiling lifts nothing: the editor's.
-    const business = await proposed("sensitivity:business");
+    const business = await proposed("sensitivity:business", t.objectId, "model");
     await decide(editor, business, { decision: "approve" });
   });
 
@@ -546,7 +553,7 @@ describe("the review inbox", () => {
       }),
     );
     // A model's restriction, waiting: it tightens the file meanwhile, so turning it down loosens.
-    const tighten = await proposed("sensitivity:restricted");
+    const tighten = await proposed("sensitivity:restricted", t.objectId, "model");
     expect((await inbox(editor)).items).toMatchObject([{ id: tighten, admin: true }]);
     expect(await code(item(editor, tighten, { decision: "reject" }))).toBe("not-admin");
     expect(await code(decide(editor, tighten, { decision: "reject" }))).toBe("not-admin");
@@ -571,7 +578,7 @@ describe("the review inbox", () => {
         exposure: "metadata-only",
       }),
     );
-    const tighter = await proposed("sensitivity:restricted", t.objectId);
+    const tighter = await proposed("sensitivity:restricted", t.objectId, "model");
     expect(tighter).toBe(tighten);
     await item(editor, tighten, { decision: "merge", into: "secret" });
     expect((await inTenant((tx) => listOpenReviews(tx, t.tenantId))).map((r) => r.id)).toEqual([
