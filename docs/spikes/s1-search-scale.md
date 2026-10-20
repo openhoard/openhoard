@@ -18,7 +18,7 @@ Otherwise, revise ADR-0005.
 
 ## Method
 
-- Code: [`spikes/s1-search-scale/`](../../spikes/s1-search-scale/). [`generate.sql`](../../spikes/s1-search-scale/generate.sql) builds the data inside Postgres, deterministically. [`run.ts`](../../spikes/s1-search-scale/run.ts) runs the workload. Run it with `pnpm --filter @openhoard/spike-s1-search-scale spike -- --url postgres://… --rows 1000000 --ef 200`, or `--pglite`.
+- Code: [`spikes/s1-search-scale/`](https://github.com/openhoard/openhoard/tree/70afad62232918d3582f49df7f58ab15bad42160/spikes/s1-search-scale) (removed from the workspace after the spike, T-1409; the links are the last commit that had it). [`generate.sql`](https://github.com/openhoard/openhoard/blob/70afad62232918d3582f49df7f58ab15bad42160/spikes/s1-search-scale/generate.sql) builds the data inside Postgres, deterministically. [`run.ts`](https://github.com/openhoard/openhoard/blob/70afad62232918d3582f49df7f58ab15bad42160/spikes/s1-search-scale/run.ts) runs the workload. Run it from a checkout of that commit with `pnpm --filter @openhoard/spike-s1-search-scale spike -- --url postgres://… --rows 1000000 --ef 200`, or `--pglite`.
 - Engines:
   - native PostgreSQL 18.3 with pgvector 0.8.1, on 2 vCPU and 7 GB RAM (`shared_buffers` 1 GB, `maintenance_work_mem` 2 GB);
   - PGlite 0.5.8 at 100k rows.

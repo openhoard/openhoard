@@ -18,7 +18,7 @@ Can `@cedar-policy/cedar-wasm` be imported as ESM in Node 24, and can it decide 
 
 ## Method
 
-- Code: [`spikes/s3-cedar/run.ts`](../../spikes/s3-cedar/run.ts). Run it with `pnpm --filter @openhoard/spike-s3-cedar spike`.
+- Code: [`spikes/s3-cedar/run.ts`](https://github.com/openhoard/openhoard/blob/70afad62232918d3582f49df7f58ab15bad42160/spikes/s3-cedar/run.ts) (removed from the workspace after the spike, T-1409; this link is the last commit that had it). Run it from a checkout of that commit with `pnpm --filter @openhoard/spike-s3-cedar spike`.
 - Machine: Cedar 4.13.0, Node 24.21.0, linux-x64 on a 2-vCPU Intel Xeon at 2.10 GHz.
 - Data:
   - Users, groups and files come from a 10,000-item fake tenant (`@openhoard/testkit`).

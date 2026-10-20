@@ -15,7 +15,7 @@ The same migration applies everywhere, and the integration checks return identic
 
 ## Method
 
-- Code: [`spikes/s2-pglite-parity/`](../../spikes/s2-pglite-parity/). [`schema.sql`](../../spikes/s2-pglite-parity/schema.sql) is a candidate core schema, and [`run.ts`](../../spikes/s2-pglite-parity/run.ts) runs 22 behavioural checks (plus version and timing reports) on each engine and diffs the results. Run it with `pnpm --filter @openhoard/spike-s2-pglite-parity spike -- postgres://…`.
+- Code: [`spikes/s2-pglite-parity/`](https://github.com/openhoard/openhoard/tree/70afad62232918d3582f49df7f58ab15bad42160/spikes/s2-pglite-parity) (removed from the workspace after the spike, T-1409; the links are the last commit that had it). [`schema.sql`](https://github.com/openhoard/openhoard/blob/70afad62232918d3582f49df7f58ab15bad42160/spikes/s2-pglite-parity/schema.sql) is a candidate core schema, and [`run.ts`](https://github.com/openhoard/openhoard/blob/70afad62232918d3582f49df7f58ab15bad42160/spikes/s2-pglite-parity/run.ts) runs 22 behavioural checks (plus version and timing reports) on each engine and diffs the results. Run it from a checkout of that commit with `pnpm --filter @openhoard/spike-s2-pglite-parity spike -- postgres://…`.
 - Engines:
   - PGlite 0.5.8, which is PostgreSQL 18.3 (32-bit WASM), with `@electric-sql/pglite-pgvector` (pgvector 0.8.1);
   - native PostgreSQL 18.3 with pgvector 0.8.1, built from source;

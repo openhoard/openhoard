@@ -3,12 +3,17 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Windows and macOS run every suite here and on main; on a pull request only when it touches
+  # what can differ by OS (the node job's "Scope" step).
+  schedule:
+    - cron: "41 6 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -26,21 +31,70 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A pull request is checked out as a merge commit: HEAD^1 is the base, so the Scope
+          # step can list what the pull request changes.
+          fetch-depth: 2
+      # T-1409. Ubuntu runs everything every time. Windows and macOS run the suites on main, on
+      # the nightly schedule, and on a pull request that changes the toolchain or code that
+      # behaves differently by OS (paths, child processes, file watching, the solo commands, or
+      # any source file that names a platform; a test naming one only for a longer timeout on
+      # Windows doesn't count). Otherwise they only report: the checks are required, so the job
+      # always runs and its steps are skipped.
+      - name: Scope
+        id: scope
+        shell: bash
+        env:
+          OS: ${{ matrix.os }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          full=true
+          if [ "$OS" != ubuntu-latest ] && [ "$EVENT" = pull_request ]; then
+            changed=$(git diff --name-only HEAD^1 HEAD)
+            os_paths='^(\.github/workflows/|\.nvmrc$|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|turbo\.json$|packages/config/|connectors/fs/|core/storage/|core/db/src/(pglite|driver)|enrichers/extract/|apps/server/src/(watch|pin|solo|connect|tunnel|main)|scripts/)'
+            platform_words='process\.platform|win32|darwin|pathToFileURL|fileURLToPath'
+            named=""
+            for f in $changed; do
+              case "$f" in *.test.*) continue ;; *.ts | *.tsx | *.js | *.mjs) ;; *) continue ;; esac
+              if [ -f "$f" ] && grep -Eq "$platform_words" "$f"; then named="$f"; break; fi
+            done
+            if grep -Eq "$os_paths" <<<"$changed"; then
+              echo "OS-specific paths changed"
+            elif [ -n "$named" ]; then
+              echo "$named names a platform"
+            else
+              full=false
+              echo "Nothing OS-specific changed: the suites run on ubuntu only."
+            fi
+          fi
+          echo "full=$full" >> "$GITHUB_OUTPUT"
       - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        if: steps.scope.outputs.full == 'true'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.scope.outputs.full == 'true'
         with:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+        if: steps.scope.outputs.full == 'true'
+      # Lint, formatting and generated files don't depend on the OS: once, on ubuntu.
       - run: pnpm lint
+        if: matrix.os == 'ubuntu-latest'
       - run: pnpm format:check
+        if: matrix.os == 'ubuntu-latest'
       - run: pnpm build
+        if: steps.scope.outputs.full == 'true'
       - run: pnpm typecheck
-      # The fast suites only (the slow lane runs in the postgres job). macOS runners have three
-      # cores and Windows ones four, slow ones, and every database suite starts PGlite (WASM):
-      # run fewer suites at once there.
-      - run: pnpm test:coverage ${{ matrix.os == 'macos-latest' && '--concurrency=2' || matrix.os == 'windows-latest' && '--concurrency=3' || '' }}
+        if: steps.scope.outputs.full == 'true'
+      # The fast suites only (the slow lane runs in the postgres job). Coverage (a tripwire, not
+      # a target) once, on ubuntu. macOS runners have three cores and Windows ones four, slow
+      # ones, and every database suite starts PGlite (WASM): run fewer suites at once there.
+      - run: pnpm test:coverage
+        if: matrix.os == 'ubuntu-latest'
+      - run: pnpm test ${{ matrix.os == 'macos-latest' && '--concurrency=2' || '--concurrency=3' }}
+        if: matrix.os != 'ubuntu-latest' && steps.scope.outputs.full == 'true'
       - name: Generated types are up to date
+        if: matrix.os == 'ubuntu-latest'
         run: |
           pnpm --filter @openhoard/schemas run generate
           git diff --exit-code -- packages/schemas/src/generated
@@ -51,6 +105,7 @@ jobs:
           git status --porcelain -- core/db/migrations
           test -z "$(git status --porcelain -- core/db/migrations)"
       - name: CLI smoke test
+        if: steps.scope.outputs.full == 'true'
         run: node apps/cli/dist/bin.js manifest validate connectors/example/openhoard.plugin.json
       # T-017: per-file outcomes for the prompt-injection corpus, in the job summary. The v0
       # baseline pipeline cannot act or tag, so today this is a smoke test of the corpus and the
@@ -94,22 +149,22 @@ jobs:
       # Workspace packages the suites import are used from their build output (through turbo,
       # so the slow lane below finds them built).
       - run: pnpm build
-      - run: pnpm --filter @openhoard/core-db run test:coverage
+      - run: pnpm --filter @openhoard/core-db run test
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
-      - run: pnpm --filter @openhoard/core-audit run test:coverage
+      - run: pnpm --filter @openhoard/core-audit run test
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
-      - run: pnpm --filter @openhoard/core-catalog run test:coverage
+      - run: pnpm --filter @openhoard/core-catalog run test
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
-      - run: pnpm --filter @openhoard/core-identity run test:coverage
+      - run: pnpm --filter @openhoard/core-identity run test
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
-      - run: pnpm --filter @openhoard/core-jobs run test:coverage
+      - run: pnpm --filter @openhoard/core-jobs run test
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
-      - run: pnpm --filter @openhoard/server run test:coverage
+      - run: pnpm --filter @openhoard/server run test
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
       # The slow lane (packages/config/vitest.preset.js): every `*.slow.test.ts` suite, once,
