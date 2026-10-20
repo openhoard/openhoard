@@ -1,4 +1,4 @@
-import type { Tx } from "@openhoard/core-db";
+import { isId, type Tx } from "@openhoard/core-db";
 import {
   addMember,
   createGroup,
@@ -53,9 +53,6 @@ import type { PatchOpName } from "./users.js";
 export const MAX_MEMBER_CHANGES = 1000;
 /** Most members returned with groups in one response. */
 export const MAX_MEMBERS_RETURNED = 10_000;
-
-const USER_ID = /^usr_[0-9a-hjkmnp-tv-z]{26}$/;
-const GROUP_ID = /^grp_[0-9a-hjkmnp-tv-z]{26}$/;
 
 /** The SCIM resource for a group; `members` when they were asked for. */
 export function groupResource(g: Group, base: string, members?: User[]): Json {
@@ -113,7 +110,7 @@ export async function loadMembers(
 
 /** The current SCIM group with this id, or a 404. */
 export async function scimGroup(tx: Tx, tenantId: string, id: string): Promise<Group> {
-  const g = GROUP_ID.test(id) ? await getGroup(tx, tenantId, id) : null;
+  const g = isId("group", id) ? await getGroup(tx, tenantId, id) : null;
   if (!g || g.source !== "scim") throw notFound("group");
   return g;
 }
@@ -219,15 +216,15 @@ export async function applyMembers(tx: Tx, tenantId: string, groupId: string, pl
   }
   for (const id of removes) {
     // Anything that isn't a user id was never a member: nothing to remove.
-    if (USER_ID.test(id)) await removeMember(tx, tenantId, groupId, id, "scim");
+    if (isId("user", id)) await removeMember(tx, tenantId, groupId, id, "scim");
   }
   for (const id of adds) {
-    if (GROUP_ID.test(id)) {
+    if (isId("group", id)) {
       throw invalidValue(
         `${id} is a group: nested groups aren't supported, a group's members are users`,
       );
     }
-    if (!USER_ID.test(id)) throw invalidValue(`not a user id: ${id.slice(0, 64)}`);
+    if (!isId("user", id)) throw invalidValue(`not a user id: ${id.slice(0, 64)}`);
     try {
       await addMember(tx, tenantId, groupId, id, "scim");
     } catch (e) {

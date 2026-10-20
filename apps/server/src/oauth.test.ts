@@ -21,7 +21,7 @@ import { ConfigSchema, type Config } from "./config.js";
 import {
   ClientError,
   ClientResolver,
-  isPrivateAddress,
+  isNonPublicAddress,
   matchRedirect,
   register,
 } from "./oauth/clients.js";
@@ -1117,7 +1117,7 @@ describe("client resolution", () => {
       "64:ff9b::a00:1",
       "not-an-ip",
     ]) {
-      expect(isPrivateAddress(a), a).toBe(true);
+      expect(isNonPublicAddress(a), a).toBe(true);
     }
     for (const a of [
       "10.1.2.3",
@@ -1132,10 +1132,10 @@ describe("client resolution", () => {
       "fe80::1",
       "::ffff:10.0.0.1",
     ]) {
-      expect(isPrivateAddress(a), a).toBe(true);
+      expect(isNonPublicAddress(a), a).toBe(true);
     }
     for (const a of ["8.8.8.8", "140.82.112.3", "2606:4700::1111"])
-      expect(isPrivateAddress(a), a).toBe(false);
+      expect(isNonPublicAddress(a), a).toBe(false);
   });
 
   it("canonicalizes resource URIs", () => {

@@ -210,8 +210,12 @@ for (const [net, prefix] of [
   NON_PUBLIC_V6.addSubnet(net, prefix, "ipv6");
 }
 
-/** Whether an address is one a public client can't be at (anything but a plain public one). */
-export function isPrivateAddress(address: string): boolean {
+/**
+ * Whether an address is one a public client can't be at (anything but a plain public one). The
+ * opposite test to the model client's isPrivateAddress(), which lets it reach only private
+ * addresses: the two were named alike.
+ */
+export function isNonPublicAddress(address: string): boolean {
   const family = isIP(address);
   if (family === 0) return true;
   return family === 4 ? NON_PUBLIC_V4.check(address, "ipv4") : NON_PUBLIC_V6.check(address, "ipv6");
@@ -224,7 +228,7 @@ export function isPrivateAddress(address: string): boolean {
 const publicLookup: LookupFunction = (hostname, options, callback) => {
   lookup(hostname, { all: true }).then(
     (addresses) => {
-      const ok = addresses.filter((a) => !isPrivateAddress(a.address));
+      const ok = addresses.filter((a) => !isNonPublicAddress(a.address));
       if (ok.length === 0 || ok.length !== addresses.length) {
         callback(new Error("the host resolves to a non-public address"), "", 4);
         return;

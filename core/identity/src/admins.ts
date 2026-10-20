@@ -1,4 +1,4 @@
-import { groupMembers, groups, lockPrincipals, users, type Tx } from "@openhoard/core-db";
+import { groupMembers, groups, isId, lockPrincipals, users, type Tx } from "@openhoard/core-db";
 import { and, asc, eq, isNotNull, isNull, ne, or, sql, type SQL } from "drizzle-orm";
 import { getUser, IdentityError, type User } from "./directory.js";
 
@@ -145,7 +145,7 @@ async function othersCounting(
 
 /** The user, locked for the rest of the transaction. */
 async function lockedUser(tx: Tx, tenantId: string, userId: string) {
-  if (typeof userId !== "string" || !/^usr_[0-9a-hjkmnp-tv-z]{26}$/.test(userId)) {
+  if (typeof userId !== "string" || !isId("user", userId)) {
     throw new IdentityError("not-found", "no such user");
   }
   const [row] = await tx

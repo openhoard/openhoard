@@ -1,4 +1,4 @@
-import type { Tx } from "@openhoard/core-db";
+import { isId, type Tx } from "@openhoard/core-db";
 import {
   createUser,
   emailKey,
@@ -351,7 +351,7 @@ export function userResource(u: User, base: string): Json {
 
 /** The current SCIM user with this id, or a 404. */
 export async function scimUser(tx: Tx, tenantId: string, id: string): Promise<User> {
-  const u = /^usr_[0-9a-hjkmnp-tv-z]{26}$/.test(id) ? await getUser(tx, tenantId, id) : null;
+  const u = isId("user", id) ? await getUser(tx, tenantId, id) : null;
   if (!u || u.source !== "scim" || u.retired !== null) throw notFound("user");
   return u;
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { appendAudit, type AuditRecord } from "@openhoard/core-audit";
-import { getTenant, lockPrincipals, type Database, type Tx } from "@openhoard/core-db";
+import { getTenant, isId, lockPrincipals, type Database, type Tx } from "@openhoard/core-db";
 import {
   checkScimToken,
   membersOf,
@@ -131,7 +131,7 @@ type ScimEnv = {
 
 /** The resource a path names, for the audit record: an id, never arbitrary input. */
 const targetOf = (id: string | undefined) =>
-  id !== undefined && /^(usr|grp)_[0-9a-hjkmnp-tv-z]{26}$/.test(id) ? { target: id } : {};
+  id !== undefined && (isId("user", id) || isId("group", id)) ? { target: id } : {};
 
 /** What a request's work produced: a response, and what the audit record says of it. */
 interface Done {

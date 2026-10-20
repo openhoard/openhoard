@@ -2,7 +2,11 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync } from "no
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DEFAULT_UNITS_PER_MINUTE } from "@openhoard/connector-sharepoint";
+import { idPattern } from "@openhoard/core-db";
 import { z } from "zod";
+
+const TENANT_ID = new RegExp(idPattern("tenant"));
+const GROUP_ID = new RegExp(idPattern("group"));
 
 /**
  * Server configuration. Precedence: environment (OPENHOARD_*) > <dataDir>/config.json > defaults.
@@ -29,7 +33,7 @@ export const ProviderSchema = z
     /** entra: a tenant-specific Entra ID issuer; google; generic: any OIDC issuer. */
     kind: z.enum(["entra", "google", "generic"]),
     /** The OpenHoard tenant its people belong to. */
-    tenantId: z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
+    tenantId: z.string().regex(TENANT_ID, "a tenant id (ten_…)"),
     /** The exact issuer: discovery must return it, and ID tokens must carry it. */
     issuer: z.url(),
     clientId: z.string().min(1).max(256),
@@ -90,7 +94,7 @@ export function externalIdClaim(p: ProviderConfig): "oid" | "sub" | undefined {
  */
 export const ApprovedClientSchema = z
   .object({
-    tenantId: z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
+    tenantId: z.string().regex(TENANT_ID, "a tenant id (ten_…)"),
     clientId: z.url().optional(),
     redirectUris: z.array(z.url()).min(1).max(20).optional(),
     trust: z.enum(["local", "commercial", "consumer"]),
@@ -119,8 +123,8 @@ export type ApprovedClient = z.infer<typeof ApprovedClientSchema>;
  */
 export const AdminGroupSchema = z
   .object({
-    tenantId: z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
-    groupId: z.string().regex(/^grp_[0-9a-hjkmnp-tv-z]{26}$/, "a group id (grp_…)"),
+    tenantId: z.string().regex(TENANT_ID, "a tenant id (ten_…)"),
+    groupId: z.string().regex(GROUP_ID, "a group id (grp_…)"),
   })
   .strict();
 
@@ -338,10 +342,7 @@ export const ModelsSchema = z
     dailyTokenBudget: z.number().int().min(0).default(5_000_000),
     /** Budgets for particular tenants, by tenant id, over dailyTokenBudget. */
     tenantBudgets: z
-      .record(
-        z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
-        z.number().int().min(0),
-      )
+      .record(z.string().regex(TENANT_ID, "a tenant id (ten_…)"), z.number().int().min(0))
       .default({}),
     summarize: z
       .object({
@@ -370,7 +371,7 @@ const schedule = (byDefault: string) =>
 const sourceBase = {
   /** The connection's name: the `source` of its items, and how admin commands name it. */
   id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/, "a lower-case slug"),
-  tenantId: z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
+  tenantId: z.string().regex(TENANT_ID, "a tenant id (ten_…)"),
   /**
    * The zone its items go to, by name: an indexed zone, made at start if the tenant has none
    * of that name. A source stays in the zone it was first synced into.
@@ -566,7 +567,7 @@ export const MailboxSchema = z
   .object({
     /** The mailbox's name here: in the audit, the logs and its password's variable. */
     id: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/, "a lower-case slug"),
-    tenantId: z.string().regex(/^ten_[0-9a-hjkmnp-tv-z]{26}$/, "a tenant id (ten_…)"),
+    tenantId: z.string().regex(TENANT_ID, "a tenant id (ten_…)"),
     host: z.string().min(1).max(253),
     port: z.number().int().min(1).max(65535).default(993),
     /** TLS from the first byte (port 993). Off only for a server on this machine. */
