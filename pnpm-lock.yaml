@@ -285,6 +285,9 @@ importers:
       '@openhoard/schemas':
         specifier: workspace:^
         version: link:../../packages/schemas
+      '@openhoard/server':
+        specifier: workspace:^
+        version: link:../server
     devDependencies:
       '@openhoard/config':
         specifier: workspace:*

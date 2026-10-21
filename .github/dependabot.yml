@@ -23,7 +23,3 @@ updates:
     directory: /
     schedule:
       interval: weekly
-  - package-ecosystem: pip
-    directory: /packages/cli-py
-    schedule:
-      interval: weekly

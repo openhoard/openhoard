@@ -30,12 +30,17 @@ tools, as you, and every AI read is audited.
   one): reading a cloud-only file downloads it. Use a folder outside OneDrive, or mark it
   "Always keep on this device".
 
-In the steps below, `oh` runs the server (or one of its commands) with its data in
-`%LOCALAPPDATA%\OpenHoard`. Define it in each PowerShell window (adjust the clone's path):
+In the steps below, `oh` is the `openhoard` command (apps/cli) with its data in
+`%LOCALAPPDATA%\OpenHoard`: `oh serve` runs the server, `oh admin …`, `oh init`, `oh connect` and
+`oh tunnel` its commands. Define it in each PowerShell window (adjust the clone's path):
 
 ```powershell
-function oh { node C:\Users\Steve\git\openhoard\apps\server\dist\main.js --data-dir "$env:LOCALAPPDATA\OpenHoard" @args }
+function oh { node C:\Users\Steve\git\openhoard\apps\cli\dist\bin.js --data-dir "$env:LOCALAPPDATA\OpenHoard" @args }
 ```
+
+(Defined `oh` before 2026-10-21, as `…\apps\server\dist\main.js`? Point it at
+`…\apps\cli\dist\bin.js` and start the server with `oh serve`: the server's own entry point now
+only serves, and says so when given a command.)
 
 (Set up before `init --solo` existed, with the data in `%USERPROFILE%\OpenHoard`? Keep that path
 in `oh`: nothing moved. Don't run `init --solo` without `--folder` then, since its default folder
@@ -85,7 +90,7 @@ it up as a whole.
 3. **Start the server**, then finish in the browser and in Claude Desktop:
 
    ```powershell
-   oh
+   oh serve
    ```
 
    It logs `source ready`, `listening`, then `sync ended` for each folder. Open the link from
@@ -214,7 +219,7 @@ tenant name, several people, your own pack). Stop the server first.
    oh admin user sign-in-link --tenant $t --user steve@example.com --minutes 60
    ```
 
-   Start the server (`oh`), open the link and press **Sign in**.
+   Start the server (`oh serve`), open the link and press **Sign in**.
 
 5. **Connect Claude Desktop.** Its own "custom connector" screen connects from Anthropic's cloud,
    which can't reach `127.0.0.1`; the `mcp-remote` bridge runs on your PC instead. In
@@ -314,7 +319,5 @@ resume`; for a held deletion use `source confirm-reconcile` or `discard-reconcil
 - **A web UI for more than looking**: `<its address>/admin/` shows who you are and where each
   source stands (T-901). Sign-in links, deciding what a source waits on and approvals are still
   the commands above and the admin API (T-902..T-905).
-- **An `openhoard` command**: for now the commands run through `node …\apps\server\dist\main.js`
-  (the `oh` function).
 - **Opening files in their Windows app** (`open` with mode native) waits for the local agent
   (FR-20, M2); for a local file `open` returns its text (it has no web link).

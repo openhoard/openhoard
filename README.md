@@ -101,19 +101,19 @@ The core makes every trust decision. Plugins extend what OpenHoard can **reach**
 
 ## Repository layout
 
-| Path                      | What lives there                                                                                            |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `core/`                   | The trusted core: `identity`, `policy`, `catalog` (index + search), `summarize`, `audit`, `sandbox`         |
-| `ai/`                     | Model providers (`models`) and the enrichment steps that call them or an extractor (`enrich`)               |
-| `connectors/`             | Source connectors: SharePoint and local folders (`fs`), and an example to start from                        |
-| `enrichers/`              | Extractors and taggers for specific file types                                                              |
-| `packs/`                  | Policy and tag-vocabulary packs: a general-business starter so far                                          |
-| `skills/`                 | Agent skills built on the core MCP tools                                                                    |
-| `clients/`                | Client integrations: a browser extension so far                                                             |
-| `packages/schemas`        | Versioned JSON Schemas for plugin manifests and other contracts                                             |
-| `apps/server`, `apps/cli` | The gateway (HTTP API, MCP server, admin CLI) and the `openhoard` CLI (npm; PyPI twin in `packages/cli-py`) |
-| `apps/web`                | The admin web app (React, Vite): static files the server serves at `/admin/`                                |
-| `assets/`                 | Logo and brand assets                                                                                       |
+| Path                      | What lives there                                                                                    |
+| ------------------------- | --------------------------------------------------------------------------------------------------- |
+| `core/`                   | The trusted core: `identity`, `policy`, `catalog` (index + search), `summarize`, `audit`, `sandbox` |
+| `ai/`                     | Model providers (`models`) and the enrichment steps that call them or an extractor (`enrich`)       |
+| `connectors/`             | Source connectors: SharePoint and local folders (`fs`), and an example to start from                |
+| `enrichers/`              | Extractors and taggers for specific file types                                                      |
+| `packs/`                  | Policy and tag-vocabulary packs: a general-business starter so far                                  |
+| `skills/`                 | Agent skills built on the core MCP tools                                                            |
+| `clients/`                | Client integrations: a browser extension so far                                                     |
+| `packages/schemas`        | Versioned JSON Schemas for plugin manifests and other contracts                                     |
+| `apps/server`, `apps/cli` | The gateway (HTTP API, MCP server) and the `openhoard` CLI that runs it and its admin commands      |
+| `apps/web`                | The admin web app (React, Vite): static files the server serves at `/admin/`                        |
+| `assets/`                 | Logo and brand assets                                                                               |
 
 ## Try it
 
@@ -125,7 +125,7 @@ git clone https://github.com/openhoard/openhoard
 cd openhoard
 pnpm install
 pnpm build
-node apps/server/dist/main.js init --solo
+node apps/cli/dist/bin.js init --solo
 ```
 
 `init --solo` sets up one person, a folder (`OpenHoard` in your home folder, made if missing;

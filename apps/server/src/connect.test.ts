@@ -25,7 +25,7 @@ import {
   MCP_REMOTE_REDIRECT,
   runConnect,
 } from "./connect.js";
-import { runInit, soloArgument, type SoloIo } from "./solo.js";
+import { runInit, type SoloIo } from "./solo.js";
 
 /*
  * T-1202: `connect claude-desktop` approves Claude Desktop's bridge, merges OpenHoard into
@@ -94,13 +94,6 @@ interface Written {
 const readJson = (file: string) => JSON.parse(readFileSync(file, "utf8")) as Written;
 
 describe("connect helpers", () => {
-  it("finds connect as the first positional argument", () => {
-    expect(soloArgument(["--data-dir", "/x", "connect", "claude-desktop"])).toEqual({
-      command: "connect",
-      at: 2,
-    });
-  });
-
   it("knows where Claude Desktop keeps its config, and that Linux has none", () => {
     expect(
       claudeDesktopConfigPath("win32", { APPDATA: "C:\\Users\\s\\AppData\\Roaming" }, "C:\\x"),

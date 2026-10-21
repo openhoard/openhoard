@@ -29,7 +29,6 @@ import {
   findStarterPack,
   PLACEHOLDER_EMAIL,
   runInit,
-  soloArgument,
   soloConfigFile,
   soloPublicUrl,
   sourceId,
@@ -114,17 +113,6 @@ async function auditOf(tenantId: string) {
 }
 
 describe("solo helpers", () => {
-  it("finds init as the first positional argument", () => {
-    expect(soloArgument(["init", "--solo"])).toEqual({ command: "init", at: 0 });
-    expect(soloArgument(["--data-dir", "/x", "init", "--solo"])).toEqual({
-      command: "init",
-      at: 2,
-    });
-    expect(soloArgument(["--data-dir", "init"])).toBeUndefined();
-    expect(soloArgument(["admin", "init"])).toBeUndefined();
-    expect(soloArgument([])).toBeUndefined();
-  });
-
   it("puts the data in the OS's app-data folder, not in the indexed folder", () => {
     expect(
       defaultDataDir("win32", { LOCALAPPDATA: "C:\\Users\\s\\AppData\\Local" }, "C:\\Users\\s"),

@@ -72,7 +72,7 @@ const QUICK_INVITE_HOURS = 1;
 const TUNNEL_STOP_MS = 10_000;
 
 export interface TunnelIo extends SoloIo {
-  /** This entry point (`…/main.js`), started again as the server. */
+  /** The server's entry point (@openhoard/server's `main.js`), started as the server. */
   self: string;
   /** Starts a program (tests); default node's spawn. */
   spawn?: typeof spawn;

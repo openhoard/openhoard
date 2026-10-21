@@ -64,8 +64,6 @@ plain unit test too, so the regression stays pinned.
 Decisions live in [`docs/adr/`](docs/adr/), contract changes go through [`docs/rfc/`](docs/rfc/),
 and spike reports go in [`docs/spikes/`](docs/spikes/).
 
-Python CLI (PyPI name only): `cd packages/cli-py && python -m pip install -e . pytest && pytest`.
-
 ## Pull requests
 
 - One logical change per PR, with tests.

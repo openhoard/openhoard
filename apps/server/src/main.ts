@@ -12,62 +12,27 @@ import {
   TenantBlobStores,
   type StorageConfig,
 } from "@openhoard/core-storage";
-import { adminArgument, runAdmin } from "./admin.js";
 import { closeApp, createApp } from "./app.js";
-import { runConnect } from "./connect.js";
 import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { checkMailboxes, startMailIn } from "./mail-in.js";
 import { createServerModels, modelsStartupWarnings } from "./models.js";
-import { runInit, soloArgument } from "./solo.js";
 import { prepareSources, type ServerSources } from "./sources.js";
 import { blobsIn, storageKeyStore, tenantKeyStore } from "./tenant-keys.js";
-import { runTunnel } from "./tunnel.js";
 import { watchSources } from "./watch.js";
 
-// `main.js [options] admin …` runs an admin command (admin.ts) instead of the server, then exits.
-// `admin` is the first argument that isn't an option (`--data-dir x admin …` is admin too).
-// `init --solo` (solo.ts), `connect claude-desktop` (connect.ts) and `tunnel` (tunnel.ts, which
-// starts this entry point again as the server) are dispatched the same way.
-const adminAt = adminArgument(process.argv.slice(2));
-const solo = soloArgument(process.argv.slice(2));
-if (adminAt !== undefined || solo !== undefined) {
-  const args = process.argv.slice(2);
-  const at = adminAt ?? (solo as { at: number }).at;
-  const rest = [...args.slice(0, at), ...args.slice(at + 1)];
-  // A reader that goes away (`… | head`) or a full disk fails the write. A command that waits
-  // for its writes (io.write) handles that itself; for the rest it is remembered, so that what
-  // was to be printed (a one-time token) and wasn't is not reported as success.
-  let lost: Error | undefined;
-  process.stdout.on("error", (e: Error) => (lost ??= e));
-  const io = {
-    out: (s: string) => void process.stdout.write(s),
-    write: (s: string) =>
-      new Promise<void>((done, fail) => {
-        process.stdout.write(s, (err) => (err ? fail(err) : done()));
-      }),
-    err: (s: string) => void process.stderr.write(s),
-    // How to run this again, for the next commands printed.
-    command: `node "${process.argv[1] ?? "main.js"}"`,
-  };
-  const code =
-    adminAt !== undefined
-      ? await runAdmin(rest, io)
-      : solo?.command === "connect"
-        ? await runConnect(rest, io)
-        : solo?.command === "tunnel"
-          ? await runTunnel(rest, { ...io, self: process.argv[1] ?? "main.js" })
-          : await runInit(rest, io);
-  // Let what was written (the one-time token) reach a pipe before exiting: on Windows pipes
-  // are asynchronous, and exit() would cut it off.
-  await Promise.all(
-    [process.stdout, process.stderr].map((s) => new Promise((done) => s.write("", done))),
+// This entry point only serves. The operator commands (admin, init --solo, connect, tunnel) are
+// the `openhoard` CLI's (apps/cli, T-1407): an argument that isn't an option is refused, saying so.
+const word = parseArgs({
+  options: { "data-dir": { type: "string" } },
+  strict: false,
+  allowPositionals: true,
+}).positionals[0];
+if (word !== undefined) {
+  process.stderr.write(
+    `"${word}" is a command of the openhoard CLI now: node apps/cli/dist/bin.js [--data-dir <dir>] ${word} …\n`,
   );
-  if (code === 0 && lost !== undefined) {
-    process.stderr.write(`standard output could not be written: ${lost.message}\n`);
-    process.exit(1);
-  }
-  process.exit(code);
+  process.exit(2);
 }
 
 // `--data-dir` overrides OPENHOARD_DATA_DIR; the dev script points it at the repo root.

@@ -392,7 +392,7 @@ export async function runConnect(argv: readonly string[], io: SoloIo): Promise<n
     [
       ``,
       `What's left, in this order:`,
-      `  1. Start the server:  ${commandLine(io, dataDir, "")}`,
+      `  1. Start the server:  ${commandLine(io, dataDir, "serve")}`,
       `  2. Open the sign-in link above in your browser (within the hour) and press Sign in.`,
       `  3. Restart Claude Desktop (quit it fully, then open it again).`,
       `  4. A browser tab opens OpenHoard's consent page for mcp-remote: press Allow.`,

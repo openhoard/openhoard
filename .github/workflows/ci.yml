@@ -51,7 +51,7 @@ jobs:
           full=true
           if [ "$OS" != ubuntu-latest ] && [ "$EVENT" = pull_request ]; then
             changed=$(git diff --name-only HEAD^1 HEAD)
-            os_paths='^(\.github/workflows/|\.nvmrc$|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|turbo\.json$|packages/config/|connectors/fs/|core/storage/|core/db/src/(pglite|driver)|enrichers/extract/|apps/server/src/(watch|pin|solo|connect|tunnel|main)|scripts/)'
+            os_paths='^(\.github/workflows/|\.nvmrc$|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|turbo\.json$|packages/config/|connectors/fs/|core/storage/|core/db/src/(pglite|driver)|enrichers/extract/|apps/server/src/(watch|pin|solo|connect|tunnel|main)|apps/cli/src/(operator|bin)|scripts/)'
             platform_words='process\.platform|win32|darwin|pathToFileURL|fileURLToPath'
             named=""
             for f in $changed; do
@@ -176,23 +176,3 @@ jobs:
       - run: pnpm test:slow
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
-
-  python-cli:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: packages/cli-py
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-      - name: Schema copy matches canonical schema
-        run: diff -u ../../packages/schemas/src/plugin-manifest.v1.schema.json src/openhoard/schemas/plugin-manifest.v1.schema.json
-      # Every dependency, including the build backend, is hash-pinned (Scorecard Pinned-Dependencies).
-      # Regenerate requirements-ci.txt with the command in requirements-ci.in.
-      - run: python -m pip install --require-hashes --no-deps -r requirements-ci.txt
-      - run: python -m pip install --no-deps --no-build-isolation .
-      - run: python -m pip check
-      - run: python -m pytest -q

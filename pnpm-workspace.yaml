@@ -8,7 +8,6 @@ packages:
   - "packages/*"
   # S4 stays until its real-tenant run (T-1401); S1-S3 are in docs/spikes.
   - "spikes/s4-graph-crawl"
-  - "!packages/cli-py"
 allowBuilds:
   esbuild: true
 # pdfjs-dist (enrichers/extract) offers a native canvas addon for rendering. Extraction only reads

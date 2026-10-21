@@ -22,6 +22,11 @@ const usage = () => `openhoard ${pkg.version}
 
 Usage:
   openhoard --version
+  openhoard [--data-dir <dir>] serve        Run the server
+  openhoard [--data-dir <dir>] admin …      Admin commands (admin --help)
+  openhoard [--data-dir <dir>] init --solo  Set up OpenHoard for one person
+  openhoard [--data-dir <dir>] connect …    Point an AI client at this server
+  openhoard [--data-dir <dir>] tunnel       Serve through a Cloudflare tunnel
   openhoard manifest validate <file...>   Validate plugin manifest(s) against schema v1
   openhoard manifest schema               Print the v1 manifest JSON Schema
 `;

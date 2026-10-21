@@ -89,7 +89,7 @@ export interface SoloIo extends AdminIo {
   home?: string;
   /** The OS user name, the default display name (tests); default os.userInfo().username. */
   username?: string;
-  /** How the person runs this entry point, for the next commands printed (`node …/main.js`). */
+  /** How the person runs this entry point, for the next commands printed (`node …/apps/cli/dist/bin.js`). */
   command?: string;
   /** Runs the program that pins a folder (pin.ts; tests). */
   run?: Run;
@@ -579,7 +579,7 @@ async function soloTenant(
     const owner = await findUserByEmail(tx, tenantId, email);
     return { tenant, people, owner };
   });
-  const listed = `  node …/main.js --data-dir <dir> admin tenant list\n`;
+  const listed = `  openhoard --data-dir <dir> admin tenant list\n`;
   if (
     found.tenant?.name !== name.trim() ||
     found.people.total > 1 ||
@@ -727,31 +727,10 @@ function summary(
     ``,
     `Next, connect Claude Desktop, then start the server:`,
     `  ${commandLine(io, s.dataDir, "connect claude-desktop")}`,
-    `  ${commandLine(io, s.dataDir, "")}`,
+    `  ${commandLine(io, s.dataDir, "serve")}`,
     `Or, to reach it from claude.ai or your phone, start it behind a tunnel instead (needs cloudflared):`,
     `  ${commandLine(io, s.dataDir, "tunnel")}`,
     `Once it runs, add files in a browser at <its address>/app/ (and, installed from there, by sharing to OpenHoard).`,
     ``,
   ].join("\n");
-}
-
-/**
- * Which solo command the server's arguments name, and where, when it is the first one that
- * isn't an option (`--data-dir x init --solo` too): `init`, `connect` or `tunnel`.
- */
-export function soloArgument(
-  args: readonly string[],
-): { command: "init" | "connect" | "tunnel"; at: number } | undefined {
-  const { tokens } = parseArgs({
-    args: [...args],
-    options: { "data-dir": { type: "string" } },
-    strict: false,
-    allowPositionals: true,
-    tokens: true,
-  });
-  const first = tokens.find((t) => t.kind === "positional");
-  if (first?.kind !== "positional") return undefined;
-  return first.value === "init" || first.value === "connect" || first.value === "tunnel"
-    ? { command: first.value, at: first.index }
-    : undefined;
 }

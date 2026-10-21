@@ -1,7 +1,7 @@
 {
   "name": "openhoard",
   "version": "0.0.1",
-  "description": "OpenHoard CLI: the open-source AI filesystem. Currently validates OpenHoard plugin manifests.",
+  "description": "OpenHoard CLI: runs the server and its operator commands (admin, init, connect, tunnel), and validates plugin manifests.",
   "type": "module",
   "bin": {
     "openhoard": "dist/bin.js"
@@ -22,7 +22,8 @@
     "node": ">=24.0.0"
   },
   "dependencies": {
-    "@openhoard/schemas": "workspace:^"
+    "@openhoard/schemas": "workspace:^",
+    "@openhoard/server": "workspace:^"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*"

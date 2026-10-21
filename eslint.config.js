@@ -4,7 +4,7 @@ import prettier from "eslint-config-prettier";
 import globals from "globals";
 
 export default tseslint.config(
-  { ignores: ["**/dist/**", "**/coverage/**", "**/.turbo/**", "packages/cli-py/**"] },
+  { ignores: ["**/dist/**", "**/coverage/**", "**/.turbo/**"] },
   js.configs.recommended,
   ...tseslint.configs.strict,
   {

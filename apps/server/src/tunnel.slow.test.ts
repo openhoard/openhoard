@@ -27,7 +27,7 @@ import { and, isNull } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
-import { runInit, soloArgument } from "./solo.js";
+import { runInit } from "./solo.js";
 import { runTunnel, type TunnelIo } from "./tunnel.js";
 
 /*
@@ -221,13 +221,6 @@ async function audit(tenantId: string) {
 }
 
 describe("tunnel", () => {
-  it("is a command of the entry point", () => {
-    expect(soloArgument(["--data-dir", "/x", "tunnel", "--name", "t"])).toEqual({
-      command: "tunnel",
-      at: 2,
-    });
-  });
-
   it("opens a quick tunnel, tells the server its address, and prints an invite", async () => {
     await initSolo();
     const before = readFileSync(join(dir, "config.json"), "utf8");

@@ -1034,42 +1034,42 @@ configuration as the server, and accept `--data-dir` as it does (before or after
 never start the server or the job queue.
 
 ```sh
-node apps/server/dist/main.js admin tenant create --name "Acme"            # prints ten_…
-node apps/server/dist/main.js admin tenant list
-node apps/server/dist/main.js admin scim-token issue --tenant ten_… --name "Entra provisioning" [--days 365]
-node apps/server/dist/main.js admin scim-token list --tenant ten_…
-node apps/server/dist/main.js admin scim-token revoke --tenant ten_… --id sct_…
-node apps/server/dist/main.js admin user grant-admin --tenant ten_… --user <usr_… | email | userName>
-node apps/server/dist/main.js admin user revoke-admin --tenant ten_… --user <usr_… | email | userName>
-node apps/server/dist/main.js admin user list-admins --tenant ten_…
-node apps/server/dist/main.js admin user lock --tenant ten_… --user <usr_… | email | userName>
-node apps/server/dist/main.js admin user unlock --tenant ten_… --user <usr_… | email | userName>
-node apps/server/dist/main.js admin user create --tenant ten_… --email <email> --name <name>
-node apps/server/dist/main.js admin user sign-in-link --tenant ten_… --user <usr_… | email> [--minutes 15]
-node apps/server/dist/main.js admin group list --tenant ten_…
-node apps/server/dist/main.js admin pack plan --tenant ten_… --file packs/general-business/pack.json
-node apps/server/dist/main.js admin pack apply --tenant ten_… --file packs/general-business/pack.json --plan-hash <hash>
-node apps/server/dist/main.js admin source list --tenant ten_…
-node apps/server/dist/main.js admin source status --tenant ten_… [--source <name>]
-node apps/server/dist/main.js admin source skips --tenant ten_… --source <name> [--reason <code>] [--limit 100]
-node apps/server/dist/main.js admin resummarize --tenant ten_… [--reason budget,refused,unavailable,no-provider] [--limit 10000] [--dry-run]
-node apps/server/dist/main.js admin injection dismiss --tenant ten_… --user <a tenant admin> --id obj_…
-node apps/server/dist/main.js admin injection reconsider --tenant ten_… --user <a tenant admin> --id obj_…
-node apps/server/dist/main.js admin source run-now --tenant ten_… --source <name>
-node apps/server/dist/main.js admin source resume --tenant ten_… --source <name>
-node apps/server/dist/main.js admin source confirm-reconcile --tenant ten_… --source <name>
-node apps/server/dist/main.js admin source discard-reconcile --tenant ten_… --source <name>
-node apps/server/dist/main.js admin source accept-identity --tenant ten_… --source <name>
-node apps/server/dist/main.js admin grant add --tenant ten_… (--user <usr_…|email|userName> | --group <grp_…|name>) --tag <facet:value> [--role read|write] [--days <n> | --forever]
-node apps/server/dist/main.js admin grant list --tenant ten_… [--user <…> | --group <…>]
-node apps/server/dist/main.js admin grant revoke --tenant ten_… --id grt_…
-node apps/server/dist/main.js admin review list --tenant ten_… --user <usr_…|email|userName> [--limit 100]
-node apps/server/dist/main.js admin review approve --tenant ten_… --user <usr_…|email|userName> --id rev_… [--replace]
-node apps/server/dist/main.js admin review reject --tenant ten_… --user <usr_…|email|userName> --id rev_…
-node apps/server/dist/main.js admin review merge --tenant ten_… --user <usr_…|email|userName> --id rev_… --into <value> [--replace]
-node apps/server/dist/main.js admin health report --tenant ten_… --user <a tenant admin> [--format text|csv] [--out <new file>] [--limit <n>] [--stale-days <n>] [--large-mb <n>]
-node apps/server/dist/main.js admin audit verify --tenant ten_…
-node apps/server/dist/main.js admin audit export --tenant ten_… [--format ndjson|csv] [--out <new file>] [--actor …] [--action …] [--decision allow|deny] [--client …] [--object …] [--from <time>] [--to <time>]
+node apps/cli/dist/bin.js admin tenant create --name "Acme"            # prints ten_…
+node apps/cli/dist/bin.js admin tenant list
+node apps/cli/dist/bin.js admin scim-token issue --tenant ten_… --name "Entra provisioning" [--days 365]
+node apps/cli/dist/bin.js admin scim-token list --tenant ten_…
+node apps/cli/dist/bin.js admin scim-token revoke --tenant ten_… --id sct_…
+node apps/cli/dist/bin.js admin user grant-admin --tenant ten_… --user <usr_… | email | userName>
+node apps/cli/dist/bin.js admin user revoke-admin --tenant ten_… --user <usr_… | email | userName>
+node apps/cli/dist/bin.js admin user list-admins --tenant ten_…
+node apps/cli/dist/bin.js admin user lock --tenant ten_… --user <usr_… | email | userName>
+node apps/cli/dist/bin.js admin user unlock --tenant ten_… --user <usr_… | email | userName>
+node apps/cli/dist/bin.js admin user create --tenant ten_… --email <email> --name <name>
+node apps/cli/dist/bin.js admin user sign-in-link --tenant ten_… --user <usr_… | email> [--minutes 15]
+node apps/cli/dist/bin.js admin group list --tenant ten_…
+node apps/cli/dist/bin.js admin pack plan --tenant ten_… --file packs/general-business/pack.json
+node apps/cli/dist/bin.js admin pack apply --tenant ten_… --file packs/general-business/pack.json --plan-hash <hash>
+node apps/cli/dist/bin.js admin source list --tenant ten_…
+node apps/cli/dist/bin.js admin source status --tenant ten_… [--source <name>]
+node apps/cli/dist/bin.js admin source skips --tenant ten_… --source <name> [--reason <code>] [--limit 100]
+node apps/cli/dist/bin.js admin resummarize --tenant ten_… [--reason budget,refused,unavailable,no-provider] [--limit 10000] [--dry-run]
+node apps/cli/dist/bin.js admin injection dismiss --tenant ten_… --user <a tenant admin> --id obj_…
+node apps/cli/dist/bin.js admin injection reconsider --tenant ten_… --user <a tenant admin> --id obj_…
+node apps/cli/dist/bin.js admin source run-now --tenant ten_… --source <name>
+node apps/cli/dist/bin.js admin source resume --tenant ten_… --source <name>
+node apps/cli/dist/bin.js admin source confirm-reconcile --tenant ten_… --source <name>
+node apps/cli/dist/bin.js admin source discard-reconcile --tenant ten_… --source <name>
+node apps/cli/dist/bin.js admin source accept-identity --tenant ten_… --source <name>
+node apps/cli/dist/bin.js admin grant add --tenant ten_… (--user <usr_…|email|userName> | --group <grp_…|name>) --tag <facet:value> [--role read|write] [--days <n> | --forever]
+node apps/cli/dist/bin.js admin grant list --tenant ten_… [--user <…> | --group <…>]
+node apps/cli/dist/bin.js admin grant revoke --tenant ten_… --id grt_…
+node apps/cli/dist/bin.js admin review list --tenant ten_… --user <usr_…|email|userName> [--limit 100]
+node apps/cli/dist/bin.js admin review approve --tenant ten_… --user <usr_…|email|userName> --id rev_… [--replace]
+node apps/cli/dist/bin.js admin review reject --tenant ten_… --user <usr_…|email|userName> --id rev_…
+node apps/cli/dist/bin.js admin review merge --tenant ten_… --user <usr_…|email|userName> --id rev_… --into <value> [--replace]
+node apps/cli/dist/bin.js admin health report --tenant ten_… --user <a tenant admin> [--format text|csv] [--out <new file>] [--limit <n>] [--stale-days <n>] [--large-mb <n>]
+node apps/cli/dist/bin.js admin audit verify --tenant ten_…
+node apps/cli/dist/bin.js admin audit export --tenant ten_… [--format ndjson|csv] [--out <new file>] [--actor …] [--action …] [--decision allow|deny] [--client …] [--object …] [--from <time>] [--to <time>]
 ```
 
 - **The File Health Report (T-1001, T-1002).** `health report` says what a tenant's admin
@@ -1222,7 +1222,7 @@ For a single person trying OpenHoard on their own folders (docs/dogfood.md), the
 sets everything up in one command, dispatched like `admin` (options may come before it):
 
 ```sh
-node apps/server/dist/main.js init --solo [--folder <path>]… [--name <display name>] \
+node apps/cli/dist/bin.js init --solo [--folder <path>]… [--name <display name>] \
   [--email <email>] [--no-extract] [--no-pin] [--data-dir <dir>]
 ```
 
@@ -1267,7 +1267,7 @@ node apps/server/dist/main.js init --solo [--folder <path>]… [--name <display 
 ### Claude Desktop: `connect claude-desktop` (T-1202)
 
 ```sh
-node apps/server/dist/main.js connect claude-desktop [--tenant ten_…] [--user <usr_… | email>] \
+node apps/cli/dist/bin.js connect claude-desktop [--tenant ten_…] [--user <usr_… | email>] \
   [--claude-config <file>] [--data-dir <dir>]
 ```
 
@@ -1534,8 +1534,8 @@ example `cloudflared tunnel --url http://127.0.0.1:7420`), and use the tunnel's 
    PGlite):
 
    ```sh
-   node apps/server/dist/main.js admin tenant create --name "Contoso trial" --data-dir .openhoard
-   node apps/server/dist/main.js admin scim-token issue --tenant ten_… --name "Entra provisioning" --data-dir .openhoard
+   node apps/cli/dist/bin.js admin tenant create --name "Contoso trial" --data-dir .openhoard
+   node apps/cli/dist/bin.js admin scim-token issue --tenant ten_… --name "Entra provisioning" --data-dir .openhoard
    ```
 
 2. **Create the enterprise app.** In the Entra admin center (entra.microsoft.com), go to
@@ -1605,7 +1605,7 @@ example `cloudflared tunnel --url http://127.0.0.1:7420`), and use the tunnel's 
      Entra sends `active: false`, and the session ends on the next request.
    - Deleting a user in Entra first soft-deletes them (`active: false`). The permanent deletion
      sends DELETE, which retires them.
-   - `node apps/server/dist/main.js admin scim-token list --tenant ten_…` shows when the token
+   - `node apps/cli/dist/bin.js admin scim-token list --tenant ten_…` shows when the token
      was last used.
    - Make the test account the tenant's first admin (T-106) with
      `admin user grant-admin --tenant ten_… --user <its UPN>` (server stopped, on PGlite), then
