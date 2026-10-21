@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
-import { contentHasher, scopedBlobId } from "@openhoard/core-catalog";
+import { contentHasher, scopedBlobId } from "./hash.js";
 import { Operator } from "opendal";
 
 /*

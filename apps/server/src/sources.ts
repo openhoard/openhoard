@@ -1,7 +1,7 @@
+import type { ContentSource } from "@openhoard/core-storage";
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { appendAudit } from "@openhoard/core-audit";
-import type { ContentSource } from "@openhoard/core-catalog";
 import { getTenant, isId, newId, zones, type Database } from "@openhoard/core-db";
 import { findUserByEmail, getUser, type User } from "@openhoard/core-identity";
 import {

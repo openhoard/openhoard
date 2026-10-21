@@ -27,7 +27,7 @@ router, budget }` with a provider that has an `embedModel`. Without one, search 
   only.
 
 **Text extraction** (`extract-text`, [extract.ts](src/extract.ts), T-402). The step reads the
-version's bytes through the `ContentSource` (core/catalog), extracts them in a limited child
+version's bytes through the `ContentSource` (core/storage), extracts them in a limited child
 process ([@openhoard/enricher-extract](../../enrichers/extract/README.md)), and stores the result
 per version with core/catalog `saveExtract()` through `write`:
 

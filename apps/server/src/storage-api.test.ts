@@ -5,7 +5,7 @@ import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core
 import { createUser, grantAdmin, issueSignInLink, type User } from "@openhoard/core-identity";
 import type { StorageJob } from "@openhoard/core-jobs";
 import { BlobStore, moveTenantBlobs, TenantBlobStores } from "@openhoard/core-storage";
-import { startFakeS3, type FakeS3 } from "@openhoard/testkit";
+import { startFakeS3, type FakeS3 } from "@openhoard/core-storage/testing";
 import type { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";

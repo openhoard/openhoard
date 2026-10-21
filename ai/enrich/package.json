@@ -25,6 +25,7 @@
     "@openhoard/core-catalog": "workspace:^",
     "@openhoard/core-db": "workspace:^",
     "@openhoard/core-jobs": "workspace:^",
+    "@openhoard/core-storage": "workspace:^",
     "@openhoard/core-summarize": "workspace:^",
     "@openhoard/enricher-extract": "workspace:^"
   },

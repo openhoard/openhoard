@@ -142,8 +142,6 @@ const SURFACE = {
   pure: [
     "blobIdOf",
     "canonicalJson",
-    "contentHash",
-    "contentHasher",
     "evaluateRules",
     "rulePath",
     "fuseChannels",
@@ -164,7 +162,6 @@ const SURFACE = {
     "reasonText",
     "reciprocalRankFusion",
     "runPackTests",
-    "scopedBlobId",
     "validatePack",
     "validateRules",
     "vectorPlanFor",

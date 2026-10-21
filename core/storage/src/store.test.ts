@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { contentHash, scopedBlobId } from "@openhoard/core-catalog";
+import { contentHash, scopedBlobId } from "./hash.js";
 import { CapabilityOverrideLayer, Operator } from "opendal";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {

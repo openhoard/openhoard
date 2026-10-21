@@ -1,4 +1,4 @@
-import type { ContentSource } from "@openhoard/core-catalog";
+import type { ContentSource } from "@openhoard/core-storage";
 import { coreEnrichSteps, type EnrichStep } from "@openhoard/core-jobs";
 import { embedStep, type EmbedStepOptions } from "./embed.js";
 import { extractStep, type ExtractStepOptions } from "./extract.js";

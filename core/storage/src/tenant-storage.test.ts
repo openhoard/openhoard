@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { blobs, tenantStorage, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant } from "@openhoard/core-db/testing";
 import { eq } from "drizzle-orm";
-import { startFakeS3 } from "@openhoard/testkit";
+import { startFakeS3 } from "./testing.js";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { classifyStorageError, probeStorage } from "./probe.js";
 import { openSecret, SealedSecretError, sealSecret } from "./secrets.js";

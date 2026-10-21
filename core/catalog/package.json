@@ -22,11 +22,11 @@
     "clean": "rimraf dist coverage"
   },
   "dependencies": {
-    "@noble/hashes": "^2.4.0",
     "@openhoard/core-audit": "workspace:^",
     "@openhoard/core-db": "workspace:^",
     "@openhoard/core-identity": "workspace:^",
     "@openhoard/core-policy": "workspace:^",
+    "@openhoard/core-storage": "workspace:^",
     "drizzle-orm": "^0.45.4"
   },
   "devDependencies": {

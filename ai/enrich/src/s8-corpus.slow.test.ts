@@ -1,3 +1,4 @@
+import type { ContentSource } from "@openhoard/core-storage";
 import {
   APPLY_TRANSACTION,
   applyPack,
@@ -6,7 +7,6 @@ import {
   viewObjects,
   VIEW_TRANSACTION,
   type CardView,
-  type ContentSource,
   type Pack,
 } from "@openhoard/core-catalog";
 import { newId, objects, objectTags, tagReviews, zones, type Database } from "@openhoard/core-db";

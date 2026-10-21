@@ -1,10 +1,5 @@
-import {
-  ingest,
-  readExtract,
-  type ContentRef,
-  type ContentSource,
-  type IngestResult,
-} from "@openhoard/core-catalog";
+import type { ContentRef, ContentSource } from "@openhoard/core-storage";
+import { ingest, readExtract, type IngestResult } from "@openhoard/core-catalog";
 import { newId, versionExtracts, versions, zones, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import {

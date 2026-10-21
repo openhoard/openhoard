@@ -1,11 +1,5 @@
-import {
-  contentRef,
-  readExtract,
-  saveExtract,
-  type ContentRef,
-  type ContentSource,
-  type VersionExtract,
-} from "@openhoard/core-catalog";
+import type { ContentRef, ContentSource } from "@openhoard/core-storage";
+import { contentRef, readExtract, saveExtract, type VersionExtract } from "@openhoard/core-catalog";
 import {
   extract,
   EXTRACTOR_VERSION,

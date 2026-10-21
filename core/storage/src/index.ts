@@ -1,3 +1,5 @@
+export { contentHash, contentHasher, scopedBlobId } from "./hash.js";
+export type { ContentRef, ContentSource, ZoneKind } from "./content-ref.js";
 export { blobContentSource, ContentMismatchError, type BlobContentOptions } from "./content.js";
 export {
   BlobNotFoundError,

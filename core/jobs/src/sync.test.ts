@@ -1,7 +1,8 @@
+import type { ContentSource } from "@openhoard/core-storage";
 import { mkdir, mkdtemp, readFile, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { contentRef, type ContentSource, type IngestResult } from "@openhoard/core-catalog";
+import { contentRef, type IngestResult } from "@openhoard/core-catalog";
 import { fsConnector } from "@openhoard/connector-fs";
 import {
   activityEvents,

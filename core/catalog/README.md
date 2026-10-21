@@ -3,8 +3,8 @@
 Part of the OpenHoard trusted core. See [../README.md](../README.md) and
 [docs/architecture.md](../../docs/architecture.md).
 
-- [`hash.ts`](src/hash.ts): content hashes (BLAKE3, `b3:`) and tenant-scoped blob ids
-  (`b3t:`, ADR-0013).
+- Content hashes (BLAKE3, `b3:`), tenant-scoped blob ids (`b3t:`, ADR-0013) and the
+  `ContentRef`/`ContentSource` types are [core/storage](../storage/README.md)'s (T-1406).
 - [`ingest.ts`](src/ingest.ts): recording source items, their versions and blobs (T-204).
 - [`rank.ts`](src/rank.ts): reciprocal rank fusion for hybrid search, with per-channel ranks.
 - [`search.ts`](src/search.ts): search behind policy: keyword, vector and hybrid (T-501..T-504).

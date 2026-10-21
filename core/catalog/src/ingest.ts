@@ -1,3 +1,4 @@
+import { contentHasher, scopedBlobId } from "@openhoard/core-storage";
 import {
   blobs,
   idPattern,
@@ -12,7 +13,6 @@ import {
 } from "@openhoard/core-db";
 import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import { writeActivity } from "./activity.js";
-import { contentHasher, scopedBlobId } from "./hash.js";
 import { lockObject, lockSourceItem } from "./locks.js";
 
 /*

@@ -1,4 +1,3 @@
-export * from "./hash.js";
 export * from "./rank.js";
 export type * from "./types.js";
 export {
@@ -219,11 +218,8 @@ export {
   contentRef,
   readExtract,
   saveExtract,
-  type ContentRef,
-  type ContentSource,
   type ExtractStatus,
   type VersionExtract,
-  type ZoneKind,
 } from "./extracts.js";
 export {
   explainAccess,

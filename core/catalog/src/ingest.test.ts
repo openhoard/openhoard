@@ -1,3 +1,4 @@
+import { contentHash, scopedBlobId } from "@openhoard/core-storage";
 import {
   blobs,
   newId,
@@ -12,7 +13,6 @@ import {
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { and, asc, eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { contentHash, scopedBlobId } from "./hash.js";
 import {
   blobIdOf,
   ingest,

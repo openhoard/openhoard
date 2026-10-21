@@ -1,10 +1,5 @@
-import {
-  ingest,
-  readEmbeddings,
-  saveCard,
-  saveExtract,
-  type ContentSource,
-} from "@openhoard/core-catalog";
+import type { ContentSource } from "@openhoard/core-storage";
+import { ingest, readEmbeddings, saveCard, saveExtract } from "@openhoard/core-catalog";
 import {
   facets,
   facetValues,

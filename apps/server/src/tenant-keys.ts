@@ -5,7 +5,7 @@ import { blobs, isId, type Database } from "@openhoard/core-db";
 import { eq } from "drizzle-orm";
 
 /*
- * Each tenant's 32-byte blob key (ADR-0013, core/catalog scopedBlobId()): blob ids are keyed by
+ * Each tenant's 32-byte blob key (ADR-0013, core/storage scopedBlobId()): blob ids are keyed by
  * it, so the database alone can't tell that two tenants hold the same file, or that a tenant
  * holds a known one. The key is kept outside the database, in the data directory:
  * `<dataDir>/keys/<tenant id>.blob-key`, 32 random bytes in base64url, readable only by the

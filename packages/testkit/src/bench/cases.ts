@@ -1,5 +1,6 @@
+import { contentHasher } from "@openhoard/core-storage";
 import { appendEvent, type AuditEvent } from "@openhoard/core-audit";
-import { contentHasher, reciprocalRankFusion } from "@openhoard/core-catalog";
+import { reciprocalRankFusion } from "@openhoard/core-catalog";
 import { buildCard } from "@openhoard/core-summarize";
 import { InMemorySearch } from "../leak/reference-search.js";
 import { Random } from "../random.js";

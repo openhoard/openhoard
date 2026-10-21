@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { ContentRef } from "@openhoard/core-catalog";
+import type { ContentRef } from "./content-ref.js";
 import { describe, expect, it } from "vitest";
 import { blobContentSource, ContentMismatchError } from "./content.js";
 import { BlobNotFoundError, BlobStore } from "./store.js";

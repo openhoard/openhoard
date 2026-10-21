@@ -1,10 +1,6 @@
 import type { Readable } from "node:stream";
-import {
-  contentHasher,
-  scopedBlobId,
-  type ContentRef,
-  type ContentSource,
-} from "@openhoard/core-catalog";
+import type { ContentRef, ContentSource } from "./content-ref.js";
+import { contentHasher, scopedBlobId } from "./hash.js";
 import type { BlobStorage } from "./tenant-storage.js";
 
 export interface BlobContentOptions {
@@ -25,7 +21,7 @@ export class ContentMismatchError extends Error {
 }
 
 /**
- * The bytes OpenHoard holds itself, as enrichment reads them (core/catalog ContentSource):
+ * The bytes OpenHoard holds itself, as enrichment reads them (ContentSource):
  * only a managed zone's version, whose blob has a storage location, streams from the store by
  * its content-addressed id. Anything else (an indexed zone, where the source keeps the bytes; a
  * local-only zone, whose content never reaches the server) is not this source's: null.

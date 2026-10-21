@@ -18,7 +18,7 @@ const stream = await blobs.open(tenantId, blobId, { offset: 0, length: 1024 });
 ## Ids and layout
 
 - A blob's id is `b3t:<hex>`: a BLAKE3 hash of the content's BLAKE3 hash, keyed with the
-  tenant's 32-byte secret (`scopedBlobId` in core/catalog).
+  tenant's 32-byte secret (`scopedBlobId`, [hash.ts](src/hash.ts)).
   - Identical bytes in one tenant are stored once; `put()` reports `created: false`.
   - Identical bytes in two tenants get unrelated ids. Neither storage paths nor
     de-duplication reveal that another tenant holds the same file.
@@ -52,7 +52,7 @@ const stream = await blobs.open(tenantId, blobId, { offset: 0, length: 1024 });
 ## Enrichment
 
 `blobContentSource(store, { tenantKey })` is how enrichment reads the bytes OpenHoard holds
-(core/catalog `ContentSource`, T-402): only a managed zone's version, whose blob has a
+(`ContentSource`, T-402): only a managed zone's version, whose blob has a
 location, streams from the store by its content-addressed id; anything else (an indexed or
 local-only zone) is null. The stream is checked as it is read: its size against the
 version's, and, given the tenant's blob key, its BLAKE3 hash against the blob id
@@ -92,7 +92,7 @@ then. One row a tenant in `tenant_storage` (migration 0071, forced RLS).
   first check, with a marker file, that the two places aren't one (`BlobStore.sameStorageAs()`):
   if they are, nothing is copied or removed. A job for an older `version` stops. One move at a
   time: `StorageBusyError` until the old copies are gone.
-- **Tests.** Against a fake S3 (`@openhoard/testkit` `startFakeS3()`, S3's own protocol in
+- **Tests.** Against a fake S3 (`@openhoard/core-storage/testing` `startFakeS3()`, S3's own protocol in
   memory) and memory stores; checked by hand against s3rver and Azurite.
 
 ## Limits

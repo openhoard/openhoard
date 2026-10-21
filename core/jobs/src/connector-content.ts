@@ -3,7 +3,7 @@ import {
   scopedBlobId,
   type ContentRef,
   type ContentSource,
-} from "@openhoard/core-catalog";
+} from "@openhoard/core-storage";
 import { objects, sourceRefs, versions, type Database } from "@openhoard/core-db";
 import { changedError, isConnectorError, type Connector } from "@openhoard/sdk";
 import { and, asc, eq } from "drizzle-orm";

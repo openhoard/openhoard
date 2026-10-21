@@ -8,6 +8,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
     }
   },
   "files": [
@@ -21,14 +25,13 @@
     "clean": "rimraf dist coverage"
   },
   "dependencies": {
-    "@openhoard/core-catalog": "workspace:^",
+    "@noble/hashes": "^2.4.0",
     "@openhoard/core-db": "workspace:^",
     "drizzle-orm": "^0.45.4",
     "opendal": "^0.49.12"
   },
   "devDependencies": {
-    "@openhoard/config": "workspace:*",
-    "@openhoard/testkit": "workspace:*"
+    "@openhoard/config": "workspace:*"
   },
   "license": "Apache-2.0"
 }
