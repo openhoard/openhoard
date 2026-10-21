@@ -30,7 +30,7 @@
     "@openhoard/core-summarize": "workspace:^",
     "@openhoard/sdk": "workspace:^",
     "drizzle-orm": "^0.45.4",
-    "pg-boss": "12.37.1"
+    "pg-boss": "12.38.0"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*",

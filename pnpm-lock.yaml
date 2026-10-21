@@ -296,8 +296,8 @@ importers:
   apps/server:
     dependencies:
       '@hono/node-server':
-        specifier: ^2.1.4
-        version: 2.1.4(hono@4.13.13)
+        specifier: ^2.1.5
+        version: 2.1.5(hono@4.13.13)
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.1
         version: 1.32.1(supports-color@7.2.0)(zod@4.6.7)
@@ -347,8 +347,8 @@ importers:
         specifier: ^4.13.13
         version: 4.13.13
       imapflow:
-        specifier: ^2.4.0
-        version: 2.4.0
+        specifier: ^2.5.2
+        version: 2.5.2
       openid-client:
         specifier: ^6.8.8
         version: 6.8.8
@@ -356,8 +356,8 @@ importers:
         specifier: ^10.4.0
         version: 10.4.0
       postal-mime:
-        specifier: ^4.0.5
-        version: 4.0.5
+        specifier: ^4.0.8
+        version: 4.0.8
       zod:
         specifier: ^4.6.7
         version: 4.6.7
@@ -490,17 +490,17 @@ importers:
   core/db:
     dependencies:
       '@electric-sql/pglite':
-        specifier: 0.5.9
-        version: 0.5.9
+        specifier: 0.5.10
+        version: 0.5.10
       '@electric-sql/pglite-pgvector':
-        specifier: 0.0.10
-        version: 0.0.10(@electric-sql/pglite@0.5.9)
+        specifier: 0.0.11
+        version: 0.0.11(@electric-sql/pglite@0.5.10)
       '@openhoard/core-policy':
         specifier: workspace:^
         version: link:../policy
       drizzle-orm:
         specifier: ^0.45.4
-        version: 0.45.4(@electric-sql/pglite@0.5.9)(@opentelemetry/api@1.9.1)(@types/pg@8.23.1)(pg@8.23.1)
+        version: 0.45.4(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.9.1)(@types/pg@8.23.1)(pg@8.23.1)
       pg:
         specifier: ^8.23.1
         version: 8.23.1
@@ -564,8 +564,8 @@ importers:
         specifier: ^0.45.4
         version: 0.45.4(@electric-sql/pglite@0.5.9)(@opentelemetry/api@1.9.1)(@types/pg@8.23.1)(pg@8.23.1)
       pg-boss:
-        specifier: 12.37.1
-        version: 12.37.1(@opentelemetry/api@1.9.1)
+        specifier: 12.38.0
+        version: 12.38.0(@opentelemetry/api@1.9.1)
     devDependencies:
       '@openhoard/config':
         specifier: workspace:*
@@ -612,8 +612,8 @@ importers:
         specifier: ^0.45.4
         version: 0.45.4(@electric-sql/pglite@0.5.9)(@opentelemetry/api@1.9.1)(@types/pg@8.23.1)(pg@8.23.1)
       opendal:
-        specifier: ^0.49.12
-        version: 0.49.12
+        specifier: ^0.49.13
+        version: 0.49.13
     devDependencies:
       '@openhoard/config':
         specifier: workspace:*
@@ -687,8 +687,8 @@ importers:
   packages/testkit:
     dependencies:
       '@hono/node-server':
-        specifier: ^2.1.4
-        version: 2.1.4(hono@4.13.13)
+        specifier: ^2.1.5
+        version: 2.1.5(hono@4.13.13)
       '@openhoard/core-audit':
         specifier: workspace:^
         version: link:../../core/audit
@@ -981,10 +981,13 @@ packages:
   '@drizzle-team/brocli@0.10.2':
     resolution: {integrity: sha512-z33Il7l5dKjUgGULTqBsQBQwckHh5AbIuxhdsIxDDiZAzBOrZO6q9ogcWC65kU382AfynTfgNumVcNIjuIua6w==}
 
-  '@electric-sql/pglite-pgvector@0.0.10':
-    resolution: {integrity: sha512-c1R6e5e/syHDhyJNPGHulXHABbQiMeA1bvs8MltQmlM26ki3FXnD1uYLSwJa1mgAIY6Wg1FupF0D371JiR8uDQ==}
+  '@electric-sql/pglite-pgvector@0.0.11':
+    resolution: {integrity: sha512-pUukU2iqI5TLBv/0D5Bk9R9zVyms+7Do6yscl4WRKW5pD2wNl8FlzGWDXphXj/Q42SsVIJHbP4+oqwjQC9fasg==}
     peerDependencies:
-      '@electric-sql/pglite': 0.5.9
+      '@electric-sql/pglite': 0.5.10
+
+  '@electric-sql/pglite@0.5.10':
+    resolution: {integrity: sha512-tXc/25U3ulOkiRQuTFdwIv+JhBqtMdAF7Gvo6CfZZWtSB4+hgC4Wr2vwK5ngvvN5PJfAAEGIsfyCVy1JhCOBYw==}
 
   '@electric-sql/pglite@0.5.9':
     resolution: {integrity: sha512-GoQTRMZ/o4J3sMW4mLDtDFGNOm1xy5oH+iHDALWll3uERY6OF4BSnL1t7FZH2Mlw+RPceDBlFJgSaecO73c4EA==}
@@ -1357,8 +1360,8 @@ packages:
       '@noble/hashes':
         optional: true
 
-  '@hono/node-server@2.1.4':
-    resolution: {integrity: sha512-2g1qeHl4BduwDn6L8nkAvDrPUWPMlkQ//a5NhP/zIyaXKMjZNRV+cG9Csu+BiJFf6+68pqzjf4Hi5sJGKHuS1g==}
+  '@hono/node-server@2.1.5':
+    resolution: {integrity: sha512-MgP/I06GdvsilDspMk/qmRzpk8LOUStP6jFAbSRi40W09DhoyUn+Mj7eyKICPqeYKybOjVFLVIAQzvu1bfIa7Q==}
     engines: {node: '>=20'}
     peerDependencies:
       hono: ^4 || ^5.0.0-0
@@ -1431,54 +1434,54 @@ packages:
     resolution: {integrity: sha512-X5XaVWZIBCT7HHZGm5I7ZQXDwLG+bGXuSrMQAW+7Zvl87h1kmc1ZB1VSRJcpUfoUrGQp4Fkoxm5kZ+Ms+aW+eA==}
     engines: {node: '>= 20.19.0'}
 
-  '@opendal/lib-darwin-arm64@0.49.12':
-    resolution: {integrity: sha512-IWHskZI94mlR7VCJX3BESsW61OxdY9iMKdEaq3eoZU6Qje5KE8iIBBvfZpzWbJXfu0ycH9maEoWavVhzjiZciA==}
+  '@opendal/lib-darwin-arm64@0.49.13':
+    resolution: {integrity: sha512-G1RN7gSRq3giZ2sovG48p2zG1fECkicyw9QkWKNBWXtDHfqPM4Z1nLrVvKTxQAFZdhKzdyQyU5jgPVCirbHW4g==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [darwin]
 
-  '@opendal/lib-darwin-x64@0.49.12':
-    resolution: {integrity: sha512-Fhw5yQFtpr9eD3G3W5A9DEehmilyYFWDEzL8NeWJh5vjUZPglgcY29XpajS53MrSA0rTDvjEOKafbtcUim6PSA==}
+  '@opendal/lib-darwin-x64@0.49.13':
+    resolution: {integrity: sha512-2HbefZ/laVZlfwJceKhCBlM6GOTVjm6zjsgITIZE6xzJeUbRET0lTJeoTsTrzTwB2LRuLOlZ/uelm4aIZLtHqA==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [darwin]
 
-  '@opendal/lib-linux-arm64-gnu@0.49.12':
-    resolution: {integrity: sha512-EnFyO9gBxEq2/iiFmul4S3clI9ogF7n6vnxq0C2HnijjgJPM5lUXq6NYvVhvgjH20xErbrAXwjPb61Jai39kNg==}
+  '@opendal/lib-linux-arm64-gnu@0.49.13':
+    resolution: {integrity: sha512-uTabu3o+c0+gbQD1AOy9YQfMBb65YOhxKVCHF1Ve3CEzud/nM4+izVZx5+JWmt1qsk4zu1mVsMVNk8kKY4DQ7A==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
     libc: [glibc]
 
-  '@opendal/lib-linux-arm64-musl@0.49.12':
-    resolution: {integrity: sha512-6OSmfs2QKkptXcAcL++zf7dx1Cvy7hEuya/r8bSQdRmxG+oXGMeLAkdNd4PEzIbt1k8VuoMGqkRntbUlRQFnXQ==}
+  '@opendal/lib-linux-arm64-musl@0.49.13':
+    resolution: {integrity: sha512-tmK/tLW/aSFTwE6YPKlhri9LOnJafvxM4dDsevLVmZUnoOrBJae9LATLcim1nx1a2PaagcZYj0nrL0NSPRWMBA==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
     libc: [musl]
 
-  '@opendal/lib-linux-x64-gnu@0.49.12':
-    resolution: {integrity: sha512-+zu8JcS3m0iRUZQnRykmOfM2BNmMBEPXWlJ/NeyPFYtzob7ttslIj7LBG2td614Fz7GXc1UEZKrOwHZiM3GihQ==}
+  '@opendal/lib-linux-x64-gnu@0.49.13':
+    resolution: {integrity: sha512-Q/+079Q8tSyIW5S9iCrwSr56NRMScHeio6HsioGbmiksb41HnUxdHXzDuSUz9b/jufxyFEiNh3ifMVLpa4Gfwg==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
     libc: [glibc]
 
-  '@opendal/lib-linux-x64-musl@0.49.12':
-    resolution: {integrity: sha512-GfXqGY0NB8igGQr8T0tDzqEFus/tBjo5HIKSC1+sMTBtCk2yuTB6X+S0ZtpZwGLowPo2C7UdKzJrSItwZfFIpg==}
+  '@opendal/lib-linux-x64-musl@0.49.13':
+    resolution: {integrity: sha512-QK9NioYu8rXsw1ILpm/+S/FkSq9IK5IomE7SA9sP09OLHvJNydHKIhx+avVQMTIb4E40d+12Cq9F3FL3qo9wPw==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
     libc: [musl]
 
-  '@opendal/lib-win32-arm64-msvc@0.49.12':
-    resolution: {integrity: sha512-Lx0yUbdIHf2YHG6eJf7UOYbBwoSNSCWa+W4flNunHRQDpEK6FRYpDE3F+gloESreU7gM6KFlQjjY6ua/iAZ/0w==}
+  '@opendal/lib-win32-arm64-msvc@0.49.13':
+    resolution: {integrity: sha512-eNV1I76iaJAvl8VUY3z+LxYMhkJT904wc2VCVP0OHMc3xUD+Ugp/50RNsWTzOnNd5W+oZv5eKGtm0GCggeDtrA==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [win32]
 
-  '@opendal/lib-win32-x64-msvc@0.49.12':
-    resolution: {integrity: sha512-XvaPSK5PZ0unh60upQHuU11Ujl52FvIVLDIOrSxfnB6dDw3meDuUgxqKgqgfEUB+fPChbmVXy6PO7h9g2srPDA==}
+  '@opendal/lib-win32-x64-msvc@0.49.13':
+    resolution: {integrity: sha512-AzBzm4xwraXOrnRY+oGhgy6/97xPoHTBAMsqUlXbsCFmPXW4sv6NKm6NTm6vQZuNw3wWrADOoPFJ+NKj5k/MQg==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [win32]
@@ -1810,8 +1813,8 @@ packages:
   '@vitest/spy@5.0.4':
     resolution: {integrity: sha512-MZKk/gSkm2q+ICobMxCpH1mA+cCAWm8WV7UhxlqGjq/sJ3AGc1BqFOs5CRVXxH78wQtme9q/NAAgBquj4AcyMw==}
 
-  '@zone-eu/mailsplit@5.4.20':
-    resolution: {integrity: sha512-6B2w0zRBWOwbO5h7SL5N/2z1AuNchTP3OT33MObUr4/cz9bWPrZ6KadLKxnSrOZG0AGu7Q03p4X7eQhZHc1u/A==}
+  '@zone-eu/mailsplit@5.4.23':
+    resolution: {integrity: sha512-2skZfQY5iOAIFwVO4jZzqtMPJyxFpCKemQGVT7O8QxUjHAK+W7LQY/UbK9BWrxeS0wZ64rKZaATY+T9BsF4JSw==}
 
   accepts@1.3.8:
     resolution: {integrity: sha512-PYAthTa2m2VKxuvSD3DPC/Gy+U+sOA1LAuT8mkmRuvw+NACSaeXEQ+NHcVF7rONl6qcaxV3Uuemwawk+7+SJLw==}
@@ -1978,8 +1981,8 @@ packages:
       typescript:
         optional: true
 
-  cron-parser@5.10.1:
-    resolution: {integrity: sha512-pKRrRagItwk9rGIStcUyMxFX34x56zoX3KDf9HJ4ttwkXIK1qxK63EvXvEDmlxI9AdPJ+Y7TEKRftRlW5eSS7A==}
+  cron-parser@5.10.2:
+    resolution: {integrity: sha512-JfAYMY0LZaWQTuict8PhtF/ksSnq8xefSDmQUnnoqvkPYkU/y3UP0DTWzJKFBz0P1IXsDG8q0vY3zHkoFZOhvw==}
     engines: {node: '>=18'}
 
   cross-spawn@7.0.6:
@@ -2449,8 +2452,8 @@ packages:
     resolution: {integrity: sha512-HpbUakT7xp5miBUywCHf36ZEuAJNklBJDDsGpUIjMzOSmM8ELSfA9Sa/QDPeNeqeoN31u+UTCkL4klCOVvRm4Q==}
     engines: {node: '>= 4'}
 
-  imapflow@2.4.0:
-    resolution: {integrity: sha512-42quCGcSiPFH2ho+/n89lXwR2JA0iuYcE+pe3BvezF24tXgSOrvB/KsJr0i45lCpLSAMZdE+iSFLCokXUGo2sA==}
+  imapflow@2.5.2:
+    resolution: {integrity: sha512-lo+Lww4XlD0FgSFuTwxPFaffCUui5RbUjQzWAx80H9HMVYLWLd5sPkwy48s5u+L32ch+anwPrr8avrztfkKBrw==}
     engines: {node: '>=20.0.0'}
 
   import-fresh@3.3.1:
@@ -2580,14 +2583,14 @@ packages:
     resolution: {integrity: sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ==}
     engines: {node: '>= 0.8.0'}
 
-  libbase64@1.3.2:
-    resolution: {integrity: sha512-fFCoI0ceXhTu/0QiJ6Uf6BV9k7X/8QW2/D4BR1vw3BPrHcIjLbGLH+U7inQ4SeWrfNCOmpGE09Qt4XjSFfus0g==}
+  libbase64@1.3.3:
+    resolution: {integrity: sha512-6n4p3TUeQPimN4ANBTYQ5P4IpFx8p6cdanknnOBfw05XGtaG/k1LAtTSu79w7S07D1esy4qUfM8G4qvQncDWcw==}
 
-  libmime@5.4.7:
-    resolution: {integrity: sha512-r1ENu4wMVSB52AAORwaW4L/MeQJr9rryzHLRpcjud3zcUPWXh1Xkgn+tAqL8oTnRO/LW7y5xxPBE20ta5amtMA==}
+  libmime@5.4.9:
+    resolution: {integrity: sha512-HKKUqLVU/ndBsAn9nBx6oykz5Tt7QzWkJG86cYvm3ekt5A/LuMR+5AjIr7fKnUg3Y2d8JQhMtQnBLYbh59/bEw==}
 
-  libqp@2.1.2:
-    resolution: {integrity: sha512-rp+U80tl9Os4K7GnVbPzPRmghPu6eqB8rcF+ontvNAnoga0JhMFG/bkTD/reC8yoznKMgOc5/ttZHJasiWeFPw==}
+  libqp@2.1.3:
+    resolution: {integrity: sha512-2tRtFndHYRyc6pAuExPbiZbzgwdWp8HIMTE1fLycMwv13YZlN5+DKvgR5WsP1W6vSpGXFuGvV49gteKetlMwLw==}
 
   lightningcss-android-arm64@1.33.0:
     resolution: {integrity: sha512-gEpRTalKdosp4Bb8qWtc2iOgE5SeIHlpS1up9bFq2wAyYhl1UdTObYiHe98zEM9SQvSoqQZ1IQD0JNpg3Ml5pg==}
@@ -2781,8 +2784,8 @@ packages:
   once@1.4.0:
     resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}
 
-  opendal@0.49.12:
-    resolution: {integrity: sha512-sKu8YNl8jWr5b/68iGWJOIiromJo9m80xm/Zx7EUtQf5W3bbgNvhLacaQkPiVnB1QZ0k4yOu1+NB1Jr4gfAC9g==}
+  opendal@0.49.13:
+    resolution: {integrity: sha512-9aqgQ4pGKP3ESPAxfKDk5JUE4X/la8SzQXSOZxBMSIIDleJOhT4jgOwjNGVLZ0TtJ/PQpGmVpm7LCncTiAlTHg==}
     engines: {node: '>= 10'}
 
   openid-client@6.8.8:
@@ -2843,8 +2846,8 @@ packages:
   pend@1.2.0:
     resolution: {integrity: sha512-F3asv42UuXchdzt+xXqfW1OGlVBe+mxa2mqI0pg5yAHZPvFmY3Y6drSf/GQ1A86WgWEN9Kzh/WrgKa6iGcHXLg==}
 
-  pg-boss@12.37.1:
-    resolution: {integrity: sha512-LghWeOIbMCiLcTY3+8MInXaJ0wk0AOkbeUZ8oE+cGO0uoheGSW3GK57eDqEbrDGpwTIpX9BVphvdvWEDYTcJ9A==}
+  pg-boss@12.38.0:
+    resolution: {integrity: sha512-felA3fyPSJwWk5cb/VwAgnudCAzWEdgBjjf+eukXm8pExlwkhjdBbOMukMyG5s8uZHO6fZZZcaIaTa3oKpfSCg==}
     engines: {node: '>=22.12.0'}
     hasBin: true
     peerDependencies:
@@ -2909,8 +2912,8 @@ packages:
     resolution: {integrity: sha512-wQ0b/W4Fr01qtpHlqSqspcj3EhBvimsdh0KlHhH8HRZnMsEa0ea2fTULOXOS9ccQr3om+GcGRk4e+isrZWV8qQ==}
     engines: {node: '>=16.20.0'}
 
-  postal-mime@4.0.5:
-    resolution: {integrity: sha512-fWu1Cmo2ef6LCwgHU1fVrqo55eyFP31F7hH0j/wMWkQYYdh+H8zz3nBf3EYRQelkmTfDrbDfTvPUQEBT8DS/jw==}
+  postal-mime@4.0.8:
+    resolution: {integrity: sha512-nnAgc4a9hn7zYuQmX4C7LU+fN47kR5S8cE8zvB/vZ2NimNDbaj+ISZJ9qe3CKIfn2uOTwwz4nQeIyljvdFNgOA==}
     engines: {node: '>=20'}
 
   postcss@8.5.30:
@@ -3743,11 +3746,14 @@ snapshots:
 
   '@drizzle-team/brocli@0.10.2': {}
 
-  '@electric-sql/pglite-pgvector@0.0.10(@electric-sql/pglite@0.5.9)':
+  '@electric-sql/pglite-pgvector@0.0.11(@electric-sql/pglite@0.5.10)':
     dependencies:
-      '@electric-sql/pglite': 0.5.9
+      '@electric-sql/pglite': 0.5.10
 
-  '@electric-sql/pglite@0.5.9': {}
+  '@electric-sql/pglite@0.5.10': {}
+
+  '@electric-sql/pglite@0.5.9':
+    optional: true
 
   '@esbuild-kit/core-utils@3.3.2':
     dependencies:
@@ -3953,7 +3959,7 @@ snapshots:
     optionalDependencies:
       '@noble/hashes': 2.4.0
 
-  '@hono/node-server@2.1.4(hono@4.13.13)':
+  '@hono/node-server@2.1.5(hono@4.13.13)':
     dependencies:
       hono: 4.13.13
 
@@ -4009,7 +4015,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.32.1(supports-color@7.2.0)(zod@4.6.7)':
     dependencies:
-      '@hono/node-server': 2.1.4(hono@4.13.13)
+      '@hono/node-server': 2.1.5(hono@4.13.13)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -4031,28 +4037,28 @@ snapshots:
 
   '@noble/hashes@2.4.0': {}
 
-  '@opendal/lib-darwin-arm64@0.49.12':
+  '@opendal/lib-darwin-arm64@0.49.13':
     optional: true
 
-  '@opendal/lib-darwin-x64@0.49.12':
+  '@opendal/lib-darwin-x64@0.49.13':
     optional: true
 
-  '@opendal/lib-linux-arm64-gnu@0.49.12':
+  '@opendal/lib-linux-arm64-gnu@0.49.13':
     optional: true
 
-  '@opendal/lib-linux-arm64-musl@0.49.12':
+  '@opendal/lib-linux-arm64-musl@0.49.13':
     optional: true
 
-  '@opendal/lib-linux-x64-gnu@0.49.12':
+  '@opendal/lib-linux-x64-gnu@0.49.13':
     optional: true
 
-  '@opendal/lib-linux-x64-musl@0.49.12':
+  '@opendal/lib-linux-x64-musl@0.49.13':
     optional: true
 
-  '@opendal/lib-win32-arm64-msvc@0.49.12':
+  '@opendal/lib-win32-arm64-msvc@0.49.13':
     optional: true
 
-  '@opendal/lib-win32-x64-msvc@0.49.12':
+  '@opendal/lib-win32-x64-msvc@0.49.13':
     optional: true
 
   '@opentelemetry/api@1.9.1': {}
@@ -4366,11 +4372,11 @@ snapshots:
 
   '@vitest/spy@5.0.4': {}
 
-  '@zone-eu/mailsplit@5.4.20':
+  '@zone-eu/mailsplit@5.4.23':
     dependencies:
-      libbase64: 1.3.2
-      libmime: 5.4.7
-      libqp: 2.1.2
+      libbase64: 1.3.3
+      libmime: 5.4.9
+      libqp: 2.1.3
 
   accepts@1.3.8:
     dependencies:
@@ -4531,7 +4537,7 @@ snapshots:
     optionalDependencies:
       typescript: 6.0.3
 
-  cron-parser@5.10.1:
+  cron-parser@5.10.2:
     dependencies:
       luxon: 3.7.2
 
@@ -4544,7 +4550,7 @@ snapshots:
   css-tree@3.2.1:
     dependencies:
       mdn-data: 2.27.1
-      source-map-js: 1.2.1
+      source-map-js: 1.2.2
 
   csstype@3.2.3: {}
 
@@ -4585,6 +4591,13 @@ snapshots:
       '@esbuild-kit/esm-loader': 2.6.5
       esbuild: 0.25.12
       tsx: 4.23.15
+
+  drizzle-orm@0.45.4(@electric-sql/pglite@0.5.10)(@opentelemetry/api@1.9.1)(@types/pg@8.23.1)(pg@8.23.1):
+    optionalDependencies:
+      '@electric-sql/pglite': 0.5.10
+      '@opentelemetry/api': 1.9.1
+      '@types/pg': 8.23.1
+      pg: 8.23.1
 
   drizzle-orm@0.45.4(@electric-sql/pglite@0.5.9)(@opentelemetry/api@1.9.1)(@types/pg@8.23.1)(pg@8.23.1):
     optionalDependencies:
@@ -4981,14 +4994,14 @@ snapshots:
 
   ignore@7.0.10: {}
 
-  imapflow@2.4.0:
+  imapflow@2.5.2:
     dependencies:
-      '@zone-eu/mailsplit': 5.4.20
+      '@zone-eu/mailsplit': 5.4.23
       encoding-japanese: 2.4.0
       iconv-lite: 0.7.3
-      libbase64: 1.3.2
-      libmime: 5.4.7
-      libqp: 2.1.2
+      libbase64: 1.3.3
+      libmime: 5.4.9
+      libqp: 2.1.3
       pino: 10.3.1
       socks: 2.8.10
 
@@ -5132,16 +5145,16 @@ snapshots:
       prelude-ls: 1.2.1
       type-check: 0.4.0
 
-  libbase64@1.3.2: {}
+  libbase64@1.3.3: {}
 
-  libmime@5.4.7:
+  libmime@5.4.9:
     dependencies:
       encoding-japanese: 2.4.0
       iconv-lite: 0.7.3
-      libbase64: 1.3.2
-      libqp: 2.1.2
+      libbase64: 1.3.3
+      libqp: 2.1.3
 
-  libqp@2.1.2: {}
+  libqp@2.1.3: {}
 
   lightningcss-android-arm64@1.33.0:
     optional: true
@@ -5282,16 +5295,16 @@ snapshots:
     dependencies:
       wrappy: 1.0.2
 
-  opendal@0.49.12:
+  opendal@0.49.13:
     optionalDependencies:
-      '@opendal/lib-darwin-arm64': 0.49.12
-      '@opendal/lib-darwin-x64': 0.49.12
-      '@opendal/lib-linux-arm64-gnu': 0.49.12
-      '@opendal/lib-linux-arm64-musl': 0.49.12
-      '@opendal/lib-linux-x64-gnu': 0.49.12
-      '@opendal/lib-linux-x64-musl': 0.49.12
-      '@opendal/lib-win32-arm64-msvc': 0.49.12
-      '@opendal/lib-win32-x64-msvc': 0.49.12
+      '@opendal/lib-darwin-arm64': 0.49.13
+      '@opendal/lib-darwin-x64': 0.49.13
+      '@opendal/lib-linux-arm64-gnu': 0.49.13
+      '@opendal/lib-linux-arm64-musl': 0.49.13
+      '@opendal/lib-linux-x64-gnu': 0.49.13
+      '@opendal/lib-linux-x64-musl': 0.49.13
+      '@opendal/lib-win32-arm64-msvc': 0.49.13
+      '@opendal/lib-win32-x64-msvc': 0.49.13
 
   openid-client@6.8.8:
     dependencies:
@@ -5351,10 +5364,10 @@ snapshots:
 
   pend@1.2.0: {}
 
-  pg-boss@12.37.1(@opentelemetry/api@1.9.1):
+  pg-boss@12.38.0(@opentelemetry/api@1.9.1):
     dependencies:
       '@opentelemetry/api': 1.9.1
-      cron-parser: 5.10.1
+      cron-parser: 5.10.2
       pg: 8.23.1
       rrule-temporal: 2.2.8
       serialize-error: 13.0.2
@@ -5436,7 +5449,7 @@ snapshots:
 
   pkce-challenge@5.0.1: {}
 
-  postal-mime@4.0.5: {}
+  postal-mime@4.0.8: {}
 
   postcss@8.5.30:
     dependencies:
