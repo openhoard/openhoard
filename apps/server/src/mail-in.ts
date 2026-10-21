@@ -1,14 +1,19 @@
 import { createHash } from "node:crypto";
 import { appendAudit } from "@openhoard/core-audit";
-import { ingest, INGEST_LIMITS, IngestError, type IngestResult } from "@openhoard/core-catalog";
+import {
+  ingestManaged,
+  INGEST_LIMITS,
+  IngestError,
+  ZoneKindError,
+  type IngestResult,
+} from "@openhoard/core-catalog";
 import { getTenant, isId, type Database, type Tx } from "@openhoard/core-db";
 import { findUserByEmail, getUser, userPrincipal, type User } from "@openhoard/core-identity";
-import { blobPath, type BlobStorage } from "@openhoard/core-storage";
+import type { BlobStorage } from "@openhoard/core-storage";
 import { ImapFlow } from "imapflow";
 import type { Logger } from "pino";
 import PostalMime, { type Address, type Email } from "postal-mime";
 import { mailPasswordEnv, type MailboxConfig } from "./config.js";
-import { managedZone, ZoneKindError } from "./managed.js";
 import { retrying } from "./retry.js";
 import { uploadTitle } from "./uploads.js";
 
@@ -485,22 +490,15 @@ export async function takeMessage(
           // Still theirs to receive, now: not only when the message was first looked at.
           const owner = await ownerOf(tx);
           if (typeof owner === "string") throw new Refused(owner);
-          const zoneId = (await managedZone(tx, tenantId, mailbox.zone, {
-            create: true,
-            actor: ACTOR,
-          })) as string;
           const principal = userPrincipal(owner.id);
-          return ingest(tx, tenantId, {
+          return ingestManaged(tx, tenantId, {
+            zone: mailbox.zone,
+            zoneActor: ACTOR,
+            blob: { blobId: stored.blobId, size: stored.size },
             source: MAIL_SOURCE,
             externalId: `${mailbox.id}/${digest}/${file.part}`,
-            zoneId,
             title: file.title,
             ownerId: principal,
-            content: {
-              blobId: stored.blobId,
-              size: stored.size,
-              location: blobPath(tenantId, stored.blobId),
-            },
             mime: file.mime,
             authorId: principal,
             modifiedAt: when,

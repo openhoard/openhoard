@@ -32,6 +32,8 @@ const SURFACE = {
     // `tag` authorized on it.
     "reviewInbox",
     "reviewItemFor",
+    // A person's own uploads (T-1405): each file through the gate.
+    "listOwnManaged",
     "searchObjects",
     "suggestTitles",
     "viewBySource",
@@ -57,6 +59,10 @@ const SURFACE = {
     // reviewItemFor() first.
     "decideReview",
     "ingest",
+    // An upload's or a mail's bytes into its managed zone (T-1405); the door checks the person.
+    "ingestManaged",
+    // A configured source's or a managed zone, found or made by name, audited (T-1405).
+    "ensureZone",
     // Takes the object's lock for the enrichment step that writes after it.
     "lockCurrentVersion",
     "markProcessed",
@@ -85,6 +91,9 @@ const SURFACE = {
     "writeActivity",
   ],
   trusted: [
+    // What a card doesn't carry, for a caller that gated the files first (T-1405).
+    "currentVersionIds",
+    "sourceUrls",
     // For enrichment (core/jobs): where a version's bytes are, to extract them (T-402).
     "contentRef",
     // For an admin's health view (T-405): how many versions have no summary, and why.
@@ -204,6 +213,7 @@ const SURFACE = {
     "VIEW_TRANSACTION",
     "VOCABULARY_MAX",
     "VocabularyError",
+    "ZoneKindError",
   ],
 } as const;
 
@@ -218,6 +228,7 @@ const RECORDING = {
   viewObject: "view",
 } as const;
 const LISTING = [
+  "listOwnManaged",
   "recentObjects",
   "reviewInbox",
   "reviewItemFor",
@@ -226,7 +237,12 @@ const LISTING = [
   "viewObjects",
 ] as const;
 /** Gated reads kept outside read.ts, beside what they belong with. */
-const ELSEWHERE: readonly string[] = ["recentObjects", "reviewInbox", "reviewItemFor"];
+const ELSEWHERE: readonly string[] = [
+  "listOwnManaged",
+  "recentObjects",
+  "reviewInbox",
+  "reviewItemFor",
+];
 
 /** The gated reads in search.ts, which reach viewObjects() through gatedMatches(). */
 const SEARCH: readonly string[] = ["searchObjects", "suggestTitles"];
@@ -406,6 +422,11 @@ describe("the catalog's export surface", () => {
           (await catalog.searchObjects(tx, t.tenantId, deny, request, { query: "" })).hits,
         suggestTitles: (tx) =>
           catalog.suggestTitles(tx, t.tenantId, deny, request, { prefix: "report" }),
+        listOwnManaged: (tx) =>
+          catalog.listOwnManaged(tx, t.tenantId, deny, request, {
+            zone: "Uploads",
+            source: "uploads",
+          }),
         recentObjects: async (tx) =>
           (await catalog.recentObjects(tx, t.tenantId, deny, request)).items,
         reviewInbox: async (tx) =>
@@ -486,6 +507,11 @@ describe("the catalog's export surface", () => {
             catalog.searchObjects(tx, t.tenantId, authz, request, { query: "report" }),
           suggestTitles: (tx) =>
             catalog.suggestTitles(tx, t.tenantId, authz, request, { prefix: "report" }),
+          listOwnManaged: (tx) =>
+            catalog.listOwnManaged(tx, t.tenantId, authz, request, {
+              zone: "Uploads",
+              source: "uploads",
+            }),
           recentObjects: (tx) => catalog.recentObjects(tx, t.tenantId, authz, request),
           reviewInbox: (tx) => catalog.reviewInbox(tx, t.tenantId, authz, { userId: t.userId }),
           reviewItemFor: (tx) =>

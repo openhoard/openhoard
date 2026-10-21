@@ -1,9 +1,9 @@
-import type { ContentSource } from "@openhoard/core-storage";
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { appendAudit } from "@openhoard/core-audit";
-import { getTenant, isId, newId, zones, type Database } from "@openhoard/core-db";
+import { ensureZone, ZoneKindError } from "@openhoard/core-catalog";
+import { getTenant, isId, type Database } from "@openhoard/core-db";
 import { findUserByEmail, getUser, type User } from "@openhoard/core-identity";
+import type { ContentSource } from "@openhoard/core-storage";
 import {
   connectorContentSource,
   ensureSourceSync,
@@ -14,7 +14,6 @@ import {
 import { fsConnector } from "@openhoard/connector-fs";
 import { graphAuth, sharepointConnector, sitePath } from "@openhoard/connector-sharepoint";
 import type { Connector } from "@openhoard/sdk";
-import { and, eq } from "drizzle-orm";
 import type { Logger } from "pino";
 import {
   sourceSecretEnv,
@@ -143,27 +142,18 @@ export async function prepareSources(
     const zoneId = await retrying(() =>
       db.withTenant(s.tenantId, async (tx) => {
         if (!(await getTenant(tx, s.tenantId))) return fail(`no tenant ${s.tenantId}`);
-        const [zone] = await tx
-          .select({ id: zones.id, kind: zones.kind })
-          .from(zones)
-          .where(and(eq(zones.tenantId, s.tenantId), eq(zones.name, s.zone)));
-        let id = zone?.id;
-        if (zone && zone.kind !== "indexed") {
-          return fail(
-            `zone "${s.zone}" is a ${zone.kind} zone: a source syncs into an indexed one`,
-          );
-        }
-        if (!zone) {
-          id = newId("zone");
-          await tx
-            .insert(zones)
-            .values({ tenantId: s.tenantId, id, kind: "indexed", name: s.zone });
-          await appendAudit(tx, s.tenantId, {
+        let id: string;
+        try {
+          id = (await ensureZone(tx, s.tenantId, {
+            name: s.zone,
+            kind: "indexed",
+            create: true,
             actor: CONFIG_ACTOR,
-            action: "zone.create",
-            decision: "allow",
-            detail: { zone: id, kind: "indexed", source: s.id },
-          });
+            detail: { source: s.id },
+          })) as string;
+        } catch (e) {
+          if (!(e instanceof ZoneKindError)) throw e;
+          return fail(`zone "${s.zone}" is a ${e.kind} zone: a source syncs into an indexed one`);
         }
         const bound = await ensureSourceSync(tx, s.tenantId, {
           source: s.id,

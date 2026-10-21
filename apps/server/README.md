@@ -1397,7 +1397,7 @@ holds, in a **managed zone**.
   can read nothing. A page saved again is a new version of the same file.
 - **`POST /api/uploads?name=<file name>`** takes one file as the request's body, with its type
   as `Content-Type`, from a signed-in member's browser session (201, or 200 when the file was
-  there already, with `{object, version, title, size, created, newVersion}`). `GET /api/uploads` lists the caller's own.
+  there already, with `{object, version, title, size, created, newVersion}`). `GET /api/uploads` lists the caller's own, each through the read gate.
 
 The upload API also takes an approved client's token (`Authorization: Bearer`, scope
 `files:add`) in place of the session: POST only, with no cookie, for an active member. The

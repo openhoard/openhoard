@@ -1,6 +1,6 @@
-import type { HitExplanation, ObjectView } from "@openhoard/core-catalog";
-import { users, versions, type Tx } from "@openhoard/core-db";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { currentVersionIds, type HitExplanation, type ObjectView } from "@openhoard/core-catalog";
+import { users, type Tx } from "@openhoard/core-db";
+import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { actorOf, type ToolContext } from "./context.js";
 
@@ -294,12 +294,7 @@ export async function auditSummaries(
   if (ctx.bearer.client.trust === "first-party") return;
   const ids = cards.filter((c) => c.summary !== undefined).map((c) => c.id);
   if (ids.length === 0) return;
-  const current = await tx
-    .selectDistinctOn([versions.objectId], { objectId: versions.objectId, id: versions.id })
-    .from(versions)
-    .where(and(eq(versions.tenantId, ctx.bearer.tenantId), inArray(versions.objectId, ids)))
-    .orderBy(versions.objectId, desc(versions.seq));
-  const versionOf = new Map(current.map((r) => [r.objectId, r.id]));
+  const versionOf = await currentVersionIds(tx, ctx.bearer.tenantId, ids);
   for (const id of ids) {
     const version = versionOf.get(id);
     ctx.trail.record({

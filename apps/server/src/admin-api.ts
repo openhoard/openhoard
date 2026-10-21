@@ -156,7 +156,8 @@ export interface AdminApiDeps {
 }
 
 /** The request's client: the admin API is OpenHoard's own. */
-const FIRST_PARTY: AuthzClient = { id: "openhoard", trust: "first-party" };
+/** OpenHoard's own apps, as the read gate sees them. */
+export const FIRST_PARTY: AuthzClient = { id: "openhoard", trust: "first-party" };
 const NO_STORE = { "cache-control": "no-store" } as const;
 const CLIENT_KEY = /^[0-9a-f]{64}$/;
 /** A source's id, as the config takes it. */

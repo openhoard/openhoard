@@ -52,8 +52,9 @@ If a task you are handed is in this list, stop and say so instead of building it
 ## Rules every change keeps
 
 - **Every catalog read goes through `viewObjects()` with an `Authorizer`.** No route or tool
-  selects from `objects`, `versions` or `source_refs` directly. (`GET /api/uploads` is the one
-  known exception; T-1405 removes it.)
+  selects from `objects`, `versions` or `source_refs` directly; what a card doesn't carry, a
+  caller that gated the files first reads through core/catalog (`sourceUrls`,
+  `currentVersionIds`).
 - **No package under `core/` imports a model client or an enricher.** Model calls happen in
   enrichment steps (`ai/enrich`) and the `find` tool's query embedding only; the model client is
   `ai/models`. ESLint refuses an import of either, or of `enrichers/*`, under `core/`.

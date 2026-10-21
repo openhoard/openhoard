@@ -1,7 +1,6 @@
-import { withheldFromAi } from "@openhoard/core-catalog";
-import { sourceRefs, type Tx } from "@openhoard/core-db";
+import { sourceUrls, withheldFromAi } from "@openhoard/core-catalog";
+import type { Tx } from "@openhoard/core-db";
 import { canonicalUrl, checkUrl } from "@openhoard/sdk";
-import { and, asc, eq, isNotNull } from "drizzle-orm";
 
 /** Why a file has no link for an AI client, in words for the assistant. */
 const NO_LINK = {
@@ -31,19 +30,8 @@ export async function webLink(
 ): Promise<{ link: string } | { link: null; reason: string }> {
   const withheld = await withheldFromAi(tx, tenantId, objectId);
   if (withheld) return { link: null, reason: NO_LINK[withheld] };
-  const refs = await tx
-    .select({ url: sourceRefs.url })
-    .from(sourceRefs)
-    .where(
-      and(
-        eq(sourceRefs.tenantId, tenantId),
-        eq(sourceRefs.objectId, objectId),
-        isNotNull(sourceRefs.url),
-      ),
-    )
-    .orderBy(asc(sourceRefs.source), asc(sourceRefs.externalId));
-  for (const { url } of refs) {
-    if (url === null || checkUrl(url) !== null) continue;
+  for (const url of await sourceUrls(tx, tenantId, objectId)) {
+    if (checkUrl(url) !== null) continue;
     const link = canonicalUrl(url);
     if (link.length <= max) return { link };
   }

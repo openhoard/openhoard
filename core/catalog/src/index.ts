@@ -72,6 +72,16 @@ export {
   type SourceItemState,
 } from "./ingest.js";
 export {
+  ensureZone,
+  ingestManaged,
+  listOwnManaged,
+  ZoneKindError,
+  type ManagedIngest,
+  type OwnFile,
+  type ZoneRequest,
+} from "./managed.js";
+export { currentVersionIds, sourceUrls } from "./lookups.js";
+export {
   enrichmentExposure,
   explainLevels,
   GENERIC_TITLE,

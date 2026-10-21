@@ -1,20 +1,24 @@
 import { appendAudit } from "@openhoard/core-audit";
-import { ingest, INGEST_LIMITS, IngestError, type IngestResult } from "@openhoard/core-catalog";
-import { newId, objects, sourceRefs, type Database, type Tx } from "@openhoard/core-db";
-import { getUser, grantIsLive, userPrincipal, type OAuthScope } from "@openhoard/core-identity";
 import {
-  blobPath,
-  BlobTooLargeError,
-  type BlobStorage,
-  type PutResult,
-} from "@openhoard/core-storage";
-import { and, desc, eq, isNull } from "drizzle-orm";
+  ensureZone,
+  ingestManaged,
+  INGEST_LIMITS,
+  IngestError,
+  listOwnManaged,
+  VIEW_TRANSACTION,
+  ZoneKindError,
+  type IngestResult,
+} from "@openhoard/core-catalog";
+import type { Database, Tx } from "@openhoard/core-db";
+import { getUser, grantIsLive, userPrincipal, type OAuthScope } from "@openhoard/core-identity";
+import { BlobTooLargeError, type BlobStorage, type PutResult } from "@openhoard/core-storage";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import type { Logger } from "pino";
+import { FIRST_PARTY } from "./admin-api.js";
 import type { AuthEnv, BearerAuth, SignedIn } from "./auth.js";
 import type { UploadsConfig } from "./config.js";
-import { managedZone, ZoneKindError } from "./managed.js";
 import { retrying } from "./retry.js";
+import { cachedTenantAuthorizer, type TenantAuthorizer } from "./tools/context.js";
 
 /*
  * Uploads (T-1206): a signed-in member hands OpenHoard a file, and OpenHoard keeps it. The first
@@ -68,6 +72,8 @@ export interface UploadDeps {
    * (`files:add`) upload for them (T-1207). Without it, only the session does.
    */
   requireBearer?: (scope: OAuthScope) => MiddlewareHandler<AuthEnv>;
+  /** The tenant's policies, as the read gate needs them (tools/context.ts). */
+  authorizer?: TenantAuthorizer;
   log?: Logger;
 }
 
@@ -159,17 +165,13 @@ export function uploadTitle(name: string | undefined): string {
 
 export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
   const { db, uploads, store, log } = deps;
-
-  /** The tenant's uploads zone, made on its first upload. */
-  const zoneOf = (tx: Tx, tenantId: string, create: boolean): Promise<string | null> =>
-    managedZone(tx, tenantId, uploads.zone, { create, actor: ZONE_ACTOR }).catch((e: unknown) => {
-      if (!(e instanceof ZoneKindError)) throw e;
-      throw new Refusal(
-        409,
-        "zone-kind",
-        `zone "${uploads.zone}" is not a managed zone: name another in uploads.zone`,
-      );
-    });
+  const authz = deps.authorizer ?? cachedTenantAuthorizer();
+  const zoneKind = () =>
+    new Refusal(
+      409,
+      "zone-kind",
+      `zone "${uploads.zone}" is not a managed zone: name another in uploads.zone`,
+    );
 
   const deny = (who: Caller, reason: string) =>
     db.withTenant(who.tenantId, (tx) =>
@@ -250,15 +252,15 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
       return c.json({ error: "Content-Type is too long" }, 400);
     }
 
-    /** Still a member, and the zone is one uploads can go to (made here when `create`). */
-    const check = async (tx: Tx, create: boolean): Promise<string | null> => {
+    /** Still a member. */
+    const member = async (tx: Tx) => {
       const user = await getUser(tx, tenantId, userId);
       if (!user || user.kind !== "member" || !user.active || user.retired !== null) {
         throw new Refusal(403, "not-member", "forbidden");
       }
-      return zoneOf(tx, tenantId, create);
     };
     const refused = async (e: unknown) => {
+      if (e instanceof ZoneKindError) e = zoneKind();
       if (e instanceof Refusal) {
         await deny(who, e.reason);
         return c.json({ error: e.message }, e.status);
@@ -271,7 +273,20 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
     };
     // Before a byte is kept: what would refuse the upload afterwards is refused now.
     try {
-      await db.withTenant(tenantId, (tx) => check(tx, false), { accessMode: "read only" });
+      await db.withTenant(
+        tenantId,
+        async (tx) => {
+          await member(tx);
+          // The zone's name not taken by another kind of zone (it is made with the file).
+          await ensureZone(tx, tenantId, {
+            name: uploads.zone,
+            kind: "managed",
+            create: false,
+            actor: ZONE_ACTOR,
+          });
+        },
+        { accessMode: "read only" },
+      );
     } catch (e) {
       return refused(e);
     }
@@ -302,7 +317,7 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
     try {
       result = await retrying(() =>
         db.withTenant(tenantId, async (tx) => {
-          const zoneId = (await check(tx, true)) as string;
+          await member(tx);
           // A client's token: still allowed now, not only when the body began to arrive (the
           // grant or the client revoked meanwhile, as the MCP server checks before answering).
           if (
@@ -311,34 +326,14 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
           ) {
             throw new Refusal(403, "grant-ended", "forbidden");
           }
-          // Unless that file has since become someone else's: then this is a new one (each
-          // time: after a hand-over, the same file sent twice is two files).
-          const [known] = await tx
-            .select({ owner: objects.ownerId })
-            .from(sourceRefs)
-            .innerJoin(
-              objects,
-              and(eq(objects.tenantId, sourceRefs.tenantId), eq(objects.id, sourceRefs.objectId)),
-            )
-            .where(
-              and(
-                eq(sourceRefs.tenantId, tenantId),
-                eq(sourceRefs.source, UPLOAD_SOURCE),
-                eq(sourceRefs.externalId, sameFile),
-              ),
-            );
-          const done = await ingest(tx, tenantId, {
+          const done = await ingestManaged(tx, tenantId, {
+            zone: uploads.zone,
+            zoneActor: ZONE_ACTOR,
+            blob: { blobId: stored.blobId, size: stored.size },
             source: UPLOAD_SOURCE,
-            externalId:
-              known && known.owner !== owner ? `${sameFile}/${newId("object")}` : sameFile,
-            zoneId,
+            externalId: sameFile,
             title,
             ownerId: owner,
-            content: {
-              blobId: stored.blobId,
-              size: stored.size,
-              location: blobPath(tenantId, stored.blobId),
-            },
             mime: type as string,
             authorId: owner,
             modifiedAt: new Date(),
@@ -351,7 +346,7 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
             detail: {
               object: done.objectId,
               version: done.versionId,
-              zone: zoneId,
+              zone: done.zoneId,
               size: stored.size,
               created: done.created.object,
               ...(done.created.object ? {} : { newVersion: done.created.version }),
@@ -386,46 +381,19 @@ export function mountUploads(app: Hono<AuthEnv>, deps: UploadDeps): void {
   });
 
   app.get("/api/uploads", async (c) => {
-    const { tenantId, userId } = callerOf(c);
-    const owner = userPrincipal(userId);
+    const { tenantId } = callerOf(c);
+    const signedIn = c.get("auth") as SignedIn;
     const rows = await db.withTenant(
       tenantId,
-      async (tx) => {
-        // A zone of that name that isn't the uploads': nothing of theirs to list.
-        const zoneId = await zoneOf(tx, tenantId, false).catch((e: unknown) => {
-          if (e instanceof Refusal) return null;
-          throw e;
-        });
-        if (zoneId === null) return [];
-        return tx
-          .select({
-            object: objects.id,
-            title: objects.title,
-            updatedAt: objects.updatedAt,
-            // Where it was saved from, when it was (a page the extension saved).
-            url: sourceRefs.url,
-          })
-          .from(objects)
-          .leftJoin(
-            sourceRefs,
-            and(
-              eq(sourceRefs.tenantId, objects.tenantId),
-              eq(sourceRefs.objectId, objects.id),
-              eq(sourceRefs.source, UPLOAD_SOURCE),
-            ),
-          )
-          .where(
-            and(
-              eq(objects.tenantId, tenantId),
-              eq(objects.zoneId, zoneId),
-              eq(objects.ownerId, owner),
-              isNull(objects.deletedAt),
-            ),
-          )
-          .orderBy(desc(objects.updatedAt), desc(objects.id))
-          .limit(LISTED);
-      },
-      { accessMode: "read only" },
+      async (tx) =>
+        listOwnManaged(
+          tx,
+          tenantId,
+          await authz(tx, tenantId),
+          { principal: signedIn.principal, client: FIRST_PARTY },
+          { zone: uploads.zone, source: UPLOAD_SOURCE, limit: LISTED },
+        ),
+      VIEW_TRANSACTION,
     );
     return c.json({ uploads: rows });
   });
