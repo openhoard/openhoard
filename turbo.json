@@ -1,8 +1,14 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "agentGuidance": false,
   "tasks": {
-    "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
-    "typecheck": { "dependsOn": ["^build"] },
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^build"]
+    },
     "test": {
       "dependsOn": ["^build"],
       "env": ["OPENHOARD_TEST_POSTGRES_URL", "OPENHOARD_TEST_SLOW"]
@@ -12,7 +18,13 @@
       "env": ["OPENHOARD_TEST_POSTGRES_URL", "OPENHOARD_TEST_SLOW"],
       "outputs": ["coverage/**"]
     },
-    "dev": { "dependsOn": ["^build"], "cache": false, "persistent": true },
-    "clean": { "cache": false }
+    "dev": {
+      "dependsOn": ["^build"],
+      "cache": false,
+      "persistent": true
+    },
+    "clean": {
+      "cache": false
+    }
   }
 }
