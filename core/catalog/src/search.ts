@@ -43,7 +43,7 @@ import {
  *    any of the words as typed (looseWords(): very common words left out), files holding more
  *    of them ranked first, and says so (`anyWord`). The vector matches are the first pass's.
  * 3. Vector matches (T-502): the nearest chunks and summaries by each query embedding's model
- *    (core/models embedQuery()), among files whose content SQL expects the caller may have (a
+ *    (ai/models embedQuery()), among files whose content SQL expects the caller may have (a
  *    reader, exposure reaching the client). The plan is spike S1's rule, never the planner's:
  *    count those rows, up to {@link EXACT_SEARCH_ROWS}; at or below it search exactly (every
  *    row's distance: recall 100%, fast on a small set); above it use the model's HNSW index
@@ -101,7 +101,7 @@ export const VECTOR_NEIGHBOURS = 50;
 /** Query embeddings one search uses at most. */
 export const MAX_QUERY_VECTORS = 4;
 
-/** A query's embedding under one model (core/models embedQuery()). */
+/** A query's embedding under one model (ai/models embedQuery()). */
 export interface QueryVector {
   /** `<provider id>/<model>`, as the stored vectors are named. */
   model: string;
@@ -114,7 +114,7 @@ export interface SearchQuery {
   /** Hits to return, 1 to 100. Default 20. */
   limit?: number;
   /**
-   * The words of the query embedded, once per embeddings model (core/models embedQuery()): with
+   * The words of the query embedded, once per embeddings model (ai/models embedQuery()): with
    * them, files are also found by meaning. Without them (no embeddings model configured, or it
    * failed), search is keyword only. Ignored when the query has no words.
    */

@@ -3,8 +3,8 @@
 Part of the OpenHoard trusted core. See [../README.md](../README.md) and
 [docs/architecture.md](../../docs/architecture.md). File cards, the prompt and output schema for
 model summaries (T-405), and the prompt-injection detector (T-408). No database and no network:
-the providers are in [core/models](../models/README.md), and the steps that run all this in
-[core/jobs](../jobs/README.md).
+the providers are in [ai/models](../../ai/models/README.md), and the steps that run all this in
+[ai/enrich](../../ai/enrich/README.md).
 
 ## File cards
 
@@ -56,7 +56,7 @@ below and quoted rendering are for. Every scan is linear: patterns are literals,
 alternations and bounded gaps, never nested quantifiers; input is cut at 1 Mi characters (the extractor's default text cap), each text is cleaned once per variant (the spaced one only when it has invisible characters), and scoring stops once the file is flagged.
 Verdicts carry pattern ids, never matched text, so they can be logged.
 
-**Measured on the S8 corpus v0** (core/jobs `s8-corpus.slow.test.ts`, the real extractor): 48 of 50
+**Measured on the S8 corpus v0** (ai/enrich `s8-corpus.slow.test.ts`, the real extractor): 48 of 50
 flagged (96%); 0 of 20 benign files with comments, white text, hidden sheets, properties,
 formulas and chat transcripts.
 

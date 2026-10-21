@@ -19,7 +19,7 @@ import {
   type ModelClient,
   type ModelRouter,
   type TokenBudget,
-} from "@openhoard/core-models";
+} from "@openhoard/ai-models";
 import {
   buildRepairPrompt,
   buildSummaryPrompt,
@@ -30,9 +30,12 @@ import {
   validateCardOutput,
 } from "@openhoard/core-summarize";
 import type { Tx } from "@openhoard/core-db";
-import type { EnrichContext, EnrichStep } from "./enrich.js";
-import type { JobsLogger } from "./jobs.js";
-import { RESUMMARIZABLE } from "./resummarize.js";
+import {
+  type EnrichContext,
+  type EnrichStep,
+  type JobsLogger,
+  RESUMMARIZABLE,
+} from "@openhoard/core-jobs";
 
 /*
  * Summaries and model tags as an enrichment step, `summarize` (T-405). Last in the pipeline:
@@ -43,7 +46,7 @@ import { RESUMMARIZABLE } from "./resummarize.js";
  * 2. records `skipped` and stops when there is no extracted text (`no-text`), when the injection
  *    detector flags it (`flagged`: checked here again, whatever the tag says), or when no
  *    configured provider may have the content (`no-provider`);
- * 3. picks the provider (core/models router: the task's order, local first by default, the
+ * 3. picks the provider (ai/models router: the task's order, local first by default, the
  *    first one the file's exposure allows, as the pipeline's `mayProcess` says now);
  * 4. reserves tokens from the tenant's daily budget, for the call and one repair; a spent
  *    budget records `skipped` for `budget` and logs a warning (the version is still processed);

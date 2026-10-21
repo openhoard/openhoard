@@ -6,7 +6,7 @@ import type { Jobs } from "./jobs.js";
  * Embedding again after the embeddings model changed (T-407): an admin who switched
  * `embedModel` (or put another provider first for `embed`) re-enqueues the tenant's current
  * versions that have text or a summary but no vectors under the new model's name
- * (`<provider id>/<model>`, core/models embeddingModelId()). The embed step then embeds them;
+ * (`<provider id>/<model>`, ai/models embeddingModelId()). The embed step then embeds them;
  * the other steps change nothing on a re-run. Until it is done, searches go on using the old
  * model's vectors; afterwards core/catalog pruneEmbeddings() drops them. Who may ask is the
  * API's question (an admin), and it audits the request.

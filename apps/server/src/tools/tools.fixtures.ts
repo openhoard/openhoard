@@ -28,7 +28,7 @@ import {
   createModelRouter,
   dailyTokenBudget,
   stubEmbedding,
-} from "@openhoard/core-models";
+} from "@openhoard/ai-models";
 import type { ClientTrust } from "@openhoard/core-policy";
 import { and, eq, sql } from "drizzle-orm";
 import type { Hono } from "hono";

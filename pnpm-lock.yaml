@@ -224,6 +224,59 @@ importers:
         specifier: ^5.0.4
         version: 5.0.4(@opentelemetry/api@1.9.1)(@types/node@24.19.2)(@vitest/coverage-v8@5.0.4)(jsdom@30.1.2(@noble/hashes@2.4.0))(vite@8.3.4(@types/node@24.19.2)(esbuild@0.28.2)(jiti@2.6.1)(tsx@4.23.15)(yaml@2.9.1))
 
+  ai/enrich:
+    dependencies:
+      '@openhoard/ai-models':
+        specifier: workspace:^
+        version: link:../models
+      '@openhoard/core-catalog':
+        specifier: workspace:^
+        version: link:../../core/catalog
+      '@openhoard/core-db':
+        specifier: workspace:^
+        version: link:../../core/db
+      '@openhoard/core-jobs':
+        specifier: workspace:^
+        version: link:../../core/jobs
+      '@openhoard/core-summarize':
+        specifier: workspace:^
+        version: link:../../core/summarize
+      '@openhoard/enricher-extract':
+        specifier: workspace:^
+        version: link:../../enrichers/extract
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@openhoard/core-identity':
+        specifier: workspace:*
+        version: link:../../core/identity
+      '@openhoard/core-policy':
+        specifier: workspace:*
+        version: link:../../core/policy
+      '@openhoard/testkit':
+        specifier: workspace:*
+        version: link:../../packages/testkit
+      drizzle-orm:
+        specifier: ^0.45.4
+        version: 0.45.4(@electric-sql/pglite@0.5.9)(@opentelemetry/api@1.9.1)(@types/pg@8.23.1)(pg@8.23.1)
+
+  ai/models:
+    dependencies:
+      '@openhoard/core-db':
+        specifier: workspace:^
+        version: link:../../core/db
+      '@openhoard/core-policy':
+        specifier: workspace:^
+        version: link:../../core/policy
+      drizzle-orm:
+        specifier: ^0.45.4
+        version: 0.45.4(@electric-sql/pglite@0.5.9)(@opentelemetry/api@1.9.1)(@types/pg@8.23.1)(pg@8.23.1)
+    devDependencies:
+      '@openhoard/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+
   apps/cli:
     dependencies:
       '@openhoard/schemas':
@@ -242,6 +295,12 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.32.1
         version: 1.32.1(supports-color@7.2.0)(zod@4.6.7)
+      '@openhoard/ai-enrich':
+        specifier: workspace:^
+        version: link:../../ai/enrich
+      '@openhoard/ai-models':
+        specifier: workspace:^
+        version: link:../../ai/models
       '@openhoard/connector-fs':
         specifier: workspace:^
         version: link:../../connectors/fs
@@ -263,9 +322,6 @@ importers:
       '@openhoard/core-jobs':
         specifier: workspace:^
         version: link:../../core/jobs
-      '@openhoard/core-models':
-        specifier: workspace:^
-        version: link:../../core/models
       '@openhoard/core-policy':
         specifier: workspace:^
         version: link:../../core/policy
@@ -486,18 +542,12 @@ importers:
       '@openhoard/core-identity':
         specifier: workspace:^
         version: link:../identity
-      '@openhoard/core-models':
-        specifier: workspace:^
-        version: link:../models
       '@openhoard/core-policy':
         specifier: workspace:^
         version: link:../policy
       '@openhoard/core-summarize':
         specifier: workspace:^
         version: link:../summarize
-      '@openhoard/enricher-extract':
-        specifier: workspace:^
-        version: link:../../enrichers/extract
       '@openhoard/sdk':
         specifier: workspace:^
         version: link:../../packages/sdk
@@ -517,22 +567,6 @@ importers:
       '@openhoard/testkit':
         specifier: workspace:*
         version: link:../../packages/testkit
-
-  core/models:
-    dependencies:
-      '@openhoard/core-db':
-        specifier: workspace:^
-        version: link:../db
-      '@openhoard/core-policy':
-        specifier: workspace:^
-        version: link:../policy
-      drizzle-orm:
-        specifier: ^0.45.4
-        version: 0.45.4(@electric-sql/pglite@0.5.9)(@opentelemetry/api@1.9.1)(@types/pg@8.23.1)(pg@8.23.1)
-    devDependencies:
-      '@openhoard/config':
-        specifier: workspace:*
-        version: link:../../packages/config
 
   core/policy:
     dependencies:

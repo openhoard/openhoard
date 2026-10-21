@@ -29,7 +29,7 @@ export interface EmbeddingItem {
   embedding: readonly number[];
 }
 
-/** `<provider id>/<model>` (core/models embeddingModelId()). */
+/** `<provider id>/<model>` (ai/models embeddingModelId()). */
 const MODEL = /^[a-z0-9][a-z0-9-]{0,62}\/[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/;
 const HASH = /^[0-9a-f]{64}$/;
 /** The most vectors one version keeps under one model. */

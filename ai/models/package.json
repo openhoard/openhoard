@@ -1,5 +1,5 @@
 {
-  "name": "@openhoard/core-models",
+  "name": "@openhoard/ai-models",
   "version": "0.0.0",
   "private": true,
   "description": "Model providers (stub, OpenAI-compatible, Anthropic, Ollama), routing by exposure, and the daily token budget.",

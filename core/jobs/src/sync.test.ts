@@ -1,12 +1,7 @@
 import { mkdir, mkdtemp, readFile, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import {
-  contentRef,
-  readExtract,
-  type ContentSource,
-  type IngestResult,
-} from "@openhoard/core-catalog";
+import { contentRef, type ContentSource, type IngestResult } from "@openhoard/core-catalog";
 import { fsConnector } from "@openhoard/connector-fs";
 import {
   activityEvents,
@@ -31,7 +26,7 @@ import { memorySource, type MemorySource } from "@openhoard/sdk/testing";
 import { and, asc, count, eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { connectorContentSource, firstOf } from "./connector-content.js";
-import { needsEnrichment } from "./enrich.js";
+import { coreEnrichSteps, needsEnrichment, type EnrichStep } from "./enrich.js";
 import { QUEUES, startJobs, type Jobs } from "./jobs.js";
 import {
   acceptSourceIdentity,
@@ -811,37 +806,42 @@ describe("reading indexed zones through connectors", () => {
     await drain(await open(lying("wrong")));
   });
 
-  it("feeds enrichment: a sync enqueues, and extraction reads the indexed zone's bytes", async () => {
+  it("feeds enrichment: a sync enqueues, and a step reads the indexed zone's bytes", async () => {
     await put(["Notes.md"], "# Hello\nfrom the folder\n");
     const connector = folder();
+    const content = connectorContentSource({
+      db,
+      connectorFor: () => connector,
+      tenantKey: () => KEY,
+    });
+    // What an extraction step does first (ai/enrich extract.ts): the version's bytes, through
+    // the connector's content source.
+    const read: string[] = [];
+    const reader: EnrichStep = {
+      name: "read-bytes",
+      async run({ target, read: inTx, signal }) {
+        const ref = await inTx((tx) => contentRef(tx, target.tenantId, target.versionId));
+        const stream = ref === null ? null : await content.open(ref, signal);
+        const chunks: Uint8Array[] = [];
+        for await (const chunk of stream ?? []) chunks.push(chunk);
+        read.push(Buffer.concat(chunks).toString("utf8"));
+      },
+    };
     const jobs = await startJobs(db, {
       pollingIntervalSeconds: 0.5,
       maintenance: false,
-      content: connectorContentSource({ db, connectorFor: () => connector, tenantKey: () => KEY }),
-      extract: { indexedZones: true },
+      steps: [reader, ...coreEnrichSteps()],
     });
     started.push(jobs);
     const report = await sync(connector, {
       enqueue: (tenantId, r) => jobs.enqueueAfterIngest(tenantId, r),
     });
     expect(report.status).toBe("done");
-    const [row] = await catalog();
-    const [version] = await db.withTenant(t.tenantId, (tx) =>
-      tx
-        .select({ id: versions.id })
-        .from(versions)
-        .where(eq(versions.objectId, row?.objectId as string)),
-    );
     const deadline = Date.now() + 25_000;
-    let extract = null;
-    while (extract?.status !== "extracted" && Date.now() < deadline) {
+    while (read.length === 0 && Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 100));
-      extract = await db.withTenant(t.tenantId, (tx) =>
-        readExtract(tx, t.tenantId, version?.id as string),
-      );
     }
-    expect(extract).toMatchObject({ status: "extracted", kind: "markdown" });
-    expect(extract?.text).toContain("from the folder");
+    expect(read).toEqual(["# Hello\nfrom the folder\n"]);
     const jobsFor = await jobs.boss.findJobs<unknown>(QUEUES.enrich, {
       data: { tenantId: t.tenantId },
     });

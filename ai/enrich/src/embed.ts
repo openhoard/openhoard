@@ -17,9 +17,8 @@ import {
   type ModelClient,
   type ModelRouter,
   type TokenBudget,
-} from "@openhoard/core-models";
-import type { EnrichContext, EnrichStep } from "./enrich.js";
-import type { JobsLogger } from "./jobs.js";
+} from "@openhoard/ai-models";
+import type { EnrichContext, EnrichStep, JobsLogger } from "@openhoard/core-jobs";
 
 /*
  * Embeddings as an enrichment step, `embed` (T-407), after summarize:

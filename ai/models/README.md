@@ -1,8 +1,9 @@
-# core/models
+# @openhoard/ai-models
 
-Part of the OpenHoard trusted core. See [../README.md](../README.md). Model providers for
-enrichment (T-404): the adapters, routing by exposure, and the daily token budget. The step that
-uses them is core/jobs' `summarize` (T-405).
+Model providers for enrichment (T-404): the adapters, routing by exposure, and the daily token
+budget. Not part of the trusted core (T-1406: no `core/*` package imports a model client). The
+steps that use them are [ai/enrich](../enrich/README.md)'s `summarize` (T-405) and `embed`
+(T-407), and the server's `find` tool embeds queries with `embedQuery()`.
 
 ## Providers
 

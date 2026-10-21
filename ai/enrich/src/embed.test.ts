@@ -25,14 +25,19 @@ import {
   tokensToday,
   type EmbedRequest,
   type ModelClient,
-} from "@openhoard/core-models";
+} from "@openhoard/ai-models";
 import { EXPOSURE, type Exposure, type ProviderKind } from "@openhoard/core-policy";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chunkText, embedStep, MAX_CHUNKS, type EmbedStepOptions } from "./embed.js";
-import { defaultEnrichSteps, EnrichStepError, enrichVersion, type WithheldStep } from "./enrich.js";
-import { injectionFlagStep } from "./flag.js";
-import { reembed } from "./reembed.js";
+import {
+  EnrichStepError,
+  enrichVersion,
+  type WithheldStep,
+  injectionFlagStep,
+  reembed,
+} from "@openhoard/core-jobs";
+import { defaultEnrichSteps } from "./steps.js";
 
 /*
  * T-407: embeddings of the summary and key chunks, stored per version with the model recorded;

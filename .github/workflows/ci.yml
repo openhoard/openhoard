@@ -114,7 +114,7 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: pnpm --filter @openhoard/testkit run injection:report
 
-  # The database suites (core-db, core-audit, core-catalog, core-identity, core-jobs, server) on native PostgreSQL 18 (ADR-0004, spike S2); the
+  # The database suites (core-db, core-audit, core-catalog, core-identity, core-jobs, ai-enrich, server) on native PostgreSQL 18 (ADR-0004, spike S2); the
   # node jobs run them on PGlite. They connect as an ordinary role, as production must. PGDG
   # packages, no Docker.
   postgres:
@@ -162,6 +162,9 @@ jobs:
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
       - run: pnpm --filter @openhoard/core-jobs run test
+        env:
+          OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
+      - run: pnpm --filter @openhoard/ai-enrich run test
         env:
           OPENHOARD_TEST_POSTGRES_URL: postgres://openhoard_ci:ci@localhost:5499/postgres
       - run: pnpm --filter @openhoard/server run test

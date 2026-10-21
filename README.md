@@ -104,6 +104,7 @@ The core makes every trust decision. Plugins extend what OpenHoard can **reach**
 | Path                      | What lives there                                                                                            |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `core/`                   | The trusted core: `identity`, `policy`, `catalog` (index + search), `summarize`, `audit`, `sandbox`         |
+| `ai/`                     | Model providers (`models`) and the enrichment steps that call them or an extractor (`enrich`)               |
 | `connectors/`             | Source connectors: SharePoint and local folders (`fs`), and an example to start from                        |
 | `enrichers/`              | Extractors and taggers for specific file types                                                              |
 | `packs/`                  | Policy and tag-vocabulary packs: a general-business starter so far                                          |

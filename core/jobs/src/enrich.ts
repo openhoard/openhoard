@@ -7,17 +7,13 @@ import {
   sourcePathOf,
   markSuperseded,
   tenantRules,
-  type ContentSource,
   type IngestResult,
   type VersionStanding,
 } from "@openhoard/core-catalog";
 import { isId, objects, versions, type Database, type Tx } from "@openhoard/core-db";
 import { mayProcess, type Exposure, type ProviderKind } from "@openhoard/core-policy";
 import { and, eq, max } from "drizzle-orm";
-import { embedStep, type EmbedStepOptions } from "./embed.js";
-import { extractStep, type ExtractStepOptions } from "./extract.js";
 import { injectionFlagStep } from "./flag.js";
-import { summarizeStep, type SummarizeStepOptions } from "./summarize.js";
 
 /*
  * The enrichment pipeline (T-401): what happens to a version after ingest records it, until
@@ -191,39 +187,13 @@ export const ruleTagStep: EnrichStep = {
 };
 
 /**
- * The steps a server runs unless told otherwise, in this order:
- *
- *   extract-text → injection-flag → rule-tags → summarize → embed
- *
- * - extract-text (T-402, extract.ts), when the server has somewhere to read versions' bytes
- *   from (`content`);
- * - injection-flag (T-408, flag.ts), always: without an extraction it scores the name alone;
- * - rule-tags (T-403), before any model sees the file;
- * - summarize (T-405, summarize.ts), when models are configured (`summarize.router` with a
- *   provider for summaries) and there is extracted text. Off by default: the cost guard says no
- *   model runs across a corpus unless an admin configures one.
- * - embed (T-407, embed.ts), when an embeddings provider is configured (`embed.router`), after
- *   the summary so it embeds that too. Without one, search is keyword only.
+ * The steps the core runs on every version, in order: the injection flag, then the rule tagger.
+ * Steps that read a version's content or send it to a model (text extraction, summaries,
+ * embeddings) are not the core's: @openhoard/ai-enrich makes them and puts them around these
+ * (its defaultEnrichSteps()), and the server passes the lot to startJobs() as `steps`.
  */
-export function defaultEnrichSteps(
-  options: {
-    content?: ContentSource;
-    extract?: Omit<ExtractStepOptions, "content">;
-    summarize?: SummarizeStepOptions;
-    embed?: EmbedStepOptions;
-  } = {},
-): EnrichStep[] {
-  const { content, extract, summarize, embed } = options;
-  const steps: EnrichStep[] = [];
-  if (content) steps.push(extractStep({ ...extract, content }));
-  steps.push(injectionFlagStep(), ruleTagStep);
-  if (content && summarize && summarize.router.candidates("summarize").length > 0) {
-    steps.push(summarizeStep(summarize));
-  }
-  if (content && embed && embed.router.candidates("embed").length > 0) {
-    steps.push(embedStep(embed));
-  }
-  return steps;
+export function coreEnrichSteps(): EnrichStep[] {
+  return [injectionFlagStep(), ruleTagStep];
 }
 
 /** A step the pipeline skipped: the file's exposure keeps its content from the step's provider. */

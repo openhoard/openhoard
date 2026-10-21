@@ -1,5 +1,5 @@
 import { openTestDatabase, seedTenant } from "@openhoard/core-db/testing";
-import { createModelClient, createModelRouter, dailyTokenBudget } from "@openhoard/core-models";
+import { createModelClient, createModelRouter, dailyTokenBudget } from "@openhoard/ai-models";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ToolContext } from "./context.js";
 import { queryVectors } from "./find.js";

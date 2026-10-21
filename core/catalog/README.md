@@ -52,7 +52,7 @@ keeps no tenant blob keys yet, so today only the size is checked; a connector's 
 hash the same way once they exist.
 
 **Which zones are extracted** (`ref.zoneKind`): a managed zone's content always; an indexed
-zone's only when the server opts in (core/jobs `extract.indexedZones`, default off); a
+zone's only when the server opts in (ai/enrich `extract.indexedZones`, default off); a
 local-only zone's never on the server (its content isn't meant to reach it), nor a code zone's
 yet. For those, no row is written.
 
@@ -66,7 +66,7 @@ embeddings (T-407) send it to a model only as the exposure allows.
 
 `version_embeddings` (T-407) holds a version's vectors, per model: its summary (seq 0) and
 chunks of its extracted text, each with the text's SHA-256, the vector's size and the kind of
-provider that made it. The model is named `<provider id>/<model>` (core/models
+provider that made it. The model is named `<provider id>/<model>` (ai/models
 `embeddingModelId()`), so another model's vectors are stored beside the old ones and searches
 use each only with a query embedded by the same model. `saveEmbeddings()` makes a version's set
 under one model exactly what it is given (through enrichment's guarded write);
@@ -311,7 +311,7 @@ filters inside the query, then uses the gate, then fuses:
    as typed (split on spaces only, so "e-mail" stays one word; very common words such as "the"
    left out), files holding more of them first, and the result says so (`anyWord`).
    `facet:value` terms filter by the tags that view shows. Up to `SEARCH_CANDIDATES` (1,000).
-3. **Vector (T-502).** `vectors` are the query's words embedded, one per model (core/models
+3. **Vector (T-502).** `vectors` are the query's words embedded, one per model (ai/models
    `embedQuery()`: local providers only by default). For each, the nearest summaries and chunks
    (`VECTOR_NEIGHBOURS`, 50, from cosine similarity 0.3 up) among files SQL expects the caller
    may have the content of: a reader, the file's exposure reaching the client. The plan is spike

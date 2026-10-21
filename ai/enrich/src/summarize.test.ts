@@ -34,7 +34,7 @@ import {
   type ModelClient,
   type ModelRouter,
   type StubResponder,
-} from "@openhoard/core-models";
+} from "@openhoard/ai-models";
 import {
   Authorizer,
   createCedarEngine,
@@ -47,10 +47,15 @@ import { and, eq } from "drizzle-orm";
 import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { EnrichStepError, enrichVersion, ruleTagStep, type EnrichStep } from "./enrich.js";
-import { injectionFlagStep } from "./flag.js";
-import { startJobs } from "./jobs.js";
-import { resummarize } from "./resummarize.js";
+import {
+  EnrichStepError,
+  enrichVersion,
+  ruleTagStep,
+  type EnrichStep,
+  injectionFlagStep,
+  startJobs,
+  resummarize,
+} from "@openhoard/core-jobs";
 import { summarizeStep, type SummarizeStepOptions } from "./summarize.js";
 
 /*

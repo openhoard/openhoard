@@ -15,7 +15,7 @@ import {
   type ExtractLimits,
   type ExtractResult,
 } from "@openhoard/enricher-extract";
-import type { EnrichStep } from "./enrich.js";
+import type { EnrichStep } from "@openhoard/core-jobs";
 
 /*
  * Text extraction as an enrichment step (T-402): reads the version's bytes through a

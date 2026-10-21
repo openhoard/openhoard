@@ -9,7 +9,7 @@ import {
   type ModelsLogger,
   type ProviderConfig,
   type TokenBudget,
-} from "@openhoard/core-models";
+} from "@openhoard/ai-models";
 import type { ProviderKind } from "@openhoard/core-policy";
 import type { Config } from "./config.js";
 

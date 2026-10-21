@@ -16,6 +16,25 @@ export default tseslint.config(
       ],
     },
   },
+  // T-1406: the core imports no model client and no enricher. Model calls happen in the
+  // ai/enrich steps (and the server's find tool); text extraction runs through them too.
+  {
+    files: ["core/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["@openhoard/ai-*", "@openhoard/enricher-*"],
+              message:
+                "core/* imports no model client and no enricher (T-1406): put the step in ai/enrich.",
+            },
+          ],
+        },
+      ],
+    },
+  },
   // The admin web app runs in a browser.
   {
     files: ["apps/web/src/**"],

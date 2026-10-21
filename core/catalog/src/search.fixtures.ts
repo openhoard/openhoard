@@ -19,7 +19,7 @@ import { saveExtract } from "./extracts.js";
  * what they would in production.
  */
 
-/** Hashed words, as core/models' stub embeds (clients.ts stubEmbedding()): similar texts point alike. */
+/** Hashed words, as ai/models' stub embeds (clients.ts stubEmbedding()): similar texts point alike. */
 export function hashedEmbedding(text: string, dimensions = 64): number[] {
   const v = new Array<number>(dimensions).fill(0);
   for (const word of text.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {

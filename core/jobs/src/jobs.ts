@@ -1,18 +1,15 @@
-import type { ContentSource, IngestResult } from "@openhoard/core-catalog";
+import type { IngestResult } from "@openhoard/core-catalog";
 import { insideWithTenant, isId, NestedWorkError, type Database } from "@openhoard/core-db";
 import { queueConnectionOf } from "@openhoard/core-db/queue";
 import { PgBoss, type ConstructorOptions, type JobWithMetadata, type Queue } from "pg-boss";
 import {
-  defaultEnrichSteps,
+  coreEnrichSteps,
   enrichVersion,
   needsEnrichment,
   stepProviders,
   type EnrichPayload,
   type EnrichStep,
 } from "./enrich.js";
-import type { EmbedStepOptions } from "./embed.js";
-import type { ExtractStepOptions } from "./extract.js";
-import type { SummarizeStepOptions } from "./summarize.js";
 import {
   isSyncPayload,
   runSyncJob,
@@ -139,30 +136,11 @@ export interface JobsOptions {
    */
   worker?: boolean;
   /**
-   * The enrichment steps, in order. Default defaultEnrichSteps(): text extraction when
-   * `content` is given, injection flagging, the rule tagger, and summaries when `summarize` is.
+   * The enrichment steps, in order. Default coreEnrichSteps(): injection flagging and the rule
+   * tagger. The server passes @openhoard/ai-enrich's defaultEnrichSteps(), which adds text
+   * extraction before them and summaries and embeddings after, when it has content and models.
    */
   steps?: readonly EnrichStep[];
-  /**
-   * Where the default steps read versions' bytes (core/storage blobContentSource(), a
-   * connector's source): with it, they extract text (T-402). Ignored when `steps` is given.
-   */
-  content?: ContentSource;
-  /**
-   * Summaries and model tags (T-405) with these providers and budget, for the default steps
-   * with `content`. Without it, no model runs. Ignored when `steps` is given.
-   */
-  summarize?: SummarizeStepOptions;
-  /**
-   * Embeddings (T-407) with these providers and budget, for the default steps with `content`.
-   * Without it, no vectors are made and search is keyword only. Ignored when `steps` is given.
-   */
-  embed?: EmbedStepOptions;
-  /**
-   * The extract step's settings (with `content`): limits, and `indexedZones` to extract indexed
-   * zones' content too (default off; managed zones always, local-only and code zones never).
-   */
-  extract?: Omit<ExtractStepOptions, "content">;
   enrich?: EnrichQueueOptions;
   /** Scheduled maintenance, or false for none. */
   maintenance?: (MaintenanceOptions & { cron?: string }) | false;
@@ -245,15 +223,7 @@ export interface Jobs {
 export async function startJobs(db: Database, options: JobsOptions = {}): Promise<Jobs> {
   if (insideWithTenant()) throw new NestedWorkError("startJobs()");
   const worker = options.worker !== false;
-  const steps = [
-    ...(options.steps ??
-      defaultEnrichSteps({
-        ...(options.content === undefined ? {} : { content: options.content }),
-        ...(options.extract === undefined ? {} : { extract: options.extract }),
-        ...(options.summarize === undefined ? {} : { summarize: options.summarize }),
-        ...(options.embed === undefined ? {} : { embed: options.embed }),
-      })),
-  ];
+  const steps = [...(options.steps ?? coreEnrichSteps())];
   const names = new Set<string>();
   for (const step of steps) {
     if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(step.name) || names.has(step.name)) {

@@ -11,7 +11,16 @@ import { describe, expect, it } from "vitest";
  */
 
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
-const SOURCE_DIRS = ["apps", "clients", "connectors", "core", "enrichers", "packages", "spikes"];
+const SOURCE_DIRS = [
+  "ai",
+  "apps",
+  "clients",
+  "connectors",
+  "core",
+  "enrichers",
+  "packages",
+  "spikes",
+];
 const SKIP = new Set(["node_modules", "dist", "coverage", ".turbo", "target"]);
 const CODE = /\.(?:[cm]?[jt]sx?)$/;
 /** The specifier, however it is quoted, and a relative reach into core/db's queue module. */

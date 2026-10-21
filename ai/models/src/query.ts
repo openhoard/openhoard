@@ -37,7 +37,7 @@ export interface EmbedQueryOptions {
   /** Longest query text sent, in characters. Default 1,000 (the search's own cap). */
   maxChars?: number;
   /**
-   * The tenant's budget to count the calls in (core/models reserveTokens()): each in a short
+   * The tenant's budget to count the calls in (ai/models reserveTokens()): each in a short
    * transaction of its own, so call embedQuery() outside any withTenant() callback.
    */
   budget?: { db: Database; tenantId: string; budget: TokenBudget };

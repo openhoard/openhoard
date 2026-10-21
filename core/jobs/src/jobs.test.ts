@@ -32,7 +32,6 @@ import {
   TEST_POSTGRES_ENV,
   type SeededTenant,
 } from "@openhoard/core-db/testing";
-import { createModelRouter } from "@openhoard/core-models";
 import { Authorizer, createCedarEngine, type AuthzPrincipal } from "@openhoard/core-policy";
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { JobWithMetadata } from "pg-boss";
@@ -1203,7 +1202,6 @@ describe("maintenance", () => {
     const jobs = await start({
       steps: [],
       maintenance: {},
-      summarize: { router: createModelRouter([]) },
     });
     // After the budget renews at midnight UTC.
     expect((await jobs.boss.getSchedules(QUEUES.budgetRetry)).map((x) => x.cron)).toEqual([
@@ -1230,7 +1228,6 @@ describe("maintenance", () => {
     // Off only where the retry is turned off.
     const off = await start({
       maintenance: { budgetRetryLimit: 0 },
-      summarize: { router: createModelRouter([]) },
     });
     expect(await off.boss.getSchedules(QUEUES.budgetRetry)).toEqual([]);
     await expect(startJobs(db, { maintenance: { budgetRetryLimit: -1 } })).rejects.toThrow(

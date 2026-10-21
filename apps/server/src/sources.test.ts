@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { defaultEnrichSteps } from "@openhoard/ai-enrich";
 import { exportAudit } from "@openhoard/core-audit";
 import { readExtract } from "@openhoard/core-catalog";
 import { newId, objects, sourceRefs, versions, zones, type Database } from "@openhoard/core-db";
@@ -193,8 +194,10 @@ describe("configured sources", { timeout: process.platform === "win32" ? 600_000
     const jobs = await startJobs(db, {
       pollingIntervalSeconds: 0.5,
       maintenance: false,
-      ...(sources.content ? { content: sources.content } : {}),
-      extract: { indexedZones: true },
+      steps: defaultEnrichSteps({
+        ...(sources.content ? { content: sources.content } : {}),
+        extract: { indexedZones: true },
+      }),
       sync: { sources: sources.scheduled, tenantKey },
     });
     started.push(jobs);

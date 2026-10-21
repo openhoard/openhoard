@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { serve } from "@hono/node-server";
 import { openDatabase } from "@openhoard/core-db";
+import { defaultEnrichSteps } from "@openhoard/ai-enrich";
 import { startJobs, type Jobs } from "@openhoard/core-jobs";
 import {
   BlobStore,
@@ -149,25 +150,29 @@ try {
     },
     worker: config.jobs.worker,
     log: log.child({ component: "jobs" }),
-    // Folders' content only where a folder opted in; what OpenHoard holds, always.
-    ...(content === null ? {} : { content, extract: { indexedZones: sources.content !== null } }),
     ...(sources.scheduled.length === 0 ? {} : { sync: { sources: sources.scheduled, tenantKey } }),
-    ...(models === null
-      ? {}
-      : {
-          summarize: {
-            router: models.router,
-            budget: models.budget,
-            log: log.child({ component: "summarize" }),
-            ...models.summarize,
-          },
-          // Embeddings (T-407) when a provider has an embeddings model; none, keyword search only.
-          embed: {
-            router: models.router,
-            budget: models.budget,
-            log: log.child({ component: "embed" }),
-          },
-        }),
+    // The enrichment steps (ai/enrich): text extraction, then the core's injection flag and rule
+    // tagger, then summaries and embeddings when models are configured.
+    steps: defaultEnrichSteps({
+      // Folders' content only where a folder opted in; what OpenHoard holds, always.
+      ...(content === null ? {} : { content, extract: { indexedZones: sources.content !== null } }),
+      ...(models === null
+        ? {}
+        : {
+            summarize: {
+              router: models.router,
+              budget: models.budget,
+              log: log.child({ component: "summarize" }),
+              ...models.summarize,
+            },
+            // Embeddings (T-407) when a provider has an embeddings model; none, keyword search only.
+            embed: {
+              router: models.router,
+              budget: models.budget,
+              log: log.child({ component: "embed" }),
+            },
+          }),
+    }),
   });
 } catch (err) {
   log.fatal({ err }, "cannot start the job queue");

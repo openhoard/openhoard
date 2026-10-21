@@ -55,8 +55,8 @@ If a task you are handed is in this list, stop and say so instead of building it
   selects from `objects`, `versions` or `source_refs` directly. (`GET /api/uploads` is the one
   known exception; T-1405 removes it.)
 - **No package under `core/` imports a model client or an enricher.** Model calls happen in
-  enrichment steps and the `find` tool's query embedding only. (`core/models` and
-  `core/jobs → enricher-extract` are the known exceptions; T-1406 removes them.)
+  enrichment steps (`ai/enrich`) and the `find` tool's query embedding only; the model client is
+  `ai/models`. ESLint refuses an import of either, or of `enrichers/*`, under `core/`.
 - **Business logic lives in a `core/*` package; `apps/server` wires.** A route or tool that decides
   something (who may propose a tag, how an upload is ingested) is a decision that moves into core.
 - **Before building a second way to do something that exists** (approve a client, create a zone,

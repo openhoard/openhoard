@@ -11,7 +11,7 @@ import {
 } from "@openhoard/core-catalog";
 import { newId, objects, objectTags, tagReviews, zones, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
-import { createModelClient, createModelRouter } from "@openhoard/core-models";
+import { createModelClient, createModelRouter } from "@openhoard/ai-models";
 import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
 import {
   buildSummaryPrompt,
@@ -26,7 +26,8 @@ import { and, eq } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { defaultEnrichSteps, enrichVersion } from "./enrich.js";
+import { enrichVersion } from "@openhoard/core-jobs";
+import { defaultEnrichSteps } from "./steps.js";
 
 /*
  * Spike S8's corpus v0 (T-017, 50 attack files) through the real pipeline: T-408 "corpus v0

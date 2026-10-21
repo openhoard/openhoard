@@ -16,9 +16,15 @@ import {
 import { docx, MIME } from "@openhoard/testkit";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { defaultEnrichSteps, enrichVersion, ruleTagStep, type EnrichStep } from "./enrich.js";
+import {
+  enrichVersion,
+  ruleTagStep,
+  type EnrichStep,
+  startJobs,
+  type Jobs,
+} from "@openhoard/core-jobs";
+import { defaultEnrichSteps } from "./steps.js";
 import { extractStep, type ExtractStepOptions } from "./extract.js";
-import { startJobs, type Jobs } from "./jobs.js";
 
 /*
  * T-402 in the pipeline: the extract step reads a version's bytes through a ContentSource,
@@ -308,8 +314,7 @@ describe("the extract step", () => {
       ["rule-tags", undefined],
     ]);
     const jobs = await startJobs(db, {
-      content: source,
-      extract: { limits: { maxTextBytes: 1024 } },
+      steps: defaultEnrichSteps({ content: source, extract: { limits: { maxTextBytes: 1024 } } }),
       pollingIntervalSeconds: 0.5,
       maintenance: false,
     });

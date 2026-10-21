@@ -4,7 +4,7 @@ import {
   type ObjectView,
   type QueryVector,
 } from "@openhoard/core-catalog";
-import { embedQuery } from "@openhoard/core-models";
+import { embedQuery } from "@openhoard/ai-models";
 import { z } from "zod";
 import {
   auditSummaries,
@@ -32,7 +32,7 @@ import { answer, readRequest, refuse, type McpTool, type ToolContext } from "./c
  * answered as a top match and alternatives, as cards.
  *
  * The query is embedded by local providers only unless `models.queryKinds` says more
- * (core/models embedQuery: a query may say something sensitive), outside any transaction; without an embeddings model, or when it
+ * (ai/models embedQuery: a query may say something sensitive), outside any transaction; without an embeddings model, or when it
  * fails, search is keyword only. Kind, media type and modified-range filters apply to what the
  * gate returned (the catalog doesn't filter on them): a filtered search reads the first 100
  * hits, and says when there were more.

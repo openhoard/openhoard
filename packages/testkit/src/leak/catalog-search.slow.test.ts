@@ -76,7 +76,7 @@ const chunks = <T>(list: readonly T[], size = 500): T[][] =>
     list.slice(n * size, (n + 1) * size),
   );
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
-/** core/models' stub embedding (clients.ts stubEmbedding()): hashed words, unit length. */
+/** ai/models' stub embedding (clients.ts stubEmbedding()): hashed words, unit length. */
 function embed(text: string): number[] {
   const v = new Array<number>(DIMENSIONS).fill(0);
   for (const word of text.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
@@ -336,7 +336,7 @@ const TAG = /^[a-z][a-z0-9-]{0,63}:[a-z0-9][a-z0-9._-]{0,127}$/;
 
 /**
  * searchObjects() and suggestTitles() as the harness drives them: the caller's principal comes
- * from the database, the query's words are embedded (as core/models embedQuery() would, with the
+ * from the database, the query's words are embedded (as ai/models embedQuery() would, with the
  * stub). `widen` adds grants the caller doesn't hold, to show the harness catches a leak.
  */
 const searchAs = (

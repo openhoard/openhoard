@@ -8,7 +8,7 @@ import {
   type RecordedRequest,
 } from "@openhoard/core-catalog";
 import type { Database, Tx } from "@openhoard/core-db";
-import type { ModelRouter, TokenBudget } from "@openhoard/core-models";
+import type { ModelRouter, TokenBudget } from "@openhoard/ai-models";
 import { Authorizer, createCedarEngine, type ProviderKind } from "@openhoard/core-policy";
 import type { Logger } from "pino";
 import type { z } from "zod";

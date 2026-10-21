@@ -1,7 +1,7 @@
 # @openhoard/enricher-extract
 
 Text extraction (T-402) for plain text, Markdown, CSV/TSV, Word, Excel, PowerPoint and PDF, in
-a limited child process. core/jobs runs it as the `extract-text` enrichment step and stores what
+a limited child process. ai/enrich runs it as the `extract-text` enrichment step and stores what
 it finds per version (core/catalog `version_extracts`).
 
 ```ts

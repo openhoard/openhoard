@@ -277,7 +277,7 @@ Off by default: with no `models.providers`, enrichment runs no model. Each provi
 kind (`local`, `commercial`, `consumer`: which files' content it may have), an adapter
 (`ollama`, `openai` for OpenAI, Azure OpenAI, LM Studio and vLLM, `anthropic`, or `stub`), a base
 URL and models, and optional timeouts, retries, caps and concurrency. See
-[core/models](../../core/models/README.md) for every setting and an example.
+[ai/models](../../ai/models/README.md) for every setting and an example.
 
 ```json
 {

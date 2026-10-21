@@ -22,6 +22,8 @@
   "dependencies": {
     "@hono/node-server": "^2.1.4",
     "@modelcontextprotocol/sdk": "^1.32.1",
+    "@openhoard/ai-enrich": "workspace:^",
+    "@openhoard/ai-models": "workspace:^",
     "@openhoard/connector-fs": "workspace:^",
     "@openhoard/connector-sharepoint": "workspace:^",
     "@openhoard/core-audit": "workspace:^",
@@ -29,7 +31,6 @@
     "@openhoard/core-db": "workspace:^",
     "@openhoard/core-identity": "workspace:^",
     "@openhoard/core-jobs": "workspace:^",
-    "@openhoard/core-models": "workspace:^",
     "@openhoard/core-policy": "workspace:^",
     "@openhoard/core-storage": "workspace:^",
     "@openhoard/sdk": "workspace:^",
