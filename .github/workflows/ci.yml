@@ -106,7 +106,17 @@ jobs:
           test -z "$(git status --porcelain -- core/db/migrations)"
       - name: CLI smoke test
         if: steps.scope.outputs.full == 'true'
-        run: node apps/cli/dist/bin.js manifest validate connectors/example/openhoard.plugin.json
+        shell: bash
+        run: |
+          node apps/cli/dist/bin.js manifest validate connectors/example/openhoard.plugin.json
+          # `serve` starts the server (whose entry point Windows imports only as a file: URL).
+          dir="$RUNNER_TEMP/openhoard-smoke"
+          mkdir -p "$dir/files"
+          node apps/cli/dist/bin.js --data-dir "$dir/data" init --solo --folder "$dir/files" --no-pin --no-extract > /dev/null
+          OPENHOARD_PORT=7431 node apps/cli/dist/bin.js --data-dir "$dir/data" serve &
+          for _ in $(seq 60); do curl -fsS http://127.0.0.1:7431/healthz > /dev/null 2>&1 && break; sleep 1; done
+          curl -fsS http://127.0.0.1:7431/healthz
+          kill $! || true
       # T-017: per-file outcomes for the prompt-injection corpus, in the job summary. The v0
       # baseline pipeline cannot act or tag, so today this is a smoke test of the corpus and the
       # extractor (it fails if either crashes). It becomes a real gate when enrichers plug in.

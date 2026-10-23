@@ -20,7 +20,8 @@ async function runOperator(args: readonly string[]): Promise<number | "serving" 
     // The server reads its options from process.argv: the same ones, without the word (`args`
     // is process.argv from its third entry on).
     process.argv.splice(first.index + 2, 1);
-    await import(serverMain());
+    // A URL, which Node's import() needs for an absolute path on Windows.
+    await import(import.meta.resolve("@openhoard/server/main"));
     return "serving";
   }
   const { runAdmin, runConnect, runInit, runTunnel } = await import("@openhoard/server");
