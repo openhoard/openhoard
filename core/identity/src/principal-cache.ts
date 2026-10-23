@@ -9,7 +9,7 @@ import { resolveWithExpiry, type PrincipalOptions } from "./directory.js";
  *
  * Invalidation is the database's job, so it holds across processes: every change resolvePrincipal
  * reads bumps the tenant's principal epoch in the writing transaction (triggers, core/db
- * migration 0021). An entry remembers the epoch it was resolved at and is used only by a
+ * 0001_rls.sql). An entry remembers the epoch it was resolved at and is used only by a
  * transaction that sees that same epoch, so a committed change (a grant, a membership, a lock, a
  * retirement, a SCIM sync) reaches the next request everywhere at once. Time does the rest: an
  * entry lasts until its soonest grant expires, and never longer than `ttlMillis`.

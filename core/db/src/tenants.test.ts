@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { fromDriver, type Database } from "./database.js";
+import type { Database } from "./database.js";
 import { newId } from "./ids.js";
 import { eq } from "drizzle-orm";
 import { facets, facetValues, principalEpochs } from "./schema.js";
@@ -11,12 +9,7 @@ import {
   ensureBuiltInVocabulary,
   getTenant,
 } from "./tenants.js";
-import {
-  openSharedTestDatabases,
-  openTestDatabase,
-  openTestDriver,
-  seedTenant,
-} from "./testing.js";
+import { openSharedTestDatabases, openTestDatabase } from "./testing.js";
 
 /* T-103's bootstrap: a tenant with what every tenant needs. */
 
@@ -69,7 +62,7 @@ describe("createTenant", () => {
       facets: [{ key: "risk", public: false }],
       values: [{ value: "injection", approved: true, exposure: "metadata-only", visibility: null }],
     });
-    // A pack or an admin changing its levels, or removing it: refused (migration 0050).
+    // A pack or an admin changing its levels, or removing it: refused (0001_rls.sql).
     for (const change of [
       { approved: false },
       { exposure: "full" as const },
@@ -97,46 +90,6 @@ describe("createTenant", () => {
     await db.withTenant(id, (tx) => ensureBuiltInVocabulary(tx, id));
     expect((await risk()).values).toMatchObject([{ approved: true, exposure: "metadata-only" }]);
     expect(BUILT_IN_VOCABULARY.facet.key).toBe("risk");
-  });
-
-  it("migration 0046 gives tenants that existed before the built-in vocabulary", async () => {
-    const driver = await openTestDriver();
-    try {
-      const before = fromDriver(driver);
-      const a = await seedTenant(before, 1);
-      const b = await seedTenant(before, 2);
-      // b had it already (a pack listed it): left as it is.
-      await before.withTenant(b.tenantId, async (tx) => {
-        await tx.insert(facets).values({ tenantId: b.tenantId, key: "risk", label: "Mine" });
-        await tx.insert(facetValues).values({
-          tenantId: b.tenantId,
-          facet: "risk",
-          value: "injection",
-          label: "x",
-          approved: true,
-          exposure: "metadata-only",
-        });
-      });
-      const migration = readFileSync(
-        fileURLToPath(new URL("../migrations/0046_built_in_vocabulary.sql", import.meta.url)),
-        "utf8",
-      );
-      await driver.query(migration);
-      for (const t of [a, b]) {
-        const values = await before.withTenant(t.tenantId, (tx) =>
-          tx.select().from(facetValues).where(eq(facetValues.facet, "risk")),
-        );
-        expect(values, t.tenantId).toMatchObject([
-          { value: "injection", approved: true, exposure: "metadata-only" },
-        ]);
-      }
-      // Nothing is left set on the session.
-      expect(await driver.query("select current_setting('app.tenant_id', true) as t")).toEqual([
-        { t: "" },
-      ]);
-    } finally {
-      await driver.close();
-    }
   });
 
   it("refuses a bad id or name, and a tenant that exists", async () => {

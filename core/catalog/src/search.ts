@@ -204,7 +204,7 @@ const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/g;
 /**
  * Split on these before the text parser, in titles and queries alike: Postgres reads
  * `Forecast.xlsx` or `q3_forecast` as one token, so "forecast" would never match either. The
- * search documents are split the same way (migration 0053, openhoard_search_words()).
+ * search documents are split the same way (core/db 0001_rls.sql, openhoard_search_words()).
  */
 const separate = (text: string) => text.replace(/[._/\\]+/g, " ");
 /** The ts_rank weights for D, C, B, A: extracted text, summary, tags, title. */
@@ -821,7 +821,7 @@ async function keywordCandidates(
       ? sql`replace(plainto_tsquery('simple', ${words})::text, ' & ', ' | ')::tsquery`
       : anyOf(loose);
   const query = loose === undefined ? sql`plainto_tsquery('simple', ${words})` : anyWord;
-  // What each view may be matched on; these are the GIN-indexed expressions (migration 0053).
+  // What each view may be matched on; these are the GIN-indexed expressions (core/db 0001_rls.sql).
   const readerDoc = sql`(a.title_tsv || a.tags_tsv || a.path_tsv || a.summary_tsv || a.body_tsv)`;
   const otherDoc = sql`(a.other_title_tsv || a.public_tags_tsv)`;
   const noSummary = sql`(a.title_tsv || a.tags_tsv || a.path_tsv || a.body_tsv)`;
@@ -1004,7 +1004,7 @@ async function nearest(
 
 /**
  * The HNSW query (exported for the plan tests): the model's partial index, by the same cast and
- * predicate as its definition (migration 0053; the size is from INDEXED_DIMENSIONS, never from
+ * predicate as its definition (core/db 0001_rls.sql; the size is from INDEXED_DIMENSIONS, never from
  * input), the filter kept a subplan (OFFSET 0) so the index scan checks each row it yields: the
  * row's version must be eligible and its provider allowed by the file's exposure (one text key,
  * `version:kind`, so the subplan is hashed); more rows than files, since a file has several

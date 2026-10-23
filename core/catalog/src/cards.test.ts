@@ -416,7 +416,7 @@ describe("the injection flag", () => {
   it("never depends on the tenant's vocabulary, and nobody can change the built-in value", async () => {
     const other = await seedTenant(db, 2);
     const inOther = <T>(work: (tx: Tx) => Promise<T>) => db.withTenant(other.tenantId, work);
-    // No risk facet at all (a tenant from before migration 0046, or a test seed).
+    // No risk facet at all (a test seed).
     expect(
       await inOther((tx) => applyInjectionFlag(tx, other.tenantId, other.objectId, true)),
     ).toBe("flagged");

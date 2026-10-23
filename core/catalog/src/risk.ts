@@ -25,8 +25,8 @@ import { proposeTag } from "./tagging.js";
  * while people in OpenHoard's own apps still read it.
  *
  * - The value is built-in vocabulary (core/db ensureBuiltInVocabulary()): every tenant has it,
- *   approved and metadata-only (createTenant(), migration 0046, and before every flag), and the
- *   database refuses any change to its levels or its removal (migration 0050). So a flag never
+ *   approved and metadata-only (createTenant(), and before every flag), and the
+ *   database refuses any change to its levels or its removal (core/db 0001_rls.sql). So a flag never
  *   depends on an admin, and a missing vocabulary can't leave files hidden.
  * - The tag is trusted: source `rule`, applied by `rule:builtin/injection-detector`, a name no
  *   pack rule can take (rule ids have no `/`), and applyRuleTags() leaves it alone.

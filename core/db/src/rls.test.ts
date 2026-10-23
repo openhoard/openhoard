@@ -102,7 +102,7 @@ describe("catalog", () => {
     for (const r of rows) {
       const column = r.table === "tenants" ? "id" : "tenant_id";
       const predicate = `(${column} = current_setting('app.tenant_id'::text, true))`;
-      // The tenant directory (0031): tenants rows, SELECT only, in a transaction that asked.
+      // The tenant directory: tenants rows, SELECT only, in a transaction that asked.
       const directory = {
         name: "tenant_directory",
         cmd: "r",

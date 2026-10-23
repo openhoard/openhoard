@@ -25,7 +25,7 @@ import { idPattern, type IdKind } from "./ids.js";
  * rls.test.ts enforce:
  *
  * - Every table has `tenant_id` (the tenants table has `id`) and forced row-level security that
- *   matches it against `app.tenant_id`; see migrations/0001_tenant_rls.sql and database.ts.
+ *   matches it against `app.tenant_id`; see migrations/0001_rls.sql and database.ts.
  * - Primary keys and foreign keys include `tenant_id`, so a row can only ever reference rows of
  *   its own tenant. This holds even for code that runs without row-level security.
  * - Nothing cascades from a tenant, a zone or a blob. Removing a tenant's data is a deliberate,
@@ -872,7 +872,7 @@ export const scimTokens = pgTable(
 );
 
 /**
- * One-time sign-in links (0056): what an operator issues with the admin CLI (`admin user
+ * One-time sign-in links: what an operator issues with the admin CLI (`admin user
  * sign-in-link`) for a person to sign in without an identity provider, on a server that allows
  * it (`auth.signInLinks`, loopback only). Only a SHA-256 of the secret is kept; a link lives at
  * most an hour and is used once (`used_at`), starting the session it names.
@@ -1075,7 +1075,7 @@ export const passkeyChallenges = pgTable(
 );
 
 /**
- * A counter per tenant, bumped by a trigger (migration 0021) on every change resolvePrincipal()
+ * A counter per tenant, bumped by a trigger (0001_rls.sql) on every change resolvePrincipal()
  * reads: grants, group memberships, and a user's kind or stops. core/identity's principal cache
  * keys entries by it, so a change anywhere in the tenant invalidates them, in every process.
  */
@@ -1566,7 +1566,7 @@ export const versionCards = pgTable(
   ],
 );
 
-/** Postgres full-text documents. Written by triggers only (migration 0053), never by the app. */
+/** Postgres full-text documents. Written by triggers only (0001_rls.sql), never by the app. */
 const tsvector = customType<{ data: string }>({ dataType: () => "tsvector" });
 
 /**
@@ -1608,7 +1608,7 @@ export const SEARCH_BODY_CHARS = 200_000;
  * underscores and slashes split words first, as the title search always has
  * (`Q3_forecast.xlsx` has the words q3, forecast and xlsx).
  *
- * Kept current by database triggers (migration 0053), whatever code path changes the inputs:
+ * Kept current by database triggers (0001_rls.sql), whatever code path changes the inputs:
  * an object's insert or rename or display title, a tag added or removed, a facet made public or
  * not, a new version (whose extract and summary don't exist yet, so its content columns empty
  * out), and an extract or a card written. `version_id` names the version the content columns
@@ -1673,7 +1673,7 @@ export const searchDocuments = pgTable(
 /** What part of a version an embedding is of. */
 export const EMBEDDING_PARTS = ["summary", "chunk"] as const;
 /**
- * Dimensions with an HNSW index (migration 0053): the common embedding sizes (all-MiniLM and
+ * Dimensions with an HNSW index (0001_rls.sql): the common embedding sizes (all-MiniLM and
  * bge-small 384, nomic-embed-text 768, mxbai-embed-large 1024, OpenAI's small model 1536).
  * Vectors of other sizes are stored and searched exactly, without an index.
  */
@@ -1839,7 +1839,7 @@ export const MAX_SYNC_TOKEN_CHARS = 65_536;
  *   they weren't in the source any more. Cleared after that.
  * - `zone_id` and `connector` bind the source to one zone and one connector: a configuration
  *   that points it elsewhere is refused, never applied to the items already recorded.
- * - `source_identity` binds it to what the connector says the source is (0041); a reconcile that
+ * - `source_identity` binds it to what the connector says the source is; a reconcile that
  *   would remove too much is held (`reconcile_held`) until an admin confirms it
  *   (`reconcile_confirmed`).
  */
@@ -1864,13 +1864,11 @@ export const sourceSyncs = pgTable(
     reconcileConfirmed: integer("reconcile_confirmed"),
     /**
      * A crawl from the beginning met a place it couldn't read, so it reconciled nothing: the next
-     * crawl from the beginning must (0042). Cleared when one does.
+     * crawl from the beginning must. Cleared when one does.
      */
     reconcileDeferred: boolean("reconcile_deferred").notNull().default(false),
-    /** Unused since 2026-10-15 (the delta delete guard went): dropped in the migration squash. */
-    deltaDeletes: integer("delta_deletes").notNull().default(0),
     /**
-     * How the last scheduled run ended (0055, T-303): when, its status, its error code and its
+     * How the last scheduled run ended (T-303): when, its status, its error code and its
      * counts (numbers only, never messages or names), for admins (`admin source status`).
      */
     lastRunAt: timestamp("last_run_at", { withTimezone: true }),
@@ -1891,7 +1889,7 @@ export const sourceSyncs = pgTable(
     stoppedAt: timestamp("stopped_at", { withTimezone: true }),
     stoppedError: text("stopped_error"),
     /**
-     * Who owns what the source syncs (0057): the person the configured owner named when the
+     * Who owns what the source syncs: the person the configured owner named when the
      * source first ran, pinned from then on (`user:usr_…`), so an email later reused by someone
      * else never takes the source over.
      */
@@ -1921,7 +1919,6 @@ export const sourceSyncs = pgTable(
       "source_syncs_reconcile_counts",
       sql`(reconcile_held is null or reconcile_held >= 0) and (reconcile_confirmed is null or reconcile_confirmed >= 0)`,
     ),
-    check("source_syncs_delta_deletes", sql`delta_deletes >= 0`),
     check(
       "source_syncs_last_status_valid",
       sql.raw(`last_status is null or last_status in (${quoted(SYNC_STATUSES)})`),
@@ -2261,8 +2258,8 @@ export const oauthTokens = pgTable(
  *
  * `event` is the exact canonical JSON the hash covers, so verification never depends on how the
  * database round-trips a type. The other columns repeat its fields for queries and exports.
- * Rows can be read and inserted in their tenant, never changed: see 0005_audit_rls.sql. Every
- * insert must extend the chain with a row that checks out (0017_audit_check_event.sql).
+ * Rows can be read and inserted in their tenant, never changed: see migrations/0001_rls.sql.
+ * Every insert must extend the chain with a row that checks out.
  */
 export const auditSchema = pgSchema("audit");
 

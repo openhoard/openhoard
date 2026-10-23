@@ -109,7 +109,7 @@ export async function openPglite(options: {
  * superuser and only switches to the owner role, above). pg-boss issues neither. Statements that
  * plainly touch them trip an error ({@link UNSAFE_QUEUE_SQL}), to catch a mistake early; it is not
  * a boundary, and quoting (`"set_config"(…)`, `SET "app".x`) gets past it. What holds: the
- * tenant_directory policy ignores the setting in a tenant's transactions (migration 0031), and
+ * tenant_directory policy ignores the setting in a tenant's transactions (0001_rls.sql), and
  * every transaction checks, in its first statement, that it runs as the owner role
  * (Driver.sessionUser), refusing to run otherwise.
  *

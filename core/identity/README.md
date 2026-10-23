@@ -215,8 +215,8 @@ admins). Administration only: an admin reads the files their grants allow, like 
   grants one.
 - Both take the principal lock first, which serializes the last-admin check. `listAdmins()` lists
   every holder with how (`role`, `group`) and whether it counts now.
-- The role is part of the principal, so its column bumps the principal epoch (core/db migration
-  0036), as memberships already do; so does a group's source, on which a group admin depends.
+- The role is part of the principal, so its column bumps the principal epoch (core/db
+  0001_rls.sql), as memberships already do; so does a group's source, on which a group admin depends.
   `PrincipalCache` takes the config's admin group per tenant (`adminGroupId`), and an OAuth access
   token's principal never carries admin: an AI client acting for an admin isn't one.
 
@@ -278,7 +278,7 @@ one-object share, drops the tenant's entries.
 Every function here that changes a principal takes the tenant's epoch lock first (core/db
 `lockPrincipals()`), before its row locks, so two such transactions can't deadlock on the
 triggers' bump. A new column `resolvePrincipal()` reads needs its trigger too (core/db
-migrations 0021 and 0036).
+0001_rls.sql).
 
 Emails are still unique among current users, keyed by `emailKey()`:
 

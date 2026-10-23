@@ -52,7 +52,7 @@ export async function createTenant(tx: Tx, tenantId: string, input: NewTenant): 
     .values({ id: tenantId, name })
     .returning({ id: tenants.id, name: tenants.name, createdAt: tenants.createdAt });
   if (!row) throw new Error("tenant insert returned nothing");
-  // A random first epoch, as core/db lockPrincipals() and the triggers start one (0021).
+  // A random first epoch, as core/db lockPrincipals() and the triggers start one (0001_rls.sql).
   await tx
     .insert(principalEpochs)
     .values({ tenantId, epoch: sql`1 + floor(random() * 1e12)::bigint` });
@@ -75,9 +75,9 @@ export const BUILT_IN_VOCABULARY = {
  * Makes sure the tenant has the built-in vocabulary, as it must be: creates the `risk` facet
  * and the values if missing. The one exception to "nothing creates vocabulary": these values
  * are the system's, not the tenant's, and the database refuses any change to their levels, and
- * their removal (migration 0050's trigger: a clear error, never a silent restore); only the
- * label may change. Idempotent; inside a withTenant() transaction for the tenant. Migration
- * 0046 did the same for tenants that existed before; createTenant() calls it.
+ * their removal (0001_rls.sql's trigger: a clear error, never a silent restore); only the
+ * label may change. Idempotent; inside a withTenant() transaction for the tenant. createTenant()
+ * calls it.
  */
 export async function ensureBuiltInVocabulary(tx: Tx, tenantId: string): Promise<void> {
   const { facet, values } = BUILT_IN_VOCABULARY;

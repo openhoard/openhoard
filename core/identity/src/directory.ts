@@ -1327,7 +1327,7 @@ export async function membersOf(
  *
  * Uncached; principal-cache.ts caches it. Every change this reads (memberships, grants, the
  * user's stops, kind and admin role, a group's source) bumps the tenant's principal epoch,
- * by trigger (core/db migrations 0021 and 0036), which is what invalidates the cache: a new
+ * by trigger (core/db 0001_rls.sql), which is what invalidates the cache: a new
  * column read here needs its trigger too.
  */
 export async function resolvePrincipal(

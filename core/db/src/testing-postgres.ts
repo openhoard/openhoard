@@ -22,8 +22,8 @@ export const TEST_TEMPLATE = "openhoard_test_template";
 /**
  * Creates a fresh database on `serverUrl` with the required locale (and pgvector, from
  * {@link TEST_TEMPLATE}), and returns a driver for it whose close() also drops it. Without the
- * template the database is made from template0 and the migrations stop at 0051 with the
- * instruction to create the extension. Covered by the native Postgres CI job, not the PGlite
+ * template the database is made from template0 and the migrations stop at their first statement with
+ * the instruction to create the extension. Covered by the native Postgres CI job, not the PGlite
  * run.
  */
 export async function createPostgresDatabase(

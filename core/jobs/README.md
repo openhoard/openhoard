@@ -257,7 +257,7 @@ move doesn't change rule tags until the job that follows it runs.
 `runSync(db, { tenantId, source, zoneId, connector, ownerId, tenantKey, enqueue })` drives one
 connector ([@openhoard/sdk](../../packages/sdk/README.md) interface v1) over one source (a
 configured connection, the `source` of its items) into one zone, and keeps where it got to in
-`source_syncs` (core/db migrations 0039, 0040: one row per tenant and source, forced RLS):
+`source_syncs` (core/db: one row per tenant and source, forced RLS):
 
 ```text
 crawl (from the start, or a checkpoint) ── done ──▶ delta, delta, delta…
@@ -324,7 +324,7 @@ accept-identity`, audited), which starts a crawl from the beginning.
   skipped and reported, a bad token fails the run. Its failures go by their code; anything else
   it throws counts as retryable. A read that says it returned another version, or sends more or
   fewer bytes than it reported, is `changed`.
-- **What is left out is kept** (`skips.ts`, core/db `source_skips`, migration 0070). A run's
+- **What is left out is kept** (`skips.ts`, core/db `source_skips`). A run's
   report lists only that run's skips, and a file skipped once (too large) isn't mentioned again
   until it changes. So the runner gathers what it skips (`too-large`, `invalid-acl`,
   `ingest-<code>`, `invalid`, and items a connector warning names, by the warning's code) and
@@ -402,8 +402,8 @@ reconcileGuard }`) gets a pg-boss schedule keyed by tenant and source, in UTC, w
   | `failed`    | stops the source, audited: runs skip it until an admin acts                    |
   | `cancelled` | nothing: the next run resumes from the last checkpoint                         |
 
-- **What admins see.** Every run records how it ended in `source_syncs` (core/db migration
-  0055): `last_run_at`, `last_status`, `last_error` (a code) and `last_counts` (numbers only).
+- **What admins see.** Every run records how it ended in `source_syncs`:
+  `last_run_at`, `last_status`, `last_error` (a code) and `last_counts` (numbers only).
   `listSourceSyncs()` returns them (with the pinned `ownerId`).
 - **Stopping.** A `failed` run (credentials refused, a configuration the runner refuses, a held
   reconcile or delta, another folder at the root) sets `stopped_at` and `stopped_error` and
@@ -417,7 +417,7 @@ reconcileGuard }`) gets a pg-boss schedule keyed by tenant and source, in UTC, w
   start schedules it again. The server binds each source with `ensureSourceSync()` at start and
   stops when it can't, so this means a configuration the runner refuses.
 - **The owner is pinned.** `pinSourceOwner()` records the person the configured owner named on
-  the source's first run (`owner_id`, migration 0057); the server resolves the owner from that
+  the source's first run (`owner_id`); the server resolves the owner from that
   id from then on, never by email again, so an address later reused by someone else can't take
   the source over. While the pinned person is locked, disabled or retired, runs wait
   (`unknown-owner`).
@@ -485,7 +485,7 @@ skips, until it has enqueued `sweepLimit` or looked at `sweepScanLimit`, so a pi
 can't hide the lost versions behind them.
 
 **Listing tenants.** `tenants` is under forced row-level security like every table. The
-`tenant_directory` policy (core/db migration 0031) lets a transaction with no tenant set that
+`tenant_directory` policy (core/db 0001_rls.sql) lets a transaction with no tenant set that
 asks for it select `tenants` rows, and nothing else: `db.tenantIds()` does that, in a read-only
 transaction that returns ids. The work itself goes through `withTenant()`, one tenant at a time.
 

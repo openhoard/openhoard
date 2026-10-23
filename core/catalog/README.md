@@ -90,7 +90,7 @@ without the `risk` facet.
 `applyInjectionFlag()` puts `risk:injection` on an object, or takes the detector's own flag off,
 as `rule:builtin/injection-detector` (source `rule`: trusted). `applyRuleTags()` leaves every
 `rule:builtin/…` tag alone (pack rule ids can't contain `/`). The value is built-in vocabulary
-(core/db `ensureBuiltInVocabulary()`, run by createTenant(), migration 0046 and before every
+(core/db `ensureBuiltInVocabulary()`, run by createTenant() and before every
 flag): approved, `exposure: metadata-only`, whatever packs or admins did to it. A flag a person
 or a pack put on is never cleared by the detector.
 
@@ -104,7 +104,7 @@ before names, or folders, were recorded covers nothing). It checks the admin
 (core/identity `isAdmin()`) and appends the `injection.review` audit record itself, in the same
 transaction; `clearInjectionReview()` (audited as `injection.review-withdrawn`) gives the
 detector back its say. The database refuses any change to `risk:injection`'s levels or its
-removal, whoever tries (migration 0050); a pack that lists it differently is refused at
+removal, whoever tries (core/db 0001_rls.sql); a pack that lists it differently is refused at
 validation.
 
 `cardSkipCounts()` counts the tenant's current versions without a summary by reason (for a

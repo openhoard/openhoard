@@ -2,7 +2,7 @@ import { sourceSkips, sourceSyncs, type Tx } from "@openhoard/core-db";
 import { and, asc, count, desc, eq, inArray, lt, sql } from "drizzle-orm";
 
 /*
- * What a source's syncs left out, and why, kept across runs (source_skips, migration 0070).
+ * What a source's syncs left out, and why, kept across runs (core/db source_skips).
  *
  * A run's report lists what it skipped, but only for that run: a file skipped for being too
  * large is not mentioned again until it changes, so by the next run nobody could say why it

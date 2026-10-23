@@ -1,1 +1,0 @@
-ALTER TABLE "source_syncs" ADD COLUMN "reconcile_deferred" boolean DEFAULT false NOT NULL;

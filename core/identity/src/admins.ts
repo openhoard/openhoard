@@ -31,7 +31,7 @@ import { getUser, IdentityError, type User } from "./directory.js";
  * Every change takes the tenant's principal lock first (core/db lockPrincipals()), which also
  * serializes the last-admin check with any concurrent removal, lock or retirement. The admin
  * role is part of the principal (resolvePrincipal()), so its column bumps the principal epoch
- * (core/db migration 0036). Callers audit every grant and removal (apps/server).
+ * (core/db 0001_rls.sql). Callers audit every grant and removal (apps/server).
  */
 
 /** Where an admin's role comes from. */

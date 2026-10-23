@@ -65,7 +65,7 @@ dead-letters for an operator instead of treating the content as absent.
 
 [`tenant-storage.ts`](src/tenant-storage.ts): where each tenant's blobs live, chosen by its admin
 (the admin app's Storage page, over the server's admin API); the server's disk (`local`) until
-then. One row a tenant in `tenant_storage` (migration 0071, forced RLS).
+then. One row a tenant in `tenant_storage` (forced RLS).
 
 - **Choosing.** [`settings.ts`](src/settings.ts) `checkChoice()` takes `local`, `s3` (bucket,
   region, access key ID and secret, a folder) or `azblob` (account, container, key, a folder),

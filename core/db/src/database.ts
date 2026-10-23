@@ -9,6 +9,7 @@ import type {
 } from "drizzle-orm/pg-core";
 import { checkServer, DatabaseCheckError, type QueryRows } from "./checks.js";
 import { isId } from "./ids.js";
+import { checkMigrationLedger } from "./migrations.js";
 import * as schema from "./schema.js";
 import { tenants } from "./schema.js";
 
@@ -51,7 +52,7 @@ export interface Database {
    *
    * The only read across tenants, for scheduled maintenance (core/jobs) that must visit each
    * one. It names tenants and nothing else: it runs in a read-only transaction of its own, in
-   * which the `tenant_directory` policy (migration 0031) lets `tenants` rows be selected, and
+   * which the `tenant_directory` policy (0001_rls.sql) lets `tenants` rows be selected, and
    * every other table stays closed because no tenant is set. Work on what it returns goes
    * through withTenant(), one tenant at a time.
    */
@@ -152,10 +153,14 @@ export async function openDatabase(options: OpenOptions): Promise<Database> {
   return fromDriver(driver);
 }
 
-/** Checks the server and applies migrations; closes the driver and rethrows on failure. */
+/**
+ * Checks the server (and, before migrating, how far the database was migrated) and applies
+ * migrations; closes the driver and rethrows on failure.
+ */
 export async function prepareDriver(driver: Driver, options: { migrate: boolean }): Promise<void> {
   try {
     const problems = await checkServer(driver.query);
+    if (options.migrate) problems.push(...(await checkMigrationLedger(driver.query)));
     if (problems.length > 0) throw new DatabaseCheckError(problems);
     if (options.migrate) await driver.migrate();
   } catch (e) {

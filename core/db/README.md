@@ -54,7 +54,7 @@ Two narrow doors besides `withTenant()`, both for core/jobs:
 
 - **`tenantIds({ after, limit })`** lists every tenant's id, in order and a page at a time, for
   scheduled maintenance that visits each tenant. `tenants` is under forced row-level security
-  like every table; the `tenant_directory` policy (migration 0031) lets a transaction with no
+  like every table; the `tenant_directory` policy (`0001_rls.sql`) lets a transaction with no
   tenant set, that sets `app.tenant_directory` to `on`, select its rows, and nothing else: no
   insert, update or delete, and every other table stays closed. Inside a tenant's transaction
   the setting changes nothing, even set for a whole session. Only `tenantIds()` sets it, in a
@@ -84,7 +84,7 @@ skips row-level security. So on PGlite every `withTenant()` and `tenantIds()` ch
 statement that sets its context, that it runs as `openhoard`, and throws `SessionRoleError`
 otherwise, before anything else runs: if anything ever switched the session back, every
 transaction after fails closed. A session-level `app.tenant_directory` can't widen a tenant's
-transaction either (migration 0031).
+transaction either (`0001_rls.sql`).
 
 ## Grants
 
@@ -128,10 +128,10 @@ CREATE EXTENSION vector;  -- pgvector is not a trusted extension
 ```
 
 pgvector doesn't mark itself trusted, so only a superuser can create it, and OpenHoard never
-connects as one. Migration 0051 checks for it (and tries to create it, in case a later pgvector
-is trusted or the role was allowed); without it the migrations stop with the instruction above
-(`pgvector is not installed in database …`, SQLSTATE 55000) instead of failing later on an
-unknown type. PGlite creates it when it opens.
+connects as one. The first migration (`0000_baseline.sql`) checks for it (and tries to create it,
+in case a later pgvector is trusted or the role was allowed); without it the migrations stop with
+the instruction above (`pgvector is not installed in database …`, SQLSTATE 55000) instead of
+failing later on an unknown type. PGlite creates it when it opens.
 
 **Tests on PostgreSQL** (`OPENHOARD_TEST_POSTGRES_URL`) create a database per test as an ordinary
 role with CREATEDB, which can't create the extension either. They copy a template that has it,
@@ -145,7 +145,7 @@ ALTER DATABASE openhoard_test_template IS_TEMPLATE true;
 CREATE EXTENSION vector;
 ```
 
-Without the template, test databases come from template0 and every migration run stops at 0051.
+Without the template, test databases come from template0 and every migration run stops at its first statement.
 
 ## Search storage
 
@@ -154,7 +154,7 @@ Without the template, test databases come from template0 and every migration run
   split by who may be matched on what: the real title and every tag (readers), trusted tags
   (a reader's metadata-only card), the title a non-reader is shown and public trusted tags
   (everyone else), and the content columns with the summary's provider kind. Kept by triggers
-  (migration 0053) on objects, tags, facets' `public`, versions, extracts and cards, so every
+  (`0001_rls.sql`) on objects, tags, facets' `public`, versions, extracts and cards, so every
   code path keeps it current; a new version empties the content columns until its own text
   and summary arrive. Two GIN indexes, on exactly the expressions core/catalog's search uses.
   The text search configuration is `simple`: split and lower-cased, no stemming and no stop
@@ -208,11 +208,18 @@ can't both take it over.
 3. **Adding a table:** add it to `tables` in `schema.ts`, give it `tenant_id` as the first
    column of its primary key and of every foreign key, and write a custom migration
    (`pnpm --filter @openhoard/core-db exec drizzle-kit generate --custom --name=<name>`) with
-   the same three statements as [`0001_tenant_rls.sql`](migrations/0001_tenant_rls.sql):
+   the three statements [`0001_rls.sql`](migrations/0001_rls.sql) runs for every table:
    enable and force row-level security, and create the `tenant_isolation` policy.
    `rls.test.ts` fails for a table without them.
 
 Migrations are never edited after they merge.
+
+`0000_baseline.sql` (the schema, as drizzle-kit generates it) and `0001_rls.sql` (row-level
+security, triggers, indexes on expressions) replaced migrations 0000-0071 on 2026-10-22 (T-1408;
+the old ones are in git at 8ccdef5). Both are stamped no later than 0071 was, so a database
+migrated through 0071 skips them and carries on with the migrations after; one whose migrations
+stopped before 0071 is refused at open, with the instruction to finish them with OpenHoard at
+8ccdef5 first (`checkMigrationLedger()`, `src/migrations.ts`).
 
 ## Tests
 

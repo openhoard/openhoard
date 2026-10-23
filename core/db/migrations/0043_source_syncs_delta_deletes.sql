@@ -1,2 +1,0 @@
-ALTER TABLE "source_syncs" ADD COLUMN "delta_deletes" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
-ALTER TABLE "source_syncs" ADD CONSTRAINT "source_syncs_delta_deletes" CHECK (delta_deletes >= 0);

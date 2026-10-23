@@ -17,7 +17,7 @@ import {
 import { PGlite } from "@electric-sql/pglite";
 import { checkServer, DatabaseCheckError } from "./checks.js";
 import { newId } from "./ids.js";
-import { migrationsFolder } from "./migrations.js";
+import { migrationsFolder, SQUASHED_THROUGH } from "./migrations.js";
 import { openPglite } from "./pglite.js";
 import { poolSettings, POSTGRES_DEFAULTS } from "./postgres.js";
 import {
@@ -302,8 +302,6 @@ describe("schema", () => {
   });
 });
 
-const MIGRATE_ALL_TIMEOUT = process.platform === "win32" ? 180_000 : 60_000;
-
 describe("migrations", () => {
   it("are all listed in the journal, in order", () => {
     const journal = JSON.parse(
@@ -319,74 +317,52 @@ describe("migrations", () => {
     const when = journal.entries.map((e) => e.when);
     expect(when).toEqual([...when].sort((x, y) => x - y));
     expect(new Set(when).size).toBe(when.length);
+    // The squashed pair is stamped no later than what databases migrated before it recorded,
+    // and everything after it later.
+    expect(when.slice(0, 2).every((w) => w <= SQUASHED_THROUGH)).toBe(true);
+    expect(when.slice(2).every((w) => w > SQUASHED_THROUGH)).toBe(true);
   });
 
-  it(
-    "clear external ids from local users and groups before SCIM owns them (0015)",
-    async () => {
-      // A database migrated up to 0014, with a local user and group that had external ids.
-      const journal = JSON.parse(
-        readFileSync(join(migrationsFolder, "meta", "_journal.json"), "utf8"),
-      ) as { entries: { tag: string }[] };
-      const upTo = journal.entries.findIndex((e) => e.tag === "0015_local_external_ids");
-      const older = mkdtempSync(join(tmpdir(), "openhoard-migrations-"));
-      const driver = await openPglite({});
-      try {
-        cpSync(migrationsFolder, older, { recursive: true });
-        writeFileSync(
-          join(older, "meta", "_journal.json"),
-          JSON.stringify({ ...journal, entries: journal.entries.slice(0, upTo) }),
-        );
-        await migratePglite(driver.db as never, { migrationsFolder: older });
-        const db = fromDriver(driver);
-        // Only the tables this migration touches, in their 0014 form: seedTenant() writes today's
-        // columns, which later migrations add.
-        const s = { tenantId: newId("tenant"), userId: newId("user"), groupId: newId("group") };
-        const scimUser = newId("user");
-        await db.withTenant(s.tenantId, async (tx) => {
-          await tx.execute(sql`insert into tenants (id, name) values (${s.tenantId}, 'Tenant 1')`);
-          await tx.execute(
-            sql`insert into users (tenant_id, id, email, email_key, display_name, source, external_id)
-              values (${s.tenantId}, ${s.userId}, 'ana@example.com', 'ana@example.com', 'Ana',
-                      'local', 'local-1')`,
-          );
-          await tx.execute(
-            sql`insert into groups (tenant_id, id, name, source, external_id)
-              values (${s.tenantId}, ${s.groupId}, 'Readers', 'local', 'local-g')`,
-          );
-          await tx.execute(
-            sql`insert into users (tenant_id, id, email, email_key, display_name, source, external_id)
-              values (${s.tenantId}, ${scimUser}, 'bo@example.com', 'bo@example.com', 'Bo',
-                      'scim', 'scim-1')`,
-          );
-        });
-        await driver.migrate();
-        const rows = await db.withTenant(s.tenantId, async (tx) => ({
-          users: await tx.select({ id: users.id, externalId: users.externalId }).from(users),
-          groups: await tx.select({ externalId: groups.externalId }).from(groups),
-        }));
-        expect(rows.users).toEqual(
-          expect.arrayContaining([
-            { id: s.userId, externalId: null },
-            { id: scimUser, externalId: "scim-1" },
-          ]),
-        );
-        expect(rows.groups).toEqual([{ externalId: null }]);
-        // Row-level security is forced again.
-        const [forced] = await driver.query(
-          `select bool_and(relforcerowsecurity) as forced from pg_class
-          where relname in ('users', 'groups') and relnamespace = 'public'::regnamespace`,
-        );
-        expect(forced?.forced).toBe(true);
-      } finally {
-        await driver.close();
-        rmSync(older, { recursive: true, force: true });
-      }
-      // Runs every migration from nothing, twice over, in the test itself: it grows with each one,
-      // and the Windows runner is several times slower.
-    },
-    MIGRATE_ALL_TIMEOUT,
-  );
+  it("carry a database migrated before the squash (T-1408) on, with only what came after", async () => {
+    // Such a database: the schema as of 0071 (the squashed pair), and 0071 recorded last.
+    const journal = JSON.parse(
+      readFileSync(join(migrationsFolder, "meta", "_journal.json"), "utf8"),
+    ) as { entries: unknown[] };
+    const squashed = mkdtempSync(join(tmpdir(), "openhoard-migrations-"));
+    const driver = await openPglite({});
+    try {
+      cpSync(migrationsFolder, squashed, { recursive: true });
+      writeFileSync(
+        join(squashed, "meta", "_journal.json"),
+        JSON.stringify({ ...journal, entries: journal.entries.slice(0, 2) }),
+      );
+      await migratePglite(driver.db as never, { migrationsFolder: squashed });
+      await driver.query(`truncate drizzle.__drizzle_migrations`);
+      await driver.query(
+        `insert into drizzle.__drizzle_migrations (hash, created_at) values ('0071', ${SQUASHED_THROUGH})`,
+      );
+      await prepareDriver(driver, { migrate: true }); // the baseline would fail on its tables
+      const [n] = await driver.query("select count(*)::int as n from drizzle.__drizzle_migrations");
+      expect(n?.n).toBe(1 + journal.entries.length - 2);
+    } finally {
+      await driver.close();
+      rmSync(squashed, { recursive: true, force: true });
+    }
+  });
+
+  it("refuse a database that stopped part way through the squashed migrations", async () => {
+    const driver = await openPglite({});
+    await driver.query(`create schema drizzle`);
+    await driver.query(
+      `create table drizzle.__drizzle_migrations (id serial primary key, hash text not null, created_at bigint)`,
+    );
+    await driver.query(
+      `insert into drizzle.__drizzle_migrations (hash, created_at) values ('0070', ${SQUASHED_THROUGH - 1000})`,
+    );
+    const e = await prepareDriver(driver, { migrate: true }).catch((err: unknown) => err);
+    expect(e).toBeInstanceOf(DatabaseCheckError);
+    expect(String(e)).toMatch(/stop before 0071_tenant_storage.*commit 8ccdef5/);
+  });
 
   it("give every test an empty database", async () => {
     const db = await openTestDatabase();
