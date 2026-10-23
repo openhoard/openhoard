@@ -80,9 +80,10 @@ provable access control, and AI you can actually trust with company data.
 
 </details>
 
-**Presenting OpenHoard to your IT team?** Use the [IT overview deck](docs/presentations/openhoard-it-overview.pptx)
-([PDF](docs/presentations/openhoard-it-overview.pdf)): architecture, data flow, storage, tags,
-security and status in 15 slides with speaker notes.
+The [IT overview deck](docs/presentations/openhoard-it-overview.pptx)
+([PDF](docs/presentations/openhoard-it-overview.pdf)) is a September 2026 snapshot, kept for its
+diagrams of the architecture, data flow, tags and security. Where it differs from this README (what
+OpenHoard is for, which sources it indexes, status, roadmap), this README is current.
 
 ## How it works
 
