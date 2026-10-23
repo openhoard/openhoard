@@ -11,6 +11,9 @@ export default defineConfig({
     include: SLOW_LANE ? ["src/**/*.slow.test.tsx"] : ["src/**/*.test.ts", "src/**/*.test.tsx"],
     exclude: [...configDefaults.exclude],
     passWithNoTests: true,
+    // CI's Linux leg runs every package's coverage at once, beside the database suites: a file's
+    // first test, which pays for jsdom and the first render, has run past the 5 s default there.
+    testTimeout: 20_000,
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts", "src/**/*.tsx"],
