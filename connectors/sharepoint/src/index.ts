@@ -10,7 +10,9 @@ export { probeSites, sitePath, type SiteProbe } from "./probe.js";
 export {
   SHAREPOINT_CONNECTOR_VERSION,
   sharepointConnector,
+  type SharePointConnector,
   type SharePointConnectorOptions,
 } from "./connector.js";
 export { graphClient, type GraphClient, type GraphClientOptions } from "./graph.js";
 export { DEFAULT_UNITS_PER_MINUTE, pacer, sharedPacer, type Pacer } from "./pace.js";
+export { LIFETIME_MS, RENEW_BEFORE_MS, type Subscriptions } from "./subscriptions.js";

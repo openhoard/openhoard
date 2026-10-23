@@ -13,9 +13,12 @@ import {
   type FakeTenant,
 } from "@openhoard/testkit";
 import { and, count, eq, isNull } from "drizzle-orm";
+import { Hono } from "hono";
 import { pino } from "pino";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { AuthEnv } from "./auth.js";
 import { ConfigSchema, sourceSecretEnv, SourceSchema } from "./config.js";
+import { mountGraphNotifications } from "./notifications.js";
 import { prepareSources } from "./sources.js";
 import { tenantKeyStore } from "./tenant-keys.js";
 
@@ -37,6 +40,9 @@ let dataDir: string;
 let tenant: FakeTenant;
 let entra: FakeEntra;
 let send: typeof fetch;
+let graph: FakeGraph;
+/** Where the fake Graph's subscription checks and notifications go. */
+let deliver: (url: string, init: RequestInit) => Promise<Response>;
 
 beforeEach(async () => {
   db = await openTestDatabase();
@@ -54,7 +60,8 @@ beforeEach(async () => {
   tenant = generateTenant({ items: 300 });
   for (const item of tenant.items) item.size = Math.min(item.size, 256);
   entra = new FakeEntra(tenant, { graph: GRAPH });
-  const graph = new FakeGraph(tenant, { entra });
+  deliver = () => Promise.reject(new TypeError("fetch failed"));
+  graph = new FakeGraph(tenant, { entra, notify: (url, init) => deliver(url, init) });
   entra.registerApp({ clientId: CLIENT_ID, secret: SECRET, appRoles: ["Sites.Selected"] });
   entra.grantSite(CLIENT_ID, site().id);
   send = (input, init) => {
@@ -86,6 +93,12 @@ const source = (more: Record<string, unknown> = {}) => ({
   graphUnitsPerMinute: 1_000_000,
   ...more,
 });
+/** Sign-in as a server reachable from the internet has it: what notifications need. */
+const AUTH = {
+  publicUrl: "https://hoard.example",
+  cookieKey: "k".repeat(43),
+  providers: [{ id: "dev", kind: "generic", issuer: "https://idp.example", clientId: "oh" }],
+};
 const keys = () => tenantKeyStore(dataDir, { hasContent: async () => false });
 /** What the server would log, through its real logger: as JSON lines, parsed. */
 function prepare(sources: Record<string, unknown>[], env: NodeJS.ProcessEnv = {}) {
@@ -137,6 +150,8 @@ describe("a SharePoint site in the configuration", { timeout: 120_000 }, () => {
         sources: [source(a), source({ id: "sp-other", zone: "Other", ...b })],
       }).success;
     expect(two({}, {})).toBe(true);
+    // Graph notifies an https address on the internet: sign-in's publicUrl.
+    expect(whole({ notifications: true })).toBe(false);
     expect(two({ graphUnitsPerMinute: 2000 }, { graphUnitsPerMinute: 4000 })).toBe(false);
     expect(two({ graphUnitsPerMinute: 2000 }, { graphUnitsPerMinute: undefined })).toBe(false);
     // Saying the default is saying nothing; and Graph named is Graph, however it is written.
@@ -382,5 +397,46 @@ describe("a SharePoint site in the configuration", { timeout: 120_000 }, () => {
     expect(
       await failing({ site: "not/a/site", certificate: { certificateFile, privateKeyFile } }),
     ).toMatch(/sources sp-other: not a site/);
+  });
+
+  it("takes Graph's change notifications: a change at SharePoint asks for a sync", async () => {
+    const config = ConfigSchema.parse({
+      dataDir,
+      auth: { ...AUTH, providers: [{ ...AUTH.providers[0], tenantId: t.tenantId }] },
+      sources: [source({ notifications: true })],
+    });
+    const { notifying } = await prepareSources(db, config, {
+      tenantKey: keys(),
+      env: { [sourceSecretEnv("sp-finance")]: SECRET },
+      fetch: send,
+    });
+    const requested: string[] = [];
+    const app = new Hono<AuthEnv>();
+    mountGraphNotifications(app, {
+      sourceOf: (tenantId, id) => notifying.get(`${tenantId}/${id}`),
+      request: async (tenantId, id) => void requested.push(`${tenantId}/${id}`),
+    });
+    deliver = async (url, init) => app.request(url, init);
+
+    await notifying.get(`${t.tenantId}/sp-finance`)?.keep(new AbortController().signal);
+    const [made] = graph.subscriptions.values();
+    expect(made?.notificationUrl).toBe(
+      `https://hoard.example/graph/notifications/${t.tenantId}/sp-finance`,
+    );
+    const file = graph.store.inDrive(site().driveId).find((i) => i.kind === "file");
+    graph.store.update(file?.id as string, { size: 9 });
+    await graph.flushNotifications();
+    expect(requested).toEqual([`${t.tenantId}/sp-finance`]);
+
+    // Anyone can POST there: without the clientState nothing is asked, and nothing is said.
+    const forged = await app.request(made?.notificationUrl as string, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: [{ subscriptionId: made?.id, changeType: "updated" }] }),
+    });
+    expect(forged.status).toBe(202);
+    expect(requested).toHaveLength(1);
+    const elsewhere = `https://hoard.example/graph/notifications/${t.tenantId}/sp-other?validationToken=x`;
+    expect((await app.request(elsewhere, { method: "POST" })).status).toBe(404);
   });
 });

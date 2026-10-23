@@ -10,6 +10,7 @@ import { adminGroupOf, type Config } from "./config.js";
 import type { UnavailableSource } from "./sources.js";
 import { loginKey } from "./login-state.js";
 import { mountMcp, type EmbedDeps, type McpTool } from "./mcp.js";
+import { mountGraphNotifications, type NotificationDeps } from "./notifications.js";
 import type { MetadataFetcher } from "./oauth/clients.js";
 import { mountOAuth } from "./oauth/routes.js";
 import { mountReviewApi } from "./review-api.js";
@@ -38,6 +39,8 @@ export interface AppDeps {
   storage?: StorageDeps;
   /** Where uploads go (T-1206); needed when `uploads` is configured. */
   uploads?: Pick<UploadDeps, "store" | "tenantKey" | "enqueue">;
+  /** Graph's change notifications for the sources that take them (T-304). */
+  notifications?: NotificationDeps;
   /** SCIM limits (tests lower or raise them). */
   scim?: ScimOptions;
   /**
@@ -84,6 +87,9 @@ export function createApp(config: Config, log?: Logger, deps: AppDeps = {}): Hon
       );
     });
   }
+
+  // Before sign-in: Graph's notifications carry no cookie, and are checked by their clientState.
+  if (deps.notifications) mountGraphNotifications(app, deps.notifications);
 
   // SCIM first: its requests carry a bearer token, never the session cookie.
   if (deps.db && config.scim.enabled) {

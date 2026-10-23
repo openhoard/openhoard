@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { closeSync, fstatSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ensureZone, ZoneKindError } from "@openhoard/core-catalog";
@@ -12,7 +13,13 @@ import {
   type ScheduledSource,
 } from "@openhoard/core-jobs";
 import { fsConnector } from "@openhoard/connector-fs";
-import { graphAuth, sharepointConnector, sitePath } from "@openhoard/connector-sharepoint";
+import {
+  graphAuth,
+  sharepointConnector,
+  sitePath,
+  type SharePointConnector,
+  type Subscriptions,
+} from "@openhoard/connector-sharepoint";
 import type { Connector } from "@openhoard/sdk";
 import type { Logger } from "pino";
 import {
@@ -44,7 +51,10 @@ import { retrying } from "./retry.js";
  *   warning (as a model without its key is), and the rest start;
  * - resolves its owner (an email or a user id) to an active member on its first run, and pins
  *   that person (ownerOf()): until they exist (`admin user create`, SCIM) runs wait, and a later
- *   configuration naming someone else is refused.
+ *   configuration naming someone else is refused;
+ * - with `notifications`, keeps its connector's subscriptions to Graph's change notifications
+ *   (T-304), at `<publicUrl>/graph/notifications/<tenant>/<source>`, made with a clientState
+ *   derived from the tenant's key, so that every node knows it and nobody else does.
  *
  * Any of those failing stops the server with a message naming the source: a folder half set up
  * would sync into the wrong place or not at all, silently.
@@ -66,6 +76,8 @@ export interface ServerSources {
    * certificate. They aren't synced; what they read before stays, and goes stale.
    */
   unavailable: UnavailableSource[];
+  /** The sources that take Graph's change notifications, by `<tenantId>/<source>`. */
+  notifying: Map<string, Subscriptions>;
 }
 
 /** A configured source the server couldn't start. */
@@ -81,7 +93,7 @@ export const CONFIG_ACTOR = "system:config";
 
 export async function prepareSources(
   db: Database,
-  config: Pick<Config, "sources" | "dataDir">,
+  config: Pick<Config, "sources" | "dataDir" | "auth">,
   options: {
     tenantKey: (tenantId: string) => Promise<Uint8Array>;
     blobs?: ContentSource;
@@ -97,6 +109,7 @@ export async function prepareSources(
   const scheduled: ScheduledSource[] = [];
   const unavailable: UnavailableSource[] = [];
   const reading = new Map<string, Connector>();
+  const notifying = new Map<string, Subscriptions>();
   for (const s of config.sources) {
     const fail = (why: string): never => {
       throw new Error(`invalid OpenHoard config:\n  sources ${s.id}: ${why}`);
@@ -197,6 +210,21 @@ export async function prepareSources(
         : { reconcileGuard: stripUndefined(s.reconcileGuard) }),
     });
     if (s.extract) reading.set(`${s.tenantId}/${s.id}`, connector);
+    if (s.connector === "sharepoint" && s.notifications) {
+      const subscriptions = (connector as SharePointConnector).subscriptions;
+      // Config checks auth is there; a test's connector may keep no subscriptions.
+      if (!subscriptions || !config.auth) return fail("its connector takes no notifications");
+      const key = await options.tenantKey(s.tenantId);
+      notifying.set(
+        `${s.tenantId}/${s.id}`,
+        subscriptions({
+          url: new URL(`/graph/notifications/${s.tenantId}/${s.id}`, config.auth.publicUrl).href,
+          clientState: createHmac("sha256", key)
+            .update(`graph-notifications:${s.tenantId}:${s.id}`)
+            .digest("base64url"),
+        }),
+      );
+    }
     options.log?.info(
       {
         source: s.id,
@@ -231,6 +259,7 @@ export async function prepareSources(
       stale = handler;
     },
     unavailable,
+    notifying,
   };
 }
 

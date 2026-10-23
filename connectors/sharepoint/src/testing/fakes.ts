@@ -37,9 +37,19 @@ export function fakes(
     contentHashes?: boolean;
     /** Graph answers 429 past this many requests a window (FakeGraphOptions.throttle). */
     throttle?: { limit: number; windowMs: number };
+    /** Where Graph's subscription checks and notifications go (FakeGraphOptions.notify). */
+    notify?: (url: string, init: RequestInit) => Promise<Response>;
   } = {},
 ): Fakes {
-  const { items = 200, maxFileBytes, pageSize, contentHashes, throttle, ...entraOptions } = options;
+  const {
+    items = 200,
+    maxFileBytes,
+    pageSize,
+    contentHashes,
+    throttle,
+    notify,
+    ...entraOptions
+  } = options;
   const tenant = generateTenant({ items });
   // Small files, for tests that read every one: the generator's run to gigabytes.
   if (maxFileBytes !== undefined) {
@@ -58,6 +68,7 @@ export function fakes(
     ...(pageSize === undefined ? {} : { pageSize }),
     ...(contentHashes === undefined ? {} : { contentHashes }),
     ...(throttle === undefined ? {} : { throttle }),
+    ...(notify === undefined ? {} : { notify }),
   });
   const sent: Fakes["sent"] = [];
   const send: typeof fetch = (input, init) => {

@@ -518,6 +518,13 @@ export const SharePointSourceSchema = z
      * under Graph's smallest limits; a larger tenant allows more. Each node spends it.
      */
     graphUnitsPerMinute: z.number().int().min(250).max(1_000_000).optional(),
+    /**
+     * Whether Graph notifies the server of changes (T-304), so a change syncs within a minute
+     * or two rather than at the next `schedule`: Graph POSTs to
+     * `<auth.publicUrl>/graph/notifications/<tenantId>/<id>`, which must be reachable from the
+     * internet over https. Default false: changes wait for the schedule.
+     */
+    notifications: z.boolean().default(false),
     /** A national cloud's addresses. Default: the global cloud's. */
     authority: ORIGIN.optional(),
     graph: ORIGIN.optional(),
@@ -747,6 +754,17 @@ export const ConfigSchema = z
           });
         }
         budgets.set(app, units);
+      }
+      if (source.connector === "sharepoint" && source.notifications) {
+        const at = c.auth ? new URL(c.auth.publicUrl) : undefined;
+        if (at?.protocol !== "https:" || isLoopback(at)) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["sources", i, "notifications"],
+            message:
+              "Graph notifies an https address on the internet: configure auth with such a publicUrl",
+          });
+        }
       }
       // The crawl is what bounds how long a permission removed at SharePoint can still read
       // here: without one, a change the delta doesn't report would never be seen.

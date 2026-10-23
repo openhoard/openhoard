@@ -17,6 +17,7 @@ import { ensureDataDir, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
 import { checkMailboxes, startMailIn } from "./mail-in.js";
 import { createServerModels, modelsStartupWarnings } from "./models.js";
+import { keepSubscriptions } from "./notifications.js";
 import { prepareSources, type ServerSources } from "./sources.js";
 import { blobsIn, storageKeyStore, tenantKeyStore } from "./tenant-keys.js";
 import { watchSources } from "./watch.js";
@@ -217,7 +218,18 @@ const app = createApp(config, log, {
   ...(models === null
     ? {}
     : { embed: { router: models.router, budget: models.budget, queryKinds: models.queryKinds } }),
+  ...(sources.notifying.size === 0
+    ? {}
+    : {
+        notifications: {
+          sourceOf: (tenantId, source) => sources.notifying.get(`${tenantId}/${source}`),
+          request: (tenantId, source) => jobs.requestSync(tenantId, source),
+          log: log.child({ component: "notifications" }),
+        },
+      }),
 });
+// Graph's change notifications (T-304): kept on a worker, once Graph can reach this server.
+let notifying: ReturnType<typeof keepSubscriptions> | null = null;
 const server = serve(
   {
     fetch: app.fetch,
@@ -227,8 +239,12 @@ const server = serve(
     // (its headers still have one minute).
     ...(config.uploads ? { serverOptions: { requestTimeout: 60 * 60_000 } } : {}),
   },
-  (info) =>
-    log.info({ address: info.address, port: info.port, dataDir: config.dataDir }, "listening"),
+  (info) => {
+    log.info({ address: info.address, port: info.port, dataDir: config.dataDir }, "listening");
+    if (config.jobs.worker && sources.notifying.size > 0) {
+      notifying = keepSubscriptions(sources.notifying, log.child({ component: "notifications" }));
+    }
+  },
 );
 
 /**
@@ -254,7 +270,7 @@ const shutdown = (signal: string) => {
   const closed = new Promise<void>((resolve) => server.close(() => resolve()));
   if ("closeIdleConnections" in server) server.closeIdleConnections();
   // The watchers first: no sync is requested of a queue that is stopping.
-  const stopped = Promise.all([watching?.close(), mailIn?.close()])
+  const stopped = Promise.all([watching?.close(), mailIn?.close(), notifying?.close()])
     .then(() => jobs.stop({ timeoutMs: JOBS_STOP_TIMEOUT_MS, graceMs: JOBS_GRACE_MS }))
     .catch((err: unknown) => log.error({ err }, "stopping the job queue failed"));
   void Promise.all([closed, stopped])

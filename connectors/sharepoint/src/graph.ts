@@ -58,21 +58,29 @@ export interface GraphClient {
   /**
    * GET a path (`/v1.0/…`) or a link Graph gave, with the app's token. Returns the response
    * for a 2xx, and for a status listed in `pass` (a 302 to follow without the token, a 404 the
-   * caller reads as an answer); anything else throws as the table above says.
+   * caller reads as an answer); anything else throws as the table above says. `method` and a
+   * JSON `body` are for the few requests that aren't reads (subscriptions.ts): those are asked
+   * again after a failure of the moment as a GET is, so one that did reach Graph may be made
+   * twice.
    */
-  get(
-    target: string,
-    signal: AbortSignal,
-    options?: { pass?: readonly number[]; headers?: Record<string, string> },
-  ): Promise<Response>;
-  /** GET, and the answer as a JSON object. An answer that isn't one is `retryable`. */
+  get(target: string, signal: AbortSignal, options?: RequestOptions): Promise<Response>;
+  /** As get(), and the answer as a JSON object. An answer that isn't one is `retryable`. */
   json(
     target: string,
     signal: AbortSignal,
-    options?: { headers?: Record<string, string> },
+    options?: Omit<RequestOptions, "pass">,
   ): Promise<Record<string, unknown>>;
   /** Whether a link is on Graph's origin: only such a link is ever followed. */
   owns(link: string): boolean;
+}
+
+export interface RequestOptions {
+  pass?: readonly number[];
+  headers?: Record<string, string>;
+  /** Default GET. */
+  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  /** Sent as JSON. */
+  body?: unknown;
 }
 
 /** Times a request is asked again after a failure of the moment, and the first wait. */
@@ -124,18 +132,16 @@ export function graphClient(options: GraphClientOptions): GraphClient {
     throw new ConnectorError("permanent", "Graph gave a link that isn't Graph's: not followed");
   }
 
-  async function once(
-    url: string,
-    token: string,
-    signal: AbortSignal,
-    extra: Record<string, string> = {},
-  ) {
+  async function once(url: string, token: string, signal: AbortSignal, asked: RequestOptions) {
     // Built as Headers, so a caller's "Authorization" in any spelling is replaced, not added to.
-    const headers = new Headers({ accept: "application/json", ...extra });
+    const headers = new Headers({ accept: "application/json", ...asked.headers });
     headers.set("authorization", `Bearer ${token}`);
+    if (asked.body !== undefined) headers.set("content-type", "application/json");
     try {
       return await send(url, {
+        method: asked.method ?? "GET",
         headers,
+        ...(asked.body === undefined ? {} : { body: JSON.stringify(asked.body) }),
         // The request holds a token: it goes to Graph or nowhere.
         redirect: "manual",
         signal,
@@ -150,16 +156,16 @@ export function graphClient(options: GraphClientOptions): GraphClient {
   async function authorized(
     url: string,
     signal: AbortSignal,
-    headers: Record<string, string> | undefined,
+    asked: RequestOptions,
   ): Promise<Response> {
     let token = await auth.appToken(signal);
-    let response = await once(url, token, signal, headers);
+    let response = await once(url, token, signal, asked);
     if (response.status === 401) {
       // Refused though Entra issued it (revoked meanwhile, or lapsed on the way): once more.
       await response.body?.cancel().catch(() => undefined);
       auth.forget(token);
       token = await auth.appToken(signal);
-      response = await once(url, token, signal, headers);
+      response = await once(url, token, signal, asked);
       if (response.status === 401) auth.forget(token);
     }
     return response;
@@ -168,8 +174,9 @@ export function graphClient(options: GraphClientOptions): GraphClient {
   async function get(
     target: string,
     signal: AbortSignal,
-    { pass = [], headers }: { pass?: readonly number[]; headers?: Record<string, string> } = {},
+    asked: RequestOptions = {},
   ): Promise<Response> {
+    const { pass = [] } = asked;
     signal.throwIfAborted();
     const url = urlOf(target);
     const cost = costOf(url);
@@ -193,7 +200,7 @@ export function graphClient(options: GraphClientOptions): GraphClient {
       waited += Math.max(0, now() - before);
       let response: Response;
       try {
-        response = await authorized(url, signal, headers);
+        response = await authorized(url, signal, asked);
       } catch (e) {
         // No answer: a failure of the moment, asked again a little later.
         if (!(e instanceof ConnectorError && e.code === "retryable") || failures >= RETRIES)
@@ -250,9 +257,9 @@ export function graphClient(options: GraphClientOptions): GraphClient {
   async function json(
     target: string,
     signal: AbortSignal,
-    { headers }: { headers?: Record<string, string> } = {},
+    asked: Omit<RequestOptions, "pass"> = {},
   ): Promise<Record<string, unknown>> {
-    const response = await get(target, signal, headers === undefined ? {} : { headers });
+    const response = await get(target, signal, asked);
     let text: string | undefined;
     try {
       text = await textOf(response, maxJsonBytes);

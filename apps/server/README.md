@@ -133,6 +133,7 @@ each library a folder at the top.
 | `recrawlAfterDays`    | how old a crawl may be before the site is crawled again instead of followed. Default 7; 0 never; 1 to 30 while permissions are imported                                   |
 | `importPermissions`   | whether SharePoint's permissions become grants here (below). Default true                                                                                                 |
 | `graphUnitsPerMinute` | Graph's resource units a minute the app may spend (below). Default 800, 250 at least                                                                                      |
+| `notifications`       | whether Graph tells the server of changes as they happen (below). Default false; needs `auth` with a `publicUrl` reachable from the internet over https                   |
 
 `id`, `tenantId`, `zone`, `owner`, `extract`, `reconcileGuard` and `staleAfterHours` are as for a
 folder.
@@ -145,7 +146,18 @@ thousands of folders in it renamed), and every `recrawlAfterDays` (default 7; 0 
 (about two database transactions a file, no downloads) and removes what is no longer there,
 which mends anything following changes missed. One worker runs one sync at a time, so a large
 site's crawl holds up the other sources' syncs while it runs. There is no `watch`: changes are
-found at the next sync, not as they happen.
+found at the next sync, unless Graph notifies the server of them.
+
+**Change notifications (T-304).** With `"notifications": true`, a worker subscribes to each of
+the site's libraries once it is listening, and Graph POSTs to
+`<publicUrl>/graph/notifications/<tenantId>/<source id>` when one changes: the source is synced
+within a minute or two instead of at its next `schedule`, which still runs. Graph first checks
+that address answers (the subscription is refused otherwise, and the error is logged hourly
+until it does), so a proxy in front must pass that path through to every node. A notification
+counts only when it carries the source's secret, which is derived from the tenant's key in
+`<dataDir>/keys` (the same on every node, known to nobody else). Subscriptions last three days and
+are renewed a day before they lapse; they are kept beside the source's folders, so a restart renews
+them rather than making more.
 
 To follow changes the connector keeps each library's folders (ids and names, no file's) in
 `<dataDir>/connectors/<tenant>/<source>`; it stays there when the source is taken out of the
@@ -226,8 +238,7 @@ after the wait, from its last checkpoint. Nothing is lost either way. A first cr
 eight units a file, so 20,000 files take over three hours at the default: a tenant with more
 licences has a higher limit, and raising the budget shortens crawls in proportion.
 
-What it doesn't do yet: be told of changes as they happen (Graph's change notifications, the
-rest of T-304), and resolve SharePoint groups. It hasn't been run against a real tenant yet.
+What it doesn't do yet: resolve SharePoint groups. It hasn't been run against a real tenant yet.
 
 Content is read through the source's connector, checked against the version's size and BLAKE3
 blob id with the tenant's blob key. **Tenant blob keys** live in `<dataDir>/keys/<tenant>.blob-key`

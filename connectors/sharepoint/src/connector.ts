@@ -33,6 +33,7 @@ import {
   type LogLine,
   type SiteFolders,
 } from "./state.js";
+import { graphSubscriptions, type Subscriptions } from "./subscriptions.js";
 
 /*
  * The SharePoint connector (T-303): one site's document libraries, crawled in place through
@@ -288,7 +289,12 @@ function spend(budget: Budget): void {
   if (budget.left-- <= 0) throw budget.over ? budget.over() : resyncError();
 }
 
-export function sharepointConnector(options: SharePointConnectorOptions): Connector {
+/** With a `stateDir`, the connector also keeps Graph's change notifications (subscriptions.ts). */
+export type SharePointConnector = Connector & {
+  subscriptions?: (notify: { url: string; clientState: string }) => Subscriptions;
+};
+
+export function sharepointConnector(options: SharePointConnectorOptions): SharePointConnector {
   const { pageSize: askedPageSize, unitsPerMinute, roundRequests = 1000 } = options;
   const recrawlAfterDays = options.recrawlAfterDays ?? 7;
   if (
@@ -1172,6 +1178,19 @@ export function sharepointConnector(options: SharePointConnectorOptions): Connec
     crawl,
     ...(state ? { delta } : {}),
     ...(importing ? { aclImport } : {}),
+    ...(options.stateDir === undefined
+      ? {}
+      : {
+          subscriptions: (notify: { url: string; clientState: string }) =>
+            graphSubscriptions({
+              ...notify,
+              client,
+              stateDir: options.stateDir as string,
+              drives: async (signal) =>
+                (await drivesOf(await siteId(signal), signal)).map((d) => d.id),
+              now,
+            }),
+        }),
     read,
     async redirect(ref, signal) {
       signal.throwIfAborted();
