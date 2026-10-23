@@ -152,7 +152,7 @@ it("a file shared through a site's Members group is found, opened and explained 
   );
   expect(card).toMatchObject({ access: "read", metadataOnly: false });
   const opened = await h.call(asMember, "open", { id: card.id, mode: "link" });
-  expect(opened.data.link).toMatch(new RegExp(`^${site.webUrl.replace(/[.]/g, "\\.")}/`));
+  expect(String(opened.data.link).startsWith(`${site.webUrl}/`)).toBe(true);
 
   // Scenario 4: the source's owner, whose files these are here, asks why the member may.
   const why = await h.call(await h.token(), "explain", { id: card.id, person: inside.upn });
