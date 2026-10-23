@@ -18,7 +18,9 @@ import { probeSites, sitePath } from "./probe.js";
  *   OPENHOARD_GRAPH_PRIVATE_KEY_FILE   its private key, PEM
  *   OPENHOARD_GRAPH_AUTHORITY, OPENHOARD_GRAPH_URL   optional: a national cloud's addresses
  *
- * It gets an app-only token, asks Graph for each site, and says what came back. It prints no
+ * It gets an app-only token, asks Graph for each site, and says what came back; with a
+ * certificate, it also asks SharePoint's own API for each site's groups (who is in them is
+ * what makes a file shared with "Members" shared with its members). It prints no
  * token and no secret. Exit status: 0 when every site is reached, 1 otherwise, 2 for a mistake
  * in how it was run (an argument, a variable, a file).
  */
@@ -114,6 +116,37 @@ async function main(): Promise<number> {
   const signal = AbortSignal.timeout(120_000);
   let failed = false;
 
+  /** Whether SharePoint says who is in the site's groups, as the connector will ask it. */
+  async function siteGroupsOf(webUrl: string | undefined): Promise<string> {
+    if (credential.kind !== "certificate") {
+      return "not readable with a client secret (SharePoint takes a certificate): files shared through the site's groups will be shared with nobody";
+    }
+    if (webUrl === undefined || !webUrl.startsWith("https://")) return "no site address to ask";
+    const origin = new URL(webUrl).origin;
+    let token: string;
+    try {
+      token = await auth.appToken(signal, origin);
+    } catch (e) {
+      failed = true;
+      return `REFUSED by Entra for SharePoint: ${shown((e as Error).message)}`;
+    }
+    const response = await fetch(
+      `${webUrl.replace(/\/$/, "")}/_api/web/sitegroups?$select=Id&$top=1`,
+      {
+        headers: {
+          authorization: `Bearer ${token}`,
+          accept: "application/json;odata=nometadata",
+        },
+        redirect: "manual",
+        signal,
+      },
+    );
+    await response.body?.cancel();
+    if (response.ok) return "readable";
+    failed = true;
+    return `REFUSED (${response.status}). Give the app SharePoint's Sites.Selected application permission too (SharePoint, not Graph, in API permissions), with admin consent.`;
+  }
+
   const app = claimsOf(await auth.appToken(signal));
   const roles = Array.isArray(app.roles) ? shown(app.roles.join(", ")) : "";
   console.log(`app-only token: issued (${credential.kind})`);
@@ -126,6 +159,7 @@ async function main(): Promise<number> {
     if (probe.status === "ok") {
       console.log(`site ${probe.site}: reached (${shown(probe.name)}, ${shown(probe.webUrl)})`);
       console.log(`  id: ${shown(probe.id)}`);
+      console.log(`  site groups: ${await siteGroupsOf(probe.webUrl)}`);
     } else {
       failed = true;
       console.log(

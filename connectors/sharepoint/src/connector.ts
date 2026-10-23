@@ -33,6 +33,7 @@ import {
   type LogLine,
   type SiteFolders,
 } from "./state.js";
+import { siteGroups, type SiteGroups } from "./sitegroups.js";
 import { graphSubscriptions, type Subscriptions } from "./subscriptions.js";
 
 /*
@@ -69,7 +70,8 @@ import { graphSubscriptions, type Subscriptions } from "./subscriptions.js";
  * refused once, a deletion a crawl saw.
  *
  * Permissions (T-305): aclImport() gives an item's as Graph lists them (permissions.ts), for
- * the core to turn into grants. A delta is asked to mark the items whose sharing changed; a
+ * the core to turn into grants, each SharePoint group's replaced by its members when the app
+ * signs in with a certificate (sitegroups.ts). A delta is asked to mark the items whose sharing changed; a
  * folder so marked has everything under it mentioned again, as a moved one has.
  *
  * Requests keep to a budget shared by every source of the same app and tenant, and a throttle
@@ -363,6 +365,8 @@ export function sharepointConnector(options: SharePointConnectorOptions): ShareP
   const feedHeaders = importing ? SHARING_CHANGES : undefined;
 
   let siteAsked: Promise<string> | undefined;
+  /** The site's address as Graph gave it with its id. */
+  let siteWebUrl: string | undefined;
   /** The site's id as Graph gives it. Asked once; a failure is asked again. */
   function siteId(signal: AbortSignal): Promise<string> {
     siteAsked ??= client
@@ -370,6 +374,7 @@ export function sharepointConnector(options: SharePointConnectorOptions): ShareP
       .then((site) => {
         const id = str(site.id);
         if (id === undefined) throw new ConnectorError("retryable", "Graph's answer wasn't a site");
+        siteWebUrl = str(site.webUrl);
         return id;
       })
       .catch((e: unknown) => {
@@ -1170,7 +1175,39 @@ export function sharepointConnector(options: SharePointConnectorOptions): ShareP
         throw new ConnectorError("permanent", "Graph refused this item's permissions");
       throw e;
     }
-    return { basis: "source", entries: aclEntriesOf(permissions, site) };
+    const entries = aclEntriesOf(permissions, site);
+    const groups = groupsOf();
+    return {
+      basis: "source",
+      entries: groups ? await groups.expand(entries, site, signal) : entries,
+    };
+  }
+
+  let groups: SiteGroups | undefined;
+  /**
+   * Who is in the site's SharePoint groups (sitegroups.ts), once the site is known: only with a
+   * certificate, which SharePoint's own API requires. The token goes to the site's own address,
+   * which must be on a host the source allows (`downloadHosts`, SharePoint's).
+   */
+  function groupsOf(): SiteGroups | undefined {
+    if (groups || options.auth.credential !== "certificate" || siteWebUrl === undefined) {
+      return groups;
+    }
+    if (client.owns(siteWebUrl) || !mayDownload(siteWebUrl) || !siteWebUrl.startsWith("https://")) {
+      throw new ConnectorError(
+        "permanent",
+        "the site's address isn't on a SharePoint host this source allows (downloadHosts)",
+      );
+    }
+    groups = siteGroups({
+      auth: options.auth,
+      webUrl: siteWebUrl,
+      pacer: client.pacer,
+      now,
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+      ...(options.maxWaitMs === undefined ? {} : { maxWaitMs: options.maxWaitMs }),
+    });
+    return groups;
   }
 
   return defineConnector({

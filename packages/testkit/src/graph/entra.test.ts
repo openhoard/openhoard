@@ -113,9 +113,14 @@ describe("the client credentials grant", () => {
     expect(await entra.verify(bySecret.body.access_token as string)).toEqual({
       appId: CLIENT,
       roles: ["Sites.Selected"],
+      certificate: false,
     });
     const byCert = await ask(await withCert());
     expect(byCert.status).toBe(200);
+    // (SharePoint's REST API takes only an app that signed in with a certificate.)
+    expect(await entra.verify(byCert.body.access_token as string)).toMatchObject({
+      certificate: true,
+    });
     // The tenant's id works as its domain does, and so does a name it was given.
     expect((await ask(app(), TOKEN_URL.replace(tenant.domain, tenant.id))).status).toBe(200);
     expect((await ask(app(), TOKEN_URL.replace(tenant.domain, TENANT_GUID))).status).toBe(200);

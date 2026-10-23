@@ -141,17 +141,17 @@ nobody) is kept by the core all the same, with who made and last changed each fi
 (`createdBy`, `lastModifiedBy`) and when: the File Health Report (T-1001, core/catalog
 `healthReport()`) reads them.
 
-| Graph says                                         | entry                                |
-| -------------------------------------------------- | ------------------------------------ |
-| an Entra user                                      | user, by object id, with the email   |
-| the same with an invitation (taken up)             | guest, by object id, with an email   |
-| an Entra group                                     | group, by object id                  |
-| a SharePoint group (a site's Members, Visitors)    | group, id `sitegroup:<site id>:<id>` |
-| "Everyone", "Everyone except external users"       | organization                         |
-| a site user that is a person, with an email        | user, id `siteuser:<login>`          |
-| a link to view or edit, for anyone or the org      | link                                 |
-| a link to view or edit, for named people or groups | link, and each of them               |
-| anything else                                      | nothing                              |
+| Graph says                                         | entry                              |
+| -------------------------------------------------- | ---------------------------------- |
+| an Entra user                                      | user, by object id, with the email |
+| the same with an invitation (taken up)             | guest, by object id, with an email |
+| an Entra group                                     | group, by object id                |
+| a SharePoint group (a site's Members, Visitors)    | each of its members (below)        |
+| "Everyone", "Everyone except external users"       | organization                       |
+| a site user that is a person, with an email        | user, id `siteuser:<login>`        |
+| a link to view or edit, for anyone or the org      | link                               |
+| a link to view or edit, for named people or groups | link, and each of them             |
+| anything else                                      | nothing                            |
 
 "Anything else" is the rule, since what an entry gives here is the file's content: an
 application, an invitation nobody has taken up, what only the older `grantedTo` fields say, an
@@ -162,9 +162,26 @@ full control are owner, `write` write, `read` read; a link's role is its type. G
 (year 1) is no expiry.
 
 What an entry is worth is the core's decision (core/jobs `acl.ts`): users and groups the tenant
-has provisioned under those ids get grants, a link and the organization grant nothing, and a
-SharePoint group matches no group there, so its members get nothing until something can say
-who they are.
+has provisioned under those ids get grants, a link and the organization grant nothing.
+
+**SharePoint groups** (`src/sitegroups.ts`). Graph names a site's Owners, Members and Visitors
+groups by id only, and most files on a site are shared through them. With a certificate, the
+connector asks SharePoint's own REST API who is in each
+(`{site}/_api/web/sitegroups/getbyid({id})/users`, once in 15 minutes a group) and gives each
+member the group's role: a person by the Entra object id SharePoint gives (else, as a site
+user, by email), an Entra security group or a Microsoft 365 group by its id, everyone as the
+organization; a Microsoft 365 group's owners claim (`_o`), as above, nobody. This needs
+SharePoint's `Sites.Selected` application permission besides Graph's ("Checking a tenant").
+A group SharePoint won't show (the app without that permission, or a group whose membership
+only its members may see) stays `group`, id `sitegroup:<site id>:<id>`, which matches nobody,
+and is counted among the run's unmatched groups; so does every group when the app signs in with
+a client secret, since SharePoint takes no app-only token made with one, and the server says so
+at start. **A change of who is in a group changes no file's permissions**, so Graph's delta
+doesn't report it: someone added is seen by the files recorded after that, and **someone
+removed keeps what the group gave them here until each file is recorded again, at the latest
+the next crawl** (`recrawlAfterDays`). Removal from an Entra or Microsoft 365 group inside the
+SharePoint group (a team site's Members holds its Microsoft 365 group) takes effect at once,
+through SCIM.
 
 - **One request an item**, each time the source mentions it, asked once however often
   recording it is retried. A crawl of a site asks once per file (the spike, S4, measured this
@@ -188,8 +205,9 @@ Tested in `src/permissions.test.ts` (Graph's documented shapes), `src/connector.
 (against the fake), and `src/e2e.slow.test.ts`: with the fake tenant's directory provisioned, **who
 can read each file through OpenHoard's grants is exactly who the fake SharePoint lets read
 it**, before and after permissions change there. The fake has users, groups, guests and
-anyone-links; SharePoint groups, organization links and links for named people are covered by
-the mapping's own tests only.
+anyone-links; `src/sitegroups.test.ts` covers SharePoint groups against a fake of SharePoint's
+group API; organization links and links for named people are covered by the mapping's own
+tests only.
 
 **Not yet tried on a real tenant.** What to look at there first:
 
@@ -311,9 +329,14 @@ production):
 1. **Register an app** (Entra admin center → App registrations → New registration; single
    tenant; no redirect URI).
 2. **Permissions** (API permissions → Microsoft Graph): application permission
-   `Sites.Selected`, then "Grant admin consent".
+   `Sites.Selected`; and under **SharePoint** (not Graph) the application permission
+   `Sites.Selected` too, which lets the connector ask who is in a site's groups (Owners,
+   Members, Visitors), through which most files are shared. Then "Grant admin consent". The
+   site grant in step 4 covers both.
 3. **A credential** (Certificates & secrets): upload a certificate's `.cer`/`.pem` and keep its
-   private key, or create a client secret and copy its **value**.
+   private key, or create a client secret and copy its **value**. Prefer the certificate:
+   SharePoint's own API takes app-only tokens only from one, so with a secret a file shared
+   through a site's group is shared with nobody here.
 4. **Grant the app a site.** `Sites.Selected` reaches nothing until this is done, by someone
    who may (an app or admin with `Sites.FullControl.All`), for example in Graph Explorer:
 
@@ -337,7 +360,8 @@ production):
    node connectors/sharepoint/dist/check.js contoso.sharepoint.com:/sites/finance <a site you did not grant>
    ```
 
-   Expected: the granted site "reached", the other "REFUSED", exit status 1 because of the
+   Expected: the granted site "reached" (with "site groups: readable" for a certificate), the
+   other "REFUSED", exit status 1 because of the
    second (2 is a mistake in the arguments, the variables or the files). It prints no token
    and no secret.
 

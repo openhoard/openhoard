@@ -202,9 +202,14 @@ What this means for a pilot:
 - **Provision first.** With SCIM from Entra, map `objectId` to `externalId` for groups **and
   for users** (Entra's default for users is another attribute). Without SCIM, only people
   named one by one at SharePoint can be matched, by email, to local users.
-- **A team site grants mostly through its SharePoint groups**, which match nobody yet: expect
-  few people besides `owner` to get access from such a site until that is resolved on a real
-  tenant. Nobody gets more than SharePoint gives; many may get less.
+- **A team site grants mostly through its SharePoint groups** (Owners, Members, Visitors).
+  With a `certificate`, the connector asks SharePoint who is in each and grants them; the app
+  needs SharePoint's `Sites.Selected` permission besides Graph's (the connector's README,
+  "Checking a tenant"). With a client secret SharePoint won't say, those groups match nobody,
+  and the server warns at start: expect few people besides `owner` to get access from such a
+  site. Nobody gets more than SharePoint gives; many may get less. Someone removed from one of
+  those groups directly (not through an Entra group in it) keeps its access here until the next
+  crawl at the latest (below).
 - **What matched nobody** is in the run's counts (`unmappedUsers`, `unmappedGroups` in `admin
 source status`, as of the last run: a crawl's run counts the whole site, a later one only
   what it revisited) and the groups' ids are in the log.
@@ -238,7 +243,7 @@ after the wait, from its last checkpoint. Nothing is lost either way. A first cr
 eight units a file, so 20,000 files take over three hours at the default: a tenant with more
 licences has a higher limit, and raising the budget shortens crawls in proportion.
 
-What it doesn't do yet: resolve SharePoint groups. It hasn't been run against a real tenant yet.
+It hasn't been run against a real tenant yet.
 
 Content is read through the source's connector, checked against the version's size and BLAKE3
 blob id with the tenant's blob key. **Tenant blob keys** live in `<dataDir>/keys/<tenant>.blob-key`

@@ -138,6 +138,11 @@ export function permissionResource(
     };
   }
   const [kind, id = ""] = splitOnce(entry.principal);
+  if (kind === "sitegroup") {
+    // A SharePoint group: Graph names it, and nothing of who is in it (FakeSharePoint says).
+    const name = `Site group ${id}`;
+    return { ...base, grantedToV2: { siteGroup: { id, displayName: name, loginName: name } } };
+  }
   if (kind === "group") {
     const group = tenant.groups.find((g) => g.id === id);
     return { ...base, grantedToV2: { group: { id, displayName: group?.displayName ?? id } } };

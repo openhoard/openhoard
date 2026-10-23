@@ -141,6 +141,13 @@ export async function prepareSources(
           continue;
         }
         ({ connector, credential } = built);
+        if (s.importPermissions && credential === "secret") {
+          // SharePoint's own API, which says who is in a site's groups, takes certificates only.
+          options.log?.warn(
+            { source: s.id, tenantId: s.tenantId },
+            `source ${s.id} signs in with a client secret: files shared through its site's SharePoint groups (Owners, Members, Visitors) are shared with nobody here; give it a certificate`,
+          );
+        }
         if (built.secretIgnored) {
           options.log?.warn(
             { source: s.id, tenantId: s.tenantId, variable: sourceSecretEnv(s.id) },

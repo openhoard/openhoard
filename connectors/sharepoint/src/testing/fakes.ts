@@ -1,4 +1,10 @@
-import { FakeEntra, FakeGraph, generateTenant, type FakeTenant } from "@openhoard/testkit";
+import {
+  FakeEntra,
+  FakeGraph,
+  FakeSharePoint,
+  generateTenant,
+  type FakeTenant,
+} from "@openhoard/testkit";
 
 /** An app registration's client id, as the tests' apps use it. */
 export const CLIENT_ID = "11111111-2222-4333-8444-555555555555";
@@ -11,6 +17,8 @@ export interface Fakes {
   tenant: FakeTenant;
   entra: FakeEntra;
   graph: FakeGraph;
+  /** SharePoint's own REST API, at the sites' origin: who is in a site's groups. */
+  sharepoint: FakeSharePoint;
   /** A clock the tests move. */
   clock: { now: number };
   /** A `fetch` that reaches the fake Entra and the fake Graph by their origins. */
@@ -70,17 +78,20 @@ export function fakes(
     ...(throttle === undefined ? {} : { throttle }),
     ...(notify === undefined ? {} : { notify }),
   });
+  const sharepoint = new FakeSharePoint(tenant, { entra });
+  const sites = new Set(tenant.sites.map((s) => new URL(s.webUrl).origin));
   const sent: Fakes["sent"] = [];
   const send: typeof fetch = (input, init) => {
     const url = String(input);
     sent.push({ url, init });
     if (url.startsWith(`${AUTHORITY}/`)) return entra.fetch(url, init);
     if (url.startsWith(`${GRAPH}/`)) return graph.fetch(url, init);
+    if (sites.has(new URL(url).origin)) return sharepoint.fetch(url, init);
     return Promise.reject(new TypeError(`fetch failed: nothing at ${url}`));
   };
   const sleep = (ms: number) => {
     clock.now += ms;
     return Promise.resolve();
   };
-  return { tenant, entra, graph, clock, fetch: send, sent, sleep };
+  return { tenant, entra, graph, sharepoint, clock, fetch: send, sent, sleep };
 }

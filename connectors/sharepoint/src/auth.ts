@@ -59,8 +59,13 @@ export interface GraphAuth {
    * shares one budget of requests (pace.ts). Nothing secret: the tenant and the client id.
    */
   readonly account?: string;
-  /** An app-only token for Graph. */
-  appToken(signal: AbortSignal): Promise<string>;
+  /** How the app proves itself: SharePoint's own API takes app-only tokens from a certificate only. */
+  readonly credential?: ClientCredential["kind"];
+  /**
+   * An app-only token for Graph, or for `resource` (an origin: the tenant's SharePoint, whose
+   * REST API says who is in a site's groups).
+   */
+  appToken(signal: AbortSignal, resource?: string): Promise<string>;
   /** Drops a token Graph refused, so the next call asks Entra for a new one. */
   forget(token: string): void;
 }
@@ -326,27 +331,34 @@ export function graphAuth(options: GraphAuthOptions): GraphAuth {
     );
   }
 
-  let app: Held | undefined;
-  let appAsking: Promise<Held> | undefined;
+  /** By resource: the token held, and the request under way. */
+  const held = new Map<string, Held>();
+  const asking = new Map<string, Promise<Held>>();
 
   return {
     graph,
     account: `${graph}|${options.tenant.toLowerCase()}|${options.clientId.toLowerCase()}`,
+    credential: credential.kind,
 
-    async appToken(signal) {
+    async appToken(signal, resource = graph) {
       signal.throwIfAborted();
-      if (app && now() < app.until) return app.token;
+      const kept = held.get(resource);
+      if (kept && now() < kept.until) return kept.token;
       // Callers arriving together share one request.
-      appAsking ??= request({ grant_type: "client_credentials", scope: `${graph}/.default` })
-        .then((held) => (app = held))
-        .finally(() => (appAsking = undefined));
-      // A failure is each caller's to hear; one nobody waits for any more isn't unhandled.
-      appAsking.catch(() => undefined);
-      return (await untilAborted(appAsking, signal)).token;
+      let pending = asking.get(resource);
+      if (!pending) {
+        pending = request({ grant_type: "client_credentials", scope: `${resource}/.default` })
+          .then((h) => (held.set(resource, h), h))
+          .finally(() => asking.delete(resource));
+        asking.set(resource, pending);
+        // A failure is each caller's to hear; one nobody waits for any more isn't unhandled.
+        pending.catch(() => undefined);
+      }
+      return (await untilAborted(pending, signal)).token;
     },
 
     forget(token) {
-      if (app?.token === token) app = undefined;
+      for (const [resource, h] of held) if (h.token === token) held.delete(resource);
     },
   };
 }

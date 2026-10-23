@@ -35,9 +35,9 @@ import {
  * expiry (a date before 2000 is Graph's way of saying none; one that can't be read leaves the
  * permission out).
  *
- * The core decides what an entry is worth (core/jobs acl.ts): a SharePoint group's id is its
- * site's alone and matches no group there, and so grants nothing, until something can say who
- * is in it.
+ * The core decides what an entry is worth (core/jobs acl.ts). A SharePoint group's id is its
+ * site's alone and matches no group there: the connector replaces it by the group's members
+ * (memberOf(), sitegroups.ts) when it can ask SharePoint, and otherwise it grants nothing.
  */
 
 type Raw = Record<string, unknown>;
@@ -118,6 +118,30 @@ function principalOf(set: unknown, site: string, invited?: string): AclPrincipal
   }
   // (An invitation nobody has taken up yet names nobody: SharePoint gives it nothing either.)
   return undefined;
+}
+
+/** A security group's claim, and a Microsoft 365 group's (its members, not `_o`, its owners). */
+const ENTRA_GROUP = /^c:0[ot]\.c\|(?:tenant|federateddirectoryclaimprovider)\|([^|]+)$/i;
+
+/**
+ * Who a member of a SharePoint group is, as SharePoint's REST API lists them (SP.User: its claim
+ * `LoginName`, `Email`, and the Entra object id when it gives one), or undefined for what is
+ * nobody here: as for permissions, a group's owners, an app, a claim this doesn't know.
+ */
+export function memberOf(raw: unknown): AclPrincipal | undefined {
+  if (!isObject(raw)) return undefined;
+  const login = text(raw.LoginName, "siteuser:".length);
+  if (login === undefined || OWNERS_ONLY.test(login)) return undefined;
+  if (EVERYONE.test(login)) return { kind: "organization" };
+  const group = ENTRA_GROUP.exec(login)?.[1];
+  if (group !== undefined)
+    return text(group) === undefined ? undefined : { kind: "group", id: group };
+  if (!PERSON.test(login)) return undefined;
+  const email = text(raw.Email);
+  const id = isObject(raw.AadObjectId) ? text(raw.AadObjectId.NameId) : undefined;
+  if (id !== undefined) return { kind: "user", id, ...(email ? { email } : {}) };
+  // Without the account's id, as a site user is: by its claim, matched by email alone.
+  return email === undefined ? undefined : { kind: "user", id: `siteuser:${login}`, email };
 }
 
 const LINK_SCOPES: Readonly<Record<string, "anyone" | "organization" | "specific">> = Object.freeze(

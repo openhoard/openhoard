@@ -13,7 +13,8 @@ import type { FakeTenant } from "../tenant/types.js";
  * It checks requests the way Entra does and refuses with Entra's error shapes and AADSTS codes,
  * so a connector's error handling can be tested offline. The tokens it issues are JWTs only it
  * can verify ({@link FakeEntra.verify}); pass the FakeEntra to a FakeGraph (`entra`) and the
- * Graph accepts them, applying `Sites.Selected` site by site.
+ * Graph accepts them, applying `Sites.Selected` site by site. Tokens for the tenant's SharePoint
+ * (its sites' origin) are issued too, for a FakeSharePoint.
  */
 
 /** Graph application permissions that reach every site. */
@@ -44,6 +45,8 @@ export interface GraphCaller {
   appId: string;
   /** The application permissions. */
   roles: readonly string[];
+  /** Whether the app proved itself with a certificate (Entra's `appidacr` 2), not a secret. */
+  certificate: boolean;
 }
 
 export interface FakeEntraOptions {
@@ -133,18 +136,25 @@ export class FakeEntra {
     }
   }
 
-  /** What a bearer token says, when this fake issued it for Graph and it hasn't expired. */
-  async verify(bearer: string): Promise<GraphCaller | undefined> {
+  /**
+   * What a bearer token says, when this fake issued it for `audience` (Graph, or the tenant's
+   * SharePoint) and it hasn't expired.
+   */
+  async verify(bearer: string, audience = this.graph): Promise<GraphCaller | undefined> {
     try {
       const { payload } = await jwtVerify(bearer, this.key, {
-        audience: this.graph,
+        audience,
         algorithms: ["HS256"],
         currentDate: new Date(this.now()),
         clockTolerance: 0,
       });
       const appId = typeof payload.appid === "string" ? payload.appid : "";
       if (appId === "" || payload.tid !== this.tenant.id) return undefined;
-      return { appId, roles: Array.isArray(payload.roles) ? (payload.roles as string[]) : [] };
+      return {
+        appId,
+        roles: Array.isArray(payload.roles) ? (payload.roles as string[]) : [],
+        certificate: payload.appidacr === "2",
+      };
     } catch {
       return undefined;
     }
@@ -263,7 +273,11 @@ export class FakeEntra {
     if (scope.length === 0) {
       return refuse(400, "invalid_request", 900144, "The request body must contain 'scope'.");
     }
-    if (scope.some((s) => s !== "offline_access" && !s.startsWith(`${this.graph}/`))) {
+    const resources = [this.graph, ...this.tenant.sites.map((site) => new URL(site.webUrl).origin)];
+    const resource = resources.find((r) => scope[0] === `${r}/.default`);
+    if (
+      scope.some((s) => s !== "offline_access" && !resources.some((r) => s.startsWith(`${r}/`)))
+    ) {
       return refuse(
         400,
         "invalid_resource",
@@ -280,7 +294,7 @@ export class FakeEntra {
         `The grant type '${log.grant}' is not supported.`,
       );
     }
-    if (scope.length !== 1 || scope[0] !== `${this.graph}/.default`) {
+    if (scope.length !== 1 || resource === undefined) {
       return refuse(
         400,
         "invalid_scope",
@@ -293,9 +307,10 @@ export class FakeEntra {
       tid: this.tenant.id,
       roles: [...(app.appRoles ?? [])],
       idtyp: "app",
+      appidacr: log.auth === "certificate" ? "2" : "1",
     })
       .setProtectedHeader({ alg: "HS256", typ: "JWT" })
-      .setAudience(this.graph)
+      .setAudience(resource)
       .setIssuedAt(seconds)
       .setExpirationTime(seconds + this.lifetime)
       .sign(this.key);
