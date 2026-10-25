@@ -21,7 +21,8 @@
     "clean": "rimraf dist coverage",
     "injection:report": "tsx scripts/injection-report.ts",
     "injection:write": "tsx scripts/write-corpus.ts",
-    "bench": "tsx scripts/bench.ts"
+    "bench": "tsx scripts/bench.ts",
+    "bench:search": "tsx scripts/search-scale.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.4",

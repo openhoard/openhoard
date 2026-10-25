@@ -143,7 +143,12 @@ export function createCedarEngine(input: Readonly<Record<string, string>> = {}):
   ];
   if (warnings.length) throw new PolicyError("policies with validation warnings", warnings);
 
-  const groups = namedGroups(staticPolicies);
+  const named = namedEntities(staticPolicies);
+  const groups = named.get(GROUP) ?? new Set<string>();
+  // No rule names a file: a decision can't depend on which file it is, only on what the request
+  // says of it, so decisions are kept by that and a search's thousand files cost a few.
+  const anyFile = !named.has(OBJECT);
+  const decided = new Map<string, AuthzDecision>();
   const schema = preparsedSchema();
   // The content hash makes the id the same in every copy of this module for the same set, and
   // different for different sets.
@@ -154,13 +159,27 @@ export function createCedarEngine(input: Readonly<Record<string, string>> = {}):
   // Frozen: every caller asking for this set shares the object.
   const engine: PolicyEngine = Object.freeze({
     evaluate(request: EngineRequest) {
+      const asked = anyFile
+        ? toCedar({ ...request, resource: { ...request.resource, id: ANY_FILE } }, groups)
+        : toCedar(request, groups);
+      const key = anyFile ? JSON.stringify(asked) : undefined;
+      const known = key === undefined ? undefined : decided.get(key);
+      if (known) return known;
       const answer = cedar.statefulIsAuthorized({
-        ...toCedar(request, groups),
+        ...asked,
         preparsedPolicySetId: setId,
         preparsedSchemaName: schema,
         validateRequest: true,
       });
-      return fromCedar(answer);
+      const decision = fromCedar(answer);
+      if (key !== undefined) {
+        if (decided.size >= DECISIONS_KEPT) decided.clear();
+        decided.set(
+          key,
+          Object.freeze({ ...decision, policies: Object.freeze([...decision.policies]) }),
+        );
+      }
+      return decision;
     },
   });
   engines.set(key, engine);
@@ -169,18 +188,26 @@ export function createCedarEngine(input: Readonly<Record<string, string>> = {}):
 
 const ns = "OpenHoard::";
 const GROUP = `${ns}Group`;
+const OBJECT = `${ns}Object`;
+/** The file a decision is asked about when no rule names one: any file, all the same. */
+const ANY_FILE = "any";
+/** Decisions an engine keeps (each a few hundred bytes of request); all go when it is full. */
+const DECISIONS_KEPT = 10_000;
 const uid = (type: string, id: string) => ({ type: `${ns}${type}`, id });
 
 /**
- * Every group the policies name, in their scope (`principal in OpenHoard::Group::"x"`) or in a
- * condition. Only these groups can change a decision: a group reaches a rule only as an entity
+ * Every entity the policies name, by type: groups in their scope (`principal in
+ * OpenHoard::Group::"x"`) or in a condition, and any file (`resource == OpenHoard::Object::"…"`).
+ * Only those groups can change a decision: a group reaches a rule only as an entity
  * literal, because no attribute or context field in {@link CEDAR_SCHEMA} has the type Group and
  * groups have no parents. (A schema change that adds one must revisit this.) So a decision
  * sends only the caller's groups in this set; with hundreds of groups on a caller, sending them
  * all made each decision several times slower.
  */
-function namedGroups(staticPolicies: Readonly<Record<string, string>>): ReadonlySet<string> {
-  const found = new Set<string>();
+function namedEntities(
+  staticPolicies: Readonly<Record<string, string>>,
+): ReadonlyMap<string, ReadonlySet<string>> {
+  const found = new Map<string, Set<string>>();
   const walk = (node: unknown) => {
     if (typeof node !== "object" || node === null) return;
     if (Array.isArray(node)) {
@@ -188,7 +215,10 @@ function namedGroups(staticPolicies: Readonly<Record<string, string>>): Readonly
       return;
     }
     const obj = node as Json;
-    if (obj.type === GROUP && typeof obj.id === "string") found.add(obj.id);
+    if (typeof obj.type === "string" && typeof obj.id === "string") {
+      const ids = found.get(obj.type) ?? new Set<string>();
+      found.set(obj.type, ids.add(obj.id));
+    }
     for (const child of Object.values(obj)) walk(child);
   };
   for (const [id, text] of Object.entries(staticPolicies)) {

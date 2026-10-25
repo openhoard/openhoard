@@ -134,3 +134,19 @@ pnpm --filter @openhoard/testkit bench --out bench.json --baseline previous.json
 The standard cases run on a seeded 10,000-item tenant: search latency p50, p95 and p99 over the reference engine (as random users), ingest throughput (streaming content, BLAKE3 hashing, card building), tenant generation, audit-chain appends and RRF fusion. Each case runs five rounds and keeps the median, and peak RSS is sampled throughout. `compareResults` flags any metric more than 20% worse than the baseline, and also beyond its absolute noise floor, so tiny timings don't flap. Runs on a different CPU model than the baseline are reported but not compared, because hosted runners change hardware.
 
 The `bench` workflow runs nightly. It compares against the last successful night, writes the table to the job summary, uploads `bench.json` for 90 days, and fails (which alerts) on a regression. Run it by hand with **accept-baseline** to record an intended slowdown as the new baseline.
+
+### OpenHoard's own search at scale (T-507)
+
+```bash
+pnpm --filter @openhoard/testkit bench:search --url postgres://user:pw@host:5432/postgres --rows 1000000 --out search.json
+```
+
+The standard cases above time the reference engine. This times `searchObjects()` itself on a real database: the gate, Cedar, the levels and fusion included.
+
+- **Data.** Files are generated in SQL, in spike S1's shape: 4-word titles and 30-word texts drawn from 5,000 terms with a steep skew, one 384-dimension vector each, and a team tag on a quarter of them. The vector indexes are built after loading.
+- **Callers.** Three: one sees 2% of the files through a tag grant, one 25%, and the owner sees all of them.
+- **What is timed.** Per caller, 30 keyword searches across the frequency range, then the same with a query vector (hybrid). It reports each p95.
+- **When it fails.** It exits 1 on a regression against `--baseline`, or on any p95 at or over 800 ms (T-507's bar).
+- **Database.** `--url` is a server that an ordinary role with CREATEDB reaches, with the test template (core/db `testing-postgres.ts`). Without `--url` it runs on PGlite, for trying it at small sizes.
+
+The `bench-search` workflow runs it nightly on PostgreSQL 18 at 1,000,000 files (`search-rows` when run by hand), with a baseline of its own (`bench-search-results`). Metric names carry the file count, so runs of different sizes are never compared.
