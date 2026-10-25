@@ -28,7 +28,7 @@
     "@noble/hashes": "^2.4.0",
     "@openhoard/core-db": "workspace:^",
     "drizzle-orm": "^0.45.4",
-    "opendal": "^0.49.12"
+    "opendal": "^0.49.13"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*"
