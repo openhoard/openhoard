@@ -146,7 +146,9 @@ machine"). This is pre-alpha: it never writes to the folder you name, but expect
 
 For a team on Microsoft 365, `init --team` sets up a server that signs people in through Entra
 and indexes a SharePoint site in place. [docs/pilot.md](docs/pilot.md) goes from nothing to
-three people finding the site's files through Claude.
+three people finding the site's files through Claude; [docs/admin.md](docs/admin.md) is the
+admin's guide after that, and [docs/clients.md](docs/clients.md) connects Claude and other AI
+clients.
 
 The CLI validates plugin manifests against the published schema, the first contract every plugin must meet.
 
