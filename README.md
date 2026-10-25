@@ -144,11 +144,14 @@ restart, Allow to press), put a file in the folder, and ask Claude for it.
 The details are in [apps/server/README.md](apps/server/README.md) ("One person on one
 machine"). This is pre-alpha: it never writes to the folder you name, but expect rough edges.
 
+For a team on Microsoft 365, `init --team` sets up a server that signs people in through Entra
+and indexes a SharePoint site in place. [docs/pilot.md](docs/pilot.md) goes from nothing to
+three people finding the site's files through Claude.
+
 The CLI validates plugin manifests against the published schema, the first contract every plugin must meet.
 
 ```bash
-npx openhoard manifest validate connectors/example/openhoard.plugin.json
-pipx run openhoard manifest validate connectors/example/openhoard.plugin.json
+node apps/cli/dist/bin.js manifest validate connectors/example/openhoard.plugin.json
 ```
 
 ## Join the hoard

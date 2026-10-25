@@ -5,7 +5,7 @@ import { parseArgs } from "node:util";
  *
  *   openhoard [--data-dir <dir>] serve        the server (@openhoard/server's main.js)
  *   openhoard [--data-dir <dir>] admin …      admin commands (apps/server admin.ts)
- *   openhoard [--data-dir <dir>] init --solo  a one-person setup (solo.ts)
+ *   openhoard [--data-dir <dir>] init --solo  a one-person setup (solo.ts); --team a team's (team.ts)
  *   openhoard [--data-dir <dir>] connect …    an AI client's config (connect.ts)
  *   openhoard [--data-dir <dir>] tunnel       the server behind a Cloudflare tunnel (tunnel.ts)
  *
