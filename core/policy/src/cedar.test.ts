@@ -816,3 +816,30 @@ describe("credential scope (T-111)", () => {
     expect(bots.authorize(withGrants(["client:acme"]))).toMatchObject({ allow: true });
   });
 });
+
+describe("decisions kept per request", () => {
+  const readable = (id: string, tags: string[]) =>
+    withGrants(["client:acme"], {
+      resource: { id, ownerId: "user:u2", tags, allTags: [], zone: "indexed" },
+    });
+
+  it("decides each file anew when a rule names one", () => {
+    const authz = new Authorizer(
+      createCedarEngine({
+        "pack/not-this-one": `forbid (principal, action, resource == OpenHoard::Object::"obj_2");`,
+      }),
+    );
+    // Asked about one file first, the other gets its own answer, and back again.
+    expect(authz.authorize(readable("obj_1", ["client:acme"])).allow).toBe(true);
+    expect(authz.authorize(readable("obj_2", ["client:acme"]))).toMatchObject({ kind: "forbid" });
+    expect(authz.authorize(readable("obj_1", ["client:acme"])).allow).toBe(true);
+  });
+
+  it("answers alike files alike, and a file that differs by itself", () => {
+    const authz = new Authorizer(createCedarEngine());
+    expect(authz.authorize(readable("obj_1", ["client:acme"])).allow).toBe(true);
+    expect(authz.authorize(readable("obj_2", ["client:acme"])).allow).toBe(true);
+    expect(authz.authorize(readable("obj_3", ["client:other"])).allow).toBe(false);
+    expect(authz.authorize(readable("obj_4", ["client:acme"])).allow).toBe(true);
+  });
+});

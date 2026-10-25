@@ -1,0 +1,98 @@
+name: bench-search
+# T-507: OpenHoard's own search (core/catalog searchObjects) over a million files in native
+# PostgreSQL, nightly. Fails on a p95 at or over 800 ms (the target) or 20% worse than the last
+# good night of the same size; apart from bench.yml, so one failing doesn't hold the other's
+# baseline back.
+on:
+  schedule:
+    - cron: "47 5 * * *"
+  workflow_dispatch:
+    inputs:
+      accept-baseline:
+        description: Record this run as the new baseline without comparing (after an intended slowdown)
+        type: boolean
+        default: false
+      search-rows:
+        description: Files to search (T-507's bar is 1,000,000)
+        type: string
+        default: "1000000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-search
+  cancel-in-progress: false
+
+env:
+  TURBO_TELEMETRY_DISABLED: "1"
+  DO_NOT_TRACK: "1"
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      actions: read # to download the previous night's results
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install PostgreSQL 18 and pgvector
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -qq postgresql-18 postgresql-18-pgvector
+      # As ci.yml's postgres job, with memory for building a million-row vector index.
+      - name: Start a cluster, create an ordinary (non-superuser) user and the test template
+        run: |
+          sudo pg_createcluster 18 bench --port 5499 -- --locale-provider=builtin --locale=C.UTF-8
+          sudo -u postgres tee /etc/postgresql/18/bench/conf.d/bench.conf > /dev/null <<'CONF'
+          shared_buffers = 4GB
+          maintenance_work_mem = 4GB
+          max_parallel_maintenance_workers = 3
+          work_mem = 64MB
+          CONF
+          sudo pg_ctlcluster 18 bench start
+          sudo -u postgres psql -p 5499 -v ON_ERROR_STOP=1 \
+            -c "create role openhoard_ci login createdb password 'ci'" \
+            -c "create database openhoard_test_template template template0 encoding 'UTF8' locale_provider builtin builtin_locale 'C.UTF-8'" \
+            -c "alter database openhoard_test_template is_template true"
+          sudo -u postgres psql -p 5499 -d openhoard_test_template -v ON_ERROR_STOP=1 \
+            -c "create extension vector"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Fetch the last successful night's results
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          run_id=$(gh run list --repo "$REPO" --workflow bench-search.yml --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+          if [ -n "$run_id" ]; then
+            gh run download "$run_id" --repo "$REPO" --name bench-search-results --dir baseline || echo "no artifact on run $run_id"
+          else
+            echo "No previous successful run: this run sets the baseline."
+          fi
+      - name: Run the search benchmark
+        env:
+          ACCEPT: ${{ inputs.accept-baseline }}
+          ROWS: ${{ inputs.search-rows || '1000000' }}
+        run: |
+          baseline="$GITHUB_WORKSPACE/baseline/search.json"
+          if [ "$ACCEPT" = "true" ]; then baseline=""; fi
+          pnpm --filter @openhoard/testkit run bench:search --url postgres://openhoard_ci:ci@localhost:5499/postgres \
+            --rows "$ROWS" --out "$GITHUB_WORKSPACE/search.json" ${baseline:+--baseline "$baseline"}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: bench-search-results
+          path: search.json
+          retention-days: 90
+          if-no-files-found: ignore

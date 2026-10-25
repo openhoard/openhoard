@@ -552,7 +552,10 @@ function levelled(tenantId: string, caller: Caller, from: SQL): SQL {
                      case when a.readable then 2
                           else ${effectiveLevel(tenantId, "visibility")} end as visibility,
                      case when a.readable then ${exposure} else 0 end as exposure
-                from (${from}) a) b
+                from (${from}) a
+              -- A fence: inlined, every reference to a level below would run its subqueries
+              -- again for the same row.
+              offset 0) b
        where b.readable or (${caller.member} and b.visibility >= 1)`;
 }
 
@@ -873,41 +876,55 @@ async function keywordCandidates(
   const trusted = sql`(ot.source <> 'model' or ot.reviewed)`;
   const shownToOthers = sql`f.public and (ot.source <> 'model' or ot.reviewed)`;
   const content = sql`(case when a.summary_ok then ${readerDoc} else ${noSummary} end)`;
+  const kwContent = sql`(a.content_ok and ${text(content, realTitle)} and ${tagMatch(tenantId, tags, all)})`;
+  const kwReader = sql`(a.readable and ${text(metaDoc, realTitle)} and ${tagMatch(tenantId, tags, all)})`;
+  const kwTrusted = sql`(a.readable and ${text(trustedDoc, realTitle)} and ${tagMatch(tenantId, tags, trusted)})`;
+  const kwOther = sql`(${text(otherDoc, prefix === undefined ? otherTitle : suggestedOther)}
+                   and ${tagMatch(tenantId, tags, shownToOthers)})`;
+  // Only what ordering needs is computed for every match: the flags and the one rank the order
+  // goes by (each candidate's levels once, levelled()). The rest of the explanation (every view's
+  // rank, the fields matched) is for the rows kept, after the limit.
   return queryRows<KeywordRow>(
     tx,
     sql`with candidates as (${candidates(tenantId, caller, where)}),
         levelled as (${levelled(tenantId, caller, sql`select * from candidates`)}),
         matched as (
-          select a.id, a.readable, a.updated_at,
-                 (a.content_ok and ${text(content, realTitle)} and ${tagMatch(tenantId, tags, all)}) as kw_content,
-                 (a.content_ok and ${text(noSummary, realTitle)} and ${tagMatch(tenantId, tags, all)}) as kw_content_ns,
-                 (a.readable and ${text(metaDoc, realTitle)} and ${tagMatch(tenantId, tags, all)}) as kw_reader,
-                 (a.readable and ${text(trustedDoc, realTitle)} and ${tagMatch(tenantId, tags, trusted)}) as kw_trusted,
-                 (${text(otherDoc, prefix === undefined ? otherTitle : suggestedOther)}
-                   and ${tagMatch(tenantId, tags, shownToOthers)}) as kw_other,
-                 ${rank(content)} as r_content,
-                 ${rank(noSummary)} as r_content_ns,
-                 ${rank(metaDoc)} as r_reader,
-                 ${rank(trustedDoc)} as r_trusted,
-                 ${rank(otherDoc)} as r_other,
-                 ${field(sql`a.title_tsv`)} as f_title,
-                 ${field(sql`a.tags_tsv`)} as f_tags,
-                 ${field(sql`a.trusted_tags_tsv`)} as f_trusted_tags,
-                 ${field(sql`a.path_tsv`)} as f_folders,
-                 (a.summary_ok and ${field(sql`a.summary_tsv`)}) as f_summary,
-                 (a.content_ok and ${field(sql`a.body_tsv`)}) as f_body,
-                 ${field(sql`a.other_title_tsv`)} as f_other_title,
-                 ${field(sql`a.public_tags_tsv`)} as f_public_tags
+          select a.*,
+                 ${kwContent} as kw_content,
+                 ${kwReader} as kw_reader,
+                 ${kwTrusted} as kw_trusted,
+                 ${kwOther} as kw_other
             from levelled a
+        ),
+        kept as (
+          select a.*,
+                 case when a.readable and a.kw_content then ${rank(content)}
+                      when a.readable and a.kw_reader then ${rank(metaDoc)}
+                      when a.readable and a.kw_trusted then ${rank(trustedDoc)}
+                      else ${rank(otherDoc)} end as r_order
+            from matched a
+           where (a.readable and (a.kw_content or a.kw_reader or a.kw_trusted)) or a.kw_other
+           order by r_order desc, case when a.readable then a.updated_at end desc nulls last, a.id
+           limit ${SEARCH_CANDIDATES + 1}
         )
-        select * from matched
-         where (readable and (kw_content or kw_reader or kw_trusted)) or kw_other
-         order by case when readable and kw_content then r_content
-                       when readable and kw_reader then r_reader
-                       when readable and kw_trusted then r_trusted
-                       else r_other end desc,
-                  case when readable then updated_at end desc nulls last, id
-         limit ${SEARCH_CANDIDATES + 1}`,
+        select a.id, a.readable, a.updated_at, a.kw_content,
+               (a.content_ok and ${text(noSummary, realTitle)} and ${tagMatch(tenantId, tags, all)}) as kw_content_ns,
+               a.kw_reader, a.kw_trusted, a.kw_other,
+               ${rank(content)} as r_content,
+               ${rank(noSummary)} as r_content_ns,
+               ${rank(metaDoc)} as r_reader,
+               ${rank(trustedDoc)} as r_trusted,
+               ${rank(otherDoc)} as r_other,
+               ${field(sql`a.title_tsv`)} as f_title,
+               ${field(sql`a.tags_tsv`)} as f_tags,
+               ${field(sql`a.trusted_tags_tsv`)} as f_trusted_tags,
+               ${field(sql`a.path_tsv`)} as f_folders,
+               (a.summary_ok and ${field(sql`a.summary_tsv`)}) as f_summary,
+               (a.content_ok and ${field(sql`a.body_tsv`)}) as f_body,
+               ${field(sql`a.other_title_tsv`)} as f_other_title,
+               ${field(sql`a.public_tags_tsv`)} as f_public_tags
+          from kept a
+         order by a.r_order desc, case when a.readable then a.updated_at end desc nulls last, a.id`,
   );
 }
 
