@@ -286,10 +286,14 @@ const shutdown = (signal: string) => {
     );
 };
 for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => shutdown(signal));
-// Started by `tunnel` (tunnel.ts), which holds a channel to this process: when it closes the
-// channel, or is gone, stop as on a signal. (Windows has no signal a parent can send that a
-// process may answer: this is how the server is stopped cleanly there.)
-// Only then: another parent's channel (a process manager's) closing means nothing here.
-if (process.send !== undefined && process.env.OPENHOARD_TUNNEL_URL) {
+// Started by `tunnel` (tunnel.ts) or by the Windows service's `service run` (service.ts), which
+// hold a channel to this process: when it closes the channel, or is gone, stop as on a signal.
+// (Windows has no signal a parent can send that a process may answer: this is how the server
+// is stopped cleanly there.) Only then: another parent's channel (a process manager's) closing
+// means nothing here.
+const supervised = process.env.OPENHOARD_TUNNEL_URL || process.env.OPENHOARD_SUPERVISED === "1";
+if (process.send !== undefined && supervised) {
   process.on("disconnect", () => shutdown("disconnect"));
+  // Gone while this was starting: the event came before anyone listened.
+  if (!process.connected) shutdown("disconnect");
 }

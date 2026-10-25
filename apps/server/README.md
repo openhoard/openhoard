@@ -1261,6 +1261,64 @@ what is left to do: provisioning in Entra, the secrets in the environment, the f
 the starter pack. Without `--site` there is no source; without `--client-id` there is no
 sign-in provider. [docs/pilot.md](../../docs/pilot.md) walks through the whole pilot.
 
+## Running it as a service: `service` (T-1102)
+
+```sh
+sudo OPENHOARD_AUTH_ENTRA_CLIENT_SECRET=… "$(command -v node)" apps/cli/dist/bin.js \
+  --data-dir <dir> service install [--user <account>] [--name openhoard]
+sudo "$(command -v node)" apps/cli/dist/bin.js --data-dir <dir> service stop | start | uninstall
+openhoard --data-dir <dir> service status
+```
+
+The server as this machine's own service: it starts at boot with nobody signed in, and again
+after a crash.
+
+| OS      | What install makes                                                    | Runs as                                   | Logs                        |
+| ------- | --------------------------------------------------------------------- | ----------------------------------------- | --------------------------- |
+| Linux   | a systemd unit, `/etc/systemd/system/<name>.service`, enabled         | `--user`, default whoever ran sudo        | `journalctl -u <name>`      |
+| macOS   | a launchd daemon, `/Library/LaunchDaemons/org.openhoard.<name>.plist` | `--user`, default whoever ran sudo        | `<dataDir>/logs/server.log` |
+| Windows | a Task Scheduler task at startup, running `service run`               | you, signed in or not, no password stored | `<dataDir>\logs\server.log` |
+
+- **It needs an administrator**, as any service does: `sudo` on Linux and macOS (install, stop,
+  start, uninstall; `status` doesn't), an elevated PowerShell on Windows. sudo knows neither an
+  alias nor, often, where Node is, hence the full command above; and under sudo the default data
+  directory is root's, so name it. The server never runs as an account with uid 0, and the account
+  it runs as must own the data directory.
+- **The secrets stay environment variables, under the same names.** Install writes the
+  `OPENHOARD_` variables set where it runs (not `OPENHOARD_DATA_DIR`, which it passes as
+  `--data-dir`) to `<dataDir>/service.env`, and the service starts Node with `--env-file` on
+  it. Values are listed by name, never printed. The file is the service account's alone: mode
+  0600 and owned by it on Linux and macOS, and on Windows only that account, the system and
+  administrators in the data directory's permissions (`icacls`, which install sets on the whole
+  data directory: its keys and database are as secret). Before anything is installed, it checks the server would load its config with
+  that file; if not, or if installing fails, a `service.env` it wrote is removed again. One that
+  exists already is used as it is: to change a secret, edit it, then `service stop` and `start`.
+- **It runs this Node and this checkout.** The service starts `<node> --env-file=<dataDir>/service.env
+<the CLI> --data-dir <dataDir> serve` with the paths install ran with: after moving either,
+  uninstall and install again. Paths holding `"`, `%`, `$` or (outside Windows) `\` are refused,
+  and so is a link where service.env or the log folder should be.
+- **On the embedded database** the admin commands need the server stopped: `service stop`, the
+  command, `service start`.
+- **Windows.** Task Scheduler starts a task again only when it fails to launch, and a task has
+  no output, so the task runs `service run`: it starts the server, appends what it prints to the
+  log, and starts it again after a failure (after 5 s, doubling to a minute while it keeps
+  failing; a server started again keeps the environment it started with, so an edited
+  `service.env` takes `service stop` and `start`). Ending the task (`service stop`) closes the
+  server's channel, and the server stops cleanly, as it does under `tunnel`. The task runs as you with S4U: it reaches the internet but
+  not your network shares, which OpenHoard doesn't use.
+- **macOS.** `stop` takes the daemon out of launchd (`bootout`) and `start` puts it back
+  (`bootstrap`, or `kickstart` while it is still in), since a daemon kept alive is started again
+  when it exits.
+- `status` prints what systemctl, launchctl or schtasks says. `uninstall` stops the service and
+  removes it; `service.env` and the data stay.
+
+CI installs, stops, starts and removes it for real on all three systems; surviving a reboot is
+checked by hand. Not tried yet: a Windows machine joined to Entra only (S4U is made for domain
+accounts, and may refuse an `AzureAD\` one), SELinux enforcing (a unit running Node or the
+checkout from a home folder can be refused), and a solo folder under macOS's protected folders
+(Documents, Desktop), which a daemon can't read. The log files of macOS and Windows aren't
+rotated.
+
 ## One person on one machine: `init --solo` (T-1201)
 
 For a single person trying OpenHoard on their own folders (docs/dogfood.md), the entry point

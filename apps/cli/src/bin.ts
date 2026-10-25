@@ -24,7 +24,8 @@ async function runOperator(args: readonly string[]): Promise<number | "serving" 
     await import(import.meta.resolve("@openhoard/server/main"));
     return "serving";
   }
-  const { runAdmin, runConnect, runInit, runTunnel } = await import("@openhoard/server");
+  const { runAdmin, runConnect, runInit, runService, runTunnel } =
+    await import("@openhoard/server");
   const rest = [...args.slice(0, first.index), ...args.slice(first.index + 1)];
   // A reader that goes away (`… | head`) or a full disk fails the write. A command that waits
   // for its writes (io.write) handles that itself; for the rest it is remembered, so that what
@@ -48,7 +49,9 @@ async function runOperator(args: readonly string[]): Promise<number | "serving" 
         ? await runConnect(rest, io)
         : first.value === "tunnel"
           ? await runTunnel(rest, { ...io, self: serverMain() })
-          : await runInit(rest, io);
+          : first.value === "service"
+            ? await runService(rest, io)
+            : await runInit(rest, io);
   // Let what was written (the one-time token) reach a pipe before exiting: on Windows pipes
   // are asynchronous, and exit() would cut it off.
   await Promise.all(
