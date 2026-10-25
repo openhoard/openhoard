@@ -1073,6 +1073,15 @@ describe("client resolution", () => {
     expect(matchRedirect(a, undefined)).toBeNull();
     expect(matchRedirect(a, "https://a.example/cb")).toBe("https://a.example/cb");
     expect(matchRedirect(a, "https://a.example/cb2")).toBeNull();
+    // A loopback redirect on another port is the one registered: Claude Code's `localhost` too.
+    const local = {
+      ...a,
+      redirectUris: ["http://localhost/callback", "http://127.0.0.1/callback"],
+    };
+    for (const asked of ["http://localhost:3118/callback", "http://127.0.0.1:51000/callback"]) {
+      expect(matchRedirect(local, asked)).toBe(asked);
+    }
+    expect(matchRedirect(local, "http://localhost:3118/other")).toBeNull();
   });
 
   it("never fetches a metadata document from a private address", async () => {

@@ -69,7 +69,7 @@ describe("a source's sync in an admin's words", () => {
     const waiting = said({ is: "waiting-for-owner" });
     expect(waiting.tone).toBe("attention");
     expect(waiting.steps).toBeUndefined();
-    expect(waiting.text).toContain("has signed in to OpenHoard once");
+    expect(waiting.text).toContain("has an account here");
   });
 
   it("says a source out of date or not started is not fine, and what to check", () => {

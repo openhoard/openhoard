@@ -68,7 +68,7 @@ export type SyncStanding =
   | { is: "identity-changed" }
   /** A failure stopped the schedule: `resume`, once what the code names is fixed. */
   | { is: "stopped"; code: string }
-  /** Nothing runs until the source's configured owner has signed in once. */
+  /** Nothing runs until the source's configured owner has an account (provisioned, or made by init). */
   | { is: "waiting-for-owner" }
   /**
    * The last crawl couldn't read part of the source, so it removed nothing: what was deleted
