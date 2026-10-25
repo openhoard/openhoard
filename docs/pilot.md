@@ -162,10 +162,13 @@ Then start the server again and sign in at `https://files.contoso.com/admin/`.
 
 ## 6. Claude, for each of the three
 
-In claude.ai, **Settings** › **Connectors** › **Add custom connector**: the address
-`https://files.contoso.com/mcp`.
+Add the connector in claude.ai with the address `https://files.contoso.com/mcp`. On a Team or
+Enterprise plan an Owner adds it once (**Organization settings** › **Connectors** › **Add** ›
+**Custom** › **Web**) and each person clicks **Connect** under **Customize** › **Connectors**; on
+Pro or Max each person adds it under **Customize** › **Connectors** › **+ Add**.
+[clients.md](clients.md) has the steps, Claude Code, and what to check when it doesn't connect.
 
-- The first time, you approve Claude as the admin, with the trust label `commercial`, on the page
+- The first time, you approve Claude as the admin, as **Organization AI** (`commercial`), on the page
   that opens.
 - Each person then signs in with their Microsoft account and consents.
 - They see only files SharePoint lets them see.
@@ -179,6 +182,9 @@ The same connector works in Claude Desktop and on the phone.
 - The three find files through Claude weekly for two weeks without being prompted. The audit log
   is the record.
 - PRD scenarios 1, 2, 4 and 7 run on this site.
+
+From here on, [admin.md](admin.md) is the day-to-day guide: people coming and going, AI
+clients, packs, the site's syncs, the audit log and what expires.
 
 Write down what differs from this page as you go. Every difference is a bug in this page or in
 OpenHoard.
