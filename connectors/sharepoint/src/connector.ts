@@ -33,7 +33,7 @@ import {
   type LogLine,
   type SiteFolders,
 } from "./state.js";
-import { siteGroups, type SiteGroups } from "./sitegroups.js";
+import { GROUP_ID, MIXED, siteGroups, type SiteGroups } from "./sitegroups.js";
 import { graphSubscriptions, type Subscriptions } from "./subscriptions.js";
 
 /*
@@ -204,6 +204,31 @@ interface Position {
   /** A cursor: the generation of kept folders it goes with, and when its crawl ended (ms). */
   gen?: string;
   crawled?: number;
+  /**
+   * With a certificate: each SharePoint group the site's items were recorded with, and the
+   * answer they got (sitegroups.ts), which each delta run compares with SharePoint's now.
+   */
+  groups?: Record<string, string>;
+}
+
+/** The most SharePoint groups a token keeps: a site has three, and a handful of its own. */
+const MAX_GROUPS = 200;
+const GROUP_ANSWER = /^[0-9a-f]{16}$/;
+
+/**
+ * The groups a token keeps: what the run started from, and what its items were recorded with
+ * since; a group with two answers is MIXED, which no answer matches. The first MAX_GROUPS.
+ */
+function watched(
+  carried: Readonly<Record<string, string>>,
+  recorded: ReadonlyMap<string, string> | undefined,
+): Record<string, string> {
+  const out: Record<string, string> = { ...carried };
+  for (const [id, answer] of recorded ?? []) {
+    const had = out[id];
+    out[id] = had === undefined || had === answer ? answer : MIXED;
+  }
+  return Object.fromEntries(Object.entries(out).slice(0, MAX_GROUPS));
 }
 
 /** The drive and item an externalId names, or undefined when it isn't one of this connector's. */
@@ -476,7 +501,11 @@ export function sharepointConnector(options: SharePointConnectorOptions): ShareP
 
   /** A token as text, refused when it is longer than a token may be. */
   function tokenOf(position: Position): string {
-    const token = JSON.stringify(position);
+    const token = JSON.stringify(
+      options.auth.credential === "certificate"
+        ? { ...position, groups: watched(carried, groups?.recorded()) }
+        : position,
+    );
     if ([...token].length > LIMITS.token) {
       throw new ConnectorError(
         "permanent",
@@ -511,7 +540,14 @@ export function sharepointConnector(options: SharePointConnectorOptions): ShareP
           client.owns(p.link))) &&
       (p.log === undefined || (typeof p.log === "string" && STATE_ID.test(p.log))) &&
       (p.gen === undefined || (typeof p.gen === "string" && STATE_ID.test(p.gen))) &&
-      (p.crawled === undefined || (typeof p.crawled === "number" && Number.isFinite(p.crawled)));
+      (p.crawled === undefined || (typeof p.crawled === "number" && Number.isFinite(p.crawled))) &&
+      (p.groups === undefined ||
+        (isObject(p.groups) &&
+          Object.keys(p.groups).length <= MAX_GROUPS &&
+          Object.entries(p.groups).every(
+            ([id, a]) =>
+              GROUP_ID.test(id) && typeof a === "string" && (a === MIXED || GROUP_ANSWER.test(a)),
+          )));
     if (!ok) throw resyncError();
     return parsed as Position;
   }
@@ -726,6 +762,17 @@ export function sharepointConnector(options: SharePointConnectorOptions): ShareP
     else if (state && position.log !== undefined) logged = state.readLog(position.log);
     if (!state || (checkpoint !== null && !logged)) delete position.log;
     state?.keepOnlyLog(position.log ?? null);
+    // The groups the crawl's items were recorded with: from the start, or as far as it got.
+    // What this node recorded in other runs isn't this crawl's (the token carries those). A
+    // token from before groups were kept, or with the other credential, starts over.
+    if (
+      checkpoint !== null &&
+      (options.auth.credential === "certificate") !== (position.groups !== undefined)
+    ) {
+      throw resyncError();
+    }
+    groups?.forget();
+    carried = position.groups ?? {};
     const drives = await drivesOf(site, signal);
     // The library the token was in the middle of is gone: its place means nothing now.
     if (position.drive !== null && !drives.some((d) => d.id === position.drive)) {
@@ -993,6 +1040,18 @@ export function sharepointConnector(options: SharePointConnectorOptions): ShareP
     }
     const kept = state.readGeneration(position.gen);
     if (!kept) throw resyncError();
+    // Someone joined or left a SharePoint group: no file changed, so the delta won't say, but
+    // every file shared through the group did. A crawl records them all with who is in it now.
+    // So does a cursor that didn't keep the groups (or kept them, and the certificate is gone).
+    if ((options.auth.credential === "certificate") !== (position.groups !== undefined)) {
+      throw resyncError();
+    }
+    for (const [id, answer] of Object.entries(position.groups ?? {})) {
+      const g = groupsOf() as SiteGroups;
+      if ((await g.fresh(id, signal)) !== answer) throw resyncError();
+    }
+    groups?.forget();
+    carried = position.groups ?? {};
     // The runner saved this token: what was written for any other is nobody's now.
     state.keepOnly(position.gen);
     /** The generation this run wrote last, named by a checkpoint the runner has since saved. */
@@ -1182,6 +1241,9 @@ export function sharepointConnector(options: SharePointConnectorOptions): ShareP
       entries: groups ? await groups.expand(entries, site, signal) : entries,
     };
   }
+
+  /** The groups the token this run started from kept (see Position.groups). */
+  let carried: Record<string, string> = {};
 
   let groups: SiteGroups | undefined;
   /**

@@ -207,9 +207,9 @@ What this means for a pilot:
   needs SharePoint's `Sites.Selected` permission besides Graph's (the connector's README,
   "Checking a tenant"). With a client secret SharePoint won't say, those groups match nobody,
   and the server warns at start: expect few people besides `owner` to get access from such a
-  site. Nobody gets more than SharePoint gives; many may get less. Someone removed from one of
-  those groups directly (not through an Entra group in it) keeps its access here until the next
-  crawl at the latest (below).
+  site. Nobody gets more than SharePoint gives; many may get less. Someone added to or removed
+  from one of those groups is seen from the next sync on: each sync asks the groups again, and
+  when who is in one changed it crawls the site, recording each file again.
 - **What matched nobody** is in the run's counts (`unmappedUsers`, `unmappedGroups` in `admin
 source status`, as of the last run: a crawl's run counts the whole site, a later one only
   what it revisited) and the groups' ids are in the log.

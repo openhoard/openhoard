@@ -177,9 +177,14 @@ only its members may see) stays `group`, id `sitegroup:<site id>:<id>`, which ma
 and is counted among the run's unmatched groups; so does every group when the app signs in with
 a client secret, since SharePoint takes no app-only token made with one, and the server says so
 at start. **A change of who is in a group changes no file's permissions**, so Graph's delta
-doesn't report it: someone added is seen by the files recorded after that, and **someone
-removed keeps what the group gave them here until each file is recorded again, at the latest
-the next crawl** (`recrawlAfterDays`). Removal from an Entra or Microsoft 365 group inside the
+doesn't report it. So the cursor keeps, for each group the site's files were recorded with,
+which answer they got; each delta run asks those groups again (one request a group, three on
+most sites) and crawls again (`resync`) when an answer differs, or when the files got more than
+one (someone left mid-crawl). **Someone removed from a group loses what it gave them from the
+next sync on** (every fifteen minutes by default), as that crawl records each file again; on a
+large site that takes the crawl's runs. Someone added gains it the same way. With a client
+secret no group is asked, and none grants anyone. A cursor made before groups were watched
+(or with the other credential) crawls once. Removal from an Entra or Microsoft 365 group inside the
 SharePoint group (a team site's Members holds its Microsoft 365 group) takes effect at once,
 through SCIM.
 
