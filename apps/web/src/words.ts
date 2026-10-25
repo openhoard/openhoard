@@ -107,7 +107,7 @@ export function sourceStatus(s: Source, tenantId: string): SourceStatus {
     case "waiting-for-owner":
       return {
         tone: "attention",
-        text: "Waiting for its owner. Nothing is read until the person this source is set up under has signed in to OpenHoard once.",
+        text: "Waiting for its owner. Nothing is read until the person this source is set up under has an account here: provisioned from your identity provider, or made when the server was set up.",
       };
     case "not-run":
       return {

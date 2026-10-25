@@ -429,14 +429,16 @@ export class ClientResolver {
 
 /**
  * The registered redirect URI a request names: exact, except a loopback one may use any port
- * (RFC 8252 §7.3). The request must name it (the token request names it again).
+ * (RFC 8252 §7.3), `localhost` included, as redirectIdentity() counts it and as Claude Code
+ * needs (its metadata names `http://localhost/callback` and redirects to a port of the
+ * moment). The request must name it (the token request names it again).
  */
 export function matchRedirect(client: ResolvedClient, asked: unknown): string | null {
   if (typeof asked !== "string") return null;
   if (client.redirectUris.includes(asked)) return asked;
   try {
     const u = new URL(asked);
-    const loopback = u.protocol === "http:" && ["127.0.0.1", "[::1]"].includes(u.hostname);
+    const loopback = u.protocol === "http:" && LOOPBACK.includes(u.hostname);
     if (
       loopback &&
       client.redirectUris.some((r) => redirectIdentity(r) === redirectIdentity(asked))

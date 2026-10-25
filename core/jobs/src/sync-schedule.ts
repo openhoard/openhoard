@@ -180,7 +180,7 @@ export async function runSyncJob(
   const owner = await configured.owner();
   if (owner === null) {
     await record(deps, data, { status: "retry", error: "unknown-owner" });
-    log.warn?.({ tenantId, source }, "sync: the source's owner isn't known yet (not signed in)");
+    log.warn?.({ tenantId, source }, "sync: the source's owner isn't known yet (not provisioned)");
     return { outcome: "unknown-owner" };
   }
   const report = await runSync(db, {
