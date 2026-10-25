@@ -27,6 +27,7 @@ Usage:
   openhoard [--data-dir <dir>] init --solo  Set up OpenHoard for one person
   openhoard [--data-dir <dir>] connect …    Point an AI client at this server
   openhoard [--data-dir <dir>] tunnel       Serve through a Cloudflare tunnel
+  openhoard [--data-dir <dir>] service …    Run the server as this machine's service
   openhoard manifest validate <file...>   Validate plugin manifest(s) against schema v1
   openhoard manifest schema               Print the v1 manifest JSON Schema
 `;

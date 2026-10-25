@@ -138,8 +138,24 @@ Then:
 - Test Connection succeeds in Entra; start provisioning, or **Provision on demand** each person.
   The first crawl starts once the owner is provisioned.
 
-To keep it running after a restart, run both as a service (Windows: Task Scheduler, at startup;
-Linux: a systemd unit; macOS: a launchd agent). T-1102 will make that one command.
+To keep it running after a restart, stop the server you started by hand and install it as a
+service, with the secret set in the same window (sudo on Linux and macOS; an elevated PowerShell
+on Windows):
+
+```sh
+# sudo knows neither `oh` nor, often, where Node is: spell both out.
+sudo OPENHOARD_AUTH_ENTRA_CLIENT_SECRET=<sign-in app secret> "$(command -v node)" \
+  <clone>/apps/cli/dist/bin.js --data-dir <data dir> service install
+```
+
+On Windows, in an elevated PowerShell, set `$env:OPENHOARD_AUTH_ENTRA_CLIENT_SECRET` and run
+`oh service install`.
+
+It keeps the secret in `<data dir>/service.env`, its owner's only. While the service runs on the
+embedded database, `service stop` before admin commands and `service start` after (with sudo,
+or elevated, likewise). More:
+apps/server, ["Running it as a service"](../apps/server/README.md#running-it-as-a-service-service-t-1102).
+Run `cloudflared` as a service too (`cloudflared service install`).
 
 ## 5. The first admin, and the starter pack
 

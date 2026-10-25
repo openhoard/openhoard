@@ -13,5 +13,6 @@ export { createLogger } from "./logger.js";
 export { runAdmin, type AdminIo } from "./admin.js";
 export { runConnect } from "./connect.js";
 export { runInit, type SoloIo } from "./solo.js";
+export { runService, type ServiceIo } from "./service.js";
 export { runTunnel, type TunnelIo } from "./tunnel.js";
 export { TOOLS, whoami, type McpTool, type ToolContext } from "./mcp.js";

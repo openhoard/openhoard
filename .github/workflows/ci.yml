@@ -51,7 +51,7 @@ jobs:
           full=true
           if [ "$OS" != ubuntu-latest ] && [ "$EVENT" = pull_request ]; then
             changed=$(git diff --name-only HEAD^1 HEAD)
-            os_paths='^(\.github/workflows/|\.nvmrc$|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|turbo\.json$|packages/config/|connectors/fs/|core/storage/|core/db/src/(pglite|driver)|enrichers/extract/|apps/server/src/(watch|pin|solo|connect|tunnel|main)|apps/cli/src/(operator|bin)|scripts/)'
+            os_paths='^(\.github/workflows/|\.nvmrc$|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|turbo\.json$|packages/config/|connectors/fs/|core/storage/|core/db/src/(pglite|driver)|enrichers/extract/|apps/server/src/(watch|pin|solo|connect|tunnel|main|service)|apps/cli/src/(operator|bin)|scripts/)'
             platform_words='process\.platform|win32|darwin|pathToFileURL|fileURLToPath'
             named=""
             for f in $changed; do
@@ -117,6 +117,30 @@ jobs:
           for _ in $(seq 60); do curl -fsS http://127.0.0.1:7431/healthz > /dev/null 2>&1 && break; sleep 1; done
           curl -fsS http://127.0.0.1:7431/healthz
           kill $! || true
+      # T-1102: the server as this OS's service (systemd, launchd, Task Scheduler), for real:
+      # installed, answering, stopped, started again, removed. A reboot isn't tried here.
+      - name: Service install
+        if: steps.scope.outputs.full == 'true'
+        shell: bash
+        run: |
+          dir="$RUNNER_TEMP/openhoard-service"
+          mkdir -p "$dir/files"
+          node apps/cli/dist/bin.js --data-dir "$dir/data" init --solo --folder "$dir/files" --no-pin --no-extract > /dev/null
+          # Windows runners are administrators; elsewhere sudo, which passes the port on.
+          if [ "$RUNNER_OS" = Windows ]; then export OPENHOARD_PORT=7432; as=(); else as=(sudo OPENHOARD_PORT=7432); fi
+          svc() { "${as[@]}" "$(command -v node)" apps/cli/dist/bin.js --data-dir "$dir/data" service "$@"; }
+          up() { for _ in $(seq 60); do curl -fsS http://127.0.0.1:7432/healthz > /dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+          logs() { svc status || true; if [ "$RUNNER_OS" = Linux ]; then sudo journalctl -u openhoard --no-pager | tail -50; else cat "$dir/data/logs/server.log"; fi; }
+          svc install
+          up || { logs; exit 1; }
+          svc stop
+          # Stopped cleanly: the server let go of the embedded database (a killed one leaves its lock).
+          for _ in $(seq 20); do [ -e "$dir/data/pgdata.lock" ] || break; sleep 1; done
+          if [ -e "$dir/data/pgdata.lock" ]; then echo "the server didn't stop cleanly"; logs; exit 1; fi
+          if curl -fsS http://127.0.0.1:7432/healthz; then echo "still answering after stop"; logs; exit 1; fi
+          svc start
+          up || { logs; exit 1; }
+          svc uninstall
       # T-017: per-file outcomes for the prompt-injection corpus, in the job summary. The v0
       # baseline pipeline cannot act or tag, so today this is a smoke test of the corpus and the
       # extractor (it fails if either crashes). It becomes a real gate when enrichers plug in.
