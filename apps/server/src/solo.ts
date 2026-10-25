@@ -35,6 +35,7 @@ import {
 import { ConfigSchema, ensureDataDir, loadConfig } from "./config.js";
 import { pinFolder, type Run } from "./pin.js";
 import { retrying } from "./retry.js";
+import { runTeamInit } from "./team.js";
 
 /*
  * `init --solo` (T-1201): one person on one machine, from nothing to a configured server with
@@ -280,6 +281,7 @@ const USAGE = `usage: openhoard init --solo [options]
 
 /** Runs `init --solo`; returns the exit code (0 done, 1 failed, 2 misused). */
 export async function runInit(argv: readonly string[], io: SoloIo): Promise<number> {
+  if (argv.includes("--team")) return runTeamInit(argv, io);
   let values;
   try {
     ({ values } = parseArgs({
@@ -307,7 +309,9 @@ export async function runInit(argv: readonly string[], io: SoloIo): Promise<numb
     return 0;
   }
   if (values.solo !== true) {
-    io.err(`init needs --solo: it is the only setup it makes so far\n\n${USAGE}`);
+    io.err(
+      `init needs --solo (one person on this machine) or --team (see init --team --help)\n\n${USAGE}`,
+    );
     return 2;
   }
   const platform = io.platform ?? process.platform;

@@ -1232,6 +1232,35 @@ node apps/cli/dist/bin.js admin audit export --tenant ten_… [--format ndjson|c
   ended. A command that changes nothing (no such person, token or source; a change the directory
   refuses) says so and exits 1, unaudited.
 
+## A team's server: `init --team` (T-1101)
+
+```sh
+openhoard --data-dir <dir> init --team --name "Contoso" --public-url https://files.contoso.com \
+  --directory <Entra tenant id> --client-id <sign-in app id> \
+  --site contoso.sharepoint.com:/sites/finance --owner it@contoso.com \
+  --graph-client-id <reader app id> --certificate reader.pem --private-key reader.key
+```
+
+Sets up an empty data directory for a team. First it checks, without making anything:
+
+- the config it would write, against the server's schema;
+- the site's certificate against its key, as the server reads them;
+- the database, opened as the server opens it. That checks PostgreSQL 17+, pgvector 0.8+ and the
+  role, and runs the migrations. It is `OPENHOARD_DATABASE_URL`'s PostgreSQL, else the embedded
+  one, and must hold no tenant yet.
+
+Then it writes `config.json` and makes the tenant and a SCIM token for Entra. If any of that
+fails, nothing is kept. The config has:
+
+- `auth`: the public URL, and the Entra provider `entra`, whose redirect URI is
+  `<publicUrl>/auth/callback/entra`;
+- one SharePoint source, `sp-<site name>`, in the zone "SharePoint", with text extraction on.
+
+Standard output has two lines: the tenant id, then the token, shown once. Standard error lists
+what is left to do: provisioning in Entra, the secrets in the environment, the first admin and
+the starter pack. Without `--site` there is no source; without `--client-id` there is no
+sign-in provider. [docs/pilot.md](../../docs/pilot.md) walks through the whole pilot.
+
 ## One person on one machine: `init --solo` (T-1201)
 
 For a single person trying OpenHoard on their own folders (docs/dogfood.md), the entry point

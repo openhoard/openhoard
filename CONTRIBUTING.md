@@ -18,7 +18,7 @@ while the trusted core stays small and carefully reviewed.
 Every plugin needs an `openhoard.plugin.json` manifest. Validate it with:
 
 ```bash
-npx openhoard manifest validate path/to/openhoard.plugin.json
+node apps/cli/dist/bin.js manifest validate path/to/openhoard.plugin.json
 ```
 
 ## Ground rules for plugins
