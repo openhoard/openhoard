@@ -14,6 +14,7 @@ import {
 import {
   APPLY_TRANSACTION,
   applyPack,
+  refreshPackLevels,
   clearInjectionReview,
   decideReview,
   HEALTH_SECTIONS,
@@ -1329,6 +1330,12 @@ async function packCommand(
               APPLY_TRANSACTION,
             ),
           );
+    if (step === "apply") {
+      const applied = plan;
+      await retrying(() =>
+        db.withTenant(tenantId, (tx) => refreshPackLevels(tx, tenantId, applied)),
+      );
+    }
   } catch (e) {
     if (!(e instanceof PackError)) throw e;
     io.err(`${e.message}\n`);

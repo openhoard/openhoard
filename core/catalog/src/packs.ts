@@ -1166,6 +1166,40 @@ export async function applyPack(
 }
 
 /**
+ * Refreshes the levels of every file that carries, or was proposed, a value `plan` added,
+ * approved or changed. Run it after applyPack() commits, in its own (READ COMMITTED)
+ * transaction: the apply's serializable snapshot can't see a tag committed after it began, so
+ * that file's levels were worked out with the value as it was.
+ */
+export async function refreshPackLevels(tx: Tx, tenantId: string, plan: PackPlan): Promise<void> {
+  const tags = plan.changes.flatMap((c) =>
+    c.kind === "add-value" || c.kind === "approve-value" || c.kind === "change-value"
+      ? [c.tag]
+      : [],
+  );
+  if (tags.length === 0) return;
+  const pairs = sql.join(
+    tags.map((tag) => {
+      const at = tag.indexOf(":");
+      return sql`(${tag.slice(0, at)}, ${tag.slice(at + 1)})`;
+    }),
+    sql`, `,
+  );
+  await queryRows(
+    tx,
+    sql`
+    select openhoard_levels_refresh_all(${tenantId}, array(
+      select distinct c.object_id from (
+        select object_id from object_tags
+         where tenant_id = ${tenantId} and (facet, value) in (${pairs})
+        union all
+        select object_id from tag_reviews
+         where tenant_id = ${tenantId} and resolved_at is null and (facet, value) in (${pairs})
+      ) c order by c.object_id))`,
+  );
+}
+
+/**
  * Removes an applied pack, exactly as planned by planPackRemoval(): its rules and policies stop
  * applying; its vocabulary stays. The same transaction and checks as applyPack(): refuses
  * (`stale-plan`) if planning again gives a different plan, and (`tests-failed`) if another
