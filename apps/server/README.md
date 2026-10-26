@@ -1194,6 +1194,9 @@ node apps/cli/dist/bin.js admin audit export --tenant ten_… [--format ndjson|c
 - **Packs.** `pack plan` prints what applying a pack would change (`!` marks a loosening), its
   warnings and tests, and the plan's hash on standard output; `pack apply` with that hash applies
   exactly that plan (refused when anything changed since, or a test fails), audited `pack.apply`.
+  It then works out again the levels of the files whose values it changed; if that fails it
+  says so and exits 3 (applied; `levels refresh` then redoes every file's levels, in one
+  transaction while tagging waits).
   A new tenant is hidden and metadata-only until a pack (the starter pack,
   `packs/general-business`) sets other defaults: until then AI clients get no content.
 - **Groups.** `group list` prints each group's id, source, member count, external id and name,

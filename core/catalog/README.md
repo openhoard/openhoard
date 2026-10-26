@@ -362,13 +362,15 @@ visible one or set `totalIsLowerBound` (it is never shown or counted). Keyword c
 through the GIN indexes; working out who may see them, and the vector search's eligible set
 (every file the caller reads), still visits each of the caller's files per query. Each file's
 levels come from `object_levels` (core/db `0003_object_levels.sql`, T-507), not worked out
-per row, which took a quarter to two fifths off a search's p95 at 30,000 files on PGlite
+per row, which took two fifths to a half off a search's p95 at 30,000 files on PGlite
 (`pnpm --filter @openhoard/testkit bench:search`); what is left grows with the files the
 caller reads and the words match. Spike S1's per-principal visible-row counts are the next
 step.
-Triggers keep `object_levels` current, but a pack apply's serializable snapshot misses a tag
-committed while it ran, so whoever applies a pack calls `refreshPackLevels()` once it commits
-(the admin CLI does).
+Triggers keep `object_levels` current, but a pack apply's serializable snapshot misses tags and
+reviews added or removed while it ran: `applyPack()` returns the files it saw carrying the
+values it changed, and `refreshPackLevels()` works those and the values' carriers out again once
+it commits (the admin CLI's `pack apply` does; `init --solo` applies its pack before anything
+else runs). If that can't run, `admin levels refresh` (`refreshAllLevels()`) redoes every file.
 
 **Timing.** Because SQL reads every candidate, those the caller can't see included, a search
 takes longer the more such files match: about 6 ms per 4,000 hidden files when levels were

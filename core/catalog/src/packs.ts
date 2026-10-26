@@ -25,7 +25,7 @@ import {
   type Exposure,
   type Visibility,
 } from "@openhoard/core-policy";
-import { and, asc, count, eq, isNull, ne, sql } from "drizzle-orm";
+import { and, asc, count, eq, isNull, ne, sql, type SQL } from "drizzle-orm";
 import { validateRules, type TagRule } from "./rules.js";
 
 /*
@@ -1134,7 +1134,7 @@ export async function applyPack(
   tenantId: string,
   input: unknown,
   options: ApplyOptions,
-): Promise<PackPlan> {
+): Promise<AppliedPack> {
   await checkApply(tx, options, "applyPack");
   // Serializable isolation is what makes this safe: two applies, or an apply and a review,
   // that touch the same rows can't both commit.
@@ -1162,41 +1162,94 @@ export async function applyPack(
       target: [tenantPacks.tenantId, tenantPacks.name],
       set: { ...stored, appliedAt: sql`now()` },
     });
-  return planned;
+  const tags = levelTags(planned.changes);
+  const objects =
+    tags.length === 0
+      ? []
+      : (
+          await queryRows<{ object_id: string }>(tx, sql`${carriers(tenantId, tags)} order by 1`)
+        ).map((r) => r.object_id);
+  return { ...planned, refresh: { tags, objects } };
 }
 
-/**
- * Refreshes the levels of every file that carries, or was proposed, a value `plan` added,
- * approved or changed. Run it after applyPack() commits, in its own (READ COMMITTED)
- * transaction: the apply's serializable snapshot can't see a tag committed after it began, so
- * that file's levels were worked out with the value as it was.
- */
-export async function refreshPackLevels(tx: Tx, tenantId: string, plan: PackPlan): Promise<void> {
-  const tags = plan.changes.flatMap((c) =>
-    c.kind === "add-value" || c.kind === "approve-value" || c.kind === "change-value"
+/** A plan as applyPack() applied it. */
+export interface AppliedPack extends PackPlan {
+  /**
+   * What refreshPackLevels() works out again once the apply commits: the values whose levels or
+   * approval it changed, and the files that carried or were proposed them in its snapshot.
+   */
+  refresh: { tags: string[]; objects: string[] };
+}
+
+/** The values whose change moves files' levels: approved, or given other levels. */
+function levelTags(changes: PackChange[]): string[] {
+  return changes.flatMap((c) =>
+    c.kind === "approve-value" ||
+    (c.kind === "change-value" && JSON.stringify(c.from.levels) !== JSON.stringify(c.to.levels))
       ? [c.tag]
       : [],
   );
-  if (tags.length === 0) return;
-  const pairs = sql.join(
-    tags.map((tag) => {
-      const at = tag.indexOf(":");
-      return sql`(${tag.slice(0, at)}, ${tag.slice(at + 1)})`;
-    }),
-    sql`, `,
+}
+
+/** The files carrying, or proposed, any of `tags` now: SQL, one parameter however many. */
+const carriers = (tenantId: string, tags: string[]) => {
+  const pairs = JSON.stringify(
+    tags.map((tag) => ({
+      facet: tag.slice(0, tag.indexOf(":")),
+      value: tag.slice(tag.indexOf(":") + 1),
+    })),
   );
-  await queryRows(
+  return sql`
+    select o.object_id from object_tags o
+      join jsonb_to_recordset(${pairs}::jsonb) p(facet text, value text) using (facet, value)
+     where o.tenant_id = ${tenantId}
+    union
+    select r.object_id from tag_reviews r
+      join jsonb_to_recordset(${pairs}::jsonb) p(facet text, value text) using (facet, value)
+     where r.tenant_id = ${tenantId} and r.resolved_at is null`;
+};
+
+/**
+ * Works out again the levels of the files whose levels applying `applied` changed. Call it once
+ * applyPack() commits, in a READ COMMITTED transaction (refused otherwise): the apply's
+ * serializable snapshot misses tags and reviews added or removed while it ran, so a file it
+ * missed, or saw carrying a value it no longer does, kept the levels worked out without the
+ * change. Covers the files the apply saw and those carrying the values now. If it can't run
+ * (the process dies first), refreshAllLevels() puts every file right. Returns how many files.
+ */
+export async function refreshPackLevels(
+  tx: Tx,
+  tenantId: string,
+  applied: AppliedPack,
+): Promise<number> {
+  await isolation(tx, "read committed", "refreshPackLevels");
+  const { tags, objects } = applied.refresh;
+  if (tags.length === 0 && objects.length === 0) return 0;
+  return refresh(
     tx,
-    sql`
-    select openhoard_levels_refresh_all(${tenantId}, array(
-      select distinct c.object_id from (
-        select object_id from object_tags
-         where tenant_id = ${tenantId} and (facet, value) in (${pairs})
-        union all
-        select object_id from tag_reviews
-         where tenant_id = ${tenantId} and resolved_at is null and (facet, value) in (${pairs})
-      ) c order by c.object_id))`,
+    tenantId,
+    sql`select jsonb_array_elements_text(${JSON.stringify(objects)}::jsonb)
+        union ${carriers(tenantId, tags)}`,
   );
+}
+
+/**
+ * Works out again the levels of every file in the tenant, in one transaction: for when
+ * refreshPackLevels() couldn't run (`openhoard admin levels refresh`). Holds every file's levels
+ * row until it commits, so tagging waits meanwhile. Returns how many files.
+ */
+export async function refreshAllLevels(tx: Tx, tenantId: string): Promise<number> {
+  await isolation(tx, "read committed", "refreshAllLevels");
+  return refresh(tx, tenantId, sql`select id from objects where tenant_id = ${tenantId}`);
+}
+
+async function refresh(tx: Tx, tenantId: string, ids: SQL): Promise<number> {
+  const [row] = await queryRows<{ n: number }>(
+    tx,
+    sql`with f as materialized (select array(select x.id from (${ids}) x(id) order by 1) as ids)
+        select cardinality(f.ids) as n, openhoard_levels_refresh_all(${tenantId}, f.ids) from f`,
+  );
+  return Number(row?.n ?? 0);
 }
 
 /**
@@ -1222,12 +1275,20 @@ export async function removePack(
 
 async function checkApply(tx: Tx, options: ApplyOptions, what: string): Promise<void> {
   if (!/^[a-z]+:.+$/s.test(options.by)) throw new PackError("invalid", "by must be a principal");
+  await isolation(tx, "serializable", what);
+}
+
+async function isolation(tx: Tx, want: string, what: string): Promise<void> {
   const [level] = await queryRows<{ level: string }>(
     tx,
     sql`select current_setting('transaction_isolation') as level`,
   );
-  if (level?.level !== "serializable") {
-    throw new Error(`${what} needs a serializable transaction (APPLY_TRANSACTION)`);
+  if (level?.level !== want) {
+    throw new Error(
+      want === "serializable"
+        ? `${what} needs a serializable transaction (APPLY_TRANSACTION)`
+        : `${what} needs a ${want} transaction`,
+    );
   }
 }
 

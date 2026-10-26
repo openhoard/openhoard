@@ -14,6 +14,7 @@ import {
 import {
   APPLY_TRANSACTION,
   applyPack,
+  refreshAllLevels,
   refreshPackLevels,
   clearInjectionReview,
   decideReview,
@@ -34,6 +35,7 @@ import {
   TagError,
   tenantPolicies,
   VIEW_TRANSACTION,
+  type AppliedPack,
   type CardSkipReason,
   type HealthOptions,
   type HealthReport,
@@ -309,6 +311,8 @@ const USAGE = `usage: openhoard admin <command> [--data-dir <dir>]
   pack plan --tenant <ten_…> --file <pack.json>   what applying a pack would change, and its hash
   pack apply --tenant <ten_…> --file <pack.json> --plan-hash <hash>
                                                    apply exactly the plan shown
+  levels refresh --tenant <ten_…>                  work out every file's levels again (when a
+                                                   pack apply says to)
   source list --tenant <ten_…>                     list the tenant's connector syncs
   source status --tenant <ten_…> [--source <name>] how each source's last scheduled sync ended
   source skips --tenant <ten_…> --source <name> [--reason <code>] [--limit <1-${MAX_SKIP_PAGE}>]
@@ -433,6 +437,7 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
     "group list",
     "pack plan",
     "pack apply",
+    "levels refresh",
     "source list",
     "source status",
     "source skips",
@@ -547,6 +552,14 @@ export async function runAdmin(argv: readonly string[], io: AdminIo): Promise<nu
           io,
           io.cwd,
         );
+      case "levels refresh": {
+        const tenantId = tenantArg(values.tenant);
+        const n = await retrying(() =>
+          db.withTenant(tenantId, (tx) => refreshAllLevels(tx, tenantId)),
+        );
+        io.err(`Worked out the levels of ${n} file${n === 1 ? "" : "s"} again.\n`);
+        return 0;
+      }
       case "source list":
         return await sourceList(db, tenantArg(values.tenant), io);
       case "source status":
@@ -1279,7 +1292,7 @@ export async function applyPackAudited(
   tenantId: string,
   pack: unknown,
   planHash: string,
-): Promise<PackPlan> {
+): Promise<AppliedPack> {
   const applied = await applyPack(tx, tenantId, pack, { planHash, by: ADMIN_ACTOR });
   await appendAudit(tx, tenantId, {
     actor: ADMIN_ACTOR,
@@ -1330,12 +1343,6 @@ async function packCommand(
               APPLY_TRANSACTION,
             ),
           );
-    if (step === "apply") {
-      const applied = plan;
-      await retrying(() =>
-        db.withTenant(tenantId, (tx) => refreshPackLevels(tx, tenantId, applied)),
-      );
-    }
   } catch (e) {
     if (!(e instanceof PackError)) throw e;
     io.err(`${e.message}\n`);
@@ -1343,6 +1350,22 @@ async function packCommand(
   }
   io.err(packPlanText(step === "plan" ? "Plan" : "Applied", plan));
   io.out(`${plan.planHash}\n`);
+  if (step === "apply") {
+    // Committed: what the apply's snapshot missed is put right now, in a transaction of its own.
+    const applied = plan as AppliedPack;
+    try {
+      await retrying(() =>
+        db.withTenant(tenantId, (tx) => refreshPackLevels(tx, tenantId, applied)),
+      );
+    } catch (e) {
+      io.err(
+        `The pack is applied, but the levels of the files its values changed weren't worked out ` +
+          `again (${(e as Error).message}). Search may show some of them wrongly until you run: ` +
+          `openhoard admin levels refresh --tenant ${tenantId}\n`,
+      );
+      return 3;
+    }
+  }
   if (step === "plan") {
     io.err(
       `To apply exactly this: openhoard admin pack apply --tenant ${tenantId} --file ${file} --plan-hash ${plan.planHash}\n`,
