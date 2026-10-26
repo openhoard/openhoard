@@ -21,6 +21,7 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 import fc from "fast-check";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { expectLevelsKept } from "./search.fixtures.js";
 import {
   SEARCH_CANDIDATES,
   searchObjects,
@@ -78,7 +79,13 @@ beforeEach(async () => {
     await tx.update(versions).set({ processedAt: sql`now()` });
   });
 });
-afterEach(() => db?.close());
+afterEach(async () => {
+  try {
+    if (db && t) await expectLevelsKept(db, t.tenantId);
+  } finally {
+    await db?.close();
+  }
+});
 
 const write = <T>(work: (tx: Tx) => Promise<T>) => db.withTenant(t.tenantId, work);
 const setDefault = (visibility: Visibility) =>

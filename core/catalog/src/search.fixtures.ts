@@ -5,13 +5,17 @@ import {
   newId,
   objects,
   objectTags,
+  queryRows,
   versions,
   type Database,
 } from "@openhoard/core-db";
 import { and, eq, sql } from "drizzle-orm";
+import { expect } from "vitest";
 import { saveCard } from "./cards.js";
 import { saveEmbeddings, type EmbeddingItem } from "./embeddings.js";
 import { saveExtract } from "./extracts.js";
+import { effectiveLevel } from "./search.js";
+import { levelsFor, VIEW_TRANSACTION } from "./visibility.js";
 
 /*
  * Test fixtures for search (T-501..T-503): files with a title, tags, extracted text, a summary
@@ -167,4 +171,48 @@ export async function addDoc(
     }
   });
   return { objectId, versionId };
+}
+
+/**
+ * T-507: every object's kept levels are the ones levelsFor() works out (core/db
+ * 0003_object_levels.sql keeps them), combined with the tenant defaults as search does. Called
+ * after each test of the suites that change levels, whatever path the test changed them by.
+ */
+export async function expectLevelsKept(db: Database, tenantId: string): Promise<void> {
+  const ranks: Record<string, number> = { hidden: 0, discoverable: 1, readable: 2 };
+  const exposures: Record<string, number> = {
+    "metadata-only": 0,
+    "local-only": 1,
+    "commercial-only": 2,
+    full: 3,
+  };
+  await db.withTenant(
+    tenantId,
+    async (tx) => {
+      // Search's own combination of the kept ranks with the tenant defaults.
+      const rows = await queryRows<{ id: string; visibility: number; exposure: number }>(
+        tx,
+        sql`select a.id, ${effectiveLevel(tenantId, "visibility")} as visibility,
+                   ${effectiveLevel(tenantId, "exposure")} as exposure
+              from (select o.id, coalesce(l.processed, false) as levels_processed,
+                           l.visibility_trusted, l.visibility_cap, l.exposure_trusted, l.exposure_cap
+                      from objects o
+                      left join object_levels l on l.tenant_id = o.tenant_id and l.object_id = o.id) a`,
+      );
+      const want = await levelsFor(
+        tx,
+        tenantId,
+        rows.map((r) => r.id),
+      );
+      for (const r of rows) {
+        const w = want.get(r.id);
+        expect({ id: r.id, visibility: r.visibility, exposure: r.exposure }).toEqual({
+          id: r.id,
+          visibility: ranks[w?.visibility ?? "hidden"],
+          exposure: exposures[w?.exposure ?? "metadata-only"],
+        });
+      }
+    },
+    VIEW_TRANSACTION,
+  );
 }

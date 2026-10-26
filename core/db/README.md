@@ -161,6 +161,14 @@ Without the template, test databases come from template0 and every migration run
   words, in every language alike (tenants write in many, often in one file; S1 measured it).
   "invoices" doesn't find "invoice", and accents count. Dots, underscores and slashes split
   words first.
+- **`object_levels`** (T-507): each object's visibility and exposure as ranks, less the
+  tenant's defaults (`0003_object_levels.sql`): whether the current version is processed, and
+  per level the most restrictive trusted level tag and the most restrictive untrusted one or open
+  review item. Statement triggers on tags, review items and versions, and a row trigger on a
+  value's level or approval, recompute them through the view `openhoard_levels`, as
+  core/catalog's collectLevels() works them out; each locks the rows before working them out,
+  so a concurrent change isn't overwritten. core/catalog's search reads them instead of working
+  the levels out per row, and viewObjects() still decides.
 - **`version_embeddings`** (T-407): vectors per version, model (`<provider id>/<model>`), part
   (summary or chunk) and seq, with the size (`dimensions`, checked against the vector), the
   provider's kind and the text's SHA-256. One untyped `vector` column holds every model's

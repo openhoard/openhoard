@@ -22,6 +22,13 @@
       "when": 1792717855373,
       "tag": "0002_drop_delta_deletes",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792974853447,
+      "tag": "0003_object_levels",
+      "breakpoints": true
     }
   ]
 }

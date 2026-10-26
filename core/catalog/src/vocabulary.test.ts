@@ -2,6 +2,7 @@ import { facets, facetValues, type Database, type Tx } from "@openhoard/core-db"
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { createUser, grantAdmin } from "@openhoard/core-identity";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { expectLevelsKept } from "./search.fixtures.js";
 import { proposeTag } from "./tagging.js";
 import { markProcessed, VIEW_TRANSACTION } from "./visibility.js";
 import { tenantVocabulary, VocabularyError } from "./vocabulary.js";
@@ -47,7 +48,13 @@ beforeEach(async () => {
     ]);
   });
 });
-afterEach(() => db?.close());
+afterEach(async () => {
+  try {
+    if (db && t) await expectLevelsKept(db, t.tenantId);
+  } finally {
+    await db?.close();
+  }
+});
 
 describe("the tenant's vocabulary (T-903)", () => {
   it("is every facet and value, with what a value does and how many items propose it", async () => {

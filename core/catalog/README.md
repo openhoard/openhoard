@@ -360,12 +360,16 @@ id), and is never matched on its content. Past the candidate cap, or among the n
 SQL's guess picks which candidates are checked, so a pack-forbidden file can crowd out a
 visible one or set `totalIsLowerBound` (it is never shown or counted). Keyword candidates come
 through the GIN indexes; working out who may see them, and the vector search's eligible set
-(every file the caller reads), still visits each of the caller's files per query: fine at tens
-of thousands, seconds at 100,000+ (`scripts/vector-recall.ts` measures it). Spike S1's
-per-principal visible-row counts and a set-based level computation are the next step.
+(every file the caller reads), still visits each of the caller's files per query. Each file's
+levels come from `object_levels` (core/db `0003_object_levels.sql`, T-507), not worked out
+per row, which took a quarter to two fifths off a search's p95 at 30,000 files on PGlite
+(`pnpm --filter @openhoard/testkit bench:search`); what is left grows with the files the
+caller reads and the words match. Spike S1's per-principal visible-row counts are the next
+step.
 
-**Timing.** Because SQL works out every candidate's levels, a search takes longer the more files
-there are that the caller can't see: about 6 ms per 4,000 hidden files (review measurement). A patient
+**Timing.** Because SQL reads every candidate, those the caller can't see included, a search
+takes longer the more such files match: about 6 ms per 4,000 hidden files when levels were
+worked out per row (review measurement), less since they are read (T-507). A patient
 caller can estimate, from response times, roughly how many files exist that they can't see (a
 count, never which files or what is in them). Padding responses or precomputing visible sets
 closes it; neither is done in M1.

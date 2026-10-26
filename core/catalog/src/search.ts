@@ -498,6 +498,8 @@ function candidates(tenantId: string, caller: Caller, where: SQL): SQL {
              d.summary_provider_kind,
              coalesce(d.body_tsv, ${empty}) as body_tsv,
              coalesce(d.path_tsv, ${empty}) as path_tsv,
+             coalesce(l.processed, false) as levels_processed,
+             l.visibility_trusted, l.visibility_cap, l.exposure_trusted, l.exposure_cap,
              (o.owner_id = ${caller.owner}
               or o.id = any(${array(caller.readObjects)})
               or exists (
@@ -508,6 +510,7 @@ function candidates(tenantId: string, caller: Caller, where: SQL): SQL {
         from objects o
         join zones z on z.tenant_id = o.tenant_id and z.id = o.zone_id
         left join search_documents d on d.tenant_id = o.tenant_id and d.object_id = o.id
+        left join object_levels l on l.tenant_id = o.tenant_id and l.object_id = o.id
        where o.tenant_id = ${tenantId} and o.deleted_at is null and ${scoped} and ${where}`;
 }
 
@@ -553,8 +556,8 @@ function levelled(tenantId: string, caller: Caller, from: SQL): SQL {
                           else ${effectiveLevel(tenantId, "visibility")} end as visibility,
                      case when a.readable then ${exposure} else 0 end as exposure
                 from (${from}) a
-              -- A fence: inlined, every reference to a level below would run its subqueries
-              -- again for the same row.
+              -- A fence: inlined, every reference to a level below would run the readable
+              -- check's subquery again for the same row.
               offset 0) b
        where b.readable or (${caller.member} and b.visibility >= 1)`;
 }
@@ -1198,41 +1201,25 @@ export function toSnippet(headline: string): Snippet {
 }
 
 /**
- * The effective visibility or exposure of candidate `a.id` as a rank, as visibility.ts
- * collectLevels() and core/policy resolveLevels() work it out: the lowest while the current
- * version is unprocessed (hidden, metadata-only); otherwise the most restrictive trusted level
- * tag (approved, and not an unreviewed model guess), or the tenant default without one; then
- * tightened by any untrusted level tag or pending review item. An unknown level counts as the
- * most restrictive. Visibility: hidden 0, discoverable 1, readable 2. Exposure: metadata-only
- * 0, local-only 1, commercial-only 2, full 3.
+ * The effective visibility or exposure of candidate `a` as a rank, from its object_levels row
+ * (core/db 0003_object_levels.sql, which mirrors visibility.ts collectLevels()
+ * and core/policy resolveLevels()): the lowest while the current version is unprocessed
+ * (hidden, metadata-only); otherwise the most restrictive trusted level tag, or the tenant
+ * default without one; then tightened by any untrusted level tag or pending review item.
+ * Visibility: hidden 0, discoverable 1, readable 2. Exposure: metadata-only 0, local-only 1,
+ * commercial-only 2, full 3.
  */
-function effectiveLevel(tenantId: string, kind: "visibility" | "exposure"): SQL {
-  const column = sql.raw(kind === "visibility" ? "fv.visibility" : "fv.exposure");
-  const fallback = sql.raw(kind === "visibility" ? "d.default_visibility" : "d.default_exposure");
-  const top = kind === "visibility" ? 2 : 3;
-  const rank = (c: SQL) =>
+export function effectiveLevel(tenantId: string, kind: "visibility" | "exposure"): SQL {
+  const [trusted, cap, fallback, top] =
     kind === "visibility"
-      ? sql`(case ${c} when 'readable' then 2 when 'discoverable' then 1 else 0 end)`
-      : sql`(case ${c} when 'full' then 3 when 'commercial-only' then 2 when 'local-only' then 1 else 0 end)`;
-  // Level tags on the candidate, from object_tags or open review items (both aliased `x`).
-  const levelled = (from: SQL, where: SQL) =>
-    sql`select ${rank(column)} as r from ${from}
-          join facet_values fv
-            on fv.tenant_id = x.tenant_id and fv.facet = x.facet and fv.value = x.value
-         where x.tenant_id = ${tenantId} and x.object_id = a.id
-           and ${column} is not null and ${where}`;
-  const trusted = sql`(fv.approved and (x.source <> 'model' or x.reviewed))`;
-  const processed = sql`coalesce((
-      select v.processed_at is not null from versions v
-       where v.tenant_id = ${tenantId} and v.object_id = a.id
-       order by v.seq desc limit 1), false)`;
-  const byDefault = sql`(select ${rank(fallback)} from tenants d where d.id = ${tenantId})`;
-  return sql`(case when not ${processed} then 0 else least(
-      coalesce((select min(t.r) from (${levelled(sql`object_tags x`, trusted)}) t), ${byDefault}),
-      coalesce((select min(u.r) from (
-          ${levelled(sql`object_tags x`, sql`not ${trusted}`)}
-          union all
-          ${levelled(sql`tag_reviews x`, sql`x.resolved_at is null and x.reason <> 'primary'`)}
-        ) u), ${top}))
-    end)`;
+      ? [
+          "a.visibility_trusted",
+          "a.visibility_cap",
+          "openhoard_visibility_rank(d.default_visibility)",
+          2,
+        ]
+      : ["a.exposure_trusted", "a.exposure_cap", "openhoard_exposure_rank(d.default_exposure)", 3];
+  const byDefault = sql`(select ${sql.raw(fallback)} from tenants d where d.id = ${tenantId})`;
+  return sql`(case when not a.levels_processed then 0 else least(
+      coalesce(${sql.raw(trusted)}, ${byDefault}), coalesce(${sql.raw(cap)}, ${top})) end)`;
 }

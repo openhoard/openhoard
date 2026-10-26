@@ -1,7 +1,10 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { fromDriver, type Database, type Driver } from "./database.js";
 import { sqlState } from "./errors.js";
 import { newId } from "./ids.js";
+import { migrationsFolder } from "./migrations.js";
 import { INDEXED_DIMENSIONS } from "./schema.js";
 import { openTestDriver, seedTenant, TEST_POSTGRES_ENV, type SeededTenant } from "./testing.js";
 
@@ -95,6 +98,48 @@ describe("search documents", () => {
     await run(`update source_refs set path = null where source = 'b'`);
     expect(await folders()).toBe("");
     await run(`delete from source_refs where source = 'b'`);
+  });
+
+  it("keep each object's levels as ranks, and the migration works them out for every tenant's", async () => {
+    const levels = (of: SeededTenant = t) =>
+      db.withTenant(of.tenantId, async (tx) => {
+        const { rows } = (await tx.execute(
+          `select processed as p, visibility_trusted as vt, visibility_cap as vc,
+                  exposure_trusted as et, exposure_cap as ec
+             from object_levels where object_id = '${of.objectId}'`,
+        )) as unknown as { rows: Record<string, unknown>[] };
+        return rows[0];
+      });
+    const o = `'${t.tenantId}', '${t.objectId}'`;
+    await run(`insert into facets (tenant_id, key, label) values ('${t.tenantId}', 'level', 'L')`);
+    await run(`insert into facet_values (tenant_id, facet, value, label, approved, visibility, exposure)
+      values ('${t.tenantId}', 'level', 'internal', 'I', true, 'discoverable', 'local-only'),
+             ('${t.tenantId}', 'level', 'secret', 'S', true, 'hidden', null)`);
+    await run(`insert into object_tags (tenant_id, object_id, facet, value, source, confidence)
+      values (${o}, 'level', 'internal', 'rule', 1)`);
+    expect(await levels()).toEqual({ p: false, vt: 1, vc: null, et: 1, ec: null });
+    await run(`update versions set processed_at = now() where object_id = '${t.objectId}'`);
+    await run(`insert into tag_reviews (tenant_id, id, object_id, facet, value, reason, source, confidence)
+      values ('${t.tenantId}', '${newId("review")}', '${t.objectId}', 'level', 'secret', 'sensitive', 'model', 0.9)`);
+    expect(await levels()).toEqual({ p: true, vt: 1, vc: 0, et: 1, ec: null });
+    // A value no longer approved stops being trusted: it only tightens.
+    await run(`update facet_values set approved = false where value = 'internal'`);
+    expect(await levels()).toEqual({ p: true, vt: null, vc: 0, et: null, ec: 1 });
+    await run(
+      `update tag_reviews set resolved_at = now(), decision = 'rejected', resolved_by = 'user:x'`,
+    );
+    expect(await levels()).toEqual({ p: true, vt: null, vc: 1, et: null, ec: 1 });
+
+    // The migration's backfill, over every tenant, as it runs: without a tenant set.
+    const other = await seedTenant(db, 2);
+    const kept = [await levels(), await levels(other)];
+    for (const of of [t, other]) {
+      await db.withTenant(of.tenantId, (tx) => tx.execute("delete from object_levels"));
+    }
+    const sql = readFileSync(join(migrationsFolder, "0003_object_levels.sql"), "utf8");
+    await driver.query(sql.slice(sql.lastIndexOf("DO $$")));
+    expect([await levels(), await levels(other)]).toEqual(kept);
+    expect(kept[1]).toEqual({ p: false, vt: null, vc: null, et: null, ec: null });
   });
 
   it("have the GIN and per-size HNSW indexes search's queries are written for", async () => {

@@ -20,6 +20,7 @@ import {
 import { Authorizer, createCedarEngine, type AuthzPrincipal } from "@openhoard/core-policy";
 import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { expectLevelsKept } from "./search.fixtures.js";
 import { ingest, removeFromSource } from "./ingest.js";
 import { proposeTag } from "./tagging.js";
 import {
@@ -78,7 +79,13 @@ beforeEach(async () => {
       .where(eq(tenants.id, t.tenantId));
   });
 });
-afterEach(() => db?.close());
+afterEach(async () => {
+  try {
+    if (db && t) await expectLevelsKept(db, t.tenantId);
+  } finally {
+    await db?.close();
+  }
+});
 
 const inTenant = <T>(work: (tx: Tx) => Promise<T>) => db.withTenant(t.tenantId, work);
 const inSnapshot = <T>(work: (tx: Tx) => Promise<T>, tenantId = t.tenantId) =>

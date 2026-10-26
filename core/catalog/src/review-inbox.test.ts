@@ -14,6 +14,7 @@ import { createUser, grantAdmin, lockUser, resolvePrincipal } from "@openhoard/c
 import { Authorizer, createCedarEngine } from "@openhoard/core-policy";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { expectLevelsKept } from "./search.fixtures.js";
 import {
   decideReview,
   ReviewAccessError,
@@ -90,7 +91,13 @@ beforeEach(async () => {
     });
   });
 });
-afterEach(() => db?.close());
+afterEach(async () => {
+  try {
+    if (db && t) await expectLevelsKept(db, t.tenantId);
+  } finally {
+    await db?.close();
+  }
+});
 
 /**
  * An assistant proposes a tag on the seeded file, as the `tag` tool does; or, `by` "model", the

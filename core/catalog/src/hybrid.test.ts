@@ -22,7 +22,7 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { fuseChannels } from "./rank.js";
-import { addDoc, hashedEmbedding, type DocInput } from "./search.fixtures.js";
+import { addDoc, hashedEmbedding, type DocInput, expectLevelsKept } from "./search.fixtures.js";
 import {
   hnswSql,
   searchObjects,
@@ -53,7 +53,13 @@ beforeEach(async () => {
   t = await seedTenant(db, 1);
   await setDefaults("discoverable", "full");
 });
-afterEach(() => db?.close());
+afterEach(async () => {
+  try {
+    if (db && t) await expectLevelsKept(db, t.tenantId);
+  } finally {
+    await db?.close();
+  }
+});
 
 const MODEL = "fixture/hash64";
 const ME = "bo";
