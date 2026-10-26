@@ -1303,9 +1303,12 @@ after a crash.
   no output, so the task runs `service run`: it starts the server, appends what it prints to the
   log, and starts it again after a failure (after 5 s, doubling to a minute while it keeps
   failing; a server started again keeps the environment it started with, so an edited
-  `service.env` takes `service stop` and `start`). Ending the task (`service stop`) closes the
-  server's channel, and the server stops cleanly, as it does under `tunnel`. The task runs as you with S4U: it reaches the internet but
-  not your network shares, which OpenHoard doesn't use.
+  `service.env` takes `service stop` and `start`). Ending a task kills its whole tree, so
+  `service stop` first asks `service run`, with a file in the data directory, to stop the
+  server cleanly, and ends the task only if it is still running after 30 s. A server killed (that
+  way, or by a shutdown) leaves the embedded database to recover on the next start, as after a
+  power cut. The task runs as you with S4U: it reaches the internet but not your network shares,
+  which OpenHoard doesn't use.
 - **macOS.** `stop` takes the daemon out of launchd (`bootout`) and `start` puts it back
   (`bootstrap`, or `kickstart` while it is still in), since a daemon kept alive is started again
   when it exits.

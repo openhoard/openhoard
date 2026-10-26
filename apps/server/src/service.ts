@@ -34,8 +34,8 @@ import { soloConfig, soloDataDir, type SoloIo } from "./solo.js";
  *   signed in or not, with no password stored (S4U: it reaches the internet, never their
  *   network shares). The task runs `service run`, which starts the server, sends what it prints
  *   to <dataDir>\logs\server.log and starts it again when it fails: Task Scheduler restarts a
- *   task only when it can't launch. Ending the task closes the server's channel, which it
- *   answers by stopping cleanly (main.ts), as it does for `tunnel`.
+ *   task only when it can't launch. `service stop` asks it to stop the server cleanly before it
+ *   would end the task, which kills the whole tree.
  *
  * Each runs this Node and this CLI with `--env-file=<dataDir>/service.env`, so the service has
  * the secrets the server reads from the environment, under the same names: install writes the
@@ -76,6 +76,8 @@ export interface ServiceIo extends SoloIo {
   unitDir?: string;
   /** This process's user id (tests); default process.getuid(). */
   uid?: number;
+  /** How often `service stop` asks whether the Windows task ended (tests); default 1 s. */
+  pollMs?: number;
 }
 
 const runCaptured: RunCaptured = (file, args) =>
@@ -444,9 +446,12 @@ export async function runService(argv: readonly string[], io: ServiceIo): Promis
     if (plan.startLoaded === undefined) return runAll(plan.start);
     return (await runAll(plan.start, true)) === 0 ? 0 : runAll(plan.startLoaded);
   }
-  if (action === "stop") return runAll(plan.stop);
+  if (action === "stop") {
+    return platform === "win32" ? stopTask(name, dataDir, io, run) : runAll(plan.stop);
+  }
   // Uninstall. Not running is fine: it is being removed.
-  for (const [file, ...args] of plan.stop) await run(file, args);
+  if (platform === "win32") await stopTask(name, dataDir, io, run);
+  else for (const [file, ...args] of plan.stop) await run(file, args);
   const code = await runAll(plan.remove);
   if (code !== 0) return code;
   if (platform !== "win32") rmSync(plan.file, { force: true });
@@ -574,15 +579,22 @@ async function install(
 /** How long a run must last for the next failure to count as the first again. */
 const STEADY_MS = 10 * 60_000;
 
+/** What `service stop` leaves for `service run` on Windows: stop the server, cleanly. */
+const stopFile = (dataDir: string) => join(dataDir, "service.stop");
+
 /**
  * `service run`, the Windows task's action: the server as a child, its output appended to
  * <dataDir>/logs/server.log, started again after a failure (5 s, doubling to a minute while it
- * keeps failing). A clean exit ends it. When this process goes (the task ended), the child's
- * channel closes and it stops cleanly.
+ * keeps failing). Ending the task kills both at once (Task Scheduler ends the whole tree), so
+ * `service stop` asks first, with a file this watches: the child's channel is closed, the
+ * server stops cleanly (main.ts), and this ends. A clean exit of its own ends it too.
  */
 async function supervise(node: string, script: string, dataDir: string, io: ServiceIo) {
   mkdirSync(join(dataDir, "logs"), { recursive: true });
   const log = openSync(join(dataDir, "logs", "server.log"), "a");
+  const say = (line: string) => writeSync(log, `openhoard service: ${line}\n`);
+  rmSync(stopFile(dataDir), { force: true });
+  let stopping = false;
   let wait = 5_000;
   for (;;) {
     const started = Date.now();
@@ -593,13 +605,53 @@ async function supervise(node: string, script: string, dataDir: string, io: Serv
       windowsHide: true,
     });
     // `exit` follows a failed start too; an error is only said.
-    child.on("error", (e) => writeSync(log, `openhoard service: ${e.message}\n`));
+    child.on("error", (e) => say(e.message));
+    const asked = setInterval(() => {
+      if (stopping || !existsSync(stopFile(dataDir))) return;
+      stopping = true;
+      say("asked to stop");
+      if (child.connected) child.disconnect();
+    }, 1_000);
     const code = await new Promise<number | null>((done) => child.once("exit", (c) => done(c)));
+    clearInterval(asked);
+    if (stopping || existsSync(stopFile(dataDir))) {
+      rmSync(stopFile(dataDir), { force: true });
+      say(`stopped (exit ${code ?? "none"})`);
+      return 0;
+    }
     if (code === 0) return 0;
     if (Date.now() - started > STEADY_MS) wait = 5_000;
-    const line = `openhoard service: the server stopped (exit ${code ?? "none"}); starting it again in ${wait / 1000} s\n`;
-    writeSync(log, line);
+    say(`the server stopped (exit ${code ?? "none"}); starting it again in ${wait / 1000} s`);
     await new Promise((done) => setTimeout(done, wait));
     wait = Math.min(wait * 2, 60_000);
   }
+}
+
+/**
+ * `service stop` on Windows: asks `service run` to stop the server cleanly (above), waits up to
+ * 30 s for the task to end, and only then ends it, which kills the server mid-write. Either
+ * way the embedded database starts again (a killed one recovers as after a power cut).
+ */
+async function stopTask(name: string, dataDir: string, io: ServiceIo, run: RunCaptured) {
+  const running = async () =>
+    (await run("schtasks", ["/Query", "/TN", name, "/FO", "CSV", "/NH"])).output.includes(
+      "Running",
+    );
+  if (!(await running())) {
+    io.err(`${name} isn't running\n`);
+    return 0;
+  }
+  writeFileSync(stopFile(dataDir), "");
+  for (let i = 0; i < 30 && (await running()); i++) {
+    await new Promise((done) => setTimeout(done, io.pollMs ?? 1_000));
+  }
+  if (!(await running())) {
+    io.err(`stopped ${name}\n`);
+    return 0;
+  }
+  io.err(`${name} didn't stop in 30 s: ending it\n`);
+  rmSync(stopFile(dataDir), { force: true });
+  const ended = await run("schtasks", ["/End", "/TN", name]);
+  if (ended.code !== 0) io.err(`${ended.output.trim()}\nschtasks failed (exit ${ended.code})\n`);
+  return ended.code === 0 ? 0 : 1;
 }
