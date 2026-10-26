@@ -45,8 +45,9 @@ async function service(argv: string[], more: Partial<ServiceIo> = {}) {
     err: (s) => void (seen.err += s),
     exec: (file, args) => {
       seen.ran.push([file, ...args].join(" "));
-      const uid = args[1] === "root" ? "0" : String(statSync(dir).uid);
-      return Promise.resolve({ code: 0, output: file === "id" ? uid : "" });
+      const own = statSync(dir);
+      const id = args[1] === "root" ? "0" : String(args[0] === "-g" ? own.gid : own.uid);
+      return Promise.resolve({ code: 0, output: file === "id" ? id : "" });
     },
     ...more,
   };
@@ -151,6 +152,31 @@ describe("service run", () => {
     expect(code).toBe(0);
     const log = readFileSync(join(dir, "logs", "server.log"), "utf8");
     expect(log).toMatch(/started 1\n.*exit 1.*again in 5 s\nstarted 1\n/s);
+  }, 20_000);
+});
+
+describe("service stop on Windows", () => {
+  it("asks the supervisor to stop the server cleanly, and ends the task only if it doesn't", async () => {
+    const script = join(root, "server.mjs");
+    writeFileSync(
+      script,
+      `process.on("disconnect", () => { console.log("clean"); process.exit(0); });
+       setInterval(() => undefined, 1000);`,
+    );
+    writeFileSync(join(dir, "service.env"), "");
+    const quiet = { out: () => undefined, err: () => undefined, env: process.env };
+    const running = runService(["run", "--data-dir", dir], { ...quiet, platform: "win32", script });
+    let answer = "Running";
+    const stopping = runService(["stop", "--data-dir", dir], {
+      ...quiet,
+      platform: "win32",
+      pollMs: 100,
+      exec: () => Promise.resolve({ code: 0, output: answer }),
+    });
+    expect(await running).toBe(0);
+    answer = "Ready";
+    expect(await stopping).toBe(0);
+    expect(readFileSync(join(dir, "logs", "server.log"), "utf8")).toMatch(/asked to stop\nclean\n/);
   }, 20_000);
 });
 
