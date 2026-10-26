@@ -12,6 +12,7 @@ import {
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { and, eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { expectLevelsKept } from "./search.fixtures.js";
 import {
   approveReview,
   listOpenReviews,
@@ -48,7 +49,13 @@ beforeEach(async () => {
     ]);
   });
 });
-afterEach(() => db?.close());
+afterEach(async () => {
+  try {
+    if (db && t) await expectLevelsKept(db, t.tenantId);
+  } finally {
+    await db?.close();
+  }
+});
 
 const inTenant = <T>(work: (tx: Tx) => Promise<T>) => db.withTenant(t.tenantId, work);
 const propose = (p: Partial<TagProposal>) =>

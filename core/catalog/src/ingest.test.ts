@@ -13,6 +13,7 @@ import {
 import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core-db/testing";
 import { and, asc, eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { expectLevelsKept } from "./search.fixtures.js";
 import {
   blobIdOf,
   ingest,
@@ -42,7 +43,13 @@ beforeEach(async () => {
   t = await seedTenant(db, 1);
   owner = `user:${t.userId}`;
 });
-afterEach(() => db?.close());
+afterEach(async () => {
+  try {
+    if (db && t) await expectLevelsKept(db, t.tenantId);
+  } finally {
+    await db?.close();
+  }
+});
 
 const inTenant = <T>(work: (tx: Tx) => Promise<T>) => db.withTenant(t.tenantId, work);
 /** Ingests `text` as item `externalId`, as a .docx unless told; `mime: undefined` sends none. */

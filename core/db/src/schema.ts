@@ -13,6 +13,7 @@ import {
   pgTable,
   primaryKey,
   real,
+  smallint,
   text,
   timestamp,
   unique,
@@ -1670,6 +1671,42 @@ export const searchDocuments = pgTable(
   ],
 );
 
+/**
+ * Each object's visibility and exposure as ranks, less the tenant's defaults (T-507), so search
+ * can tell which files a caller may expect to see without working the levels out per row:
+ * `processed` (the current version is), and per level the most restrictive trusted level tag
+ * (`*_trusted`, null with none: the tenant default applies) and the most restrictive untrusted
+ * one or open review item (`*_cap`, null with none). Ranks: visibility hidden 0, discoverable 1,
+ * readable 2; exposure metadata-only 0, local-only 1, commercial-only 2, full 3. No row: not
+ * processed. Kept by triggers (0003_object_levels.sql) as core/catalog collectLevels() works
+ * them out; they only narrow what search considers, and viewObjects() still decides.
+ */
+export const objectLevels = pgTable(
+  "object_levels",
+  {
+    tenantId: text("tenant_id").notNull(),
+    objectId: text("object_id").notNull(),
+    processed: boolean("processed").notNull().default(false),
+    visibilityTrusted: smallint("visibility_trusted"),
+    visibilityCap: smallint("visibility_cap"),
+    exposureTrusted: smallint("exposure_trusted"),
+    exposureCap: smallint("exposure_cap"),
+  },
+  (t) => [
+    primaryKey({ columns: [t.tenantId, t.objectId] }),
+    foreignKey({
+      name: "object_levels_object_fk",
+      columns: [t.tenantId, t.objectId],
+      foreignColumns: [objects.tenantId, objects.id],
+    }).onDelete("cascade"),
+    check(
+      "object_levels_ranks_valid",
+      sql`coalesce(visibility_trusted, 0) between 0 and 2 and coalesce(visibility_cap, 0) between 0 and 2
+          and coalesce(exposure_trusted, 0) between 0 and 3 and coalesce(exposure_cap, 0) between 0 and 3`,
+    ),
+  ],
+);
+
 /** What part of a version an embedding is of. */
 export const EMBEDDING_PARTS = ["summary", "chunk"] as const;
 /**
@@ -2320,6 +2357,7 @@ export const tables = {
   versionExtracts,
   versionCards,
   searchDocuments,
+  objectLevels,
   versionEmbeddings,
   modelUsage,
   injectionReviews,

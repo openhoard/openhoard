@@ -15,6 +15,7 @@ import { openTestDatabase, seedTenant, type SeededTenant } from "@openhoard/core
 import { createCedarEngine } from "@openhoard/core-policy";
 import { and, eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { expectLevelsKept } from "./search.fixtures.js";
 import {
   APPLY_TRANSACTION,
   applyPack,
@@ -56,7 +57,13 @@ beforeEach(async () => {
   db = await openTestDatabase();
   t = await seedTenant(db, 1);
 });
-afterEach(() => db?.close());
+afterEach(async () => {
+  try {
+    if (db && t) await expectLevelsKept(db, t.tenantId);
+  } finally {
+    await db?.close();
+  }
+});
 
 const inTenant = <T>(work: (tx: Tx) => Promise<T>) => db.withTenant(t.tenantId, work);
 const plan = (pack: unknown) => inTenant((tx) => planPack(tx, t.tenantId, pack));
