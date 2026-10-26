@@ -16,7 +16,6 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs, parseEnv } from "node:util";
 import { soloConfig, soloDataDir, type SoloIo } from "./solo.js";
@@ -413,7 +412,9 @@ export async function runService(argv: readonly string[], io: ServiceIo): Promis
       ? "/etc/systemd/system"
       : platform === "darwin"
         ? "/Library/LaunchDaemons"
-        : tmpdir());
+        : // The task's XML, for schtasks to read, next to service.env (whose folder is the
+          // service account's alone by then), and removed after.
+          dataDir);
   const spec: ServiceSpec = { name, user, node, script, dataDir, unitDir };
   const plan =
     platform === "linux"
@@ -434,7 +435,13 @@ export async function runService(argv: readonly string[], io: ServiceIo): Promis
     return 0;
   };
 
-  if (action === "install") return install(io, platform, spec, plan, env, run, runAll);
+  if (action === "install") {
+    try {
+      return await install(io, platform, spec, plan, env, run, runAll);
+    } finally {
+      if (platform === "win32") rmSync(plan.file, { force: true });
+    }
+  }
   if (action === "status") {
     // What the tool says is the answer, whatever its exit code says (a stopped unit is 3).
     const [file, ...args] = plan.status[0] as Step;
@@ -498,27 +505,33 @@ async function install(
   }
   const envFile = join(spec.dataDir, "service.env");
   const logs = join(spec.dataDir, "logs");
-  const linked =
-    notLinked(envFile, "file") ?? (platform === "darwin" ? notLinked(logs, "dir") : null);
-  if (linked !== null) return failed(linked);
-  const kept = existsSync(envFile);
+  if (platform === "darwin") {
+    const linked = notLinked(logs, "dir");
+    if (linked !== null) return failed(linked);
+  }
+  // Read if it is there, without following a link (no look first that it could change after);
+  // made if not.
+  let kept = true;
   let text: string;
   try {
-    if (kept) {
-      // Read without following a link put there since it was looked at.
-      const fd = openSync(envFile, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      try {
-        if (!fstatSync(fd).isFile()) return failed(`${envFile} isn't a file`);
-        text = readFileSync(fd, "utf8");
-      } finally {
-        closeSync(fd);
-      }
-    } else {
-      text = envFileText(env);
-      createOwnedFile(envFile, text, owner);
+    const fd = openSync(envFile, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    try {
+      if (!fstatSync(fd).isFile()) return failed(`${envFile} isn't a file`);
+      text = readFileSync(fd, "utf8");
+    } finally {
+      closeSync(fd);
     }
   } catch (e) {
-    return failed(`can't ${kept ? "read" : "write"} ${envFile}: ${(e as Error).message}`);
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      return failed(`can't read ${envFile} (a link isn't followed): ${(e as Error).message}`);
+    }
+    kept = false;
+    try {
+      text = envFileText(env);
+      createOwnedFile(envFile, text, owner);
+    } catch (e) {
+      return failed(`can't write ${envFile}: ${(e as Error).message}`);
+    }
   }
   // Written but not wanted: a refused install leaves the next one free to write it again.
   const undo = () => {
@@ -563,7 +576,6 @@ async function install(
   if (platform === "win32") writeFileSync(plan.file, `\ufeff${plan.text}`, { encoding: "utf16le" });
   else writeFileSync(plan.file, plan.text, { mode: 0o644 });
   const code = await runAll(plan.install);
-  if (platform === "win32") rmSync(plan.file, { force: true });
   if (code !== 0) {
     // What a failed enable left behind (systemd links the unit before starting it).
     if (platform === "linux") await run("systemctl", ["disable", spec.name]);
