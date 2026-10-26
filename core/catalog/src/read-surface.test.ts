@@ -75,9 +75,10 @@ const SURFACE = {
     "proposePrimaryTag",
     "proposeTag",
     "pruneActivity",
+    "refreshAllLevels",
+    "refreshPackLevels",
     "rejectReview",
     "removeFromSource",
-    "refreshPackLevels",
     "removePack",
     // Enrichment's extract step, through its guarded write (T-402).
     "saveExtract",

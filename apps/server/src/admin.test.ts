@@ -868,6 +868,8 @@ describe("openhoard admin", { timeout: 180_000 }, () => {
     );
     expect(applied.code, applied.err).toBe(0);
     expect(applied.err).toContain("Applied: pack tiny 1.0.0");
+    const levels = await admin("levels", "refresh", "--tenant", tenantId);
+    expect([levels.code, levels.err]).toEqual([0, "Worked out the levels of 0 files again.\n"]);
     expect(
       (await admin("pack", "plan", "--tenant", tenantId, "--file", join(dir, "none.json"))).code,
     ).toBe(1);

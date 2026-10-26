@@ -32,6 +32,7 @@ import {
   tenantRules,
   validatePack,
   zoneLiterals,
+  type AppliedPack,
   type Pack,
   type PackFacet,
 } from "./packs.js";
@@ -786,31 +787,62 @@ describe("a value losing its level", () => {
 });
 
 describe("refreshPackLevels", () => {
-  it("puts right a file the apply's snapshot missed", async () => {
-    // A tag committed after a serializable apply began: its file kept the value's old levels.
-    const p = await plan(small());
-    await apply(small(), p.planHash);
-    await inTenant((tx) =>
-      tx.insert(objectTags).values({
-        tenantId: t.tenantId,
-        objectId: t.objectId,
-        facet: "sensitivity",
-        value: "secret",
-        source: "user",
-        confidence: 1,
-      }),
+  // The apply's serializable snapshot misses tags added or removed while it ran (PGlite has one
+  // connection, so the rows those leave behind are made by hand here).
+  const withV = (v: Partial<Record<"visibility" | "exposure", string>>, version: string): Pack =>
+    small({
+      version,
+      facets: [
+        {
+          key: "x",
+          label: "X",
+          values: [{ value: "v", label: "V", ...v } as PackFacet["values"][number]],
+        },
+      ],
+    });
+  const row = () =>
+    inTenant((tx) =>
+      queryRows(tx, sql`select * from object_levels where object_id = ${t.objectId}`),
     );
-    const row = () =>
-      inTenant((tx) =>
-        queryRows(tx, sql`select * from object_levels where object_id = ${t.objectId}`),
-      );
+  const spoil = () =>
+    inTenant((tx) => tx.execute(sql`update object_levels set processed = not processed`));
+  const refresh = (applied: AppliedPack) =>
+    inTenant((tx) => refreshPackLevels(tx, t.tenantId, applied));
+
+  it("puts right the files the apply saw and those carrying its values now", async () => {
+    const v1 = withV({ visibility: "readable", exposure: "full" }, "1.0.0");
+    await apply(v1, (await plan(v1)).planHash);
+    const tag = { tenantId: t.tenantId, objectId: t.objectId, facet: "x", value: "v" };
+    await inTenant((tx) => tx.insert(objectTags).values({ ...tag, source: "user", confidence: 1 }));
+    const v2 = withV({ visibility: "hidden", exposure: "metadata-only" }, "1.0.1");
+    const applied = await apply(v2, (await plan(v2)).planHash);
+    expect(applied.refresh).toEqual({ tags: ["x:v"], objects: [t.objectId] });
     const kept = await row();
-    expect(kept).toEqual([expect.objectContaining({ visibility_trusted: 0 })]);
-    await inTenant((tx) =>
-      tx.execute(sql`update object_levels set visibility_trusted = null, visibility_cap = null`),
-    );
-    await inTenant((tx) => refreshPackLevels(tx, t.tenantId, p));
+    await spoil();
+    expect(await refresh({ ...applied, refresh: { tags: ["x:v"], objects: [] } })).toBe(1);
     expect(await row()).toEqual(kept);
+    // Untagged since: no longer a carrier, put right as one the apply saw.
+    await inTenant((tx) => tx.delete(objectTags).where(eq(objectTags.value, "v")));
+    const untagged = await row();
+    await spoil();
+    expect(await refresh(applied)).toBe(1);
+    expect(await row()).toEqual(untagged);
+  });
+
+  it("leaves out values whose label alone changed, and refuses a serializable transaction", async () => {
+    const v1 = withV({}, "1.0.0");
+    await apply(v1, (await plan(v1)).planHash);
+    const relabelled = { ...withV({}, "1.0.1") };
+    (relabelled.facets?.[0]?.values[0] as { label: string }).label = "Vee";
+    const applied = await apply(relabelled, (await plan(relabelled)).planHash);
+    expect(applied.refresh).toEqual({ tags: [], objects: [] });
+    await expect(
+      db.withTenant(
+        t.tenantId,
+        (tx) => refreshPackLevels(tx, t.tenantId, applied),
+        APPLY_TRANSACTION,
+      ),
+    ).rejects.toThrow("needs a read committed transaction");
   });
 });
 
