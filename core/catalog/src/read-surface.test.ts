@@ -77,6 +77,7 @@ const SURFACE = {
     "pruneActivity",
     "rejectReview",
     "removeFromSource",
+    "refreshPackLevels",
     "removePack",
     // Enrichment's extract step, through its guarded write (T-402).
     "saveExtract",

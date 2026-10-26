@@ -25,6 +25,7 @@ import {
   parsePack,
   planPack,
   planPackRemoval,
+  refreshPackLevels,
   removePack,
   runPackTests,
   tenantPolicies,
@@ -781,6 +782,35 @@ describe("a value losing its level", () => {
       },
     ]);
     expect(p.warnings).toEqual(["x:a goes from hidden/metadata-only to no visibility/no exposure"]);
+  });
+});
+
+describe("refreshPackLevels", () => {
+  it("puts right a file the apply's snapshot missed", async () => {
+    // A tag committed after a serializable apply began: its file kept the value's old levels.
+    const p = await plan(small());
+    await apply(small(), p.planHash);
+    await inTenant((tx) =>
+      tx.insert(objectTags).values({
+        tenantId: t.tenantId,
+        objectId: t.objectId,
+        facet: "sensitivity",
+        value: "secret",
+        source: "user",
+        confidence: 1,
+      }),
+    );
+    const row = () =>
+      inTenant((tx) =>
+        queryRows(tx, sql`select * from object_levels where object_id = ${t.objectId}`),
+      );
+    const kept = await row();
+    expect(kept).toEqual([expect.objectContaining({ visibility_trusted: 0 })]);
+    await inTenant((tx) =>
+      tx.execute(sql`update object_levels set visibility_trusted = null, visibility_cap = null`),
+    );
+    await inTenant((tx) => refreshPackLevels(tx, t.tenantId, p));
+    expect(await row()).toEqual(kept);
   });
 });
 

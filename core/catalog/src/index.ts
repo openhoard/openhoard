@@ -251,6 +251,7 @@ export {
   parsePack,
   planPack,
   planPackRemoval,
+  refreshPackLevels,
   removePack,
   runPackTests,
   tenantPolicies,

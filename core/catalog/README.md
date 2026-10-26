@@ -366,6 +366,9 @@ per row, which took a quarter to two fifths off a search's p95 at 30,000 files o
 (`pnpm --filter @openhoard/testkit bench:search`); what is left grows with the files the
 caller reads and the words match. Spike S1's per-principal visible-row counts are the next
 step.
+Triggers keep `object_levels` current, but a pack apply's serializable snapshot misses a tag
+committed while it ran, so whoever applies a pack calls `refreshPackLevels()` once it commits
+(the admin CLI does).
 
 **Timing.** Because SQL reads every candidate, those the caller can't see included, a search
 takes longer the more such files match: about 6 ms per 4,000 hidden files when levels were
