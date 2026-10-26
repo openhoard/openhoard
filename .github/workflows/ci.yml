@@ -87,9 +87,10 @@ jobs:
       - run: pnpm typecheck
         if: steps.scope.outputs.full == 'true'
       # The fast suites only (the slow lane runs in the postgres job). Coverage (a tripwire, not
-      # a target) once, on ubuntu. macOS runners have three cores and Windows ones four, slow
-      # ones, and every database suite starts PGlite (WASM): run fewer suites at once there.
-      - run: pnpm test:coverage
+      # a target) once, on ubuntu. Every database suite starts PGlite (WASM), so run few suites
+      # at once: ubuntu runners have four cores (turbo's default of 10 timed out suites' 60 s
+      # setup under coverage), macOS ones three and Windows ones four, slow ones.
+      - run: pnpm test:coverage --concurrency=3
         if: matrix.os == 'ubuntu-latest'
       - run: pnpm test ${{ matrix.os == 'macos-latest' && '--concurrency=2' || '--concurrency=3' }}
         if: matrix.os != 'ubuntu-latest' && steps.scope.outputs.full == 'true'
