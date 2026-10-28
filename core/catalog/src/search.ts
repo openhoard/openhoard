@@ -46,7 +46,9 @@ import {
  *    (ai/models embedQuery()), among files whose content SQL expects the caller may have (a
  *    reader, exposure reaching the client). The plan is spike S1's rule, never the planner's:
  *    count those rows, up to {@link EXACT_SEARCH_ROWS}; at or below it search exactly (every
- *    row's distance: recall 100%, fast on a small set); above it use the model's HNSW index
+ *    row's distance: recall 100%, fast on a small set); above it, or when the caller reads more
+ *    files than that (the count skipped: it would cost more than the search), use the model's
+ *    HNSW index
  *    with `hnsw.iterative_scan = relaxed_order` and `hnsw.ef_search = 200`, set for that
  *    statement only. (Filtered HNSW without that choice lost most of its recall on selective
  *    filters, and the planner picked it anyway.)
@@ -570,10 +572,8 @@ function levelled(tenantId: string, caller: Caller, from: SQL): SQL {
  * is harmless there.
  */
 async function withoutJit<T>(tx: Tx, work: () => Promise<T>): Promise<T> {
-  const [before] = await queryRows<{ jit: string }>(
-    tx,
-    sql`select current_setting('jit') as jit, set_config('jit', 'off', true)`,
-  );
+  const [before] = await queryRows<{ jit: string }>(tx, sql`select current_setting('jit') as jit`);
+  await queryRows(tx, sql`select set_config('jit', 'off', true)`);
   const restore = () => queryRows(tx, sql`select set_config('jit', ${before?.jit ?? "on"}, true)`);
   let result: T;
   try {
@@ -984,24 +984,37 @@ async function nearest(
   // shown, T-405): a file tightened to local-only since a commercial model embedded it
   // matches nothing by those vectors.
   const eligibleWhere = eligibleWhereSql(tenantId, caller, tags);
-  // Started from the files the caller reads (owner, files and tags granted: each an index
-  // lookup), not from every file of the tenant: the cost follows what they read.
-  // Each file looked up on its own (LATERAL, fenced): planned as a join, the planner hashed the
-  // tenant's every file and level row (2.4 s at a million) for a caller reading 20,000.
-  const eligible = sql`with eligible as materialized (
-      select x.* from (${readableIds(tenantId, caller)}) r
-       cross join lateral (${eligibleWhere(sql`o.id = r.id`)} offset 0) x)`;
-  // An eligible file's vectors of the model, by its index (tenant, object, model), again a
-  // lookup a file rather than a scan of every vector.
-  const vectorsOf = sql`eligible x cross join lateral (
-      select e.object_id, e.embedding, e.provider_kind from version_embeddings e
-       where e.tenant_id = ${tenantId} and e.object_id = x.id and e.model = ${query.model}
-         and e.version_id = x.version_id and e.dimensions = ${dimensions} offset 0) e`;
   const allowed = sql`x.exposure >= ${providerNeed(sql`e.provider_kind`)}`;
-  // One statement counts the visible vectors (at most one past the threshold) and, when the
-  // count says exact, searches exactly: the eligible set is worked out once. Past the threshold
-  // the exact half doesn't run (its condition is false before any row is read).
   const indexed = (INDEXED_DIMENSIONS as readonly number[]).includes(dimensions);
+  const toRows = (list: { id: string | null; distance: number | null }[]) =>
+    list.flatMap((r) => (r.id === null ? [] : [{ id: r.id, distance: Number(r.distance) }]));
+  // How many files the caller reads (owned, granted, tagged; counted with repeats, so at worst
+  // over), up to one past the threshold: index lookups, stopping there.
+  const readable = readableIds(tenantId, caller);
+  const [reads] = await queryRows<{ n: number }>(
+    tx,
+    sql`select count(*)::int as n from (${readableIds(tenantId, caller, "all")} limit ${exactLimit + 1}) r`,
+  );
+  const few = Number(reads?.n ?? 0) <= exactLimit;
+  // A caller reading few files: each looked up on its own (LATERAL, fenced), and its vectors by
+  // their index (tenant, object, model); planned as a join, the planner hashed the tenant's
+  // every file, level row and vector (3 s at a million) for a caller reading 20,000. A caller
+  // reading many: the set worked out once from the tenant's files, which costs less than a
+  // lookup a file (30 us each) there.
+  const eligible = few
+    ? sql`with eligible as materialized (
+        select x.* from (${readable}) r
+         cross join lateral (${eligibleWhere(sql`o.id = r.id`)} offset 0) x)`
+    : sql`with eligible as materialized (${eligibleWhere(sql`true`)})`;
+  const vectorsOf = few
+    ? sql`eligible x cross join lateral (
+        select e.object_id, e.embedding, e.provider_kind from version_embeddings e
+         where e.tenant_id = ${tenantId} and e.object_id = x.id and e.model = ${query.model}
+           and e.version_id = x.version_id and e.dimensions = ${dimensions} offset 0) e`
+    : sql`version_embeddings e join eligible x
+          on x.id = e.object_id and x.version_id = e.version_id
+         and e.tenant_id = ${tenantId} and e.model = ${query.model}
+         and e.dimensions = ${dimensions}`;
   const exact = (where: SQL) => sql`
             -- No index can serve this ORDER BY: the indexes are on a cast to a fixed size.
             select e.object_id as id, min(e.embedding <=> ${literal}::vector) as distance
@@ -1010,21 +1023,31 @@ async function nearest(
              group by e.object_id
              order by distance, id
              limit ${neighbours}`;
-  const counted = await queryRows<{ n: number; id: string | null; distance: number | null }>(
-    tx,
-    sql`${eligible},
-        counted as materialized (
-          select count(*)::int as n from (
-            select 1 from ${vectorsOf} where ${allowed}
-             limit ${exactLimit + 1}) c)
-        select c.n, exact.id, exact.distance from counted c
-          left join lateral (${exact(indexed ? sql`c.n <= ${exactLimit}::bigint` : sql`true`)}) exact
-            on true`,
-  );
-  const toRows = (list: { id: string | null; distance: number | null }[]) =>
-    list.flatMap((r) => (r.id === null ? [] : [{ id: r.id, distance: Number(r.distance) }]));
-  let plan = vectorPlanFor(Number(counted[0]?.n ?? 0), dimensions, exactLimit);
-  let rows = toRows(counted);
+  let plan: "exact" | "hnsw";
+  let rows: { id: string; distance: number }[];
+  if (few || !indexed) {
+    // One statement counts the visible vectors (at most one past the threshold) and, when the
+    // count says exact, searches exactly: the eligible set is worked out once. Past the
+    // threshold the exact half doesn't run (its condition is false before any row is read).
+    const counted = await queryRows<{ n: number; id: string | null; distance: number | null }>(
+      tx,
+      sql`${eligible},
+          counted as materialized (
+            select count(*)::int as n from (
+              select 1 from ${vectorsOf} where ${allowed}
+               limit ${exactLimit + 1}) c)
+          select c.n, exact.id, exact.distance from counted c
+            left join lateral (${exact(indexed ? sql`c.n <= ${exactLimit}::bigint` : sql`true`)}) exact
+              on true`,
+    );
+    plan = vectorPlanFor(Number(counted[0]?.n ?? 0), dimensions, exactLimit);
+    rows = toRows(counted);
+  } else {
+    // More files than the threshold: more vectors too, unless most have none; the HNSW query
+    // says so by coming back short, below.
+    plan = "hnsw";
+    rows = [];
+  }
   if (plan === "hnsw") {
     rows = await withHnswSettings(
       tx,
@@ -1056,19 +1079,24 @@ async function nearest(
  * and tags not yet trusted, are checked again by candidates()), as `id`: one index lookup per
  * source, so the planner can count each from its statistics.
  */
-function readableIds(tenantId: string, caller: Caller): SQL {
+function readableIds(
+  tenantId: string,
+  caller: Caller,
+  union: "distinct" | "all" = "distinct",
+): SQL {
   const tags = caller.readTags.flatMap((tag) => {
     const at = tag.indexOf(":");
     return at < 0
       ? []
       : [sql`(ot.facet = ${tag.slice(0, at)} and ot.value = ${tag.slice(at + 1)})`];
   });
+  const u = sql.raw(union === "all" ? "union all" : "union");
   return sql`select r.id from objects r where r.tenant_id = ${tenantId} and r.owner_id = ${caller.owner}
-      union select unnest(${array(caller.readObjects)})
+      ${u} select unnest(${array(caller.readObjects)})
       ${
         tags.length === 0
           ? sql``
-          : sql`union select ot.object_id from object_tags ot
+          : sql`${u} select ot.object_id from object_tags ot
                  where ot.tenant_id = ${tenantId} and (${sql.join(tags, sql` or `)})`
       }`;
 }

@@ -317,7 +317,8 @@ filters inside the query, then uses the gate, then fuses:
    may have the content of: a reader, the file's exposure reaching the client. The plan is spike
    S1's rule, chosen here, never by the planner: count the visible vectors (capped at
    `EXACT_SEARCH_ROWS`, 50,000, so the count is bounded); at or below it, exact search; above it,
-   the model size's partial HNSW index with `hnsw.iterative_scan = relaxed_order` and
+   or when the caller reads more files than that (the count skipped), the model size's partial
+   HNSW index, each row it yields checked on its own (T-507), with `hnsw.iterative_scan = relaxed_order` and
    `hnsw.ef_search = 200`, set for that statement only. `vectorPlans` says which ran. Sizes
    without an index (not 384, 768, 1024 or 1536) are always searched exactly.
 4. `viewObjects(…, { search: true })` checks every candidate from both: `read` and `search`,
