@@ -4,6 +4,7 @@ import {
   newId,
   objects,
   objectTags,
+  queryRows,
   sourceRefs,
   tagReviews,
   tenants,
@@ -140,6 +141,19 @@ const tag = (value: string, more: Partial<typeof objectTags.$inferInsert> = {}) 
   );
 
 describe("searchObjects", () => {
+  it("searches with JIT compilation off, and puts the setting back after", async () => {
+    const after = await db.withTenant(
+      t.tenantId,
+      async (tx) => {
+        await queryRows(tx, sql`select set_config('jit', 'on', true)`);
+        await searchObjects(tx, t.tenantId, authz, request(person()), { query: "budget" });
+        return queryRows<{ jit: string }>(tx, sql`select current_setting('jit') as jit`);
+      },
+      VIEW_TRANSACTION,
+    );
+    expect(after).toEqual([{ jit: "on" }]);
+  });
+
   it("finds what the caller can read: by an object grant, a tag grant, or as the owner", async () => {
     await setDefault("hidden");
     expect(await ids(person())).toEqual([]);

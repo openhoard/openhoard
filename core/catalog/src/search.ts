@@ -555,11 +555,36 @@ function levelled(tenantId: string, caller: Caller, from: SQL): SQL {
                      case when a.readable then 2
                           else ${effectiveLevel(tenantId, "visibility")} end as visibility,
                      case when a.readable then ${exposure} else 0 end as exposure
-                from (${from}) a
-              -- A fence: inlined, every reference to a level below would run the readable
-              -- check's subquery again for the same row.
+                -- Fences: inlined, every reference to readable or a level below would run
+                -- the readable check's subquery again for the same row.
+                from (select * from (${from}) f offset 0) a
               offset 0) b
        where b.readable or (${caller.member} and b.visibility >= 1)`;
+}
+
+/**
+ * Runs `work` with JIT compilation off, local to the transaction, and puts the setting back
+ * after: search's candidate queries. They are estimated at millions (every candidate's levels and
+ * rank), so PostgreSQL compiled them, inlining and optimizing, every time: 0.5 to 2.4 s a
+ * statement at a million files, more than running them (T-507). PGlite has no JIT; the setting
+ * is harmless there.
+ */
+async function withoutJit<T>(tx: Tx, work: () => Promise<T>): Promise<T> {
+  const [before] = await queryRows<{ jit: string }>(
+    tx,
+    sql`select current_setting('jit') as jit, set_config('jit', 'off', true)`,
+  );
+  const restore = () => queryRows(tx, sql`select set_config('jit', ${before?.jit ?? "on"}, true)`);
+  let result: T;
+  try {
+    result = await work();
+  } catch (e) {
+    // As withHnswSettings(): an aborted transaction can't restore, and ends with its setting.
+    await restore().catch(() => {});
+    throw e;
+  }
+  await restore();
+  return result;
 }
 
 /**
@@ -579,14 +604,14 @@ async function gatedMatches(
   const caller = callerOf(request);
   if (caller === null) return null;
   const { tags, prefix } = match;
-  const rows = await keywordCandidates(tx, tenantId, caller, match);
+  const rows = await withoutJit(tx, () => keywordCandidates(tx, tenantId, caller, match));
   const checked = rows.slice(0, SEARCH_CANDIDATES);
   const byId = new Map(checked.map((r) => [r.id, r]));
 
   const near = new Map<string, { model: string; similarity: number }[]>(prior?.near);
   const plans: VectorPlan[] = [...(prior?.plans ?? [])];
   for (const query of prior === undefined ? match.vectors : []) {
-    const found = await nearest(tx, tenantId, caller, query, tags, tuning);
+    const found = await withoutJit(tx, () => nearest(tx, tenantId, caller, query, tags, tuning));
     plans.push({ model: query.model, plan: found.plan });
     for (const n of found.near) {
       const list = near.get(n.id) ?? [];
