@@ -16,6 +16,10 @@ on:
         description: Files to search (T-507's bar is 1,000,000)
         type: string
         default: "1000000"
+      explain-slow:
+        description: Log the plan of every statement over 2 s (auto_explain, with ANALYZE; slows the run) and print them
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -52,6 +56,8 @@ jobs:
           sudo apt-get install -y -qq postgresql-18 postgresql-18-pgvector
       # As ci.yml's postgres job, with memory for building a million-row vector index.
       - name: Start a cluster, create an ordinary (non-superuser) user and the test template
+        env:
+          EXPLAIN_SLOW: ${{ inputs.explain-slow }}
         run: |
           sudo pg_createcluster 18 bench --port 5499 -- --locale-provider=builtin --locale=C.UTF-8
           sudo -u postgres tee /etc/postgresql/18/bench/conf.d/bench.conf > /dev/null <<'CONF'
@@ -60,6 +66,15 @@ jobs:
           max_parallel_maintenance_workers = 3
           work_mem = 64MB
           CONF
+          if [ "$EXPLAIN_SLOW" = "true" ]; then
+            sudo -u postgres tee /etc/postgresql/18/bench/conf.d/explain.conf > /dev/null <<'CONF'
+          session_preload_libraries = 'auto_explain'
+          auto_explain.log_min_duration = '2s'
+          auto_explain.log_analyze = on
+          auto_explain.log_buffers = on
+          auto_explain.log_nested_statements = on
+          CONF
+          fi
           sudo pg_ctlcluster 18 bench start
           sudo -u postgres psql -p 5499 -v ON_ERROR_STOP=1 \
             -c "create role openhoard_ci login createdb password 'ci'" \
@@ -89,6 +104,10 @@ jobs:
           if [ "$ACCEPT" = "true" ]; then baseline=""; fi
           pnpm --filter @openhoard/testkit run bench:search --url postgres://openhoard_ci:ci@localhost:5499/postgres \
             --rows "$ROWS" --out "$GITHUB_WORKSPACE/search.json" ${baseline:+--baseline "$baseline"}
+      - name: Print the slow statements' plans
+        if: always() && inputs.explain-slow
+        run: |
+          sudo cat /var/log/postgresql/postgresql-18-bench.log | head -c 3000000 || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
