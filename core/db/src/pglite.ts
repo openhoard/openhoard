@@ -50,7 +50,11 @@ export async function openPglite(options: {
     // security. So the database belongs to an ordinary role and the session becomes it, as a
     // native installation connects as its owner. pgvector is not a trusted extension, so it is
     // created first, as a DBA would on a native server. The time zone is the host's otherwise
-    // (spike S2); PGlite is one session, so setting these once is enough.
+    // (spike S2). PGlite never runs ANALYZE, so statements that functions and triggers cache
+    // keep the generic plan made while the tables were small: a sequential scan per row,
+    // quadratic in a bulk insert (16,000 tags took 171 s; 16 s with custom plans). Native
+    // PostgreSQL analyzes, so there only the 0003 levels functions force custom plans, each for
+    // itself. PGlite is one session, so setting these once is enough.
     await client.exec(`
       CREATE EXTENSION IF NOT EXISTS vector;
       DO $$
@@ -63,6 +67,7 @@ export async function openPglite(options: {
       $$;
       SET SESSION AUTHORIZATION ${PGLITE_OWNER};
       SET TIME ZONE 'UTC';
+      SET plan_cache_mode = force_custom_plan;
     `);
   } catch (e) {
     await client?.close();
