@@ -40,7 +40,7 @@
     "@openhoard/sdk": "workspace:^",
     "@openhoard/web": "workspace:^",
     "drizzle-orm": "^0.45.4",
-    "hono": "^4.13.13",
+    "hono": "^4.13.14",
     "imapflow": "^2.5.2",
     "openid-client": "^6.8.8",
     "pino": "^10.4.0",
