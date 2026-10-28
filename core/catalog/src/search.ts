@@ -959,7 +959,19 @@ async function nearest(
   // shown, T-405): a file tightened to local-only since a commercial model embedded it
   // matches nothing by those vectors.
   const eligibleWhere = eligibleWhereSql(tenantId, caller, tags);
-  const eligible = sql`with eligible as materialized (${eligibleWhere(sql`true`)})`;
+  // Started from the files the caller reads (owner, files and tags granted: each an index
+  // lookup), not from every file of the tenant: the cost follows what they read.
+  // Each file looked up on its own (LATERAL, fenced): planned as a join, the planner hashed the
+  // tenant's every file and level row (2.4 s at a million) for a caller reading 20,000.
+  const eligible = sql`with eligible as materialized (
+      select x.* from (${readableIds(tenantId, caller)}) r
+       cross join lateral (${eligibleWhere(sql`o.id = r.id`)} offset 0) x)`;
+  // An eligible file's vectors of the model, by its index (tenant, object, model), again a
+  // lookup a file rather than a scan of every vector.
+  const vectorsOf = sql`eligible x cross join lateral (
+      select e.object_id, e.embedding, e.provider_kind from version_embeddings e
+       where e.tenant_id = ${tenantId} and e.object_id = x.id and e.model = ${query.model}
+         and e.version_id = x.version_id and e.dimensions = ${dimensions} offset 0) e`;
   const allowed = sql`x.exposure >= ${providerNeed(sql`e.provider_kind`)}`;
   // One statement counts the visible vectors (at most one past the threshold) and, when the
   // count says exact, searches exactly: the eligible set is worked out once. Past the threshold
@@ -968,10 +980,8 @@ async function nearest(
   const exact = (where: SQL) => sql`
             -- No index can serve this ORDER BY: the indexes are on a cast to a fixed size.
             select e.object_id as id, min(e.embedding <=> ${literal}::vector) as distance
-              from version_embeddings e
-              join eligible x on x.id = e.object_id and x.version_id = e.version_id
-             where e.tenant_id = ${tenantId} and e.model = ${query.model}
-               and e.dimensions = ${dimensions} and ${allowed} and ${where}
+              from ${vectorsOf}
+             where ${allowed} and ${where}
              group by e.object_id
              order by distance, id
              limit ${neighbours}`;
@@ -980,10 +990,7 @@ async function nearest(
     sql`${eligible},
         counted as materialized (
           select count(*)::int as n from (
-            select 1 from version_embeddings e
-              join eligible x on x.id = e.object_id and x.version_id = e.version_id
-             where e.tenant_id = ${tenantId} and e.model = ${query.model}
-               and e.dimensions = ${dimensions} and ${allowed}
+            select 1 from ${vectorsOf} where ${allowed}
              limit ${exactLimit + 1}) c)
         select c.n, exact.id, exact.distance from counted c
           left join lateral (${exact(indexed ? sql`c.n <= ${exactLimit}::bigint` : sql`true`)}) exact
@@ -1017,6 +1024,28 @@ async function nearest(
       .map((r) => ({ id: r.id, similarity: 1 - Number(r.distance) }))
       .filter((r) => Number.isFinite(r.similarity) && r.similarity >= minSimilarity),
   };
+}
+
+/**
+ * Every file the caller may read by ownership or grant (a superset of `readable`: deleted files,
+ * and tags not yet trusted, are checked again by candidates()), as `id`: one index lookup per
+ * source, so the planner can count each from its statistics.
+ */
+function readableIds(tenantId: string, caller: Caller): SQL {
+  const tags = caller.readTags.flatMap((tag) => {
+    const at = tag.indexOf(":");
+    return at < 0
+      ? []
+      : [sql`(ot.facet = ${tag.slice(0, at)} and ot.value = ${tag.slice(at + 1)})`];
+  });
+  return sql`select r.id from objects r where r.tenant_id = ${tenantId} and r.owner_id = ${caller.owner}
+      union select unnest(${array(caller.readObjects)})
+      ${
+        tags.length === 0
+          ? sql``
+          : sql`union select ot.object_id from object_tags ot
+                 where ot.tenant_id = ${tenantId} and (${sql.join(tags, sql` or `)})`
+      }`;
 }
 
 /**
