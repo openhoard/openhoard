@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { lockDataDir, processStart, readLock, removeStaleLock } from "./pglite.js";
+import { lockDataDir, openPglite, processStart, readLock, removeStaleLock } from "./pglite.js";
 
 describe("lockDataDir", () => {
   let dir: string;
@@ -121,5 +121,18 @@ describe("removeStaleLock", () => {
 
   it("treats a lock that is gone as removed", () => {
     expect(removeStaleLock(lock, "2147483646 aa")).toBe(true);
+  });
+});
+
+describe("openPglite", () => {
+  it("plans each statement for its parameters: PGlite never analyzes", async () => {
+    const driver = await openPglite({});
+    try {
+      expect(await driver.query("select current_setting('plan_cache_mode') as mode")).toEqual([
+        { mode: "force_custom_plan" },
+      ]);
+    } finally {
+      await driver.close();
+    }
   });
 });
