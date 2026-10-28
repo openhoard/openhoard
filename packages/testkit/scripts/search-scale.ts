@@ -178,7 +178,8 @@ try {
   };
   /**
    * A query that failed (a statement timeout, say): its plan, then the plan as it ran, with no
-   * timeout and search's HNSW settings, so the nightly log shows where the time goes.
+   * timeout (up to 20 minutes, so a failing night runs that much longer) and search's HNSW
+   * settings, so the nightly log shows where the time goes.
    */
   const explainFailure = async (e: unknown, who: string) => {
     const failed = (e as { query?: unknown; params?: unknown[] }) ?? {};

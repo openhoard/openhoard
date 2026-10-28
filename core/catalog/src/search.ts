@@ -958,15 +958,7 @@ async function nearest(
   // of those, only vectors whose provider the file's exposure still allows (as a summary is
   // shown, T-405): a file tightened to local-only since a commercial model embedded it
   // matches nothing by those vectors.
-  const eligibleWhere = (where: SQL) =>
-    sql`select a.id, a.version_id, a.exposure
-          from (${levelled(
-            tenantId,
-            caller,
-            sql`select * from (${candidates(tenantId, caller, where)}) c where c.readable`,
-          )}) a
-         where a.content_ok and a.version_id is not null
-           and ${tagMatch(tenantId, tags, sql`true`)}`;
+  const eligibleWhere = eligibleWhereSql(tenantId, caller, tags);
   const eligible = sql`with eligible as materialized (${eligibleWhere(sql`true`)})`;
   const allowed = sql`x.exposure >= ${providerNeed(sql`e.provider_kind`)}`;
   // One statement counts the visible vectors (at most one past the threshold) and, when the
@@ -1025,6 +1017,33 @@ async function nearest(
       .map((r) => ({ id: r.id, similarity: 1 - Number(r.distance) }))
       .filter((r) => Number.isFinite(r.similarity) && r.similarity >= minSimilarity),
   };
+}
+
+/**
+ * The files whose current version a caller may be matched on by vectors, among those `where` (on
+ * `o`, the objects row) picks, as `(id, version_id, exposure)`: readable, content allowed to the
+ * client, carrying the query's tag filters. The inner fence works out `readable` once a row.
+ */
+function eligibleWhereSql(tenantId: string, caller: Caller, tags: readonly string[]) {
+  return (where: SQL) =>
+    sql`select a.id, a.version_id, a.exposure
+          from (${levelled(
+            tenantId,
+            caller,
+            sql`select * from (${candidates(tenantId, caller, where)} offset 0) c where c.readable`,
+          )}) a
+         where a.content_ok and a.version_id is not null
+           and ${tagMatch(tenantId, tags, sql`true`)}`;
+}
+
+/** {@link eligibleWhereSql} for a request (the plan tests); null when it may see nothing. */
+export function vectorEligibilitySql(
+  tenantId: string,
+  request: ViewRequest,
+  tags: readonly string[] = [],
+): ((where: SQL) => SQL) | null {
+  const caller = callerOf(request);
+  return caller === null ? null : eligibleWhereSql(tenantId, caller, tags);
 }
 
 /**
