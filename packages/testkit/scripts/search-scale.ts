@@ -15,7 +15,13 @@
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { arch, cpus, platform } from "node:os";
 import { parseArgs } from "node:util";
-import { searchObjects, VIEW_TRANSACTION } from "@openhoard/core-catalog";
+import {
+  HNSW_EF_SEARCH,
+  HNSW_ITERATIVE_SCAN,
+  HNSW_MAX_SCAN_TUPLES,
+  searchObjects,
+  VIEW_TRANSACTION,
+} from "@openhoard/core-catalog";
 import { facets, facetValues, queryRows, tenants, type Database } from "@openhoard/core-db";
 import { openTestDatabase, seedTenant, TEST_POSTGRES_ENV } from "@openhoard/core-db/testing";
 import { Authorizer, createCedarEngine, type AuthzPrincipal } from "@openhoard/core-policy";
@@ -151,19 +157,66 @@ try {
   });
   const timed = async (principal: AuthzPrincipal, query: string, vector?: number[]) => {
     const began = performance.now();
-    await db.withTenant(
-      tenantId,
-      (tx) =>
-        searchObjects(
-          tx,
-          tenantId,
-          authz,
-          { principal, client: { id: "bench", trust: "first-party" } },
-          { query, ...(vector ? { vectors: [{ model: MODEL, vector }] } : {}), limit: 10 },
-        ),
-      VIEW_TRANSACTION,
-    );
+    try {
+      await db.withTenant(
+        tenantId,
+        (tx) =>
+          searchObjects(
+            tx,
+            tenantId,
+            authz,
+            { principal, client: { id: "bench", trust: "first-party" } },
+            { query, ...(vector ? { vectors: [{ model: MODEL, vector }] } : {}), limit: 10 },
+          ),
+        VIEW_TRANSACTION,
+      );
+    } catch (e) {
+      await explainFailure(e, principal.userId);
+      throw e;
+    }
     return performance.now() - began;
+  };
+  /**
+   * A query that failed (a statement timeout, say): its plan, then the plan as it ran, with no
+   * timeout and search's HNSW settings, so the nightly log shows where the time goes.
+   */
+  const explainFailure = async (e: unknown, who: string) => {
+    const failed = (e as { query?: unknown; params?: unknown[] }) ?? {};
+    if (typeof failed.query !== "string" || !Array.isArray(failed.params)) return;
+    const params = failed.params;
+    const parts = failed.query.split(/\$(\d+)/);
+    const statement = sql.join(
+      parts.map((part, i) => (i % 2 === 0 ? sql.raw(part) : sql`${params[Number(part) - 1]}`)),
+      sql``,
+    );
+    for (const how of ["costs", "analyze, buffers"]) {
+      try {
+        const plan = await db.withTenant(
+          tenantId,
+          async (tx) => {
+            await tx.execute(sql`set local statement_timeout = '20min'`);
+            await queryRows(
+              tx,
+              sql`select set_config('hnsw.ef_search', ${String(HNSW_EF_SEARCH)}, true),
+                         set_config('hnsw.iterative_scan', ${HNSW_ITERATIVE_SCAN}, true),
+                         set_config('hnsw.max_scan_tuples', ${String(HNSW_MAX_SCAN_TUPLES)}, true)`,
+            );
+            return queryRows<{ "QUERY PLAN": string }>(
+              tx,
+              sql`explain (${sql.raw(how)}) ${statement}`,
+            );
+          },
+          VIEW_TRANSACTION,
+        );
+        process.stderr.write(
+          `\n--- explain (${how}) of ${who}'s failed query ---\n` +
+            plan.map((r) => r["QUERY PLAN"]).join("\n") +
+            "\n",
+        );
+      } catch (x) {
+        process.stderr.write(`\nexplain (${how}) failed: ${(x as Error).message}\n`);
+      }
+    }
   };
   // Across the frequency range: the commonest terms (most files), the middle, the rare; one
   // word and two.
