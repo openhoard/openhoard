@@ -19,7 +19,7 @@ import {
   type Exposure,
   type Visibility,
 } from "@openhoard/core-policy";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, type SQL } from "drizzle-orm";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { fuseChannels } from "./rank.js";
 import { addDoc, hashedEmbedding, type DocInput, expectLevelsKept } from "./search.fixtures.js";
@@ -417,7 +417,10 @@ describe("vector search (T-502)", () => {
     const plan = await db.withTenant(
       t.tenantId,
       async (tx) => {
-        const eligible = sql`with eligible as (select object_id as id, version_id, 3 as exposure from search_documents)`;
+        const eligible = (where: SQL) =>
+          sql`select o.id, s.version_id, 3 as exposure from objects o
+                join search_documents s on s.tenant_id = o.tenant_id and s.object_id = o.id
+               where ${where}`;
         const rows = await withHnswSettings(tx, async () => {
           const inside = await queryRows<{ ef: string; scan: string; max: string }>(
             tx,
@@ -441,7 +444,10 @@ describe("vector search (T-502)", () => {
     expect(plan.after).toEqual([{ ef: "40", scan: "off", max: "20000" }]);
     const text = plan.explained.map((r) => Object.values(r).join(" ")).join("\n");
     expect(text).toMatch(/version_embeddings_hnsw_768/);
-    expect(() => hnswSql(sql``, t.tenantId, { model: MODEL, vector: [1, 0] }, 10)).toThrow(
+    // Each row the scan yields is checked on its own: never a join against every eligible file.
+    expect(text).toMatch(/SubPlan/);
+    expect(text).not.toMatch(/Semi Join|Hash Join/);
+    expect(() => hnswSql(() => sql``, t.tenantId, { model: MODEL, vector: [1, 0] }, 10)).toThrow(
       RangeError,
     );
   });

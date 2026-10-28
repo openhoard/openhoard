@@ -958,11 +958,16 @@ async function nearest(
   // of those, only vectors whose provider the file's exposure still allows (as a summary is
   // shown, T-405): a file tightened to local-only since a commercial model embedded it
   // matches nothing by those vectors.
-  const eligible = sql`with candidates as (${candidates(tenantId, caller, sql`true`)}),
-      levelled as (${levelled(tenantId, caller, sql`select * from candidates where readable`)}),
-      eligible as materialized (select a.id, a.version_id, a.exposure from levelled a
-                    where a.content_ok and a.version_id is not null
-                      and ${tagMatch(tenantId, tags, sql`true`)})`;
+  const eligibleWhere = (where: SQL) =>
+    sql`select a.id, a.version_id, a.exposure
+          from (${levelled(
+            tenantId,
+            caller,
+            sql`select * from (${candidates(tenantId, caller, where)}) c where c.readable`,
+          )}) a
+         where a.content_ok and a.version_id is not null
+           and ${tagMatch(tenantId, tags, sql`true`)}`;
+  const eligible = sql`with eligible as materialized (${eligibleWhere(sql`true`)})`;
   const allowed = sql`x.exposure >= ${providerNeed(sql`e.provider_kind`)}`;
   // One statement counts the visible vectors (at most one past the threshold) and, when the
   // count says exact, searches exactly: the eligible set is worked out once. Past the threshold
@@ -1002,7 +1007,7 @@ async function nearest(
       () =>
         queryRows<{ id: string; distance: number }>(
           tx,
-          hnswSql(eligible, tenantId, query, neighbours),
+          hnswSql(eligibleWhere, tenantId, query, neighbours),
         ),
       tuning.maxScanTuples,
     );
@@ -1025,14 +1030,17 @@ async function nearest(
 /**
  * The HNSW query (exported for the plan tests): the model's partial index, by the same cast and
  * predicate as its definition (core/db 0001_rls.sql; the size is from INDEXED_DIMENSIONS, never from
- * input), the filter kept a subplan (OFFSET 0) so the index scan checks each row it yields: the
- * row's version must be eligible and its provider allowed by the file's exposure (one text key,
- * `version:kind`, so the subplan is hashed); more rows than files, since a file has several
- * chunks, re-sorted because relaxed order may return near neighbours slightly out of order.
- * `eligible` is a WITH clause defining `eligible(id, version_id, exposure)`.
+ * input). Each row the index scan yields is checked on its own (`eligibleWhere` narrowed to that
+ * file, by its keys): the row's version must be eligible and its provider allowed by the file's
+ * exposure. A scalar subquery, so the planner keeps it a per-row check: built as a set, the
+ * eligible files of a caller who reads a quarter of a million took 2.8 s before the scan began,
+ * and a semi join against them compared every row with every key (315 s, T-507). More rows than
+ * files, since a file has several chunks, re-sorted because relaxed order may return near
+ * neighbours slightly out of order. `eligibleWhere(where)` selects `(id, version_id, exposure)` of
+ * the eligible files `where` (on `o`, the objects row) picks.
  */
 export function hnswSql(
-  eligible: SQL,
+  eligibleWhere: (where: SQL) => SQL,
   tenantId: string,
   query: QueryVector,
   neighbours: number,
@@ -1044,18 +1052,15 @@ export function hnswSql(
   const cast = sql.raw(`vector(${dimensions})`);
   const literal = `[${query.vector.join(",")}]`;
   const distance = sql`e.embedding::${cast} <=> ${literal}::${cast}`;
-  return sql`${eligible},
-      allowed as materialized (
-        select x.version_id || ':' || k.kind as key
-          from eligible x
-          cross join (values ('local', 1), ('commercial', 2), ('consumer', 3)) k(kind, need)
-         where x.exposure >= k.need),
-      near as materialized (
+  return sql`with near as materialized (
         select e.object_id, ${distance} as distance
           from version_embeddings e
          where e.tenant_id = ${tenantId} and e.model = ${query.model}
            and e.dimensions = ${sql.raw(String(dimensions))}
-           and e.version_id || ':' || e.provider_kind in (select key from allowed offset 0)
+           and coalesce((select true from (${eligibleWhere(sql`o.id = e.object_id`)}) x
+                          where x.version_id = e.version_id
+                            and x.exposure >= ${providerNeed(sql`e.provider_kind`)}
+                          limit 1), false)
          order by ${distance}
          limit ${neighbours * 4})
       select object_id as id, min(distance) as distance from near
