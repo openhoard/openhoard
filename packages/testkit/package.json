@@ -30,7 +30,7 @@
     "@openhoard/core-catalog": "workspace:^",
     "@openhoard/core-storage": "workspace:^",
     "@openhoard/core-summarize": "workspace:^",
-    "hono": "^4.13.13",
+    "hono": "^4.13.14",
     "jose": "^6.2.12",
     "oidc-provider": "^9.12.2"
   },
