@@ -40,11 +40,11 @@
     "@openhoard/sdk": "workspace:^",
     "@openhoard/web": "workspace:^",
     "drizzle-orm": "^0.45.4",
-    "hono": "^4.13.13",
-    "imapflow": "^2.5.2",
+    "hono": "^4.13.16",
+    "imapflow": "^2.10.0",
     "openid-client": "^6.8.8",
     "pino": "^10.4.0",
-    "postal-mime": "^4.0.8",
+    "postal-mime": "^4.2.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
