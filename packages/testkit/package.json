@@ -25,21 +25,21 @@
     "bench:search": "tsx scripts/search-scale.ts"
   },
   "dependencies": {
-    "@hono/node-server": "^2.1.5",
+    "@hono/node-server": "^2.1.6",
     "@openhoard/core-audit": "workspace:^",
     "@openhoard/core-catalog": "workspace:^",
     "@openhoard/core-storage": "workspace:^",
     "@openhoard/core-summarize": "workspace:^",
-    "hono": "^4.13.13",
-    "jose": "^6.2.12",
-    "oidc-provider": "^9.12.2"
+    "hono": "^4.13.17",
+    "jose": "^6.2.16",
+    "oidc-provider": "^9.13.3"
   },
   "devDependencies": {
     "@openhoard/config": "workspace:*",
     "@openhoard/core-db": "workspace:^",
     "@openhoard/core-identity": "workspace:^",
     "@openhoard/core-policy": "workspace:^",
-    "@types/oidc-provider": "^9.12.1",
+    "@types/oidc-provider": "^9.13.1",
     "drizzle-orm": "^0.45.4"
   },
   "license": "Apache-2.0"
