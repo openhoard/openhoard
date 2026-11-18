@@ -33,7 +33,7 @@
     "@openhoard/core-jobs": "workspace:^",
     "@openhoard/testkit": "workspace:^",
     "drizzle-orm": "^0.45.4",
-    "vitest": "^5.0.5"
+    "vitest": "^5.1.0"
   },
   "license": "Apache-2.0"
 }
